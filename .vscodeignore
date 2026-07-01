@@ -7,4 +7,5 @@ src/**
 **/*.ts
 node_modules/**
 test/**
+images/*.svg
 PLAN.md

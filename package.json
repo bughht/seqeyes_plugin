@@ -5,9 +5,10 @@
   "version": "0.0.1",
   "publisher": "seqeyes",
   "license": "MIT",
+  "icon": "images/logo.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-org/seqeyes-plugin"
+    "url": "https://github.com/bughht/seqeyes_plugin"
   },
   "engines": {
     "vscode": "^1.85.0"
@@ -110,7 +111,11 @@
         "seqeyes.timeUnit": {
           "type": "string",
           "default": "ms",
-          "enum": ["us", "ms", "s"],
+          "enum": [
+            "us",
+            "ms",
+            "s"
+          ],
           "description": "Time unit for axis labels."
         },
         "seqeyes.maxBlocksForFullRender": {
@@ -130,12 +135,13 @@
     "package": "vsce package"
   },
   "devDependencies": {
-    "@types/vscode": "^1.85.0",
     "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.19.0",
     "@typescript-eslint/parser": "^6.19.0",
+    "@vscode/vsce": "^2.22.0",
     "eslint": "^8.56.0",
-    "typescript": "^5.3.3",
-    "@vscode/vsce": "^2.22.0"
+    "sharp": "^0.35.3",
+    "typescript": "^5.3.3"
   }
 }
