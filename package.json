@@ -1,0 +1,141 @@
+{
+  "name": "seqeyes-plugin",
+  "displayName": "SeqEyes Plugin",
+  "description": "Visualize Pulseq MRI sequences inside VS Code — inspect sequence diagrams, k-space trajectories, and gradient moments with interactive zoom and pan.",
+  "version": "0.0.1",
+  "publisher": "seqeyes",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/seqeyes-plugin"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Visualization",
+    "Science",
+    "Other"
+  ],
+  "keywords": [
+    "pulseq",
+    "mri",
+    "sequence",
+    "visualization",
+    "k-space",
+    "gradient",
+    "seqeyes"
+  ],
+  "activationEvents": [
+    "onCustomEditor:seqeyes.sequenceViewer"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "seqeyes.sequenceViewer",
+        "displayName": "SeqEyes Sequence Viewer",
+        "selector": [
+          {
+            "filenamePattern": "*.seq"
+          }
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "seqeyes.helloWorld",
+        "title": "SeqEyes: Hello World"
+      },
+      {
+        "command": "seqeyes.openSequenceViewer",
+        "title": "SeqEyes: Open Sequence Viewer",
+        "icon": "$(graph)"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "seqeyes.openSequenceViewer",
+          "when": "resourceExtname == .seq",
+          "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "seqeyes.openSequenceViewer",
+          "when": "resourceExtname == .seq",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "SeqEyes Plugin",
+      "properties": {
+        "seqeyes.rfColor": {
+          "type": "string",
+          "default": "#e6194b",
+          "description": "Color for RF waveform in sequence diagram."
+        },
+        "seqeyes.gxColor": {
+          "type": "string",
+          "default": "#3cb44b",
+          "description": "Color for Gx gradient."
+        },
+        "seqeyes.gyColor": {
+          "type": "string",
+          "default": "#4363d8",
+          "description": "Color for Gy gradient."
+        },
+        "seqeyes.gzColor": {
+          "type": "string",
+          "default": "#f58231",
+          "description": "Color for Gz gradient."
+        },
+        "seqeyes.adcColor": {
+          "type": "string",
+          "default": "#42d4f4",
+          "description": "Color for ADC readout events."
+        },
+        "seqeyes.backgroundColor": {
+          "type": "string",
+          "default": "#ffffff",
+          "description": "Background color for sequence diagrams."
+        },
+        "seqeyes.showGrid": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show grid lines in the sequence diagram."
+        },
+        "seqeyes.timeUnit": {
+          "type": "string",
+          "default": "ms",
+          "enum": ["us", "ms", "s"],
+          "description": "Time unit for axis labels."
+        },
+        "seqeyes.maxBlocksForFullRender": {
+          "type": "number",
+          "default": 5000,
+          "description": "Maximum number of blocks to render in full detail before switching to simplified view."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.11.0",
+    "@typescript-eslint/eslint-plugin": "^6.19.0",
+    "@typescript-eslint/parser": "^6.19.0",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.3",
+    "@vscode/vsce": "^2.22.0"
+  }
+}
