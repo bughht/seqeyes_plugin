@@ -1,0 +1,50 @@
+# Pulseq sequence file
+# Created manually for testing v1.4.1 RF delay
+
+[VERSION]
+major 1
+minor 4
+revision 1
+
+[DEFINITIONS]
+AdcRasterTime 1e-07
+BlockDurationRaster 1e-05
+GradientRasterTime 1e-05
+RadiofrequencyRasterTime 1e-06
+Name test_v141
+
+# Format of blocks:
+# NUM DUR RF  GX  GY  GZ  ADC  EXT
+[BLOCKS]
+   1 100   0   0   0   0  0  0
+   2 300   1   1   0   0  0  0
+   3 100   0   0   0   0  1  0
+
+# Format of RF events:
+# id amplitude mag_id phase_id delay freq phase
+# ..        Hz   ....    ....    us   Hz   rad
+[RF]
+1 500 1 2 250 -1000 1.5708
+
+# Format of trapezoid gradients:
+# id amplitude rise flat fall delay
+# ..      Hz/m   us   us   us    us
+[TRAP]
+ 1 100000 100 500 100 0
+
+# Format of ADC events:
+# id num dwell delay freq phase
+# ..  ..    ns    us   Hz   rad
+[ADC]
+1 100 1000 50 0 0
+
+# Sequence Shapes
+[SHAPES]
+
+shape_id 1
+num_samples 4
+0 1 1 0
+
+shape_id 2
+num_samples 4
+0 0.5 0.5 0

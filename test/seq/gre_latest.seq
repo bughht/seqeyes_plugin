@@ -1,0 +1,43 @@
+# Pulseq sequence file
+# Created by PyPulseq
+
+[VERSION]
+major 1
+minor 5
+revision 1
+
+[DEFINITIONS]
+AdcRasterTime 1e-07 
+BlockDurationRaster 1e-05 
+GradientRasterTime 1e-05 
+RadiofrequencyRasterTime 1e-06 
+TotalDuration 0.00388 
+
+# Format of blocks:
+# NUM DUR RF  GX  GY  GZ  ADC  EXT
+[BLOCKS]
+1  50   0   0   0   0  0  0
+2 200   0   1   0   0  0  0
+3 138   0   0   0   0  1  0
+
+# Format of trapezoid gradients:
+# id amplitude rise flat fall delay
+# ..      Hz/m   us   us   us    us
+[TRAP]
+ 1       255102  40 1920  40   0
+
+# Format of ADC events:
+# id num dwell delay freqPPM phasePPM freq phase phase_id
+# ..  ..    ns    us     ppm  rad/MHz   Hz   rad       ..
+[ADC]
+1 128 10000 100 0 0 0 0 0
+
+
+[SIGNATURE]
+# This is the hash of the Pulseq file, calculated right before the [SIGNATURE]
+# section was added. It can be reproduced/verified with md5sum if the file
+# trimmed to the position right above [SIGNATURE]. The new line character
+# preceding [SIGNATURE] BELONGS to the signature (and needs to be sripped away
+# for recalculating/verification)
+Type md5
+Hash 595b498b6fc2bb2d45ebf72a14f4c810

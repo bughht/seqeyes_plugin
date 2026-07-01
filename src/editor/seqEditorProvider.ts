@@ -16,6 +16,8 @@ import { decodeAllBlocks } from '../pulseq/decoder';
 import { getWebviewContent } from './webviewContent';
 import type { DecodedBlock, DecodedGradWaveform } from '../pulseq/types';
 
+declare var console: any;
+
 // ─── Constants ────────────────────────────────────────────────────────────
 
 const VIEW_TYPE = 'seqeyes.sequenceViewer';

@@ -1,110 +1,96 @@
-# SeqEyes Plugin — Pulseq Sequence Viewer for VS Code
+# SeqEyes Plugin
 
-Visualize [Pulseq](https://github.com/pulseq/pulseq) MRI sequences directly inside
-VS Code. Inspect RF pulses, gradient waveforms, ADC readouts, and digital triggers
-with interactive zoom, pan, and per-channel toggles.
+Visualize [Pulseq](https://github.com/pulseq/pulseq) MRI sequences inside VS Code — inspect RF pulses, gradients, ADC readouts and triggers with interactive zoom & pan.
 
-Inspired by [SeqEyes](https://github.com/xingwangyong/seqeyes) by Xingwang Yong.
+Inspired by [SeqEyes](https://github.com/xingwangyong/seqeyes). The parser follows SeqEyes' **single-loader, version-gated** strategy — one robust parser handles all Pulseq versions (v1.2.0 through v1.5.1) with per‑section integer version comparisons.
 
 ## Features
 
-- **Custom editor for `.seq` files** — opens automatically; no external tools needed
-- **7 visualization channels**: RF magnitude, RF phase (φ), Gx, Gy, Gz, ADC, Triggers
-- **Interactive Canvas rendering**: scroll to zoom, drag to pan, hover for tooltip
+### Visualization
+- **Custom editor for `.seq` files** — opens automatically on double‑click
+- **7 toggle‑able channels**: RF · φ · Gx · Gy · Gz · ADC · Trigger
+- **Interactive Canvas**: scroll‑zoom, drag‑pan, hover tooltips with block‑level details
 - **Vertical cursor** with live time readout
-- **Per-channel toggles** — click legend items to show/hide channels
-- **Y-axis ticks** with physical units (Hz, rad, Hz/m)
-- **Dark mode** — auto-detects VS Code theme
-- **Pulseq version support**: v1.4.1, v1.4.2, v1.5.0, v1.5.1
-- **Shape decompression** — full run-length decoding of compressed RF/gradient shapes
-- **RF phase computation** with frequency offset modulation
+- **Y‑axis ticks** with physical units (Hz, rad, Hz/m, mT/m, G/cm)
+- **Unit switchers** for time (s / ms / µs) and gradient (Hz/m / mT/m / G/cm)
+- **Block boundary lines** — optional dotted vertical lines with block‑number labels (toggle in toolbar, default off)
+- **Dark mode** — auto‑detects VS Code theme
 
-## Supported Pulseq Blocks
+### Parser (matching SeqEyes PulseqLoader.cpp)
+- **Pulseq v1.2.0 – v1.5.1** — single loader with unified `versionCombined` integer gating
+- **Pre‑v1.4 backward compatibility** — 7‑field RF, old delay‑ID block format
+- **PPM‑based frequency & phase offsets** — effective offsets computed with γ·B₀ (¹H, 42.576 MHz/T)
+- **RF `center` field** — effective pulse centre for TE/TI calculations (v1.5+)
+- **Extended trapezoid gradients** — non‑uniform time+wave shape pairs with oversampling support
+- **Trapezoid decomposition** — 4‑point analytical model matching SeqEyes SeriesBuilder
+- **Run‑length shape decompression** — verified against C++ reference implementation
+- **All 7 extension types**: Triggers, NCO, Rotations (quaternion in v1.5+), LabelSet, LabelInc, Soft Delays, RF Shims
+- **Label decoding** — maps label‑name strings to Mdh_Label enum; unknown labels get dynamic IDs (≥1000)
 
-| Block Type | Visualized |
-|-----------|-----------|
-| RF pulses (amplitude, phase, frequency offset, delay) | ✅ |
+## Supported Blocks
+
+| Event | Status |
+|-------|--------|
+| RF (amplitude, phase, freq/PPM offset, delay, centre, use‑flag) | ✅ |
 | Trapezoid gradients (amplitude, rise, flat, fall, delay) | ✅ |
-| Arbitrary gradients (shape, time shape, first/last) | ✅ |
-| ADC readout (samples, dwell, delay, phase offset) | ✅ |
-| Digital triggers (channel, delay, duration) | ✅ |
-| NCO (numerically controlled oscillator) | ⬜ planned |
+| Arbitrary & extended‑trapezoid gradients (shaped, non‑uniform sampling) | ✅ |
+| ADC (dwell, delay, freq/PPM offset, phase modulation shape) | ✅ |
+| Digital triggers (channel, type, delay, duration) | ✅ |
+| NCO (frequency, phase, delay, duration) | ✅ |
+| Gradient rotations (3×3 matrix v1.4.x, quaternion v1.5+) | ✅ |
+| Label SET / INC (MDH counters & flags) | ✅ |
+| Soft delays (hint strings) | ✅ |
+| RF shimming (per‑channel amplitude/phase) | ✅ |
 
-## Requirements
-
-- VS Code ≥ 1.85.0
-
-## Installation
-
-### From VSIX (local)
+## Install
 
 ```bash
-npm install
-npm run compile
-npx vsce package
+npm install && npm run compile && npx vsce package
 code --install-extension seqeyes-plugin-0.0.1.vsix --force
 ```
 
-### Development (F5)
-
-```bash
-npm install
-# Press F5 in VS Code to launch Extension Development Host
-```
+Or press **F5** for Extension Development Host.
 
 ## Usage
 
-1. Open any `.seq` file in VS Code — the SeqEyes Viewer opens automatically
-2. Or right-click a `.seq` file → **SeqEyes: Open Sequence Viewer**
-3. Or run **Ctrl+Shift+P** → `SeqEyes: Hello World`
+| Action | Shortcut |
+|--------|----------|
+| Open `.seq` file | Double‑click in Explorer |
+| Zoom | Scroll wheel or toolbar `+` / `−` |
+| Pan | Click & drag |
+| Fit | Toolbar `Fit` |
+| Toggle channel | Click legend label |
+| Toggle block boundaries | Checkbox `☐ Blocks` in toolbar |
+| Block details | Hover waveform |
+| Time cursor | Move mouse |
 
-### Controls
-
-| Action | How |
-|--------|-----|
-| Zoom in/out | Scroll wheel or toolbar `+`/`−` buttons |
-| Pan | Click and drag |
-| Fit to window | Toolbar `Fit` button |
-| Toggle channel | Click legend items (RF, φ, Gx, Gy, Gz, ADC, Trig) |
-| View block details | Hover over any waveform |
-| Time cursor | Move mouse — red dashed line with time readout |
-
-## Project Structure
+## Architecture
 
 ```
-seqeyes-plugin/
-├── src/
-│   ├── extension.ts              # Activation, commands, status bar
-│   ├── pulseq/
-│   │   ├── types.ts              # TypeScript interfaces for Pulseq data
-│   │   ├── reader.ts             # Text-based .seq file parser
-│   │   ├── decompressor.ts       # Run-length shape decompression
-│   │   └── decoder.ts            # Waveform reconstruction per block
-│   └── editor/
-│       ├── seqEditorProvider.ts  # CustomTextEditorProvider
-│       └── webviewContent.ts     # Canvas-based visualization HTML/JS
-├── test/seq/                     # Test .seq files (v1.4.1, v1.4.2, v1.5.1)
-├── package.json
-├── tsconfig.json
-└── PLAN.md                       # Development roadmap
+src/
+├── extension.ts                  Activation & commands
+├── pulseq/
+│   ├── types.ts                  Data types + version constants (3‑layer)
+│   ├── reader.ts                 .seq parser (v1.2.0 – v1.5.1, version‑gated)
+│   ├── decompressor.ts           Run‑length shape decompression
+│   └── decoder.ts                Waveform reconstruction (RF phase, PPM,
+│                                 gradient decomposition, ext‑trapezoids)
+└── editor/
+    ├── seqEditorProvider.ts      CustomTextEditorProvider + serialisation
+    └── webviewContent.ts         Canvas‑based interactive viewer
 ```
 
-## Test Sequences
+## Version Strategy
 
-Test files are in `test/seq/`:
+Following SeqEyes' design, a single v1.5.1‑capable loader handles all versions via a combined integer:
 
-| File | Version | Description |
-|------|---------|-------------|
-| `spi_1shot_noSMS_CimaX.seq` | v1.4.1 | SPI sequence, 8400 blocks, 84 slices |
-| `fs_se_dti_spiral_vds_...seq` | v1.4.2 | DTI with spiral readout, 819 blocks |
-| `rosette_mrf_demo.seq` | v1.5.1 | MRF with rosette trajectory, 3814 blocks |
-| `spiral_mrf_demo.seq` | v1.5.1 | MRF with spiral trajectory, 5566 blocks |
+| Threshold | Versions | Key differences |
+|-----------|----------|----------------|
+| `< 1,004,000` | pre‑v1.4 | No timeShape, old delay‑ID block format |
+| `< 1,005,000` | v1.4.x | timeShape added |
+| `≥ 1,005,000` | v1.5.x | PPM offsets, RF centre, quaternion rotations, first/last gradient amplitudes |
+| `≥ 1,005,001` | v1.5.1+ | RequiredExtensions validation |
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
-
-## Acknowledgments
-
-- [Pulseq](https://github.com/pulseq/pulseq) — open file format for MR sequences
-- [SeqEyes](https://github.com/xingwangyong/seqeyes) — the original Qt/C++ sequence viewer
+MIT

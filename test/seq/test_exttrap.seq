@@ -1,0 +1,21 @@
+# Pulseq
+[VERSION]
+major 1
+minor 5
+revision 1
+[DEFINITIONS]
+BlockDurationRaster 1e-05
+GradientRasterTime 1e-05
+RadiofrequencyRasterTime 1e-06
+AdcRasterTime 1e-07
+[BLOCKS]
+1 20 0 1 0 0 0 0
+[GRADIENTS]
+1 100 0 0 1 2 0
+[SHAPES]
+shape_id 1
+num_samples 5
+0 0.5 1 0.5 0
+shape_id 2
+num_samples 5
+0 10 20 30 40

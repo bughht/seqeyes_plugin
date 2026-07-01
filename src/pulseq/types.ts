@@ -15,6 +15,26 @@
 
 export interface VersionInfo { major: number; minor: number; revision: number; }
 
+/**
+ * Unified version integer for clean threshold comparisons.
+ * Computed as: major*1_000_000 + minor*1_000 + revision.
+ *
+ * Thresholds (matching SeqEyes):
+ *   < 1_004_000  — pre‑v1.4  (no timeShape, old block format)
+ *   < 1_005_000  — v1.4.x   (timeShape added)
+ *  >= 1_005_000  — v1.5.x   (PPM fields, center, quaternion rotations, etc.)
+ *  >= 1_005_001  — RequiredExtensions check added
+ *
+ * Export these as constants so the reader can use them without magic numbers.
+ */
+export const VER_PRE_14  = 1_004_000;
+export const VER_V15     = 1_005_000;
+export const VER_V15001  = 1_005_001;
+
+export function makeVersionCombined(major: number, minor: number, revision: number): number {
+    return major * 1_000_000 + minor * 1_000 + revision;
+}
+
 /** [BLOCKS] section row */
 export interface BlockEntry {
     num: number;   // 1‑based block number
@@ -30,11 +50,14 @@ export interface RFEntry {
     magShapeId: number;        // magnitude envelope shape
     phaseShapeId: number;      // phase waveform shape
     timeShapeId: number;       // 0 = uniform rf‑raster
-    delay: number;             // [rf‑raster units]  (v1.5+)
-    phaseOffset: number;       // [rad]
+    center: number;            // [µs] effective pulse centre (v1.5+; -1 = undefined)
+    delay: number;             // [µs]  (v1.5+)  or [rf‑raster] (v1.4.x)
+    freqPPM: number;           // [ppm]  (v1.5+)
+    phasePPM: number;          // [rad/MHz]  (v1.5+)
     freqOffset: number;        // [Hz]
+    phaseOffset: number;       // [rad]
     phaseModShapeId: number;   // additional phase modulation (v1.5+)
-    use: string;               // 'e'|'i'|'s'|'u'  (v1.5+)
+    use: string;               // 'e'|'r'|'i'|'s'|'u'  (v1.5+)
 }
 
 /** [GRADIENTS] — arbitrary (shaped) gradient */
@@ -64,27 +87,42 @@ export interface ADCEntry {
     numSamples: number;
     dwell: number;          // [ns]
     delay: number;          // [µs]
+    freqPPM: number;        // [ppm]  (v1.5+)
+    phasePPM: number;       // [rad/MHz]  (v1.5+)
     freqOffset: number;     // [Hz]
     phaseOffset: number;    // [rad]
     deadTime: number;       // [µs]  (v1.5+)
-    discardPre: number;     // samples to discard (v1.5+)
+    discardPre: number;
     discardPost: number;
     phaseModShapeId: number;
 }
 
-/** [EXTENSIONS] linked‑list node */
+/** [EXTENSIONS] linked‑list node.
+ *  Extension type constants (matching SeqEyes ExtType enum). */
+export const enum ExtType {
+    EXT_LIST    = 0,   // the extension linked-list itself
+    EXT_TRIGGER = 1,   // digital trigger output
+    EXT_NCO     = 2,   // numerically‑controlled oscillator (NOT in SeqEyes; ours)
+    EXT_ROTATION= 3,   // gradient rotation matrix / quaternion
+    EXT_LABELSET= 4,   // set MDH label counters / flags
+    EXT_LABELINC= 5,   // increment MDH label counters
+    EXT_DELAY   = 6,   // soft delay (v1.5+)
+    EXT_RF_SHIM = 7,   // per‑channel RF shimming (v1.5+)
+}
+
 export interface ExtensionEntry {
     id: number;
-    type: number;    // 1=trigger  2=NCO  3=rotation  4=label …
-    ref: number;
+    type: number;    // ExtType value
+    ref: number;     // index into the type‑specific library
     nextId: number;  // 0 = end of chain
 }
 
 export interface TriggerSpec {
     id: number;
-    channel: number;   // 1‑7
-    delay: number;     // [µs]
-    duration: number;  // [µs]
+    triggerType: number;  // 1 = digital output
+    channel: number;      // 1‑7
+    delay: number;        // [µs]
+    duration: number;     // [µs]
 }
 
 export interface NCOSpec {
@@ -94,6 +132,46 @@ export interface NCOSpec {
     phase: number;      // [rad]
     delay: number;      // [µs]
     duration: number;   // [µs]
+}
+
+/** Gradient rotation — quaternion in v1.5+, 3×3 matrix in v1.4.x */
+export interface RotationSpec {
+    id: number;
+    /** Quaternion [q0,q1,q2,q3] (v1.5+) or rotation matrix (v1.4.x, length 9). */
+    values: number[];
+}
+
+/** Set MDH label counters / flags */
+export interface LabelSetSpec {
+    id: number;
+    value: number;
+    labelId: number;   // decoded label enum value
+    flagId: number;    // decoded flag enum value
+}
+
+/** Increment MDH label counters */
+export interface LabelIncSpec {
+    id: number;
+    value: number;
+    labelId: number;
+    flagId: number;
+}
+
+/** Soft delay (v1.5+) */
+export interface SoftDelaySpec {
+    id: number;
+    numId: number;     // id of the soft‑delayed event
+    offset: number;    // [µs]
+    factor: number;    // scaling factor
+    hint: string;      // optional description
+}
+
+/** Per‑channel RF shimming (v1.5+) */
+export interface RFShimSpec {
+    id: number;
+    nChannels: number;
+    amplitudes: number[];  // [Hz] per channel
+    phases: number[];      // [rad] per channel
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -113,13 +191,13 @@ export interface DecompressedShape {
 export interface DecodedRFWaveform {
     blockIndex: number;
     startTime: number;          // [s]  includes RF delay
-    duration: number;           // [s]  pulse length (without delay)
+    duration: number;           // [s]  pulse length
     timePoints: Float64Array;   // [s]  absolute time per sample
     magnitude: Float64Array;    // [Hz]
-    phase: Float64Array;        // [rad]
+    phase: Float64Array;        // [rad]  wrapped to [-π, π]
     amplitude: number;          // [Hz]
-    freqOffset: number;
-    phaseOffset: number;
+    freqOffset: number;         // [Hz]  (effective, incl. PPM)
+    phaseOffset: number;        // [rad] (effective, incl. PPM)
 }
 
 export interface DecodedGradWaveform {
@@ -180,6 +258,7 @@ export interface DecodedBlock {
 
 export interface PulseqSequence {
     version: VersionInfo;
+    versionCombined: number;          // major*1M + minor*1K + revision
     definitions: Map<string, number[]>;
     definitionsRaw: Map<string, string>;
     blocks: BlockEntry[];
@@ -187,9 +266,16 @@ export interface PulseqSequence {
     arbitraryGrads: Map<number, ArbitraryGradEntry>;
     trapGrads: Map<number, TrapGradEntry>;
     adcs: Map<number, ADCEntry>;
+    /** Extension linked-list nodes (type→ref→next). */
     extensions: Map<number, ExtensionEntry>;
+    /** Extension type‑specific libraries (ALL present, even if empty). */
     triggers: TriggerSpec[];
     ncos: NCOSpec[];
+    rotations: RotationSpec[];
+    labelSets: LabelSetSpec[];
+    labelIncs: LabelIncSpec[];
+    softDelays: SoftDelaySpec[];
+    rfShims: RFShimSpec[];
     shapes: Map<number, DecompressedShape>;
     rasterTimes: {
         blockDurationRaster: number;   // [s]

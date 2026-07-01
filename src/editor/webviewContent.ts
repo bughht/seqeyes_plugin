@@ -49,6 +49,8 @@ canvas{display:block}
 <button id="zr" title="Reset">\u21BA</button><div class="sep"></div>
 <span class="ulbl">Time:</span><select id="tu"><option value="s">s</option><option value="ms" selected>ms</option><option value="us">\u00b5s</option></select>
 <span class="ulbl">Grad:</span><select id="gu"><option value="Hz/m" selected>Hz/m</option><option value="mT/m">mT/m</option><option value="G/cm">G/cm</option></select>
+<div class="sep"></div>
+<label class="li" id="bbt" title="Toggle block boundary lines"><input type="checkbox" id="bbc" style="margin:0;cursor:pointer"><span style="font-size:11px;color:var(--fg)">Blocks</span></label>
 <div class="sep"></div><div class="lg" id="legend"></div>
 <span class="cur" id="cur">\u2190 hover for time</span>
 </div>
@@ -72,6 +74,7 @@ var ox=0,sc=1;                             // view offset [s] & scale [px/s]
 var dr=false,dsx=0,dso=0;                  // drag state
 var cursorT=0;                              // mouse time position
 var timeUnit='ms',gradUnit='Hz/m';          // display unit selections
+var showBB=false;                            // show block boundaries (default off)
 var GAMMA=42576;                            // Hz/m per mT/m for ¹H
 
 /* ── Unit conversion helpers ──────────────────────────────────────────── */
@@ -134,6 +137,7 @@ function draw(){
   var vs=ox,ve=ox+(w-M.l-M.r)/sc;
   drawGrid(w,h,vs,ve,s);
   drawZeroLines(w,h,s);
+  if(showBB)drawBlockBounds(w,h,s);
   drawBlocks(vs,ve,s);
   drawAxes(w,h,vs,ve,s);
   drawCursor(w,h,s);
@@ -154,6 +158,18 @@ function drawCursor(w,h,s){
 function drawZeroLines(w,h,s){
   ctx.strokeStyle=s.getPropertyValue('--gr').trim();ctx.lineWidth=0.4;ctx.setLineDash([2,4]);
   var vc=visChannels();for(var vi=0;vi<vc.length;vi++){var i=vc[vi];if(i>=2&&i<=4){ctx.beginPath();ctx.moveTo(M.l,cy(vi));ctx.lineTo(w-M.r,cy(vi));ctx.stroke();}}
+  ctx.setLineDash([]);
+}
+/* ── Block boundary lines (dotted, muted) ─────────────────────────────── */
+function drawBlockBounds(w,h,s){
+  ctx.strokeStyle=s.getPropertyValue('--ax').trim();ctx.lineWidth=0.6;ctx.setLineDash([3,6]);
+  for(var i=0;i<BL.length;i++){
+    var x=t2x(BL[i].s);if(x<M.l||x>w-M.r)continue;
+    ctx.beginPath();ctx.moveTo(x,M.t);ctx.lineTo(x,h-M.b);ctx.stroke();
+    // Small block number label at the top
+    ctx.fillStyle=s.getPropertyValue('--ax').trim();ctx.font='9px monospace';ctx.textAlign='center';
+    ctx.fillText('#'+BL[i].i,x,M.t-2);
+  }
   ctx.setLineDash([]);
 }
 function drawGrid(w,h,vs,ve,s){
@@ -179,8 +195,8 @@ function drawAxes(w,h,vs,ve,s){
   for(var vi=0;vi<vc.length;vi++){
     var ci=vc[vi],y0=cy(vi);
     // Channel label (bold, coloured)
-    ctx.textAlign='right';ctx.font='bold 12px monospace';
-    ctx.fillStyle=chColors[ci];ctx.fillText(CH[ci],M.l-20,y0+4);
+    ctx.textAlign='right';ctx.font='bold 18px monospace';
+    ctx.fillStyle=chColors[ci];ctx.fillText(CH[ci],M.l-40,y0+4);
     // Tick values
     ctx.fillStyle=s.getPropertyValue('--lb').trim();ctx.font='10px monospace';
     var lblX=M.l-12;
@@ -319,6 +335,7 @@ cc.addEventListener('mouseleave',function(){cursorT=0;curEl.textContent='\\u2190
 document.getElementById('zi').onclick=function(){sc*=1.5;draw()};
 document.getElementById('zo').onclick=function(){sc/=1.5;sc=Math.max(50/(TD||1e-3),sc);draw()};
 document.getElementById('zf').onclick=fit;document.getElementById('zr').onclick=fit;
+document.getElementById('bbc').onchange=function(){showBB=this.checked;draw();};
 
 /* ── Helpers ──────────────────────────────────────────────────────────── */
 function fit(){var w=mc.width/(window.devicePixelRatio||1);sc=(w-M.l-M.r)/(TD||1e-3);ox=0;draw()}
