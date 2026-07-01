@@ -167,20 +167,29 @@ function decodeGradient(seq: PulseqSequence, gradId: number, startTime: number, 
     };
 }
 
+/**
+ * Decode a trapezoid gradient into time-domain points.
+ * Produces a waveform that spans from block start to the end of the shape,
+ * including the leading zero (delay) segment for proper visual alignment.
+ */
 function decodeTrapGradient(trap: TrapGradEntry, startTime: number, channel: 'gx' | 'gy' | 'gz'): DecodedGradWaveform {
-    const rise = trap.rise * 1e-6;    // us → s
+    const rise = trap.rise * 1e-6;
     const flat = trap.flat * 1e-6;
     const fall = trap.fall * 1e-6;
     const delay = trap.delay * 1e-6;
-    const amp = trap.amplitude;        // Hz/m
-
+    const amp = trap.amplitude;
     const gradStart = startTime + delay;
+
     const tPoints: number[] = [];
     const waveform: number[] = [];
 
-    // Ramp up (starts at gradStart, not at startTime)
+    // Leading zero: block start → gradient start (shows idle time before gradient)
+    tPoints.push(startTime);
+    waveform.push(0);
     tPoints.push(gradStart);
     waveform.push(0);
+
+    // Ramp up
     tPoints.push(gradStart + rise);
     waveform.push(amp);
 
@@ -192,12 +201,12 @@ function decodeTrapGradient(trap: TrapGradEntry, startTime: number, channel: 'gx
     tPoints.push(gradStart + rise + flat + fall);
     waveform.push(0);
 
-    const shapeDuration = rise + flat + fall;
+    const totalDuration = delay + rise + flat + fall;
 
     return {
         blockIndex: trap.id,
-        startTime: gradStart,
-        duration: shapeDuration,
+        startTime,                // block start (same as other events in this block)
+        duration: totalDuration,  // includes delay + shape
         timePoints: new Float64Array(tPoints),
         waveform: new Float64Array(waveform),
         amplitude: amp,
@@ -206,6 +215,10 @@ function decodeTrapGradient(trap: TrapGradEntry, startTime: number, channel: 'gx
     };
 }
 
+/**
+ * Decode an arbitrary (shaped) gradient.
+ * Includes delay offset and first/last amplitude handling for v1.5.x continuity.
+ */
 function decodeArbitraryGradient(seq: PulseqSequence, arb: ArbitraryGradEntry, startTime: number, gradRaster: number, channel: 'gx' | 'gy' | 'gz'): DecodedGradWaveform {
     const shape = seq.shapes.get(arb.shapeId);
     if (!shape) {
@@ -221,12 +234,18 @@ function decodeArbitraryGradient(seq: PulseqSequence, arb: ArbitraryGradEntry, s
         };
     }
 
-    const gradStart = startTime + arb.delay * gradRaster;
+    const delay = arb.delay * gradRaster;
+    const gradStart = startTime + delay;
     const nSamples = shape.numSamples;
-    const timePoints = new Float64Array(nSamples);
-    const waveform = new Float64Array(nSamples);
+    const timePoints = new Float64Array(nSamples + 2); // +2 for leading edge
+    const waveform = new Float64Array(nSamples + 2);
 
-    // Check if there's a time shape for non-uniform sampling
+    // Leading zero point at block start (visual alignment)
+    timePoints[0] = startTime;
+    waveform[0] = 0;
+    timePoints[1] = gradStart;
+    waveform[1] = arb.first;
+
     let timeShape: Float64Array | null = null;
     if (arb.timeId > 0) {
         const ts = seq.shapes.get(arb.timeId);
@@ -235,19 +254,20 @@ function decodeArbitraryGradient(seq: PulseqSequence, arb: ArbitraryGradEntry, s
 
     for (let i = 0; i < nSamples; i++) {
         if (timeShape && i < timeShape.length) {
-            timePoints[i] = gradStart + timeShape[i] * gradRaster;
+            timePoints[i + 2] = gradStart + timeShape[i] * gradRaster;
         } else {
-            timePoints[i] = gradStart + (i + 0.5) * gradRaster;
+            timePoints[i + 2] = gradStart + (i + 0.5) * gradRaster;
         }
-        // Gradient = first (DC offset for continuity) + amplitude × normalized shape
-        waveform[i] = arb.first + arb.amplitude * shape.samples[i];
+        waveform[i + 2] = arb.first + arb.amplitude * shape.samples[i];
     }
 
-    const duration = nSamples > 0 ? timePoints[nSamples - 1] - gradStart + gradRaster : 0;
+    const duration = nSamples > 0
+        ? timePoints[nSamples + 1] - startTime + gradRaster
+        : delay;
 
     return {
         blockIndex: arb.id,
-        startTime: gradStart,
+        startTime,
         duration,
         timePoints,
         waveform,
