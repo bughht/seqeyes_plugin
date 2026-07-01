@@ -1,123 +1,102 @@
 /**
- * Waveform decoder — converts parsed Pulseq blocks into time-domain waveforms
- * by expanding shapes, applying amplitudes, and computing time points.
+ * Pulseq Waveform Decoder
+ *
+ * Converts parsed .seq data (library entries + block table) into time‑domain
+ * waveforms suitable for rendering.  Each block's events are expanded:
+ *   - RF:  magnitude shape × amplitude  +  phase with freq‑offset modulation
+ *   - Gradients:  trapezoid or arbitrary (shaped) with leading zero anchor
+ *   - ADC:  readout window metadata
+ *   - Extensions:  triggers, NCO
+ *
+ * All time‑points are absolute (seconds from sequence start).
  */
-import { PulseqSequence, DecodedBlock, DecodedRFWaveform, DecodedGradWaveform, DecodedADCEvent, DecodedTriggerEvent, DecodedNCOEvent, RFEntry, TrapGradEntry, ArbitraryGradEntry, ADCEntry } from './types';
 
-/**
- * Decode all blocks in a sequence into full waveforms.
- */
+import type {
+    PulseqSequence, DecodedBlock, DecodedRFWaveform, DecodedGradWaveform,
+    DecodedADCEvent, DecodedTriggerEvent, DecodedNCOEvent,
+    RFEntry, TrapGradEntry, ArbitraryGradEntry, ADCEntry, ExtensionEntry,
+} from './types';
+
+// ─── Public API ───────────────────────────────────────────────────────────
+
+/** Decode all blocks into render‑ready waveforms. */
 export function decodeAllBlocks(seq: PulseqSequence): DecodedBlock[] {
     const decoded: DecodedBlock[] = [];
-    let cumulativeTime = 0; // seconds
+    let cumulative = 0;  // [s]
 
     for (const block of seq.blocks) {
-        const durSeconds = block.dur * seq.rasterTimes.blockDurationRaster;
-        const decodedBlock: DecodedBlock = {
-            index: block.num,
-            duration: durSeconds,
-            startTime: cumulativeTime,
-        };
+        const dur = block.dur * seq.rasterTimes.blockDurationRaster;
+        const db: DecodedBlock = { index: block.num, duration: dur, startTime: cumulative };
 
-        // Decode RF
         if (block.rfId > 0) {
             const rf = seq.rfs.get(block.rfId);
-            if (rf) {
-                decodedBlock.rf = decodeRF(seq, rf, cumulativeTime, durSeconds);
-            }
+            if (rf) db.rf = decodeRF(seq, rf, cumulative, dur);
         }
+        db.gx = decodeGradient(seq, block.gxId, cumulative, dur, 'gx');
+        db.gy = decodeGradient(seq, block.gyId, cumulative, dur, 'gy');
+        db.gz = decodeGradient(seq, block.gzId, cumulative, dur, 'gz');
 
-        // Decode gradients (Gx, Gy, Gz)
-        decodedBlock.gx = decodeGradient(seq, block.gxId, cumulativeTime, durSeconds, 'gx');
-        decodedBlock.gy = decodeGradient(seq, block.gyId, cumulativeTime, durSeconds, 'gy');
-        decodedBlock.gz = decodeGradient(seq, block.gzId, cumulativeTime, durSeconds, 'gz');
-
-        // Decode ADC
         if (block.adcId > 0) {
             const adc = seq.adcs.get(block.adcId);
-            if (adc) {
-                decodedBlock.adc = decodeADC(seq, adc, cumulativeTime);
-            }
+            if (adc) db.adc = decodeADC(adc, cumulative);
         }
-
-        // Decode extensions (triggers, NCO)
         if (block.extId > 0) {
             const ext = seq.extensions.get(block.extId);
-            if (ext) {
-                decodeExtensions(seq, ext, decodedBlock, cumulativeTime);
-            }
+            if (ext) decodeExtensions(seq, ext, db, cumulative);
         }
 
-        decoded.push(decodedBlock);
-        cumulativeTime += durSeconds;
+        decoded.push(db);
+        cumulative += dur;
     }
-
     return decoded;
 }
 
-function decodeRF(seq: PulseqSequence, rf: RFEntry, startTime: number, blockDur: number): DecodedRFWaveform {
-    const rfRaster = seq.rasterTimes.rfRaster;
+// ─── RF decoding ──────────────────────────────────────────────────────────
 
-    // Get magnitude shape
-    let magSamples: Float64Array;
+function decodeRF(seq: PulseqSequence, rf: RFEntry, blockStart: number, _blockDur: number): DecodedRFWaveform {
+    const raster = seq.rasterTimes.rfRaster;
+    const rfStart = blockStart + rf.delay * raster;
+
+    // Decompress magnitude shape
     const magShape = seq.shapes.get(rf.magShapeId);
-    if (magShape) {
-        magSamples = new Float64Array(magShape.samples);
-    } else {
-        // No shape found, create a simple pulse
-        const n = Math.max(2, Math.round(blockDur / rfRaster));
-        magSamples = new Float64Array(n);
-        magSamples.fill(1.0);
+    const nSamples = magShape?.numSamples ?? Math.max(2, Math.round(_blockDur / raster));
+    const mag = magShape
+        ? new Float64Array(magShape.samples)
+        : makeConstant(nSamples, 1);
+
+    // Decompress phase shape
+    const phShape = seq.shapes.get(rf.phaseShapeId);
+    const ph = phShape
+        ? new Float64Array(phShape.samples)
+        : new Float64Array(mag.length);
+
+    // Time shape (non‑uniform sampling)
+    const timeShape = rf.timeShapeId > 0
+        ? seq.shapes.get(rf.timeShapeId)?.samples ?? null
+        : null;
+
+    const n = Math.min(mag.length, ph.length);
+    const t = new Float64Array(n);
+    const amp = new Float64Array(n);
+    const phase = new Float64Array(n);
+
+    for (let i = 0; i < n; i++) {
+        t[i] = timeShape
+            ? rfStart + timeShape[i] * raster
+            : rfStart + (i + 0.5) * raster;
+        amp[i] = rf.amplitude * mag[i];
+        const dt = t[i] - rfStart;
+        phase[i] = 2 * Math.PI * ph[i] + rf.phaseOffset + 2 * Math.PI * rf.freqOffset * dt;
     }
 
-    // Get phase shape
-    let phaseSamples: Float64Array;
-    const phaseShape = seq.shapes.get(rf.phaseShapeId);
-    if (phaseShape) {
-        phaseSamples = new Float64Array(phaseShape.samples);
-    } else {
-        phaseSamples = new Float64Array(magSamples.length);
-        phaseSamples.fill(0);
-    }
-
-    // Ensure same length
-    const nSamples = Math.min(magSamples.length, phaseSamples.length);
-    const timePoints = new Float64Array(nSamples);
-    const magnitude = new Float64Array(nSamples);
-    const phase = new Float64Array(nSamples);
-
-    // Time shape for non-uniform sampling
-    let timeShape: Float64Array | null = null;
-    if (rf.timeShapeId > 0) {
-        const ts = seq.shapes.get(rf.timeShapeId);
-        if (ts) timeShape = new Float64Array(ts.samples);
-    }
-
-    // RF actual start time (block start + RF delay)
-    const rfStartTime = startTime + rf.delay * rfRaster;
-
-    for (let i = 0; i < nSamples; i++) {
-        if (timeShape && i < timeShape.length) {
-            timePoints[i] = rfStartTime + timeShape[i] * rfRaster;
-        } else {
-            timePoints[i] = rfStartTime + (i + 0.5) * rfRaster;
-        }
-        magnitude[i] = rf.amplitude * magSamples[i];
-        // Phase = 2π×phaseShape + phaseOffset + 2π×freqOffset×(t - t0)
-        const dt = timePoints[i] - rfStartTime;
-        phase[i] = 2 * Math.PI * phaseSamples[i] + rf.phaseOffset + 2 * Math.PI * rf.freqOffset * dt;
-    }
-
-    const duration = nSamples > 0
-        ? timePoints[nSamples - 1] - rfStartTime + rfRaster
-        : blockDur - rf.delay * rfRaster;
+    const duration = n > 0 ? t[n - 1] - rfStart + raster : 0;
 
     return {
         blockIndex: rf.id,
-        startTime: rfStartTime,
+        startTime: rfStart,
         duration,
-        timePoints,
-        magnitude,
+        timePoints: t,
+        magnitude: amp,
         phase,
         amplitude: rf.amplitude,
         freqOffset: rf.freqOffset,
@@ -125,215 +104,140 @@ function decodeRF(seq: PulseqSequence, rf: RFEntry, startTime: number, blockDur:
     };
 }
 
-function decodeGradient(seq: PulseqSequence, gradId: number, startTime: number, blockDur: number, channel: 'gx' | 'gy' | 'gz'): DecodedGradWaveform {
-    const gradRaster = seq.rasterTimes.gradientRaster;
+// ─── Gradient decoding ────────────────────────────────────────────────────
 
-    if (gradId <= 0) {
-        // No gradient → flat zero
-        return {
-            blockIndex: 0,
-            startTime,
-            duration: blockDur,
-            timePoints: new Float64Array([startTime, startTime + blockDur]),
-            waveform: new Float64Array([0, 0]),
-            amplitude: 0,
-            type: 'none',
-            channel,
-        };
-    }
+function decodeGradient(
+    seq: PulseqSequence, gradId: number,
+    blockStart: number, blockDur: number,
+    channel: 'gx' | 'gy' | 'gz',
+): DecodedGradWaveform {
+    if (gradId <= 0) return zeroGradient(blockStart, blockDur, channel);
 
-    // Check if trapezoid
     const trap = seq.trapGrads.get(gradId);
-    if (trap) {
-        return decodeTrapGradient(trap, startTime, channel);
-    }
+    if (trap) return decodeTrap(trap, blockStart, channel);
 
-    // Check if arbitrary
     const arb = seq.arbitraryGrads.get(gradId);
-    if (arb) {
-        return decodeArbitraryGradient(seq, arb, startTime, gradRaster, channel);
-    }
+    if (arb) return decodeArb(seq, arb, blockStart, channel);
 
-    // Fallback: empty gradient
+    return zeroGradient(blockStart, blockDur, channel);
+}
+
+function zeroGradient(t0: number, dur: number, ch: 'gx' | 'gy' | 'gz'): DecodedGradWaveform {
     return {
-        blockIndex: gradId,
-        startTime,
-        duration: blockDur,
-        timePoints: new Float64Array([startTime, startTime + blockDur]),
+        blockIndex: 0, startTime: t0, duration: dur,
+        timePoints: new Float64Array([t0, t0 + dur]),
         waveform: new Float64Array([0, 0]),
-        amplitude: 0,
-        type: 'none',
-        channel,
+        amplitude: 0, type: 'none', channel: ch,
     };
 }
 
-/**
- * Decode a trapezoid gradient into time-domain points.
- * Produces a waveform that spans from block start to the end of the shape,
- * including the leading zero (delay) segment for proper visual alignment.
- */
-function decodeTrapGradient(trap: TrapGradEntry, startTime: number, channel: 'gx' | 'gy' | 'gz'): DecodedGradWaveform {
+/** Trapezoid — includes a leading anchor at block start for visual alignment. */
+function decodeTrap(trap: TrapGradEntry, blockStart: number, ch: 'gx' | 'gy' | 'gz'): DecodedGradWaveform {
     const rise = trap.rise * 1e-6;
     const flat = trap.flat * 1e-6;
     const fall = trap.fall * 1e-6;
     const delay = trap.delay * 1e-6;
-    const amp = trap.amplitude;
-    const gradStart = startTime + delay;
-
-    const tPoints: number[] = [];
-    const waveform: number[] = [];
-
-    // Leading zero: block start → gradient start (shows idle time before gradient)
-    tPoints.push(startTime);
-    waveform.push(0);
-    tPoints.push(gradStart);
-    waveform.push(0);
-
-    // Ramp up
-    tPoints.push(gradStart + rise);
-    waveform.push(amp);
-
-    // Flat top
-    tPoints.push(gradStart + rise + flat);
-    waveform.push(amp);
-
-    // Ramp down
-    tPoints.push(gradStart + rise + flat + fall);
-    waveform.push(0);
-
-    const totalDuration = delay + rise + flat + fall;
+    const gradStart = blockStart + delay;
 
     return {
         blockIndex: trap.id,
-        startTime,                // block start (same as other events in this block)
-        duration: totalDuration,  // includes delay + shape
-        timePoints: new Float64Array(tPoints),
-        waveform: new Float64Array(waveform),
-        amplitude: amp,
+        startTime: blockStart,
+        duration: delay + rise + flat + fall,
+        timePoints: new Float64Array([
+            blockStart,              // anchor — idle before gradient
+            gradStart,               // end of idle
+            gradStart + rise,        // ramp‑up done
+            gradStart + rise + flat, // flat‑top done
+            gradStart + rise + flat + fall,  // ramp‑down done
+        ]),
+        waveform: new Float64Array([0, 0, trap.amplitude, trap.amplitude, 0]),
+        amplitude: trap.amplitude,
         type: 'trap',
-        channel,
+        channel: ch,
     };
 }
 
-/**
- * Decode an arbitrary (shaped) gradient.
- * Includes delay offset and first/last amplitude handling for v1.5.x continuity.
- */
-function decodeArbitraryGradient(seq: PulseqSequence, arb: ArbitraryGradEntry, startTime: number, gradRaster: number, channel: 'gx' | 'gy' | 'gz'): DecodedGradWaveform {
+/** Arbitrary (shaped) gradient — includes leading anchor and first/last handling. */
+function decodeArb(
+    seq: PulseqSequence, arb: ArbitraryGradEntry,
+    blockStart: number, ch: 'gx' | 'gy' | 'gz',
+): DecodedGradWaveform {
     const shape = seq.shapes.get(arb.shapeId);
-    if (!shape) {
-        return {
-            blockIndex: arb.id,
-            startTime,
-            duration: 0,
-            timePoints: new Float64Array([startTime]),
-            waveform: new Float64Array([0]),
-            amplitude: 0,
-            type: 'arb',
-            channel,
-        };
+    if (!shape) return zeroGradient(blockStart, 0, ch);
+
+    const raster = seq.rasterTimes.gradientRaster;
+    const delay = arb.delay * raster;
+    const gradStart = blockStart + delay;
+    const n = shape.numSamples;
+
+    // +2 for the anchor points at blockStart and gradStart
+    const tp = new Float64Array(n + 2);
+    const wf = new Float64Array(n + 2);
+    tp[0] = blockStart;  wf[0] = 0;
+    tp[1] = gradStart;   wf[1] = arb.first;
+
+    const timeShape = arb.timeId > 0
+        ? seq.shapes.get(arb.timeId)?.samples ?? null
+        : null;
+
+    for (let i = 0; i < n; i++) {
+        tp[i + 2] = timeShape
+            ? gradStart + timeShape[i] * raster
+            : gradStart + (i + 0.5) * raster;
+        wf[i + 2] = arb.first + arb.amplitude * shape.samples[i];
     }
 
-    const delay = arb.delay * gradRaster;
-    const gradStart = startTime + delay;
-    const nSamples = shape.numSamples;
-    const timePoints = new Float64Array(nSamples + 2); // +2 for leading edge
-    const waveform = new Float64Array(nSamples + 2);
-
-    // Leading zero point at block start (visual alignment)
-    timePoints[0] = startTime;
-    waveform[0] = 0;
-    timePoints[1] = gradStart;
-    waveform[1] = arb.first;
-
-    let timeShape: Float64Array | null = null;
-    if (arb.timeId > 0) {
-        const ts = seq.shapes.get(arb.timeId);
-        if (ts) timeShape = new Float64Array(ts.samples);
-    }
-
-    for (let i = 0; i < nSamples; i++) {
-        if (timeShape && i < timeShape.length) {
-            timePoints[i + 2] = gradStart + timeShape[i] * gradRaster;
-        } else {
-            timePoints[i + 2] = gradStart + (i + 0.5) * gradRaster;
-        }
-        waveform[i + 2] = arb.first + arb.amplitude * shape.samples[i];
-    }
-
-    const duration = nSamples > 0
-        ? timePoints[nSamples + 1] - startTime + gradRaster
-        : delay;
+    const dur = n > 0 ? tp[n + 1] - blockStart + raster : delay;
 
     return {
-        blockIndex: arb.id,
-        startTime,
-        duration,
-        timePoints,
-        waveform,
-        amplitude: arb.amplitude,
-        type: 'arb',
-        channel,
+        blockIndex: arb.id, startTime: blockStart, duration: dur,
+        timePoints: tp, waveform: wf,
+        amplitude: arb.amplitude, type: 'arb', channel: ch,
     };
 }
 
-function decodeADC(seq: PulseqSequence, adc: ADCEntry, startTime: number): DecodedADCEvent {
+// ─── ADC / Extensions ─────────────────────────────────────────────────────
+
+function decodeADC(adc: ADCEntry, blockStart: number): DecodedADCEvent {
     return {
-        blockIndex: adc.id,
-        startTime,
+        blockIndex: adc.id, startTime: blockStart,
         numSamples: adc.numSamples,
         dwell: adc.dwell * 1e-9,     // ns → s
-        delay: adc.delay * 1e-6,     // us → s
+        delay: adc.delay * 1e-6,     // µs → s
         freqOffset: adc.freqOffset,
         phaseOffset: adc.phaseOffset,
     };
 }
 
-function decodeExtensions(seq: PulseqSequence, ext: { id: number; type: number; ref: number; nextId: number }, decodedBlock: DecodedBlock, blockStartTime: number): void {
-    // Walk the extension linked list
-    let currentExt = ext;
+function decodeExtensions(
+    seq: PulseqSequence, ext: ExtensionEntry,
+    db: DecodedBlock, blockStart: number,
+): void {
     const visited = new Set<number>();
-
-    while (currentExt && !visited.has(currentExt.id)) {
-        visited.add(currentExt.id);
-
-        if (currentExt.type === 1) {
-            // TRIGGERS type
-            const triggers = seq.triggers.filter(t => {
-                // Match triggers that belong to this extension chain
-                // The ref links to trigger spec IDs
-                return true; // For simplicity, include all triggers
-            });
-
-            if (triggers.length > 0) {
-                decodedBlock.triggers = triggers.map(t => ({
-                    blockIndex: t.id,
-                    startTime: blockStartTime,
-                    channel: t.channel,
-                    delay: t.delay * 1e-6,      // us → s
-                    duration: t.duration * 1e-6, // us → s
-                }));
-            }
-        } else if (currentExt.type === 2) {
-            // NCO type
-            const ncos = seq.ncos;
-            if (ncos.length > 0) {
-                decodedBlock.nco = ncos.map(n => ({
-                    blockIndex: n.id,
-                    startTime: blockStartTime,
-                    channel: n.channel,
-                    frequency: n.frequency,
-                    phase: n.phase,
-                    delay: n.delay * 1e-6,
-                    duration: n.duration * 1e-6,
-                }));
-            }
+    let cur: ExtensionEntry | undefined = ext;
+    while (cur && !visited.has(cur.id)) {
+        visited.add(cur.id);
+        if (cur.type === 1) {
+            db.triggers = seq.triggers.map(t => ({
+                blockIndex: t.id, startTime: blockStart,
+                channel: t.channel,
+                delay: t.delay * 1e-6, duration: t.duration * 1e-6,
+            }));
+        } else if (cur.type === 2) {
+            db.nco = seq.ncos.map(n => ({
+                blockIndex: n.id, startTime: blockStart,
+                channel: n.channel, frequency: n.frequency, phase: n.phase,
+                delay: n.delay * 1e-6, duration: n.duration * 1e-6,
+            }));
         }
-
-        if (currentExt.nextId > 0) {
-            currentExt = seq.extensions.get(currentExt.nextId) || undefined as any;
-        } else {
-            break;
-        }
+        cur = cur.nextId > 0 ? seq.extensions.get(cur.nextId) : undefined;
     }
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────
+
+function makeConstant(n: number, value: number): Float64Array {
+    const a = new Float64Array(Math.max(n, 2));
+    a.fill(value);
+    return a;
 }

@@ -1,152 +1,156 @@
 /**
- * Pulseq data types — mirrors the Pulseq v1.x file format specification.
+ * Pulseq Data Types — complete TypeScript definitions for the Pulseq v1.x format.
+ *
+ * Three-layer architecture:
+ *   Layer 1 — Raw file data (parsed from .seq sections)
+ *   Layer 2 — Decompressed shapes
+ *   Layer 3 — Decoded time-domain waveforms for visualization
+ *
+ * @see https://github.com/pulseq/pulseq
  */
 
-/** Raw definition entry parsed from [DEFINITIONS] section */
-export interface DefinitionEntry {
-    key: string;
-    values: number[];
-}
+// ═══════════════════════════════════════════════════════════════
+// Layer 1 — Raw file data
+// ═══════════════════════════════════════════════════════════════
 
-/** Raw block entry parsed from [BLOCKS] section */
+export interface VersionInfo { major: number; minor: number; revision: number; }
+
+/** [BLOCKS] section row */
 export interface BlockEntry {
-    num: number;
-    dur: number;       // duration in block duration raster units
-    rfId: number;      // 0 = none
-    gxId: number;      // 0 = none
-    gyId: number;
-    gzId: number;
-    adcId: number;     // 0 = none
-    extId: number;     // 0 = none
+    num: number;   // 1‑based block number
+    dur: number;   // [block‑duration raster units]
+    rfId: number; gxId: number; gyId: number; gzId: number;
+    adcId: number; extId: number;  // 0 = none
 }
 
-/** RF event data from [RF] section */
+/** [RF] library entry */
 export interface RFEntry {
     id: number;
-    amplitude: number;           // Hz
-    magShapeId: number;
-    phaseShapeId: number;
-    timeShapeId: number;         // 0 = default raster
-    delay: number;               // v1.5+: RF delay in rf raster units
-    phaseOffset: number;         // radians
-    freqOffset: number;          // Hz
-    phaseModShapeId: number;     // v1.5+: shape ID for phase modulation, 0 = none
-    use: string;                 // v1.5+: 'e' excitation, 'i' inversion, 's' saturation, 'u' undefined
+    amplitude: number;         // [Hz]
+    magShapeId: number;        // magnitude envelope shape
+    phaseShapeId: number;      // phase waveform shape
+    timeShapeId: number;       // 0 = uniform rf‑raster
+    delay: number;             // [rf‑raster units]  (v1.5+)
+    phaseOffset: number;       // [rad]
+    freqOffset: number;        // [Hz]
+    phaseModShapeId: number;   // additional phase modulation (v1.5+)
+    use: string;               // 'e'|'i'|'s'|'u'  (v1.5+)
 }
 
-/** Arbitrary gradient entry from [GRADIENTS] section */
+/** [GRADIENTS] — arbitrary (shaped) gradient */
 export interface ArbitraryGradEntry {
     id: number;
-    amplitude: number;   // Hz/m
-    first: number;       // v1.5+: amplitude at shape start (v1.4.x: implicit 0)
-    last: number;        // v1.5+: amplitude at shape end (v1.4.x: implicit 0)
-    shapeId: number;
-    timeId: number;      // 0 = default raster
-    delay: number;       // v1.5+: delay in grad raster units (v1.4.x: stored as timeRange)
+    amplitude: number;   // [Hz/m]
+    first: number;       // [Hz/m] at shape start  (v1.5+; v1.4.x ≡ 0)
+    last: number;        // [Hz/m] at shape end
+    shapeId: number;     // normalized waveform shape
+    timeId: number;      // 0 = uniform grad‑raster
+    delay: number;       // [grad‑raster units]
 }
 
-/** Trapezoid gradient entry from [TRAP] section */
+/** [TRAP] — trapezoid gradient */
 export interface TrapGradEntry {
     id: number;
-    amplitude: number;    // Hz/m
-    rise: number;         // us
-    flat: number;         // us
-    fall: number;         // us
-    delay: number;        // us
+    amplitude: number;   // [Hz/m]
+    rise: number;        // [µs]
+    flat: number;        // [µs]
+    fall: number;        // [µs]
+    delay: number;       // [µs]
 }
 
-/** ADC entry from [ADC] section */
+/** [ADC] readout */
 export interface ADCEntry {
     id: number;
     numSamples: number;
-    dwell: number;        // ns
-    delay: number;        // us
-    freqOffset: number;   // Hz
-    phaseOffset: number;  // radians
-    deadTime: number;     // v1.5+: ADC dead time (us)
-    discardPre: number;   // v1.5+: samples to discard before
-    discardPost: number;  // v1.5+: samples to discard after
-    phaseModShapeId: number; // v1.5+: shape ID for phase modulation
+    dwell: number;          // [ns]
+    delay: number;          // [µs]
+    freqOffset: number;     // [Hz]
+    phaseOffset: number;    // [rad]
+    deadTime: number;       // [µs]  (v1.5+)
+    discardPre: number;     // samples to discard (v1.5+)
+    discardPost: number;
+    phaseModShapeId: number;
 }
 
-/** Extension list entry from [EXTENSIONS] section */
+/** [EXTENSIONS] linked‑list node */
 export interface ExtensionEntry {
     id: number;
-    type: number;
+    type: number;    // 1=trigger  2=NCO  3=rotation  4=label …
     ref: number;
-    nextId: number;
+    nextId: number;  // 0 = end of chain
 }
 
-/** Trigger specification */
 export interface TriggerSpec {
     id: number;
-    channel: number;   // 1-7
-    delay: number;     // us
-    duration: number;  // us
+    channel: number;   // 1‑7
+    delay: number;     // [µs]
+    duration: number;  // [µs]
 }
 
-/** NCO (Numerically Controlled Oscillator) specification */
 export interface NCOSpec {
     id: number;
     channel: number;
-    frequency: number;  // Hz
-    phase: number;      // radians
-    delay: number;      // us
-    duration: number;   // us
+    frequency: number;  // [Hz]
+    phase: number;      // [rad]
+    delay: number;      // [µs]
+    duration: number;   // [µs]
 }
 
-/** Decompressed shape data */
+// ═══════════════════════════════════════════════════════════════
+// Layer 2 — Decompressed shapes
+// ═══════════════════════════════════════════════════════════════
+
+/** Run‑length decompressed shape, normalized to [0, 1] */
 export interface DecompressedShape {
     numSamples: number;
-    samples: Float64Array;  // normalized [0,1] range
+    samples: Float64Array;
 }
 
-/** Fully decoded RF waveform for a block */
+// ═══════════════════════════════════════════════════════════════
+// Layer 3 — Decoded time‑domain output
+// ═══════════════════════════════════════════════════════════════
+
 export interface DecodedRFWaveform {
     blockIndex: number;
-    startTime: number;       // seconds
-    duration: number;        // seconds
-    timePoints: Float64Array; // seconds
-    magnitude: Float64Array;  // Hz
-    phase: Float64Array;      // radians
-    amplitude: number;        // Hz
-    freqOffset: number;       // Hz
-    phaseOffset: number;      // radians
-}
-
-/** Fully decoded gradient waveform for a block and channel */
-export interface DecodedGradWaveform {
-    blockIndex: number;
-    startTime: number;
-    duration: number;
-    timePoints: Float64Array;
-    waveform: Float64Array;   // Hz/m
-    amplitude: number;
-    type: 'trap' | 'arb' | 'none';
-    channel: 'gx' | 'gy' | 'gz';
-}
-
-/** Fully decoded ADC event for a block */
-export interface DecodedADCEvent {
-    blockIndex: number;
-    startTime: number;
-    numSamples: number;
-    dwell: number;        // seconds
-    delay: number;        // seconds
+    startTime: number;          // [s]  includes RF delay
+    duration: number;           // [s]  pulse length (without delay)
+    timePoints: Float64Array;   // [s]  absolute time per sample
+    magnitude: Float64Array;    // [Hz]
+    phase: Float64Array;        // [rad]
+    amplitude: number;          // [Hz]
     freqOffset: number;
     phaseOffset: number;
 }
 
-/** Fully decoded trigger event for a block */
+export interface DecodedGradWaveform {
+    blockIndex: number;
+    startTime: number;          // [s]  block start (visual anchor)
+    duration: number;           // [s]  delay + shape
+    timePoints: Float64Array;   // [s]
+    waveform: Float64Array;     // [Hz/m]
+    amplitude: number;          // [Hz/m]
+    type: 'trap' | 'arb' | 'none';
+    channel: 'gx' | 'gy' | 'gz';
+}
+
+export interface DecodedADCEvent {
+    blockIndex: number;
+    startTime: number;       // [s]  block start
+    numSamples: number;
+    dwell: number;           // [s]
+    delay: number;           // [s]
+    freqOffset: number;
+    phaseOffset: number;
+}
+
 export interface DecodedTriggerEvent {
     blockIndex: number;
     startTime: number;
     channel: number;
-    delay: number;        // seconds
-    duration: number;     // seconds
+    delay: number;           // [s]
+    duration: number;        // [s]
 }
 
-/** Fully decoded NCO event for a block */
 export interface DecodedNCOEvent {
     blockIndex: number;
     startTime: number;
@@ -157,11 +161,10 @@ export interface DecodedNCOEvent {
     duration: number;
 }
 
-/** Complete decoded block with all waveforms */
 export interface DecodedBlock {
-    index: number;
-    duration: number;       // seconds
-    startTime: number;      // seconds (computed cumulatively)
+    index: number;           // 1‑based
+    duration: number;        // [s]
+    startTime: number;       // [s]  cumulative from sequence start
     rf?: DecodedRFWaveform;
     gx?: DecodedGradWaveform;
     gy?: DecodedGradWaveform;
@@ -171,9 +174,12 @@ export interface DecodedBlock {
     nco?: DecodedNCOEvent[];
 }
 
-/** Complete parsed sequence */
+// ═══════════════════════════════════════════════════════════════
+// Top‑level container
+// ═══════════════════════════════════════════════════════════════
+
 export interface PulseqSequence {
-    version: { major: number; minor: number; revision: number };
+    version: VersionInfo;
     definitions: Map<string, number[]>;
     definitionsRaw: Map<string, string>;
     blocks: BlockEntry[];
@@ -186,9 +192,9 @@ export interface PulseqSequence {
     ncos: NCOSpec[];
     shapes: Map<number, DecompressedShape>;
     rasterTimes: {
-        blockDurationRaster: number;    // seconds
-        gradientRaster: number;         // seconds
-        rfRaster: number;               // seconds
-        adcRaster: number;              // seconds
+        blockDurationRaster: number;   // [s]
+        gradientRaster: number;
+        rfRaster: number;
+        adcRaster: number;
     };
 }
