@@ -2,7 +2,7 @@
   "name": "seqeyes-plugin",
   "displayName": "SeqEyes Plugin",
   "description": "Visualize Pulseq MRI sequences inside VS Code — inspect sequence diagrams, k-space trajectories, and gradient moments with interactive zoom and pan.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "Bughht",
   "license": "MIT",
   "icon": "images/logo.png",
