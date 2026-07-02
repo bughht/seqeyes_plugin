@@ -23,6 +23,6 @@ export const HTML_BODY = `
 <!-- Main split: waveforms | k-space -->
 <div id="main">
 <div id="left"><div id="cc"><canvas id="mc"></canvas><div id="tt"></div></div></div>
-<div id="right"><canvas id="kc"></canvas><div id="rc"><button id="krst" title="Reset view">\u21BA</button><button id="kax" title="Toggle projection">Prj</button></div></div>
+<div id="right"><div class="handle" id="khandle"></div><canvas id="kc"></canvas><div id="rc"><button id="krst" title="Reset view">\u21BA</button><button id="kax" title="Toggle projection">Prj</button><button id="kunit" title="Toggle k-space unit (cycles/m \u2194 rad/m)">U</button><div style="display:flex;align-items:center;gap:2px;margin-top:4px"><span style="font-size:9px;color:var(--lb)">Dot</span><input type="range" id="kdot" min="1" max="12" value="2" style="width:50px;accent-color:var(--adc)" title="ADC marker size"></div></div></div>
 </div>
 `;

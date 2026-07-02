@@ -2,7 +2,7 @@
 
 Visualize [Pulseq](https://github.com/pulseq/pulseq) MRI sequences inside VS Code — inspect RF pulses, gradients, ADC readouts, and triggers with interactive zoom & pan. Inspired by [SeqEyes](https://github.com/xingwangyong/seqeyes).
 
-![SeqEyes](images/logo.png)
+<img src="images/logo.svg" alt="SeqEyes" width="200" />
 
 ## Features
 

@@ -151,7 +151,7 @@ function serializeGrad(g: DecodedGradWaveform): Record<string, unknown> {
 /** Convert k‑space data to plain arrays for JSON serialisation.
  *  Downsamples the trajectory to at most 8000 display points. */
 function serializeKSpace(ks: KSpaceData): Record<string, unknown> {
-    const MAX_KPTS = 8000;
+    const MAX_KPTS = 30000;
     return {
         kx: downsample(ks.ktraj[0], MAX_KPTS),
         ky: downsample(ks.ktraj[1], MAX_KPTS),

@@ -15,7 +15,9 @@ body{font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background
 #main{display:flex;flex:1;overflow:hidden}
 #left{display:flex;flex-direction:column;flex:1;overflow:hidden;min-width:0}
 #right{width:0;overflow:hidden;position:relative;border-left:1px solid var(--gr);transition:width .25s}
-#right.open{width:400px}
+#right.open{width:500px}
+#right .handle{position:absolute;left:0;top:0;bottom:0;width:5px;cursor:col-resize;z-index:20}
+#right .handle:hover{background:var(--adc);opacity:.3}
 #right canvas{display:block;width:100%;height:100%}
 #rc{position:absolute;top:4px;left:4px;z-index:10;display:flex;flex-direction:column;gap:2px}
 #rc button{background:var(--gr);border:1px solid var(--ax);color:var(--fg);padding:2px 6px;border-radius:3px;cursor:pointer;font-size:10px}
