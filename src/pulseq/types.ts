@@ -198,6 +198,7 @@ export interface DecodedRFWaveform {
     amplitude: number;          // [Hz]
     freqOffset: number;         // [Hz]  (effective, incl. PPM)
     phaseOffset: number;        // [rad] (effective, incl. PPM)
+    use: string;                // 'e'=excitation, 'r'=refocusing, 'i'=inversion, 's'=saturation, 'u'=undefined
 }
 
 export interface DecodedGradWaveform {

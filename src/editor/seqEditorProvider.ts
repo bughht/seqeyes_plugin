@@ -13,6 +13,7 @@
 import * as vscode from 'vscode';
 import { parseSequenceText } from '../pulseq/reader';
 import { decodeAllBlocks } from '../pulseq/decoder';
+import { calculateKspace, type KSpaceData } from '../pulseq/kspace';
 import { getWebviewContent } from './webviewContent';
 import type { DecodedBlock, DecodedGradWaveform } from '../pulseq/types';
 
@@ -55,10 +56,20 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
                 : 0;
 
             panel.webview.html = getWebviewContent(totalDur);
+
+            // Pre‑compute k‑space trajectory (Pulseq‑compatible)
+            const ks = calculateKspace(
+                blocks,
+                seq.rasterTimes.gradientRaster,
+                totalDur,
+            );
+
             panel.webview.postMessage({
                 type: 'sequenceData',
                 blocks: serializeBlocks(blocks),
                 totalDuration: totalDur,
+                gradRaster: seq.rasterTimes.gradientRaster,
+                kspace: ks ? serializeKSpace(ks) : null,
             });
 
             const name = seq.definitionsRaw.get('Name');
@@ -107,6 +118,7 @@ function serializeBlocks(blocks: DecodedBlock[]): object[] {
                 m: downsample(b.rf.magnitude, MAX_DISPLAY_PTS),
                 p: rawP ? rawP.map(v => ((v % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)) : null,
                 a: b.rf.amplitude, fo: b.rf.freqOffset, po: b.rf.phaseOffset,
+                u: b.rf.use || 'u',   // 'e'=excitation, 'r'=refocusing, 'i'=inversion, 's'=saturation, 'u'=undefined
             };
         }
         if (b.gx) o.gx = serializeGrad(b.gx);
@@ -133,6 +145,22 @@ function serializeGrad(g: DecodedGradWaveform): Record<string, unknown> {
         t: downsample(g.timePoints, MAX_DISPLAY_PTS),
         w: downsample(g.waveform, MAX_DISPLAY_PTS),
         a: g.amplitude, ty: g.type, ch: g.channel,
+    };
+}
+
+/** Convert k‑space data to plain arrays for JSON serialisation.
+ *  Downsamples the trajectory to at most 8000 display points. */
+function serializeKSpace(ks: KSpaceData): Record<string, unknown> {
+    const MAX_KPTS = 8000;
+    return {
+        kx: downsample(ks.ktraj[0], MAX_KPTS),
+        ky: downsample(ks.ktraj[1], MAX_KPTS),
+        kz: downsample(ks.ktraj[2], MAX_KPTS),
+        tk: downsample(ks.t_ktraj, MAX_KPTS),
+        ax: Array.from(ks.ktraj_adc[0]),
+        ay: Array.from(ks.ktraj_adc[1]),
+        az: Array.from(ks.ktraj_adc[2]),
+        ta: Array.from(ks.t_adc),
     };
 }
 

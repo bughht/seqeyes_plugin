@@ -130,6 +130,19 @@ function decodeRF(seq: PulseqSequence, rf: RFEntry, blockStart: number, _blockDu
 
     const duration = n > 0 ? t[n - 1] - rfStart + raster : 0;
 
+    // Estimate flip angle to classify RF use when metadata is missing (pre‑v1.5)
+    let use = rf.use || '';
+    if (!use || use === 'u') {
+        // Integrate RF magnitude to get flip angle in degrees: FA = 360 × ∫ mag(t) dt
+        let faDeg = 0;
+        for (let i = 1; i < n; i++) {
+            const dt = t[i] - t[i - 1];
+            faDeg += 360 * (amp[i] + amp[i - 1]) * 0.5 * dt;
+        }
+        // Classify: ≤ 100° → excitation, ≥ 120° → refocusing, else → excitation (safe default)
+        use = faDeg >= 120 ? 'r' : 'e';
+    }
+
     return {
         blockIndex: rf.id,
         startTime: rfStart,
@@ -140,6 +153,7 @@ function decodeRF(seq: PulseqSequence, rf: RFEntry, blockStart: number, _blockDu
         amplitude: rf.amplitude,
         freqOffset: freqFull,
         phaseOffset: phaseFull,
+        use,
     };
 }
 
