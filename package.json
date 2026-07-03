@@ -2,7 +2,7 @@
   "name": "seqeyes-plugin",
   "displayName": "SeqEyes Plugin",
   "description": "Visualize Pulseq MRI sequences inside VS Code — inspect sequence diagrams, k-space trajectorieswith interactive user interface.",
-  "version": "0.0.3",
+  "version": "0.1.0",
   "publisher": "Bughht",
   "license": "MIT",
   "icon": "images/logo.png",
@@ -132,7 +132,7 @@
     "lint": "eslint src --ext ts",
     "test": "node ./out/test/runTest.js",
     "package": "vsce package",
-    "build:web": "npx esbuild web/pulseq-browser.ts --bundle --format=iife --global-name=Pulseq --outfile=web/pulseq-bundle.js --target=es2020",
+    "build:web": "npx esbuild web/pulseq-browser.ts --bundle --format=iife --global-name=Pulseq --outfile=web/pulseq-bundle.js --target=es2020 && node -e \"require('fs').copyFileSync('images/logo.png','web/logo.png')\"",
     "predeploy": "npm run build:web"
   },
   "devDependencies": {
