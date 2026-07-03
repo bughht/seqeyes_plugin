@@ -1,18 +1,3 @@
-/**
- * webview/js_interaction.ts — JavaScript mouse, wheel & toolbar handlers.
- *
- * Contains:
- *   • Mouse wheel (time zoom + Y‑axis amplitude zoom)
- *   • Drag‑to‑pan
- *   • Hover cursor + tooltip
- *   • Toolbar button handlers
- *   • Helper functions (fit, nice, fmtT, fmtAmp, fmtG)
- *   • MutationObserver for theme changes
- *   • Initial resize trigger
- *   • IIFE closing
- */
-
-export const JS_INTERACTION = `
 /* ═══════════════════════════════════════════════════════════════════════
    Mouse interaction
    ═══════════════════════════════════════════════════════════════════════ */
@@ -41,19 +26,19 @@ window.addEventListener('mousemove',function(e){
     var found=null;for(var i=0;i<BL.length;i++){if(cursorT>=BL[i].s&&cursorT<=BL[i].s+BL[i].d){found=BL[i];break}}
     if(found){
       var lines=['Block #'+found.i,'Time: '+fmtT(timeConv(found.s))+' '+timeUnitStr()+' (dur: '+fmtT(timeConv(found.d))+' '+timeUnitStr()+')'];
-      if(found.rf){lines.push('RF: '+(found.rf.a||0).toFixed(1)+' Hz  fo='+(found.rf.fo||0).toFixed(0)+' Hz  \\u03c6\\u2080='+((found.rf.po||0)%6.283).toFixed(2)+' rad');}
+      if(found.rf){lines.push('RF: '+(found.rf.a||0).toFixed(1)+' Hz  fo='+(found.rf.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.rf.po||0)%6.283).toFixed(2)+' rad');}
       if(found.gx&&found.gx.ty!=='none')lines.push('Gx: '+fmtG(found.gx));
       if(found.gy&&found.gy.ty!=='none')lines.push('Gy: '+fmtG(found.gy));
       if(found.gz&&found.gz.ty!=='none')lines.push('Gz: '+fmtG(found.gz));
-      if(found.adc){lines.push('ADC: '+found.adc.n+'pts @'+(found.adc.dw*1e6).toFixed(1)+'\\u00b5s  fo='+(found.adc.fo||0).toFixed(0)+' Hz  \\u03c6\\u2080='+((found.adc.po||0)%6.283).toFixed(2)+' rad');}
-      if(found.trg)lines.push('Trig: ch'+found.trg.map(function(x){return x.c}).join(',')+' \\u0394'+found.trg.map(function(x){return fmtT(timeConv(x.dr))+' '+timeUnitStr()}).join(','));
-      tt.textContent=lines.join('\\n');tt.style.display='block';
+      if(found.adc){lines.push('ADC: '+found.adc.n+'pts @'+(found.adc.dw*1e6).toFixed(1)+'\u00b5s  fo='+(found.adc.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.adc.po||0)%6.283).toFixed(2)+' rad');}
+      if(found.trg)lines.push('Trig: ch'+found.trg.map(function(x){return x.c}).join(',')+' \u0394'+found.trg.map(function(x){return fmtT(timeConv(x.dr))+' '+timeUnitStr()}).join(','));
+      tt.textContent=lines.join('\n');tt.style.display='block';
       tt.style.left=Math.min(e.clientX+15,window.innerWidth-350)+'px';tt.style.top=(e.clientY-10)+'px';
     }else{tt.style.display='none'}
   }else{tt.style.display='none'}
 });
 window.addEventListener('mouseup',function(){dr=false;cc.classList.remove('pan')});
-cc.addEventListener('mouseleave',function(){cursorT=0;curEl.textContent='\\u2190 hover for time';draw()});
+cc.addEventListener('mouseleave',function(){cursorT=0;curEl.textContent='\u2190 hover for time';draw()});
 
 /* ── Toolbar buttons ──────────────────────────────────────────────────── */
 document.getElementById('openBtn').onclick=function(){
@@ -80,5 +65,3 @@ function fmtAmp(v){if(v>=1e6)return(v/1e6).toFixed(1)+'M';if(v>=1e3)return(v/1e3
 function fmtG(g){var a=gradConv(g.a||0);return a.toFixed(1)+' '+gradUnitStr()+' ('+g.ty+')';}
 new MutationObserver(function(){draw()}).observe(document.body,{attributes:true,attributeFilter:['class']});
 rs();
-})();
-`;

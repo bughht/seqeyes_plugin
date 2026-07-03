@@ -1,12 +1,3 @@
-﻿/**
- * webview/js_drawing.ts — JavaScript Canvas drawing functions.
- *
- * Contains the main draw() loop and all sub-drawing routines:
- *   draw, drawCursor, drawGrid, drawZeroLines, drawBlockBounds,
- *   drawAxes, drawBlocks, drawG.
- */
-
-export const JS_DRAWING = `
 /* ═══════════════════════════════════════════════════════════════════════
    Main draw loop
    ═══════════════════════════════════════════════════════════════════════ */
@@ -81,8 +72,8 @@ function drawAxes(w,h,vs,ve,s){
     ctx.fillStyle=s.getPropertyValue('--lb').trim();ctx.font='10px monospace';
     var lblX=M.l-12;
     if(ci===0){ctx.fillText(fmtAmp(gMax[0])+'Hz',lblX,M.t+vi*ch+12);ctx.fillText('0',lblX,y0+ch/2-2);}
-    else if(ci===1){ctx.fillText('2\\u03c0',lblX,M.t+vi*ch+12);ctx.fillText('\\u03c0',lblX,y0+4);ctx.fillText('0',lblX,y0+ch/2-2);}
-    else if(ci>=2&&ci<=4){var d=gradConv(gMax[ci]);ctx.fillText('\\u00b1'+fmtAmp(d)+gradUnitStr(),lblX,M.t+vi*ch+12);ctx.fillText('0',lblX,y0+4);}
+    else if(ci===1){ctx.fillText('2\u03c0',lblX,M.t+vi*ch+12);ctx.fillText('\u03c0',lblX,y0+4);ctx.fillText('0',lblX,y0+ch/2-2);}
+    else if(ci>=2&&ci<=4){var d=gradConv(gMax[ci]);ctx.fillText('\u00b1'+fmtAmp(d)+gradUnitStr(),lblX,M.t+vi*ch+12);ctx.fillText('0',lblX,y0+4);}
     else if(ci===5){ctx.fillText('on',lblX,M.t+vi*ch+12);}
     else if(ci===6){ctx.fillText('ch',lblX,M.t+vi*ch+12);}
 
@@ -200,5 +191,3 @@ function drawG(g,vi,ci,c,ch,s,globMax){
     }ctx.stroke();
   }
 }
-
-;`;

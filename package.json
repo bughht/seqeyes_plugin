@@ -127,8 +127,9 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
+    "compile": "tsc -p ./ && npm run copy-assets",
+    "watch": "npm run copy-assets && tsc -watch -p ./",
+    "copy-assets": "node -e \"var s='src/editor/webview/assets',d='out/editor/webview/assets',fs=require('fs'),p=require('path');fs.mkdirSync(d,{recursive:true});fs.readdirSync(s).forEach(function(f){fs.copyFileSync(p.join(s,f),p.join(d,f))});console.log('Assets copied to out/');\"",
     "lint": "eslint src --ext ts",
     "test": "node ./out/test/runTest.js",
     "package": "vsce package",
