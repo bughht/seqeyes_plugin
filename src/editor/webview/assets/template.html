@@ -15,6 +15,17 @@
 <button id="kbtn" title="Toggle K-Space View" style="margin-left:4px">K-Space</button>
 <span class="cur" id="cur">← hover for time</span>
 </div>
+<!-- ── Progress overlay (centered card during loading) ── -->
+<div id="poverlay" style="display:none">
+  <div id="pcard">
+    <div id="pspinner"></div>
+    <div id="ptext">Loading sequence…</div>
+    <div id="pbar2"><div id="pfill2"></div></div>
+    <div id="ppct">0%</div>
+  </div>
+</div>
+<!-- ── Minimap overview strip (like VS Code's code minimap) ── -->
+<div id="mmap"><canvas id="mmc"></canvas></div>
 <!-- Main split: waveforms | k-space -->
 <div id="main">
 <div id="left"><div id="cc"><canvas id="mc"></canvas><div id="tt"></div></div></div>

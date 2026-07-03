@@ -21,6 +21,12 @@ var ampZoom=[1,1,1,1,1,1,1];
 /* K‑space data — pre‑computed on the extension side */
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
 
+/* Timing metadata (TR/TE info for minimap tooltip) */
+var seqTiming=null;  // {trTimeSec,trCount,hasExplicitTR,teTimeSec,hasExplicitTE,rfUseGuessed}
+
+/* Block positions for minimap: [{i,s,d}, ...] */
+var blockPos=[];
+
 /* VS Code API — acquired once, used for postMessage to extension host */
 var vscApi=(typeof acquireVsCodeApi!=='undefined')?acquireVsCodeApi():null;
 
@@ -49,8 +55,28 @@ guSel.onchange=function(){gradUnit=guSel.value;draw();};
 
 /* ── Data reception ───────────────────────────────────────────────────── */
 window.addEventListener('message',function(e){
-  var m=e.data;if(m.type==='sequenceData'){
+  var m=e.data;
+  if(m.type==='progress'){
+    var overlay=document.getElementById('poverlay'),fill=document.getElementById('pfill2'),
+        text=document.getElementById('ptext'),pct=document.getElementById('ppct');
+    if(m.phase==='start'){
+      overlay.style.display='flex';fill.style.width='0%';
+      text.textContent=m.text||'Loading sequence\u2026';pct.textContent='0%';
+    }else if(m.phase==='done'){
+      fill.style.width='100%';pct.textContent='100%';
+      text.textContent=m.text||'Ready';
+      setTimeout(function(){overlay.style.display='none';},500);
+    }else{
+      fill.style.width=(m.percent||0)+'%';
+      pct.textContent=(m.percent||0)+'%';
+      text.textContent=m.text||'';
+    }
+    return;
+  }
+  if(m.type==='sequenceData'){
     BL=m.blocks||[];TD=m.totalDuration||0;GR=m.gradRaster||1e-5;
+    blockPos=m.blockPositions||[];
+    mmCache=null;  // invalidate minimap cache on new data
     // Decode binary k‑space ADC data (Float32 base64 → typed arrays)
     if(m.kspace){
       kTraj=[m.kspace.kx,m.kspace.ky,m.kspace.kz];kTime=m.kspace.tk;
@@ -61,7 +87,12 @@ window.addEventListener('message',function(e){
         uploadKSpaceGPU();  // send to WebGL buffers
       }
     }
-    computeGlobalMax();fit();draw();drawKs();
+    // Store timing metadata for minimap tooltip
+    if(m.timing) seqTiming=m.timing; else seqTiming=null;
+    computeGlobalMax();
+    // Auto-zoom: if TR is known, zoom to first TR; otherwise fit full sequence
+    if(seqTiming&&seqTiming.trTimeSec>0){fitToFirstTR();}else{fit();}
+    draw();drawKs();drawMinimap();
   }
 });
 
@@ -81,12 +112,218 @@ function computeGlobalMax(){
   gMax[0]=Math.max(gMax[0],100);
 }
 
+/* ── Minimap ──────────────────────────────────────────────────────────── */
+var mmCanvas=document.getElementById('mmc'),mmCtx=mmCanvas.getContext('2d');
+/* Offscreen cache: static block bands rendered once, then blitted each frame.
+ * Invalidated on data load or theme change. */
+var mmCache=null, mmCacheW=0, mmCacheDpr=0;
+
+/** (Re)build the offscreen minimap cache using ImageData pixel‑buffer rendering.
+ *  Avoids O(blocks) canvas API calls — instead does one integer‑array pass
+ *  per block and a single putImageData() at the end.  ~20× faster than fillRect. */
+function buildMinimapCache(){
+  mmCache=null;
+  if(!TD||TD<=0||!BL.length)return;
+  var dpr=window.devicePixelRatio||1;
+  var W=mmCanvas.width, H=mmCanvas.height;  // physical pixels
+  if(W<=0||H<=0)return;
+
+  var s=getComputedStyle(document.body);
+  var cssW=W/dpr, scM=cssW/TD;
+
+  // Parse theme colours → [r,g,b]
+  var rfRGB=parseHexRGB(s.getPropertyValue('--rf').trim());
+  var gxRGB=parseHexRGB(s.getPropertyValue('--gx').trim());
+  var gyRGB=parseHexRGB(s.getPropertyValue('--gy').trim());
+  var gzRGB=parseHexRGB(s.getPropertyValue('--gz').trim());
+  var adcRGB=parseHexRGB(s.getPropertyValue('--adc').trim());
+  var bgRGB=parseHexRGB(s.getPropertyValue('--trbg').trim());
+
+  // Band layout in physical pixels
+  var rfY0=0, rfY1=5*dpr;
+  var gY0=5*dpr, gH=2*dpr;
+  var aY0=11*dpr, aY1=H;
+
+  // ── Step 1: accumulate per‑pixel‑column counters ──
+  // For each pixel column we store a hit count per band (integer 0..255).
+  var pw=Math.max(1,Math.ceil(cssW));
+  var rfCnt=new Uint8Array(pw), adcCnt=new Uint8Array(pw);
+  var gxCnt=new Uint8Array(pw), gyCnt=new Uint8Array(pw), gzCnt=new Uint8Array(pw);
+
+  // Stride: for very large sequences, skip blocks that map to sub‑pixel positions
+  var stride=BL.length>20000?Math.floor(BL.length/15000):1;
+
+  for(var i=0;i<BL.length;i+=stride){
+    var b=BL[i];
+    var px0=Math.floor(b.s*scM), px1=Math.ceil((b.s+b.d)*scM);
+    if(px0>=pw)continue;
+    px0=Math.max(0,px0);px1=Math.min(pw,px1);
+
+    if(b.rf) for(var p=px0;p<px1;p++){if(rfCnt[p]<255)rfCnt[p]++;}
+    if(b.gx&&b.gx.ty!=='none') for(var p=px0;p<px1;p++){if(gxCnt[p]<255)gxCnt[p]++;}
+    if(b.gy&&b.gy.ty!=='none') for(var p=px0;p<px1;p++){if(gyCnt[p]<255)gyCnt[p]++;}
+    if(b.gz&&b.gz.ty!=='none') for(var p=px0;p<px1;p++){if(gzCnt[p]<255)gzCnt[p]++;}
+    if(b.adc) for(var p=px0;p<px1;p++){if(adcCnt[p]<255)adcCnt[p]++;}
+  }
+
+  // ── Step 2: build ImageData from counters ──
+  var imgData=new ImageData(W,H);
+  var d=imgData.data;
+  // Fill background first
+  for(var y=0;y<H;y++){
+    for(var x=0;x<W;x++){
+      var idx=(y*W+x)*4;
+      d[idx]=bgRGB[0];d[idx+1]=bgRGB[1];d[idx+2]=bgRGB[2];d[idx+3]=255;
+    }
+  }
+  // Overlay each band — alpha proportional to hit count, clamped
+  for(var px=0;px<pw;px++){
+    var x0=Math.floor(px*dpr), x1=Math.floor((px+1)*dpr);
+    if(x1<=x0)x1=x0+1;
+
+    // RF band
+    if(rfCnt[px]>0){
+      var a=Math.min(140,rfCnt[px]*55);
+      fillBand(d,W,x0,x1,rfY0,rfY1,rfRGB[0],rfRGB[1],rfRGB[2],a);
+    }
+    // Gx band
+    if(gxCnt[px]>0){
+      var a=Math.min(150,gxCnt[px]*60);
+      fillBand(d,W,x0,x1,gY0,gY0+gH,gxRGB[0],gxRGB[1],gxRGB[2],a);
+    }
+    // Gy band
+    if(gyCnt[px]>0){
+      var a=Math.min(150,gyCnt[px]*60);
+      fillBand(d,W,x0,x1,gY0+gH,gY0+2*gH,gyRGB[0],gyRGB[1],gyRGB[2],a);
+    }
+    // Gz band
+    if(gzCnt[px]>0){
+      var a=Math.min(150,gzCnt[px]*60);
+      fillBand(d,W,x0,x1,gY0+2*gH,gY0+3*gH,gzRGB[0],gzRGB[1],gzRGB[2],a);
+    }
+    // ADC band
+    if(adcCnt[px]>0){
+      var a=Math.min(130,adcCnt[px]*50);
+      fillBand(d,W,x0,x1,aY0,aY1,adcRGB[0],adcRGB[1],adcRGB[2],a);
+    }
+  }
+
+  // Write to offscreen canvas
+  var oc=document.createElement('canvas');
+  oc.width=W;oc.height=H;
+  oc.getContext('2d').putImageData(imgData,0,0);
+  mmCache=oc;mmCacheW=W;mmCacheDpr=dpr;
+}
+
+/** Fill a rectangular band in the ImageData buffer with alpha blending. */
+function fillBand(d,W,x0,x1,y0,y1,r,g,b,a){
+  for(var y=y0;y<y1;y++){
+    for(var x=x0;x<x1;x++){
+      var i=(y*W+x)*4;
+      var srcA=a/255, dstA=d[i+3]/255;
+      var outA=srcA+dstA*(1-srcA);
+      if(outA<0.001)continue;
+      d[i]  =(r*srcA+d[i]  *dstA*(1-srcA))/outA;
+      d[i+1]=(g*srcA+d[i+1]*dstA*(1-srcA))/outA;
+      d[i+2]=(b*srcA+d[i+2]*dstA*(1-srcA))/outA;
+      d[i+3]=Math.round(outA*255);
+    }
+  }
+}
+
+/** Parse a hex colour (#rrggbb or #rgb) to [r,g,b]. */
+function parseHexRGB(c){
+  if(!c||c[0]!=='#')return[128,128,128];
+  var h=c.substring(1);
+  if(h.length===3)h=h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+  return[parseInt(h.substring(0,2),16),parseInt(h.substring(2,4),16),parseInt(h.substring(4,6),16)];
+}
+
+/** Fast per‑frame draw: blit cache + dynamic viewport highlight + TR lines + text. */
+function drawMinimap(){
+  var dpr=window.devicePixelRatio||1;
+  var W=mmCanvas.width/dpr, H=mmCanvas.height/dpr;
+  mmCtx.globalAlpha=1;  // reset — prevent stale alpha from previous draws
+  mmCtx.clearRect(0,0,W,H);
+  if(!TD||TD<=0)return;
+  var s=getComputedStyle(document.body);
+
+  // Rebuild cache when needed (data changed, theme changed, or DPR changed)
+  if(!mmCache||mmCacheW!==mmCanvas.width||mmCacheDpr!==dpr){
+    buildMinimapCache();
+  }
+
+  // ── Blit cached block bands ──
+  if(mmCache){
+    mmCtx.drawImage(mmCache,0,0);
+  }else{
+    mmCtx.fillStyle=s.getPropertyValue('--trbg').trim();mmCtx.fillRect(0,0,W,H);
+  }
+
+  if(!BL.length)return;
+  var scM=W/TD;
+
+  // ── TR boundary lines ──
+  if(seqTiming&&seqTiming.trTimeSec>0&&seqTiming.trCount>1){
+    mmCtx.strokeStyle=s.getPropertyValue('--fg').trim();
+    mmCtx.globalAlpha=0.10;mmCtx.lineWidth=0.4;
+    mmCtx.beginPath();
+    for(var tr=0;tr<=seqTiming.trCount;tr++){
+      var tx=tr*seqTiming.trTimeSec*scM;
+      if(tx<=W){mmCtx.moveTo(tx,0);mmCtx.lineTo(tx,H);}
+    }
+    mmCtx.stroke();mmCtx.globalAlpha=1;
+  }
+
+  // ── Viewport highlight ──
+  var mcW=mc.width/dpr;
+  var vx0=ox*scM, vx1=(ox+(mcW-M.l-M.r)/sc)*scM;
+  vx0=Math.max(0,vx0);vx1=Math.min(W,vx1);
+  var vw=Math.max(2,vx1-vx0);
+  // Subtle wash
+  mmCtx.fillStyle=s.getPropertyValue('--fg').trim();mmCtx.globalAlpha=0.18;
+  mmCtx.fillRect(vx0,0,vw,H);
+  // Edge markers — only when viewport is not flush against the canvas edge
+  mmCtx.globalAlpha=0.45;
+  mmCtx.fillStyle=s.getPropertyValue('--adc').trim();
+  if(vx0>0.5)mmCtx.fillRect(vx0,0,1,H);
+  if(vx1<W-0.5)mmCtx.fillRect(vx1-1,0,1,H);
+  mmCtx.globalAlpha=1;
+
+  // ── Info text ──
+  var info='';
+  if(seqTiming){
+    if(seqTiming.trTimeSec>0)info+='TR='+fmtDur2(seqTiming.trTimeSec)+(seqTiming.hasExplicitTR?'':'~')+'  ';
+    if(seqTiming.teTimeSec>0)info+='TE='+fmtDur2(seqTiming.teTimeSec)+'  ';
+    if(seqTiming.trCount>1)info+=seqTiming.trCount+' TRs';
+  }
+  if(info){
+    mmCtx.fillStyle='rgba(0,0,0,0.35)';mmCtx.font='9px monospace';mmCtx.textAlign='left';
+    mmCtx.fillText(info,5,H-3);
+    mmCtx.fillStyle=s.getPropertyValue('--fg').trim();mmCtx.globalAlpha=0.9;
+    mmCtx.fillText(info,4,H-4);
+    mmCtx.globalAlpha=1;
+  }
+}
+
+function fmtDur2(s){
+  if(s>=1)return s.toFixed(2)+'s';
+  if(s>=0.001)return(s*1e3).toFixed(1)+'ms';
+  return(s*1e6).toFixed(0)+'\u00b5s';
+}
+
 /* ── Canvas resize ────────────────────────────────────────────────────── */
 function rs(){
   var dpr=window.devicePixelRatio||1,r=cc.getBoundingClientRect();
   mc.width=r.width*dpr;mc.height=r.height*dpr;
   mc.style.width=r.width+'px';mc.style.height=r.height+'px';
-  ctx.setTransform(dpr,0,0,dpr,0,0);draw();
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  // Resize minimap canvas too
+  var mr=document.getElementById('mmap').getBoundingClientRect();
+  mmCanvas.width=mr.width*dpr;mmCanvas.height=mr.height*dpr;
+  mmCanvas.style.width=mr.width+'px';mmCanvas.style.height=mr.height+'px';
+  mmCtx.setTransform(dpr,0,0,dpr,0,0);
+  draw();drawMinimap();
 }
 window.addEventListener('resize',rs);new ResizeObserver(rs).observe(cc);
 
@@ -96,3 +333,15 @@ function cy(vi){var vc=visChannels(),h=(mc.height/(window.devicePixelRatio||1)-M
 function cH(){var vc=visChannels();return(mc.height/(window.devicePixelRatio||1)-M.t-M.b)/Math.max(vc.length,1);}
 function t2x(t){return M.l+(t-ox)*sc}
 function x2t(x){return ox+(x-M.l)/sc}
+
+/* ── Initial view: zoom to first TR ───────────────────────────────────── */
+function fitToFirstTR(){
+  if(!seqTiming||seqTiming.trTimeSec<=0){fit();return;}
+  var w=mc.width/(window.devicePixelRatio||1);
+  // Show first TR with 10% padding on each side
+  var trDur=seqTiming.trTimeSec;
+  sc=(w-M.l-M.r)/(trDur*1.2);
+  ox=Math.max(0,-trDur*0.1);  // small negative offset for left padding
+  // Clamp scale to reasonable range
+  sc=Math.max(50/(TD||1e-3),Math.min(sc,1e7));
+}

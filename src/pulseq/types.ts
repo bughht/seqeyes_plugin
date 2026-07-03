@@ -284,4 +284,30 @@ export interface PulseqSequence {
         rfRaster: number;
         adcRaster: number;
     };
+    /** Parsed timing metadata (from [DEFINITIONS]). */
+    timing?: SequenceTiming;
+}
+
+/** Timing metadata extracted from the sequence — TE, TR, and TR detection info.
+ *  Used to enable TR‑based navigation and first‑TR‑only rendering for large 3D sequences. */
+export interface SequenceTiming {
+    /** TE (echo time) in seconds, if defined via EchoTime / TE in [DEFINITIONS]. */
+    teTimeSec: number;
+    /** Whether TE was explicitly defined in the sequence file. */
+    hasExplicitTE: boolean;
+    /** TR (repetition time) in seconds, from RepetitionTime / TR or estimated from RF pulses. */
+    trTimeSec: number;
+    /** Whether TR was explicitly defined (true) or estimated from excitation RF spacing (false). */
+    hasExplicitTR: boolean;
+    /** Number of TRs in the sequence (only valid when TR is known). */
+    trCount: number;
+    /** 1‑based block indices where each TR starts (excitation block indices).
+     *  Length = trCount + 1 (last entry is past‑the‑end sentinel). */
+    trStartBlocks: number[];
+    /** Excitation centre times in seconds (one per TR start). */
+    excitationTimesSec: number[];
+    /** RF use classification was guessed (pre‑v1.5 files lacking per‑pulse use tag). */
+    rfUseGuessed: boolean;
+    /** Per‑block RF use character ('e','r','s','i','p','u' or 0). */
+    rfUsePerBlock: number[];
 }
