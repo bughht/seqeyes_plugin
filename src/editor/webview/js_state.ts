@@ -64,11 +64,23 @@ guSel.onchange=function(){gradUnit=guSel.value;draw();};
 window.addEventListener('message',function(e){
   var m=e.data;if(m.type==='sequenceData'){
     BL=m.blocks||[];TD=m.totalDuration||0;GR=m.gradRaster||1e-5;
-    // Receive pre‑computed k‑space
-    if(m.kspace){kTraj=[m.kspace.kx,m.kspace.ky,m.kspace.kz];kTime=m.kspace.tk;kAdc=[m.kspace.ax,m.kspace.ay,m.kspace.az];kAdcTime=m.kspace.ta;}
+    // Decode binary k‑space ADC data (Float32 base64 → typed arrays)
+    if(m.kspace){
+      kTraj=[m.kspace.kx,m.kspace.ky,m.kspace.kz];kTime=m.kspace.tk;
+      var n=m.kspace.nAdc||0;
+      if(n>0&&m.kspace.axb){
+        kAdc=[decodeB64F32(m.kspace.axb,n),decodeB64F32(m.kspace.ayb,n),decodeB64F32(m.kspace.azb,n)];
+        kAdcTime=decodeB64F32(m.kspace.tab,n);
+        uploadKSpaceGPU();  // send to WebGL buffers
+      }
+    }
     computeGlobalMax();fit();draw();drawKs();
   }
 });
+
+/* ── Base64 → Float32Array decoder ─────────────────────────────────── */
+function decodeB64F32(b64,n){var bin=atob(b64),len=bin.length,b=new Uint8Array(len);for(var i=0;i<len;i++)b[i]=bin.charCodeAt(i);return new Float32Array(b.buffer,0,n);}
+
 
 /* ── Global amplitude ranges ──────────────────────────────────────────── */
 function computeGlobalMax(){

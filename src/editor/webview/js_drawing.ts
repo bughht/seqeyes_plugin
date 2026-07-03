@@ -127,11 +127,34 @@ function drawBlocks(vs,ve,s){
     // -- RF phase --
     if(b.rf&&b.rf.p&&viPh>=0){
       var py=cy(viPh);
-      ctx.strokeStyle=s.getPropertyValue('--rf').trim();ctx.lineWidth=0.8;ctx.setLineDash([2,3]);ctx.beginPath();
+      ctx.strokeStyle=s.getPropertyValue('--rf').trim();ctx.lineWidth=0.8;ctx.beginPath();
       for(var i=0,f=1,psc=ch*.9/6.28318;i<b.rf.t.length;i++){
         var sx=t2x(b.rf.t[i]),sy=py+ch*.45-b.rf.p[i]*psc;
         if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
       }ctx.stroke();ctx.setLineDash([]);
+    }
+
+    // -- ADC phase curve on φ axis (evolves linearly:  φ(t) = po + 2π·fo·Δt) --
+    if(b.adc&&viPh>=0&&b.adc.n>1){
+      var apy3=cy(viPh);
+      var t0=b.adc.s+b.adc.d, fo2=b.adc.fo||0, po2=b.adc.po||0;
+      var nAdc=b.adc.n, dw2=b.adc.dw, te2=t0+nAdc*dw2;
+      if(te2>vs&&t0<ve){
+        ctx.strokeStyle=s.getPropertyValue('--adc').trim();ctx.lineWidth=0.8;
+        ctx.beginPath();
+        var psc2=ch*.9/6.28318;
+        // Subsample large readouts to ≤ 200 points for performance
+        var step=Math.max(1,Math.ceil(nAdc/200));
+        for(var s2=0,f2=1;s2<=nAdc;s2+=step){
+          var tA=(s2<nAdc)?t0+(s2+0.5)*dw2:te2;
+          var dtA=tA-t0;
+          var phA=((po2+6.283185*fo2*dtA)%6.28318+6.28318)%6.28318;
+          var sxA=t2x(tA),syA=apy3+ch*.45-phA*psc2;
+          var clipL2=M.l,clipR2=mc.width/(window.devicePixelRatio||1)-M.r;
+          if(sxA<clipL2||sxA>clipR2){f2=1;continue}
+          if(f2){ctx.moveTo(sxA,syA);f2=0}else ctx.lineTo(sxA,syA);
+        }ctx.stroke();ctx.setLineDash([]);
+      }
     }
 
     // -- Gradients --
@@ -148,7 +171,6 @@ function drawBlocks(vs,ve,s){
         ctx.fillStyle=af;ctx.fillRect(ax0,ay-ch*.28,ax1-ax0,ch*.56);
         ctx.strokeStyle=ac;ctx.lineWidth=1;ctx.strokeRect(ax0,ay-ch*.28,ax1-ax0,ch*.56);
         if(ax1-ax0>30){ctx.fillStyle=s.getPropertyValue('--fg').trim();ctx.font='9px monospace';ctx.textAlign='center';ctx.fillText(b.adc.n+'pts',(ax0+ax1)/2,ay+3);}
-        if(b.adc.po&&Math.abs(b.adc.po)>1e-6){ctx.fillStyle=ac;ctx.beginPath();ctx.arc((ax0+ax1)/2,ay-ch*.22,4,0,6.283);ctx.fill();ctx.fillStyle='#fff';ctx.font='7px monospace';ctx.textAlign='center';ctx.fillText('\\u03c6',(ax0+ax1)/2,ay-ch*.19);}
       }
     }
 
@@ -158,7 +180,7 @@ function drawBlocks(vs,ve,s){
       for(var tj=0;tj<b.trg.length;tj++){
         var tg=b.trg[tj],ts=tg.s+tg.d,te=ts+tg.dr;if(te<vs||ts>ve)continue;
         var txm=t2x((ts+te)/2);
-        ctx.fillStyle=tc;ctx.beginPath();ctx.moveTo(txm,ty-ch*.15);ctx.lineTo(txm-5,ty+ch*.15);ctx.lineTo(txm+5,ty+ch*.15);ctx.closePath();ctx.fill();
+        ctx.fillStyle=tc;ctx.beginPath();ctx.moveTo(txm,ty-ch*.05);ctx.lineTo(txm-5,ty+ch*.05);ctx.lineTo(txm+5,ty+ch*.05);ctx.closePath();ctx.fill();
         ctx.fillStyle=tc;ctx.font='8px monospace';ctx.textAlign='center';ctx.fillText('ch'+tg.c,txm,ty+ch*.28);
       }
     }

@@ -1,6 +1,6 @@
 # SeqEyes Plugin
 
-Visualize [Pulseq](https://github.com/pulseq/pulseq) MRI sequences inside VS Code — inspect RF pulses, gradients, ADC readouts, and triggers with interactive zoom & pan. Inspired by [SeqEyes](https://github.com/xingwangyong/seqeyes).
+Visualize [Pulseq](https://github.com/pulseq/pulseq) MRI sequences inside VS Code — inspect RF pulses, gradients, ADC readouts, and triggers with interactive zoom & pan. Includes a GPU‑accelerated k‑space viewer with camera presets. Inspired by [SeqEyes](https://github.com/xingwangyong/seqeyes).
 
 [![VS Code Marketplace](https://img.shields.io/badge/VS%20Code-Marketplace-blue?logo=visualstudiocode)](https://marketplace.visualstudio.com/items?itemName=Bughht.seqeyes-plugin)
 
@@ -10,13 +10,16 @@ Visualize [Pulseq](https://github.com/pulseq/pulseq) MRI sequences inside VS Cod
 
 - **Custom editor for `.seq` files** — opens automatically on double‑click
 - **7 toggle‑able channels**: RF · φ · Gx · Gy · Gz · ADC · Trigger
-- **Interactive Canvas**: scroll‑zoom, drag‑pan, hover tooltips
-- **K‑space viewer** (right panel): 2D projections & 3D scatter of ADC samples
+- **ADC phase curve** on φ axis — continuous $\phi(t) = \phi_0 + 2\pi \cdot f_{offset} \cdot (t - t_0)$
+- **K‑space viewer**: WebGL‑accelerated 3D scatter (millions of points @ 60 fps) with camera presets
+- **Camera presets** (xy / xz / yz) rotate the 3D view; any drag reverts to free 3D
+- **Interactive Canvas**: scroll‑zoom (anchored at cursor), drag‑pan, hover tooltips
+- **7 built‑in themes**: One Light · One Dark · Dracula · Nord · GitHub Light · GitHub Dark · System
 - **Vertical cursor** with live time readout
 - **Unit switchers** for time (s / ms / µs) and gradient (Hz/m / mT/m / G/cm)
-- **K‑space unit toggle** (cycles/m ↔ rad/m) with auto‑updating axis ticks
-- **Block boundary lines** — toggle in toolbar, default off
-- **Dark mode** — auto‑detects VS Code theme
+- **K‑space unit toggle** (1/m ↔ rad/m) with auto‑updating axis ticks
+- **Block boundary lines** — toggle in toolbar
+- **Optimized for large files** — binary k‑space encoding, memory‑safe parser
 - **Pulseq v1.2.0 – v1.5.1** support
 
 ## Install
@@ -35,19 +38,18 @@ Or press **F5** for Extension Development Host.
 | Action | How |
 |--------|-----|
 | Open a `.seq` file | Double‑click in Explorer |
-| Zoom | Scroll wheel or toolbar `+` / `−` |
-| Pan | Click & drag |
+| Zoom waveform | Scroll wheel or toolbar `+` / `−` |
+| Pan waveform | Click & drag |
 | Fit to view | Toolbar `Fit` |
 | Toggle channel | Click legend label |
 | Toggle block boundaries | Checkbox `☐ Blocks` in toolbar |
-| Block details | Hover waveform |
-| Time cursor | Move mouse |
-| Toggle k‑space panel | Toolbar `K` button |
-| Cycle 2D / 3D view | `Prj` button in k‑space panel |
-| Rotate (3D) | Left‑drag in k‑space panel |
-| Pan (3D) | Right‑drag or middle‑drag |
-| Pan (2D) | Left‑drag |
-| Zoom k‑space | Scroll wheel |
+| Block details & values | Hover waveform |
+| Switch theme | Toolbar `Theme` dropdown |
+| Toggle k‑space panel | Toolbar `K‑Space` button |
+| Rotate 3D view | Left‑drag in k‑space panel |
+| Pan 3D view | Right‑drag or middle‑drag |
+| Zoom k‑space (at cursor) | Scroll wheel in k‑space panel |
+| Cycle camera preset | `Prj` button — xy → xz → yz → 3D |
 | Reset k‑space view | `↺` button |
 | Toggle k‑space unit | `U` button — cycles/m ↔ rad/m |
 | ADC marker size | `Dot` slider in k‑space panel |

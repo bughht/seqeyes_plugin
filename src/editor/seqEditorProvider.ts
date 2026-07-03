@@ -148,8 +148,9 @@ function serializeGrad(g: DecodedGradWaveform): Record<string, unknown> {
     };
 }
 
-/** Convert k‑space data to plain arrays for JSON serialisation.
- *  Downsamples the trajectory to at most 8000 display points. */
+/** Convert k‑space data for webview transfer.
+ *  ADC arrays are binary‑encoded (Float32 → base64) to reduce payload ~3×;
+ *  the trajectory is JSON (already down‑sampled to MAX_KPTS).  */
 function serializeKSpace(ks: KSpaceData): Record<string, unknown> {
     const MAX_KPTS = 30000;
     return {
@@ -157,11 +158,20 @@ function serializeKSpace(ks: KSpaceData): Record<string, unknown> {
         ky: downsample(ks.ktraj[1], MAX_KPTS),
         kz: downsample(ks.ktraj[2], MAX_KPTS),
         tk: downsample(ks.t_ktraj, MAX_KPTS),
-        ax: Array.from(ks.ktraj_adc[0]),
-        ay: Array.from(ks.ktraj_adc[1]),
-        az: Array.from(ks.ktraj_adc[2]),
-        ta: Array.from(ks.t_adc),
+        // Binary‑encoded ADC arrays — Float32 base64, ~3× smaller than JSON arrays
+        axb: encodeF32B64(ks.ktraj_adc[0]),
+        ayb: encodeF32B64(ks.ktraj_adc[1]),
+        azb: encodeF32B64(ks.ktraj_adc[2]),
+        tab: encodeF32B64(ks.t_adc),
+        nAdc: ks.ktraj_adc[0].length,
     };
+}
+
+/** Encode a Float64Array (or number[]) as a base64‑encoded Float32 blob.
+ *  Uses Node's Buffer for efficient base64 conversion. */
+function encodeF32B64(data: Float64Array | number[]): string {
+    const f32 = new Float32Array(data);
+    return Buffer.from(f32.buffer).toString('base64');
 }
 
 /** Uniformly downsample an array to at most `maxPts` elements. */

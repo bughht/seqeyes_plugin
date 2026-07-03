@@ -54,6 +54,10 @@ function effPhaseOff(phaseOffset: number, phasePPM: number, b0: number): number 
 
 /** Decode all blocks into render‑ready waveforms. */
 export function decodeAllBlocks(seq: PulseqSequence): DecodedBlock[] {
+    // Clear per‑sequence extension caches to avoid cross‑sequence contamination
+    _trigCache.clear();
+    _ncoCache.clear();
+
     const decoded: DecodedBlock[] = [];
     let cumulative = 0;  // [s]
 
@@ -306,6 +310,11 @@ function decodeADC(adc: ADCEntry, blockStart: number, seq: PulseqSequence): Deco
     };
 }
 
+// Cache for decoded trigger/NCO arrays keyed by extension id to avoid
+// repeated .map() calls when many blocks share the same extension.
+const _trigCache = new Map<number, DecodedTriggerEvent[]>();
+const _ncoCache = new Map<number, DecodedNCOEvent[]>();
+
 function decodeExtensions(
     seq: PulseqSequence, ext: ExtensionEntry,
     db: DecodedBlock, blockStart: number,
@@ -315,17 +324,27 @@ function decodeExtensions(
     while (cur && !visited.has(cur.id)) {
         visited.add(cur.id);
         if (cur.type === 1) {
-            db.triggers = seq.triggers.map(t => ({
-                blockIndex: t.id, startTime: blockStart,
-                channel: t.channel,
-                delay: t.delay * 1e-6, duration: t.duration * 1e-6,
-            }));
+            let cached = _trigCache.get(cur.id);
+            if (!cached) {
+                cached = seq.triggers.map(t => ({
+                    blockIndex: t.id, startTime: 0,  // startTime filled per-block below
+                    channel: t.channel,
+                    delay: t.delay * 1e-6, duration: t.duration * 1e-6,
+                }));
+                _trigCache.set(cur.id, cached);
+            }
+            db.triggers = cached.map(t => ({ ...t, startTime: blockStart }));
         } else if (cur.type === 2) {
-            db.nco = seq.ncos.map(n => ({
-                blockIndex: n.id, startTime: blockStart,
-                channel: n.channel, frequency: n.frequency, phase: n.phase,
-                delay: n.delay * 1e-6, duration: n.duration * 1e-6,
-            }));
+            let cached = _ncoCache.get(cur.id);
+            if (!cached) {
+                cached = seq.ncos.map(n => ({
+                    blockIndex: n.id, startTime: 0,
+                    channel: n.channel, frequency: n.frequency, phase: n.phase,
+                    delay: n.delay * 1e-6, duration: n.duration * 1e-6,
+                }));
+                _ncoCache.set(cur.id, cached);
+            }
+            db.nco = cached.map(n => ({ ...n, startTime: blockStart }));
         }
         cur = cur.nextId > 0 ? seq.extensions.get(cur.nextId) : undefined;
     }

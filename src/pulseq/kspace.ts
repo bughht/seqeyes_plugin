@@ -12,15 +12,15 @@
  *        Excitation  -> dk = -k
  *        Refocusing  -> dk = -2*k - dk
  *   5. NaN marker BEFORE excitation index (clean plot break).
- *   6. No 2pi factor - k-space in cycles/m (matching Pulseq convention).
+ *   6. No 2pi factor - k-space in Hz/m (matching Pulseq convention).
  */
 
 import type { DecodedBlock, DecodedGradWaveform } from './types';
 
 export interface KSpaceData {
-    ktraj: Float64Array[];      // [kx, ky, kz]  [cycles/m]
+    ktraj: Float64Array[];      // [kx, ky, kz]  [Hz/m]
     t_ktraj: Float64Array;      // time grid  [s]
-    ktraj_adc: Float64Array[];  // ADC samples  [cycles/m]
+    ktraj_adc: Float64Array[];  // ADC samples  [Hz/m]
     t_adc: Float64Array;        // ADC times  [s]
 }
 
@@ -35,16 +35,22 @@ export function calculateKspace(
     const GR = gradientRaster;
     const tacc = 1e-10;
 
-    // ---- Pass 1: collect gradient time/value series ----
-    const gxT: number[] = [], gxV: number[] = [];
-    const gyT: number[] = [], gyV: number[] = [];
-    const gzT: number[] = [], gzV: number[] = [];
-    const excT: number[] = [], refT: number[] = [], adcT: number[] = [];
+    // ---- Pass 1: count total ADC samples & collect RF/ADC events & gradient breakpoints ----
+    const excT: number[] = [], refT: number[] = [];
+    const gradBreaks: number[] = [];  // only start/end of each gradient waveform
+    let totalAdcSamples = 0;
+    for (const b of blocks) {
+        if (b.adc) totalAdcSamples += b.adc.numSamples;
+    }
+    // Pre-allocate ADC array to avoid repeated resizing for large sequences
+    const adcT = new Float64Array(totalAdcSamples);
+    let adcIdx = 0;
 
     for (const b of blocks) {
-        collect(b.gx, gxT, gxV);
-        collect(b.gy, gyT, gyV);
-        collect(b.gz, gzT, gzV);
+        // Collect only gradient breakpoints (first/last time), not every sample
+        collectBreaks(b.gx, gradBreaks);
+        collectBreaks(b.gy, gradBreaks);
+        collectBreaks(b.gz, gradBreaks);
         if (b.rf) {
             const iso = b.rf.startTime + b.rf.duration * 0.5;
             const u = b.rf.use || '';
@@ -53,26 +59,35 @@ export function calculateKspace(
         }
         if (b.adc) {
             const t0 = b.adc.startTime + b.adc.delay;
-            for (let s = 0; s < b.adc.numSamples; s++)
-                adcT.push(t0 + (s + 0.5) * b.adc.dwell + trajectoryDelay);
+            const dwell = b.adc.dwell;
+            const nSamp = b.adc.numSamples;
+            for (let s = 0; s < nSamp; s++)
+                adcT[adcIdx++] = t0 + (s + 0.5) * dwell + trajectoryDelay;
         }
     }
 
-    // ---- Pass 2: build non-uniform time grid ----
-    const cand = new Set<number>();
-    const addC = (t: number) => { if (isFinite(t) && t >= -tacc) cand.add(Math.max(0, tacc * Math.round(t/tacc))); };
-    for (const t of gxT) addC(t);
-    for (const t of gyT) addC(t);
-    for (const t of gzT) addC(t);
-    for (const t of excT) { addC(t); addC(t - GR); }
-    for (const t of refT) { addC(t); addC(t - GR); }
-    for (const t of adcT) addC(t);
-    addC(0); addC(totalDuration);
+    // ---- Pass 2: build non-uniform time grid (memory‑safe: sort+dedup array) ----
+    // Use a sorted-array dedup instead of Set to avoid V8's ~16.7M Set size limit.
+    // Only essential points are included: gradient breakpoints, RF centres,
+    // ADC sample times, block boundaries, and a uniform raster grid.
+    const cand: number[] = [];
+    const pushC = (t: number) => { if (isFinite(t) && t >= -tacc) cand.push(Math.max(0, tacc * Math.round(t/tacc))); };
+    for (const t of gradBreaks) pushC(t);
+    for (const t of excT) { pushC(t); pushC(t - GR); }
+    for (const t of refT) { pushC(t); pushC(t - GR); }
+    for (const t of adcT) pushC(t);
+    pushC(0); pushC(totalDuration);
     if (totalDuration > 0) {
         const nS = Math.max(1, Math.round(totalDuration / GR));
-        for (let i = 0; i <= nS; i++) addC(i * GR);
+        for (let i = 0; i <= nS; i++) pushC(i * GR);
     }
-    const grid = Array.from(cand).sort((a, b) => a - b);
+    // Sort and deduplicate in one pass — O(n log n) but safe for any sequence size
+    if (cand.length === 0) return null;
+    cand.sort((a, b) => a - b);
+    const grid: number[] = [];
+    for (let i = 0; i < cand.length; i++) {
+        if (i === 0 || cand[i] - cand[i - 1] > tacc * 0.5) grid.push(cand[i]);
+    }
     const N = grid.length;
     if (N < 2) return null;
 
@@ -138,9 +153,13 @@ export function calculateKspace(
 }
 
 // ---- helpers ----
-function collect(g: DecodedGradWaveform|undefined, t: number[], v: number[]): void {
+/** Collect only the first and last time point of a gradient waveform (breakpoints).
+ *  The full waveform is evaluated via `gradVal` interpolation — individual sample
+ *  points do NOT need to be in the integration grid.  This avoids blowing up the
+ *  candidate array for sequences with many arbitrary (shaped) gradients. */
+function collectBreaks(g: DecodedGradWaveform|undefined, breaks: number[]): void {
     if (!g || g.type === 'none' || !g.timePoints || g.timePoints.length < 2) return;
-    for (let i = 0; i < g.timePoints.length; i++) { t.push(g.timePoints[i]); v.push(g.waveform[i]); }
+    breaks.push(g.timePoints[0], g.timePoints[g.timePoints.length - 1]);
 }
 function gradVal(g: DecodedGradWaveform|undefined, t: number): number {
     if (!g || g.type === 'none') return 0;

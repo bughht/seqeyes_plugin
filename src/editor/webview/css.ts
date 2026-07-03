@@ -9,6 +9,18 @@ export const CSS = `
 /* ── Colour scheme ── */
 :root{--bg:#fff;--fg:#222;--gr:#ddd;--rf:#e6194b;--rff:rgba(230,25,75,.07);--gx:#3cb44b;--gy:#4363d8;--gz:#f58231;--adc:#42d4f4;--adf:rgba(66,212,244,.14);--tr:#911eb4;--ax:#aaa;--lb:#888;--cr:#ee0000}
 body.vscode-dark{--bg:#1e1e1e;--fg:#ddd;--gr:#3a3a3a;--rf:#ff6b8a;--rff:rgba(255,107,138,.05);--gx:#5cdb5c;--gy:#6b8cff;--gz:#ffb347;--adc:#5ce1f4;--adf:rgba(92,225,244,.10);--tr:#d45cff;--ax:#666;--lb:#999;--cr:#ff4444}
+/* ── Theme: One Light (Atom‑inspired bright) ── */
+body.theme-onelight{--bg:#fafafa;--fg:#383a42;--gr:#e5e5e6;--rf:#e45649;--rff:rgba(228,86,73,.08);--gx:#50a14f;--gy:#4078f2;--gz:#c18401;--adc:#0184bc;--adf:rgba(1,132,188,.12);--tr:#a626a4;--ax:#a0a1a7;--lb:#696c77;--cr:#e45649}
+/* ── Theme: One Dark Pro (cool dark) ── */
+body.theme-onedark{--bg:#282c34;--fg:#abb2bf;--gr:#3e4452;--rf:#e06c75;--rff:rgba(224,108,117,.10);--gx:#98c379;--gy:#61afef;--gz:#e5c07b;--adc:#56b6c2;--adf:rgba(86,182,194,.14);--tr:#c678dd;--ax:#5c6370;--lb:#828997;--cr:#e06c75}
+/* ── Theme: Dracula (purple dark) ── */
+body.theme-dracula{--bg:#282a36;--fg:#f8f8f2;--gr:#44475a;--rf:#ff5555;--rff:rgba(255,85,85,.10);--gx:#50fa7b;--gy:#8be9fd;--gz:#ffb86c;--adc:#8be9fd;--adf:rgba(139,233,253,.14);--tr:#bd93f9;--ax:#6272a4;--lb:#8890b8;--cr:#ff5555}
+/* ── Theme: Nord (frosty dark) ── */
+body.theme-nord{--bg:#2e3440;--fg:#eceff4;--gr:#434c5e;--rf:#bf616a;--rff:rgba(191,97,106,.10);--gx:#a3be8c;--gy:#81a1c1;--gz:#d08770;--adc:#88c0d0;--adf:rgba(136,192,208,.14);--tr:#b48ead;--ax:#4c566a;--lb:#7b8898;--cr:#bf616a}
+/* ── Theme: GitHub Light (clean white) ── */
+body.theme-githublight{--bg:#ffffff;--fg:#24292f;--gr:#d0d7de;--rf:#cf222e;--rff:rgba(207,34,46,.07);--gx:#1a7f37;--gy:#0969da;--gz:#bc4c00;--adc:#0969da;--adf:rgba(9,105,218,.10);--tr:#8250df;--ax:#afb8c1;--lb:#656d76;--cr:#cf222e}
+/* ── Theme: GitHub Dark (muted dark) ── */
+body.theme-github{--bg:#0d1117;--fg:#c9d1d9;--gr:#21262d;--rf:#ff7b72;--rff:rgba(255,123,114,.08);--gx:#7ee787;--gy:#79c0ff;--gz:#ffa657;--adc:#a5d6ff;--adf:rgba(165,214,255,.12);--tr:#d2a8ff;--ax:#30363d;--lb:#8b949e;--cr:#ff7b72}
 /* ── Layout ── */
 *{margin:0;padding:0;box-sizing:border-box}
 body{font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--fg);overflow:hidden;height:100vh;user-select:none;display:flex;flex-direction:column}
@@ -18,7 +30,9 @@ body{font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background
 #right.open{width:500px}
 #right .handle{position:absolute;left:0;top:0;bottom:0;width:5px;cursor:col-resize;z-index:20}
 #right .handle:hover{background:var(--adc);opacity:.3}
-#right canvas{display:block;width:100%;height:100%}
+#right canvas{position:absolute;top:0;left:0;display:block;width:100%;height:100%}
+#kg{z-index:0;pointer-events:none}
+#kc{z-index:1;pointer-events:auto;background:transparent}
 #rc{position:absolute;top:4px;left:4px;z-index:10;display:flex;flex-direction:column;gap:2px}
 #rc button{background:var(--gr);border:1px solid var(--ax);color:var(--fg);padding:2px 6px;border-radius:3px;cursor:pointer;font-size:10px}
 #rc button:hover{opacity:.75}
