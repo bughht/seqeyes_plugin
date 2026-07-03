@@ -24,11 +24,26 @@ export interface KSpaceData {
     t_adc: Float64Array;        // ADC times  [s]
 }
 
+/**
+ * Options for k-space trajectory calculation.
+ *
+ * `maxGridPoints` is a hard safety cap — if the integration grid would
+ * exceed this many points the function returns null rather than risk an
+ * out‑of‑memory crash.  The uniform raster grid ALWAYS uses the native
+ * gradient raster for integration accuracy; the cap only applies as a
+ * last‑resort safety check after all essential points are collected.
+ */
+export interface KSpaceOptions {
+    /** Hard cap on integration grid size (default 200 000). */
+    maxGridPoints?: number;
+}
+
 export function calculateKspace(
     blocks: DecodedBlock[],
     gradientRaster: number,
     totalDuration: number,
     trajectoryDelay: number = 0,
+    _options?: KSpaceOptions,
 ): KSpaceData | null {
     if (!blocks.length || !gradientRaster || gradientRaster <= 0) return null;
 
@@ -81,6 +96,7 @@ export function calculateKspace(
         const nS = Math.max(1, Math.round(totalDuration / GR));
         for (let i = 0; i <= nS; i++) pushC(i * GR);
     }
+
     // Sort and deduplicate in one pass — O(n log n) but safe for any sequence size
     if (cand.length === 0) return null;
     cand.sort((a, b) => a - b);

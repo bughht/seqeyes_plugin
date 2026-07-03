@@ -5,15 +5,18 @@
  * opens a `.seq` file.  The provider:
  *   1. Reads the .seq file text
  *   2. Parses it via the Pulseq reader
- *   3. Decodes waveforms via the decoder
- *   4. Sends serialised block data to the webview via postMessage
- *   5. The webview renders an interactive Canvas diagram
+ *   3. Detects TE/TR timing (from definitions or RF‑pulse estimation)
+ *   4. Decodes all waveforms via the decoder
+ *   5. Computes k‑space trajectory
+ *   6. Sends serialised block data + timing metadata to the webview
+ *   7. The webview renders an interactive Canvas diagram with minimap
  */
 
 import * as vscode from 'vscode';
 import { parseSequenceText } from '../pulseq/reader';
-import { decodeAllBlocks } from '../pulseq/decoder';
+import { decodeAllBlocks, getTotalDuration } from '../pulseq/decoder';
 import { calculateKspace, type KSpaceData } from '../pulseq/kspace';
+import { detectSequenceTiming } from '../pulseq/trdetect';
 import { getWebviewContent } from './webviewContent';
 import type { DecodedBlock, DecodedGradWaveform } from '../pulseq/types';
 
@@ -48,49 +51,81 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
         panel.webview.options = { enableScripts: true };
         panel.webview.html = this._loadingHtml();
 
-        // ── Reusable helper: parse + post data (does NOT replace HTML) ──
+        // ── Core: parse, decode, compute k‑space, send ──
         const sendSequenceData = async (uri: vscode.Uri) => {
+            const postProgress = (phase: string, percent: number, text: string) => {
+                panel.webview.postMessage({ type: 'progress', phase, percent, text });
+            };
+
+            postProgress('start', 0, 'Reading file\u2026');
             const text = (await vscode.workspace.fs.readFile(uri)).toString();
+
+            postProgress('parse', 5, 'Parsing Pulseq sequence\u2026');
             const seq = parseSequenceText(text);
+
+            postProgress('timing', 10, 'Detecting TR/TE timing\u2026');
+            const timing = detectSequenceTiming(seq);
+
+            const totalBlocks = seq.blocks.length;
+            postProgress('decode', 15, `Decoding ${totalBlocks} blocks\u2026`);
             const blocks = decodeAllBlocks(seq);
             const totalDur = blocks.length > 0
                 ? blocks[blocks.length - 1].startTime + blocks[blocks.length - 1].duration
                 : 0;
 
+            postProgress('kspace', 55, 'Computing k-space trajectory\u2026');
             const ks = calculateKspace(
                 blocks,
                 seq.rasterTimes.gradientRaster,
                 totalDur,
             );
 
+            postProgress('serialize', 85, 'Preparing data for display\u2026');
+            // Build lightweight block‑position array for the minimap
+            const blockPositions = seq.blocks.map((b, i) => {
+                let cum = 0;
+                for (let j = 0; j < i; j++) cum += seq.blocks[j].dur * seq.rasterTimes.blockDurationRaster;
+                return { i: b.num, s: cum, d: b.dur * seq.rasterTimes.blockDurationRaster };
+            });
+
+            const serialized = serializeBlocks(blocks);
+
+            postProgress('send', 95, 'Rendering\u2026');
             panel.webview.postMessage({
                 type: 'sequenceData',
-                blocks: serializeBlocks(blocks),
+                blocks: serialized,
                 totalDuration: totalDur,
                 gradRaster: seq.rasterTimes.gradientRaster,
                 kspace: ks ? serializeKSpace(ks) : null,
+                timing: {
+                    trTimeSec: timing.trTimeSec,
+                    trCount: timing.trCount,
+                    hasExplicitTR: timing.hasExplicitTR,
+                    teTimeSec: timing.teTimeSec,
+                    hasExplicitTE: timing.hasExplicitTE,
+                    rfUseGuessed: timing.rfUseGuessed,
+                },
+                blockPositions,
             });
 
+            postProgress('done', 100, 'Ready');
             const name = seq.definitionsRaw.get('Name') || uri.path.split(/[\\/]/).pop() || 'SeqEyes Viewer';
             panel.title = `SeqEyes: ${name.replace(/\.seq$/i, '')}`;
         };
 
-        // ── Initial load: validate, set full UI, then send data ──
+        // ── Initial load: validate, set full UI, show progress, then send data ──
         try {
-            // Quick validation parse (throws if file is malformed)
             parseSequenceText((await vscode.workspace.fs.readFile(doc.uri)).toString());
-
-            // Validation passed — swap loading spinner for the full UI
             panel.webview.html = getWebviewContent(0);
-
-            // Now send the actual data (re-parses, but parsing is fast)
+            // Give the webview a moment to parse its new HTML, then start progress
+            panel.webview.postMessage({ type: 'progress', phase: 'start', percent: 0, text: 'Preparing\u2026' });
             await sendSequenceData(doc.uri);
         } catch (err) {
             panel.webview.html = this._errorHtml(err);
-            return;  // don't wire up messages if the initial file is broken
+            return;
         }
 
-        // ── Handle messages from webview (Open button, etc.) ──
+        // ── Handle messages from webview ──
         panel.webview.onDidReceiveMessage(async (msg) => {
             if (msg.command === 'log') {
                 console.log('[SeqEyes]', msg.text);

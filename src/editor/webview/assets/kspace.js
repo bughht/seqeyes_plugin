@@ -17,6 +17,7 @@ document.getElementById("theme").onchange=function(){
   if(kThemeClass)b.classList.remove(kThemeClass);
   if(v==="system"){kThemeClass=null;}
   else{b.classList.add("theme-"+v);kThemeClass="theme-"+v;}
+  mmCache=null;  // invalidate minimap — colours changed
   draw(); drawKs();  // redraw both views with new colours
 };
 

@@ -54,14 +54,50 @@ function effPhaseOff(phaseOffset: number, phasePPM: number, b0: number): number 
 
 /** Decode all blocks into render‑ready waveforms. */
 export function decodeAllBlocks(seq: PulseqSequence): DecodedBlock[] {
+    return decodeBlockRange(seq, 0, seq.blocks.length);
+}
+
+/**
+ * Decode a contiguous range of blocks [startBlockIdx, endBlockIdx).
+ *
+ * This is the core optimization for large 3D sequences — instead of decoding
+ * thousands of blocks at once, we decode only the visible range (e.g. first TR,
+ * or current viewport).  Shapes are still decompressed on demand via the
+ * existing decompressor (which is already O(n) per shape), but the block loop
+ * and RF/gradient expansion are limited to the requested range.
+ *
+ * Cumulative time is computed from block 0 so that startTime values are
+ * absolute (correct for rendering).
+ *
+ * @param seq            Parsed sequence.
+ * @param startBlockIdx  0‑based inclusive start block index.
+ * @param endBlockIdx    0‑based exclusive end block index.
+ * @returns              Decoded blocks [startBlockIdx, endBlockIdx).
+ */
+export function decodeBlockRange(
+    seq: PulseqSequence,
+    startBlockIdx: number,
+    endBlockIdx: number,
+): DecodedBlock[] {
     // Clear per‑sequence extension caches to avoid cross‑sequence contamination
     _trigCache.clear();
     _ncoCache.clear();
 
-    const decoded: DecodedBlock[] = [];
-    let cumulative = 0;  // [s]
+    const totalBlocks = seq.blocks.length;
+    const s = Math.max(0, Math.min(startBlockIdx, totalBlocks));
+    const e = Math.max(s, Math.min(endBlockIdx, totalBlocks));
+    if (s >= e) return [];
 
-    for (const block of seq.blocks) {
+    // Pre‑compute cumulative time up to startBlockIdx so that all startTime
+    // values are absolute (needed for correct k‑space & visual alignment).
+    let cumulative = 0;
+    for (let i = 0; i < Math.min(s, totalBlocks); i++) {
+        cumulative += seq.blocks[i].dur * seq.rasterTimes.blockDurationRaster;
+    }
+
+    const decoded: DecodedBlock[] = [];
+    for (let i = s; i < e; i++) {
+        const block = seq.blocks[i];
         const dur = block.dur * seq.rasterTimes.blockDurationRaster;
         const db: DecodedBlock = { index: block.num, duration: dur, startTime: cumulative };
 
@@ -86,6 +122,31 @@ export function decodeAllBlocks(seq: PulseqSequence): DecodedBlock[] {
         cumulative += dur;
     }
     return decoded;
+}
+
+/**
+ * Get the total sequence duration without decoding all blocks.
+ * This is a fast O(n) scan of block durations (no shape decompression).
+ */
+export function getTotalDuration(seq: PulseqSequence): number {
+    let total = 0;
+    for (const block of seq.blocks) {
+        total += block.dur * seq.rasterTimes.blockDurationRaster;
+    }
+    return total;
+}
+
+/**
+ * Get cumulative start time for a specific block index without decoding.
+ * Useful for translating between block indices and absolute times.
+ */
+export function getBlockStartTime(seq: PulseqSequence, blockIdx: number): number {
+    let cumulative = 0;
+    const n = Math.min(blockIdx, seq.blocks.length);
+    for (let i = 0; i < n; i++) {
+        cumulative += seq.blocks[i].dur * seq.rasterTimes.blockDurationRaster;
+    }
+    return cumulative;
 }
 
 // ─── RF decoding ──────────────────────────────────────────────────────────

@@ -23,6 +23,8 @@ var Pulseq = (() => {
   __export(pulseq_browser_exports, {
     calculateKspace: () => calculateKspace,
     decodeAllBlocks: () => decodeAllBlocks,
+    detectSequenceTiming: () => detectSequenceTiming,
+    getTotalDuration: () => getTotalDuration,
     parseSequenceText: () => parseSequenceText
   });
 
@@ -655,11 +657,22 @@ var Pulseq = (() => {
     return phaseOffset + phasePPM * 1e-6 * GAMMA_HZ_T * b0;
   }
   function decodeAllBlocks(seq) {
+    return decodeBlockRange(seq, 0, seq.blocks.length);
+  }
+  function decodeBlockRange(seq, startBlockIdx, endBlockIdx) {
     _trigCache.clear();
     _ncoCache.clear();
-    const decoded = [];
+    const totalBlocks = seq.blocks.length;
+    const s = Math.max(0, Math.min(startBlockIdx, totalBlocks));
+    const e = Math.max(s, Math.min(endBlockIdx, totalBlocks));
+    if (s >= e) return [];
     let cumulative = 0;
-    for (const block of seq.blocks) {
+    for (let i = 0; i < Math.min(s, totalBlocks); i++) {
+      cumulative += seq.blocks[i].dur * seq.rasterTimes.blockDurationRaster;
+    }
+    const decoded = [];
+    for (let i = s; i < e; i++) {
+      const block = seq.blocks[i];
       const dur = block.dur * seq.rasterTimes.blockDurationRaster;
       const db = { index: block.num, duration: dur, startTime: cumulative };
       if (block.rfId > 0) {
@@ -681,6 +694,13 @@ var Pulseq = (() => {
       cumulative += dur;
     }
     return decoded;
+  }
+  function getTotalDuration(seq) {
+    let total = 0;
+    for (const block of seq.blocks) {
+      total += block.dur * seq.rasterTimes.blockDurationRaster;
+    }
+    return total;
   }
   function decodeRF(seq, rf, blockStart, _blockDur) {
     const raster = seq.rasterTimes.rfRaster;
@@ -896,7 +916,7 @@ var Pulseq = (() => {
   }
 
   // src/pulseq/kspace.ts
-  function calculateKspace(blocks, gradientRaster, totalDuration, trajectoryDelay = 0) {
+  function calculateKspace(blocks, gradientRaster, totalDuration, trajectoryDelay = 0, _options) {
     if (!blocks.length || !gradientRaster || gradientRaster <= 0) return null;
     const GR = gradientRaster;
     const tacc = 1e-10;
@@ -1095,6 +1115,146 @@ var Pulseq = (() => {
     const i0 = lo - 1, i1 = lo, dt = g[i1] - g[i0];
     if (dt <= 0) return d[i1];
     return d[i0] + (d[i1] - d[i0]) * (t - g[i0]) / dt;
+  }
+
+  // src/pulseq/trdetect.ts
+  var GAMMA_HZ_T2 = 42576e3;
+  var DEFAULT_B0_T2 = 3;
+  function detectSequenceTiming(seq) {
+    const b0 = getB02(seq);
+    const supportsRfUse = seq.versionCombined >= 1005e3;
+    let teTimeSec = 0;
+    let hasExplicitTE = false;
+    const teDef = seq.definitions.get("EchoTime") ?? seq.definitions.get("TE");
+    if (teDef && teDef.length > 0) {
+      teTimeSec = teDef[0];
+      hasExplicitTE = true;
+    }
+    let trTimeSec = 0;
+    let hasExplicitTR = false;
+    const trDef = seq.definitions.get("RepetitionTime") ?? seq.definitions.get("TR");
+    if (trDef && trDef.length > 0) {
+      trTimeSec = trDef[0];
+      hasExplicitTR = true;
+    }
+    const rfUsePerBlock = [];
+    const excitationTimesSec = [];
+    let rfUseGuessed = false;
+    const blockStartTimes = computeCumulativeTimes(seq);
+    for (let i = 0; i < seq.blocks.length; i++) {
+      const blk = seq.blocks[i];
+      if (blk.rfId <= 0) {
+        rfUsePerBlock.push(0);
+        continue;
+      }
+      const rf = seq.rfs.get(blk.rfId);
+      if (!rf) {
+        rfUsePerBlock.push(0);
+        continue;
+      }
+      const useChar = classifyRfUse(rf, supportsRfUse, b0);
+      const useCode = useChar.charCodeAt(0);
+      rfUsePerBlock.push(useCode);
+      if (useChar === "e") {
+        const rfRaster = seq.rasterTimes.rfRaster;
+        const center = rf.center >= 0 ? rf.center * 1e-6 : estimateRfCenter(rf, seq);
+        const excTime = blockStartTimes[i] + rf.delay * rfRaster + center;
+        excitationTimesSec.push(excTime);
+      }
+      if (!supportsRfUse && useChar !== "u") rfUseGuessed = true;
+    }
+    let trCount = 0;
+    const trStartBlocks = [];
+    if (!hasExplicitTR && excitationTimesSec.length >= 2) {
+      trTimeSec = estimateTRFromExcitations(excitationTimesSec);
+      hasExplicitTR = false;
+    }
+    if (trTimeSec > 0) {
+      const totalDuration = blockStartTimes.length > 0 ? blockStartTimes[blockStartTimes.length - 1] + seq.blocks[seq.blocks.length - 1].dur * seq.rasterTimes.blockDurationRaster : 0;
+      trCount = Math.max(1, Math.ceil(totalDuration / trTimeSec));
+      const tol = trTimeSec * 0.3;
+      let trIdx = 0;
+      for (let i = 0; i < seq.blocks.length; i++) {
+        const blkStart = blockStartTimes[i];
+        const expected = trIdx * trTimeSec;
+        if (blkStart >= expected - tol && trIdx < trCount) {
+          trStartBlocks.push(i);
+          trIdx++;
+        }
+      }
+      trStartBlocks.push(seq.blocks.length);
+      trCount = trStartBlocks.length - 1;
+    } else {
+      trCount = 0;
+      for (let i = 0; i < seq.blocks.length; i++) {
+        if (seq.blocks[i].adcId > 0) {
+          trStartBlocks.push(i);
+          trCount++;
+        }
+      }
+      trStartBlocks.push(seq.blocks.length);
+    }
+    return {
+      teTimeSec,
+      hasExplicitTE,
+      trTimeSec,
+      hasExplicitTR,
+      trCount,
+      trStartBlocks,
+      excitationTimesSec,
+      rfUseGuessed,
+      rfUsePerBlock
+    };
+  }
+  function getB02(seq) {
+    const raw = seq.definitions.get("B0") ?? seq.definitions.get("b0") ?? seq.definitions.get("b_0");
+    if (raw && Array.isArray(raw) && raw.length > 0) return +raw[0];
+    return DEFAULT_B0_T2;
+  }
+  function computeCumulativeTimes(seq) {
+    const times = [];
+    let cum = 0;
+    for (const blk of seq.blocks) {
+      times.push(cum);
+      cum += blk.dur * seq.rasterTimes.blockDurationRaster;
+    }
+    return times;
+  }
+  function classifyRfUse(rf, supportsMetadata, b0Tesla) {
+    if (supportsMetadata && rf.use && rf.use !== "u" && rf.use !== "U") {
+      return rf.use.toLowerCase();
+    }
+    const faDeg = estimateFlipAngleDeg(rf);
+    if (faDeg < 90.01) return "e";
+    const freqPPM = rf.freqPPM !== 0 ? rf.freqPPM : b0Tesla > 0 ? 1e6 * rf.freqOffset / (GAMMA_HZ_T2 * b0Tesla) : 0;
+    const durEst = 0;
+    if (durEst > 6e-3 && freqPPM >= -4.5 && freqPPM <= -3) return "s";
+    return "r";
+  }
+  function estimateFlipAngleDeg(rf) {
+    const absAmp = Math.abs(rf.amplitude);
+    if (absAmp > 3e3) return 180;
+    if (absAmp > 1500) return 120;
+    return 90;
+  }
+  function estimateRfCenter(rf, _seq) {
+    return 0;
+  }
+  function estimateTRFromExcitations(excTimesSec) {
+    if (excTimesSec.length < 2) return 0;
+    const intervals = [];
+    for (let i = 1; i < excTimesSec.length; i++) {
+      const dt = excTimesSec[i] - excTimesSec[i - 1];
+      if (dt > 1e-9) intervals.push(dt);
+    }
+    if (intervals.length === 0) return 0;
+    intervals.sort((a, b) => a - b);
+    const median = intervals[Math.floor(intervals.length / 2)];
+    const niceMs = niceRound(median * 1e3, 10);
+    return niceMs * 1e-3;
+  }
+  function niceRound(value, base) {
+    return Math.round(value / base) * base;
   }
   return __toCommonJS(pulseq_browser_exports);
 })();
