@@ -1,28 +1,12 @@
-/**
- * webview/js_state.ts — JavaScript state, configuration, helpers & setup.
- *
- * This string contains the first part of the webview's inline <script>:
- *   • DOM element references
- *   • Application state variables
- *   • Unit conversion helpers
- *   • Legend builder
- *   • postMessage data reception
- *   • Global amplitude range computation
- *   • Canvas resize handler
- *   • Coordinate mapping utilities
- */
-
-export const JS_STATE = `
 /* ═══════════════════════════════════════════════════════════════════════
    Application state & configuration
    ═══════════════════════════════════════════════════════════════════════ */
-(function(){
 var cc=document.getElementById('cc'),mc=document.getElementById('mc'),ctx=mc.getContext('2d'),
  tt=document.getElementById('tt'),curEl=document.getElementById('cur'),legend=document.getElementById('legend'),
  tuSel=document.getElementById('tu'),guSel=document.getElementById('gu');
 var BL=[],TD=0,GR=1e-5;              // blocks, total duration, gradient raster [s]
 var M={t:8,r:30,b:22,l:92};                // margins
-var CH=['RF','\\u03c6','Gx','Gy','Gz','ADC','Trig']; // 7 channels
+var CH=['RF','\u03c6','Gx','Gy','Gz','ADC','Trig']; // 7 channels
 var chColors=['var(--rf)','var(--rf)','var(--gx)','var(--gy)','var(--gz)','var(--adc)','var(--tr)'];
 var chVis=[true,true,true,true,true,true,true];                   // visibility toggles
 var gMax=[1,6.28318,1,1,1,0,0];          // global max per channel
@@ -112,4 +96,3 @@ function cy(vi){var vc=visChannels(),h=(mc.height/(window.devicePixelRatio||1)-M
 function cH(){var vc=visChannels();return(mc.height/(window.devicePixelRatio||1)-M.t-M.b)/Math.max(vc.length,1);}
 function t2x(t){return M.l+(t-ox)*sc}
 function x2t(x){return ox+(x-M.l)/sc}
-`;

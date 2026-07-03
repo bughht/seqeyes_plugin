@@ -1,15 +1,3 @@
-/**
- * K-space viewer — GPU‑accelerated 3D scatter + Canvas 2D axes.
- *
- * Two overlaid canvases inside #right:
- *   #kg  (z‑index 0) — WebGL  scatter  (millions of points @ 60 fps)
- *   #kc  (z‑index 1) — Canvas 2D axes / labels
- *
- * The xy / xz / yz buttons are camera presets that rotate the 3D view
- * to look straight down the corresponding axis.  Any manual drag reverts
- * the button back to "3D".
- */
-export const JS_KSPACE = `
 var kOpen=false, kView="3d";
 var kCx=0, kCy=0, kCz=0, kScl=1;    // view center & zoom
 var kAutoFit=true;
@@ -114,7 +102,7 @@ function uploadKSpaceGPU(){
 document.getElementById("kbtn").onclick=function(){
   kOpen=!kOpen;
   var p=document.getElementById("right");
-  if(kOpen){p.classList.add("open");this.textContent="K \u2715";kAutoFit=true;}
+  if(kOpen){p.classList.add("open");this.textContent="K Space ✕";kAutoFit=true;}
   else{p.classList.remove("open");p.style.width="";this.textContent="K Space";}
   if(kOpen){requestAnimationFrame(function(){drawKs_init();});}
   else{requestAnimationFrame(function(){resizeKc();drawKs();});}
@@ -356,8 +344,7 @@ function parseCSSColor(c){
   if(!c)return[0.26,0.83,0.96];
   var m=c.match(/^#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$/);
   if(m)return[parseInt(m[1],16)/255,parseInt(m[2],16)/255,parseInt(m[3],16)/255];
-  m=c.match(/rgb\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)\\s*\\)/);
+  m=c.match(/rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)/);
   if(m)return[+m[1]/255,+m[2]/255,+m[3]/255];
   return[0.26,0.83,0.96];
 }
-`;
