@@ -56,6 +56,16 @@ window.addEventListener('mouseup',function(){dr=false;cc.classList.remove('pan')
 cc.addEventListener('mouseleave',function(){cursorT=0;curEl.textContent='\\u2190 hover for time';draw()});
 
 /* ── Toolbar buttons ──────────────────────────────────────────────────── */
+document.getElementById('openBtn').onclick=function(){
+  // In VS Code webview: ask extension host to pick a .seq file
+  if(vscApi){
+    vscApi.postMessage({command:'openFile'});
+  }else{
+    // Standalone web mode: trigger hidden file input
+    var fi=document.getElementById('fileInput');
+    if(fi)fi.click();
+  }
+};
 document.getElementById('zi').onclick=function(){sc*=1.5;draw()};
 document.getElementById('zo').onclick=function(){sc/=1.5;sc=Math.max(50/(TD||1e-3),sc);draw()};
 document.getElementById('zf').onclick=fit;document.getElementById('zr').onclick=fit;

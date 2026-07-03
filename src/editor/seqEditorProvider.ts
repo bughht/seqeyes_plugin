@@ -48,16 +48,15 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
         panel.webview.options = { enableScripts: true };
         panel.webview.html = this._loadingHtml();
 
-        try {
-            const seq = parseSequenceText(doc.getText());
+        // ── Reusable helper: parse + post data (does NOT replace HTML) ──
+        const sendSequenceData = async (uri: vscode.Uri) => {
+            const text = (await vscode.workspace.fs.readFile(uri)).toString();
+            const seq = parseSequenceText(text);
             const blocks = decodeAllBlocks(seq);
             const totalDur = blocks.length > 0
                 ? blocks[blocks.length - 1].startTime + blocks[blocks.length - 1].duration
                 : 0;
 
-            panel.webview.html = getWebviewContent(totalDur);
-
-            // Pre‑compute k‑space trajectory (Pulseq‑compatible)
             const ks = calculateKspace(
                 blocks,
                 seq.rasterTimes.gradientRaster,
@@ -72,14 +71,45 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
                 kspace: ks ? serializeKSpace(ks) : null,
             });
 
-            const name = seq.definitionsRaw.get('Name');
-            panel.title = name ? `SeqEyes: ${name}` : 'SeqEyes Viewer';
+            const name = seq.definitionsRaw.get('Name') || uri.path.split(/[\\/]/).pop() || 'SeqEyes Viewer';
+            panel.title = `SeqEyes: ${name.replace(/\.seq$/i, '')}`;
+        };
+
+        // ── Initial load: validate, set full UI, then send data ──
+        try {
+            // Quick validation parse (throws if file is malformed)
+            parseSequenceText((await vscode.workspace.fs.readFile(doc.uri)).toString());
+
+            // Validation passed — swap loading spinner for the full UI
+            panel.webview.html = getWebviewContent(0);
+
+            // Now send the actual data (re-parses, but parsing is fast)
+            await sendSequenceData(doc.uri);
         } catch (err) {
             panel.webview.html = this._errorHtml(err);
+            return;  // don't wire up messages if the initial file is broken
         }
 
-        panel.webview.onDidReceiveMessage(msg => {
-            if (msg.command === 'log') console.log('[SeqEyes]', msg.text);
+        // ── Handle messages from webview (Open button, etc.) ──
+        panel.webview.onDidReceiveMessage(async (msg) => {
+            if (msg.command === 'log') {
+                console.log('[SeqEyes]', msg.text);
+            } else if (msg.command === 'openFile') {
+                const uris = await vscode.window.showOpenDialog({
+                    canSelectMany: false,
+                    filters: { 'Pulseq Sequences': ['seq'] },
+                    title: 'Open Pulseq Sequence',
+                });
+                if (uris && uris.length > 0) {
+                    try {
+                        await sendSequenceData(uris[0]);
+                    } catch (err) {
+                        vscode.window.showErrorMessage(
+                            'Failed to load sequence: ' + (err instanceof Error ? err.message : String(err))
+                        );
+                    }
+                }
+            }
         });
     }
 

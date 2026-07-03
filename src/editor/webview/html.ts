@@ -8,6 +8,7 @@
 export const HTML_BODY = `
 <!-- ── Toolbar ── -->
 <div id="tb">
+<button id="openBtn" title="Open another .seq file">📂 Open</button><div class="sep"></div>
 <button id="zi" title="Zoom In (scroll wheel)">+</button>
 <button id="zo" title="Zoom Out">\u2212</button>
 <button id="zf" title="Fit All">Fit</button>
@@ -27,4 +28,6 @@ export const HTML_BODY = `
 <div id="left"><div id="cc"><canvas id="mc"></canvas><div id="tt"></div></div></div>
 <div id="right"><div class="handle" id="khandle"></div><canvas id="kg"></canvas><canvas id="kc"></canvas><div id="rc"><button id="krst" title="Reset view">\u21BA</button><button id="kax" title="Toggle projection">Prj</button><button id="kunit" title="Toggle k-space unit (1/m \u2194 rad/m)">Unit: 1/m</button><div style="display:flex;align-items:center;gap:2px;margin-top:4px"><span style="font-size:9px;color:var(--lb)">Size</span><input type="range" id="kdot" min="1" max="12" value="2" style="width:50px;accent-color:var(--adc)" title="ADC marker size"></div></div></div>
 </div>
+<!-- Hidden file input for standalone web mode -->
+<input type="file" id="fileInput" accept=".seq" style="display:none">
 `;

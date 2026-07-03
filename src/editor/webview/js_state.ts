@@ -37,6 +37,9 @@ var ampZoom=[1,1,1,1,1,1,1];
 /* K‑space data — pre‑computed on the extension side */
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
 
+/* VS Code API — acquired once, used for postMessage to extension host */
+var vscApi=(typeof acquireVsCodeApi!=='undefined')?acquireVsCodeApi():null;
+
 /* ── Unit conversion helpers ──────────────────────────────────────────── */
 function gradConv(v){if(gradUnit==='mT/m')return v/GAMMA;if(gradUnit==='G/cm')return v/(GAMMA*10);return v;}
 function gradUnitStr(){return gradUnit;}
