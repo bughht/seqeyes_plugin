@@ -1,6 +1,8 @@
-name: Release VS Code Extension
+name: Build and Release VS Code Extension
 
 on:
+  pull_request:
+    branches: [main, master]
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'     # e.g. v0.1.1 → creates GitHub Release
@@ -26,8 +28,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Compile TypeScript
-        run: npm run compile
+      - name: Validate extension and web bundle
+        run: npm run check
 
       - name: Package extension
         run: npx @vscode/vsce package --out seqeyes-web.vsix
