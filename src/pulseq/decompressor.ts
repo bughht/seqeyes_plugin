@@ -19,13 +19,17 @@
  *
  * @param compressed  Packed sample values from the .seq file.
  * @param numSamples  Expected number of uncompressed samples.
- * @returns           Normalised shape samples in [0, 1] range.
+ * @returns           Shape samples reconstructed from the derivative stream.
+ * @throws            Error when the packed stream is malformed.
  */
 export function decompressShape(
     compressed: Float64Array | number[],
     numSamples: number,
 ): Float64Array {
     const packedLen = compressed.length;
+    if (!Number.isInteger(numSamples) || numSamples <= 0) {
+        throw new Error(`Invalid shape sample count: ${numSamples}`);
+    }
 
     // Uncompressed storage — just return as‑is
     if (packedLen === numSamples) {
@@ -52,16 +56,28 @@ export function decompressShape(
             iUnpacked++;
         } else {
             // Repeat marker:  v, v, (rep_count − 2)
-            if (iPacked + 2 >= packedLen) break;
+            if (iPacked + 2 >= packedLen) {
+                throw new Error('Malformed compressed shape: repeat marker is missing its count');
+            }
             const value = compressed[iPacked];
-            const repeatCount = Math.round(compressed[iPacked + 2]) + 2;
+            const rawRepeat = compressed[iPacked + 2];
+            const repeatCount = Math.round(rawRepeat) + 2;
+            if (Math.abs(rawRepeat + 2 - repeatCount) > 1e-6 || repeatCount < 2) {
+                throw new Error(`Malformed compressed shape: invalid repeat count ${rawRepeat}`);
+            }
+            if (iUnpacked + repeatCount > numSamples) {
+                throw new Error('Malformed compressed shape: repeat block exceeds expected sample count');
+            }
             iPacked += 3;  // skip value, value, rep‑count
-            const end = Math.min(iUnpacked + repeatCount, numSamples);
+            const end = iUnpacked + repeatCount;
             while (iUnpacked < end) {
                 result[iUnpacked] = value;
                 iUnpacked++;
             }
         }
+    }
+    if (iUnpacked !== numSamples) {
+        throw new Error(`Malformed compressed shape: expected ${numSamples} samples, decoded ${iUnpacked}`);
     }
 
     // Cumulative sum — derivative → original waveform

@@ -31,6 +31,9 @@ var Pulseq = (() => {
   // src/pulseq/decompressor.ts
   function decompressShape(compressed, numSamples) {
     const packedLen = compressed.length;
+    if (!Number.isInteger(numSamples) || numSamples <= 0) {
+      throw new Error(`Invalid shape sample count: ${numSamples}`);
+    }
     if (packedLen === numSamples) {
       return new Float64Array(compressed);
     }
@@ -49,16 +52,28 @@ var Pulseq = (() => {
         iPacked++;
         iUnpacked++;
       } else {
-        if (iPacked + 2 >= packedLen) break;
+        if (iPacked + 2 >= packedLen) {
+          throw new Error("Malformed compressed shape: repeat marker is missing its count");
+        }
         const value = compressed[iPacked];
-        const repeatCount = Math.round(compressed[iPacked + 2]) + 2;
+        const rawRepeat = compressed[iPacked + 2];
+        const repeatCount = Math.round(rawRepeat) + 2;
+        if (Math.abs(rawRepeat + 2 - repeatCount) > 1e-6 || repeatCount < 2) {
+          throw new Error(`Malformed compressed shape: invalid repeat count ${rawRepeat}`);
+        }
+        if (iUnpacked + repeatCount > numSamples) {
+          throw new Error("Malformed compressed shape: repeat block exceeds expected sample count");
+        }
         iPacked += 3;
-        const end = Math.min(iUnpacked + repeatCount, numSamples);
+        const end = iUnpacked + repeatCount;
         while (iUnpacked < end) {
           result[iUnpacked] = value;
           iUnpacked++;
         }
       }
+    }
+    if (iUnpacked !== numSamples) {
+      throw new Error(`Malformed compressed shape: expected ${numSamples} samples, decoded ${iUnpacked}`);
     }
     let cumSum = 0;
     for (let i = 0; i < numSamples; i++) {
@@ -71,6 +86,7 @@ var Pulseq = (() => {
   // src/pulseq/types.ts
   var VER_PRE_14 = 1004e3;
   var VER_V15 = 1005e3;
+  var VER_V15001 = 1005001;
   function makeVersionCombined(major, minor, revision) {
     return major * 1e6 + minor * 1e3 + revision;
   }
@@ -79,6 +95,7 @@ var Pulseq = (() => {
   function parseSequenceText(text) {
     const lines = text.split(/\r?\n/);
     const seq = createEmptySequence();
+    const seenSections = /* @__PURE__ */ new Set();
     let sectionName = null;
     let sectionLines = [];
     for (const line of lines) {
@@ -86,6 +103,7 @@ var Pulseq = (() => {
       if (m) {
         if (sectionName) dispatchSection(seq, sectionName, sectionLines);
         sectionName = m[1];
+        seenSections.add(sectionName);
         sectionLines = [];
       } else {
         sectionLines.push(line);
@@ -98,6 +116,7 @@ var Pulseq = (() => {
       seq.version.revision
     );
     extractRasterTimes(seq);
+    validateSequence(seq, seenSections);
     return seq;
   }
   function dispatchSection(seq, name, lines) {
@@ -147,6 +166,8 @@ var Pulseq = (() => {
       trapGrads: /* @__PURE__ */ new Map(),
       adcs: /* @__PURE__ */ new Map(),
       extensions: /* @__PURE__ */ new Map(),
+      extensionNames: /* @__PURE__ */ new Map(),
+      extensionTypes: /* @__PURE__ */ new Map(),
       triggers: [],
       ncos: [],
       rotations: [],
@@ -162,10 +183,34 @@ var Pulseq = (() => {
     if (seq.versionCombined > 0) return seq.versionCombined;
     return makeVersionCombined(seq.version.major, seq.version.minor, seq.version.revision);
   }
+  function parseError(message) {
+    throw new Error(`Pulseq parse error: ${message}`);
+  }
+  function requireFieldCount(section, line, count, allowed) {
+    const allowedCounts = Array.isArray(allowed) ? allowed : [allowed];
+    if (!allowedCounts.includes(count)) {
+      parseError(`${section} row has ${count} fields, expected ${allowedCounts.join(" or ")}: ${line}`);
+    }
+  }
+  function toNumber(value, section, line) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) parseError(`${section} row contains a non-numeric field '${value}': ${line}`);
+    return n;
+  }
+  function toInt(value, section, line) {
+    const n = toNumber(value, section, line);
+    if (!Number.isInteger(n)) parseError(`${section} row contains a non-integer field '${value}': ${line}`);
+    return n;
+  }
+  function splitFields(line) {
+    return line.trim().split(/\s+/);
+  }
   function parseVersion(seq, lines) {
     for (const line of lines) {
-      const [k, v] = line.trim().split(/\s+/);
-      const n = parseInt(v, 10);
+      const p = splitFields(line);
+      requireFieldCount("VERSION", line, p.length, 2);
+      const [k, v] = p;
+      const n = toInt(v, "VERSION", line);
       if (k === "major") seq.version.major = n;
       else if (k === "minor") seq.version.minor = n;
       else if (k === "revision") seq.version.revision = n;
@@ -192,31 +237,31 @@ var Pulseq = (() => {
   function parseBlocks(seq, lines) {
     const vc = ver(seq);
     for (const line of lines) {
-      const p = line.trim().split(/\s+/);
-      if (p.length < 8) continue;
-      const num = +p[0];
+      const p = splitFields(line);
+      requireFieldCount("BLOCKS", line, p.length, [7, 8]);
+      const num = toInt(p[0], "BLOCKS", line);
+      const extId = p.length === 8 ? toInt(p[7], "BLOCKS", line) : 0;
       if (vc < VER_PRE_14) {
         seq.blocks.push({
           num,
-          dur: +p[1],
-          // raw µs — will be converted to raster‑units later
-          rfId: +p[2],
-          gxId: +p[3],
-          gyId: +p[4],
-          gzId: +p[5],
-          adcId: +p[6],
-          extId: +p[7]
+          dur: toNumber(p[1], "BLOCKS", line),
+          rfId: toInt(p[2], "BLOCKS", line),
+          gxId: toInt(p[3], "BLOCKS", line),
+          gyId: toInt(p[4], "BLOCKS", line),
+          gzId: toInt(p[5], "BLOCKS", line),
+          adcId: toInt(p[6], "BLOCKS", line),
+          extId
         });
       } else {
         seq.blocks.push({
           num,
-          dur: +p[1],
-          rfId: +p[2],
-          gxId: +p[3],
-          gyId: +p[4],
-          gzId: +p[5],
-          adcId: +p[6],
-          extId: +p[7]
+          dur: toNumber(p[1], "BLOCKS", line),
+          rfId: toInt(p[2], "BLOCKS", line),
+          gxId: toInt(p[3], "BLOCKS", line),
+          gyId: toInt(p[4], "BLOCKS", line),
+          gzId: toInt(p[5], "BLOCKS", line),
+          adcId: toInt(p[6], "BLOCKS", line),
+          extId
         });
       }
     }
@@ -224,60 +269,50 @@ var Pulseq = (() => {
   function parseRF(seq, lines) {
     const vc = ver(seq);
     for (const line of lines) {
-      const parts = line.trim().split(/\s+/);
-      let use = "";
-      if (parts.length && /^[erisu]$/i.test(parts[parts.length - 1])) {
-        use = parts.pop().toLowerCase();
-      }
-      if (parts.length < 6) continue;
-      const id = +parts[0];
-      const amp = +parts[1];
-      const magId = +parts[2];
-      const phId = +parts[3];
+      const parts = splitFields(line);
+      const id = toInt(parts[0], "RF", line);
+      const amp = toNumber(parts[1], "RF", line);
+      const magId = toInt(parts[2], "RF", line);
+      const phId = toInt(parts[3], "RF", line);
       if (vc >= VER_V15) {
+        requireFieldCount("RF", line, parts.length, 12);
+        const use = parts[11].toLowerCase();
+        if (!/^[erisu]$/.test(use)) parseError(`RF row has invalid use flag '${parts[11]}': ${line}`);
         seq.rfs.set(id, {
           id,
           amplitude: amp,
           magShapeId: magId,
           phaseShapeId: phId,
-          timeShapeId: +parts[4],
-          center: parts.length > 5 ? +parts[5] : -1,
-          // [5] = centre (µs)
-          delay: parts.length > 6 ? +parts[6] : 0,
-          // [6] = delay (µs)
-          freqPPM: parts.length > 7 ? +parts[7] : 0,
-          // [7] = freqPPM
-          phasePPM: parts.length > 8 ? +parts[8] : 0,
-          // [8] = phasePPM
-          freqOffset: parts.length > 9 ? +parts[9] : 0,
-          // [9] = freq (Hz)
-          phaseOffset: parts.length > 10 ? +parts[10] : 0,
-          // [10] = phase (rad)
+          timeShapeId: toInt(parts[4], "RF", line),
+          center: toNumber(parts[5], "RF", line),
+          delay: toNumber(parts[6], "RF", line),
+          freqPPM: toNumber(parts[7], "RF", line),
+          phasePPM: toNumber(parts[8], "RF", line),
+          freqOffset: toNumber(parts[9], "RF", line),
+          phaseOffset: toNumber(parts[10], "RF", line),
           phaseModShapeId: 0,
           use
         });
       } else if (vc >= VER_PRE_14) {
-        const hasTimeShape = parts.length >= 8;
-        const timeShapeId = hasTimeShape ? +parts[4] : 0;
-        const offset = hasTimeShape ? 1 : 0;
+        requireFieldCount("RF", line, parts.length, 8);
         seq.rfs.set(id, {
           id,
           amplitude: amp,
           magShapeId: magId,
           phaseShapeId: phId,
-          timeShapeId,
+          timeShapeId: toInt(parts[4], "RF", line),
           center: -1,
           // not in v1.4.x
-          delay: +parts[4 + offset],
-          // delay
+          delay: toNumber(parts[5], "RF", line),
           freqPPM: 0,
           phasePPM: 0,
-          freqOffset: parts.length > 5 + offset ? +parts[5 + offset] : 0,
-          phaseOffset: parts.length > 6 + offset ? +parts[6 + offset] : 0,
-          phaseModShapeId: parts.length > 7 + offset ? +parts[7 + offset] : 0,
-          use: ""
+          freqOffset: toNumber(parts[6], "RF", line),
+          phaseOffset: toNumber(parts[7], "RF", line),
+          phaseModShapeId: 0,
+          use: "u"
         });
       } else {
+        requireFieldCount("RF", line, parts.length, 7);
         seq.rfs.set(id, {
           id,
           amplitude: amp,
@@ -285,13 +320,13 @@ var Pulseq = (() => {
           phaseShapeId: phId,
           timeShapeId: 0,
           center: -1,
-          delay: +parts[4],
+          delay: toNumber(parts[4], "RF", line),
           freqPPM: 0,
           phasePPM: 0,
-          freqOffset: parts.length > 5 ? +parts[5] : 0,
-          phaseOffset: parts.length > 6 ? +parts[6] : 0,
-          phaseModShapeId: parts.length > 7 ? +parts[7] : 0,
-          use: ""
+          freqOffset: toNumber(parts[5], "RF", line),
+          phaseOffset: toNumber(parts[6], "RF", line),
+          phaseModShapeId: 0,
+          use: "u"
         });
       }
     }
@@ -299,111 +334,116 @@ var Pulseq = (() => {
   function parseArbitraryGrads(seq, lines) {
     const vc = ver(seq);
     for (const line of lines) {
-      const p = line.trim().split(/\s+/);
-      if (p.length < 4) continue;
-      const id = +p[0];
+      const p = splitFields(line);
+      const id = toInt(p[0], "GRADIENTS", line);
       if (vc >= VER_V15) {
+        requireFieldCount("GRADIENTS", line, p.length, 7);
         seq.arbitraryGrads.set(id, {
           id,
-          amplitude: +p[1],
-          first: +p[2],
-          last: +p[3],
-          shapeId: +p[4],
-          timeId: p.length > 5 ? +p[5] : 0,
-          delay: p.length > 6 ? +p[6] : 0
+          amplitude: toNumber(p[1], "GRADIENTS", line),
+          first: toNumber(p[2], "GRADIENTS", line),
+          last: toNumber(p[3], "GRADIENTS", line),
+          shapeId: toInt(p[4], "GRADIENTS", line),
+          timeId: toInt(p[5], "GRADIENTS", line),
+          delay: toNumber(p[6], "GRADIENTS", line)
         });
       } else if (vc >= VER_PRE_14) {
+        requireFieldCount("GRADIENTS", line, p.length, 5);
         seq.arbitraryGrads.set(id, {
           id,
-          amplitude: +p[1],
-          first: 0,
-          last: 0,
-          shapeId: +p[2],
-          timeId: p.length > 3 ? +p[3] : 0,
-          delay: p.length > 4 ? +p[4] : 0
+          amplitude: toNumber(p[1], "GRADIENTS", line),
+          first: NaN,
+          last: NaN,
+          shapeId: toInt(p[2], "GRADIENTS", line),
+          timeId: toInt(p[3], "GRADIENTS", line),
+          delay: toNumber(p[4], "GRADIENTS", line)
         });
       } else {
+        requireFieldCount("GRADIENTS", line, p.length, 4);
         seq.arbitraryGrads.set(id, {
           id,
-          amplitude: +p[1],
-          first: 0,
-          last: 0,
-          shapeId: +p[2],
+          amplitude: toNumber(p[1], "GRADIENTS", line),
+          first: NaN,
+          last: NaN,
+          shapeId: toInt(p[2], "GRADIENTS", line),
           timeId: 0,
-          delay: p.length > 3 ? +p[3] : 0
+          delay: toNumber(p[3], "GRADIENTS", line)
         });
       }
     }
   }
   function parseTrapGrads(seq, lines) {
     for (const line of lines) {
-      const p = line.trim().split(/\s+/);
-      if (p.length >= 5) {
-        seq.trapGrads.set(+p[0], {
-          id: +p[0],
-          amplitude: +p[1],
-          rise: +p[2],
-          flat: +p[3],
-          fall: +p[4],
-          delay: p.length > 5 ? +p[5] : 0
-        });
-      }
+      const p = splitFields(line);
+      requireFieldCount("TRAP", line, p.length, 6);
+      const id = toInt(p[0], "TRAP", line);
+      seq.trapGrads.set(id, {
+        id,
+        amplitude: toNumber(p[1], "TRAP", line),
+        rise: toNumber(p[2], "TRAP", line),
+        flat: toNumber(p[3], "TRAP", line),
+        fall: toNumber(p[4], "TRAP", line),
+        delay: toNumber(p[5], "TRAP", line)
+      });
     }
   }
   function parseADC(seq, lines) {
     const vc = ver(seq);
     for (const line of lines) {
-      const p = line.trim().split(/\s+/);
-      if (p.length < 5) continue;
-      const id = +p[0];
+      const p = splitFields(line);
+      const id = toInt(p[0], "ADC", line);
       if (vc >= VER_V15) {
+        requireFieldCount("ADC", line, p.length, 9);
         seq.adcs.set(id, {
           id,
-          numSamples: +p[1],
-          dwell: +p[2],
-          delay: +p[3],
-          freqPPM: p.length > 4 ? +p[4] : 0,
-          phasePPM: p.length > 5 ? +p[5] : 0,
-          freqOffset: p.length > 6 ? +p[6] : 0,
-          phaseOffset: p.length > 7 ? +p[7] : 0,
+          numSamples: toInt(p[1], "ADC", line),
+          dwell: toNumber(p[2], "ADC", line),
+          delay: toNumber(p[3], "ADC", line),
+          freqPPM: toNumber(p[4], "ADC", line),
+          phasePPM: toNumber(p[5], "ADC", line),
+          freqOffset: toNumber(p[6], "ADC", line),
+          phaseOffset: toNumber(p[7], "ADC", line),
           deadTime: 0,
           discardPre: 0,
           discardPost: 0,
-          phaseModShapeId: p.length > 8 ? +p[8] : 0
+          phaseModShapeId: toInt(p[8], "ADC", line)
         });
       } else {
+        requireFieldCount("ADC", line, p.length, 6);
         seq.adcs.set(id, {
           id,
-          numSamples: +p[1],
-          dwell: +p[2],
-          delay: +p[3],
+          numSamples: toInt(p[1], "ADC", line),
+          dwell: toNumber(p[2], "ADC", line),
+          delay: toNumber(p[3], "ADC", line),
           freqPPM: 0,
           phasePPM: 0,
-          freqOffset: p.length > 4 ? +p[4] : 0,
-          phaseOffset: p.length > 5 ? +p[5] : 0,
+          freqOffset: toNumber(p[4], "ADC", line),
+          phaseOffset: toNumber(p[5], "ADC", line),
           deadTime: 0,
           discardPre: 0,
           discardPost: 0,
-          phaseModShapeId: p.length > 6 ? +p[6] : 0
+          phaseModShapeId: 0
         });
       }
     }
   }
   function parseExtensions(seq, valid) {
     const vc = ver(seq);
+    _unknownLabelCounter = 0;
+    _unknownLabels.clear();
     let i = 0;
     while (i < valid.length) {
       const line = valid[i].trim();
       if (line.startsWith("extension ")) break;
-      const p = line.split(/\s+/);
-      if (p.length >= 4) {
-        seq.extensions.set(+p[0], {
-          id: +p[0],
-          type: +p[1],
-          ref: +p[2],
-          nextId: +p[3]
-        });
-      }
+      const p = splitFields(line);
+      requireFieldCount("EXTENSIONS", line, p.length, 4);
+      const id = toInt(p[0], "EXTENSIONS", line);
+      seq.extensions.set(id, {
+        id,
+        type: toInt(p[1], "EXTENSIONS", line),
+        ref: toInt(p[2], "EXTENSIONS", line),
+        nextId: toInt(p[3], "EXTENSIONS", line)
+      });
       i++;
     }
     while (i < valid.length) {
@@ -415,6 +455,8 @@ var Pulseq = (() => {
       }
       const extName = extM[1].toUpperCase();
       const extId = +extM[2];
+      seq.extensionNames.set(extId, extName);
+      seq.extensionTypes.set(extId, extensionNameToType(extName));
       i++;
       const dataLines = [];
       while (i < valid.length && !valid[i].trim().startsWith("extension ")) {
@@ -448,62 +490,89 @@ var Pulseq = (() => {
       }
     }
   }
+  function extensionNameToType(name) {
+    switch (name.toUpperCase()) {
+      case "TRIGGERS":
+        return 1 /* EXT_TRIGGER */;
+      case "ROTATIONS":
+        return 2 /* EXT_ROTATION */;
+      case "LABELSET":
+        return 3 /* EXT_LABELSET */;
+      case "LABELINC":
+        return 4 /* EXT_LABELINC */;
+      case "DELAYS":
+        return 5 /* EXT_DELAY */;
+      case "RF_SHIMS":
+        return 6 /* EXT_RF_SHIM */;
+      case "NCO":
+        return 100 /* EXT_NCO */;
+      default:
+        return 999 /* EXT_UNKNOWN */;
+    }
+  }
   function parseTriggerSpecs(seq, lines) {
     for (const line of lines) {
-      const p = line.split(/\s+/);
-      if (p.length >= 5) {
-        seq.triggers.push({
-          id: +p[0],
-          triggerType: +p[1],
-          channel: +p[2],
-          delay: +p[3],
-          duration: +p[4]
-        });
-      }
+      const p = splitFields(line);
+      requireFieldCount("TRIGGERS", line, p.length, 5);
+      seq.triggers.push({
+        id: toInt(p[0], "TRIGGERS", line),
+        triggerType: toInt(p[1], "TRIGGERS", line),
+        channel: toInt(p[2], "TRIGGERS", line),
+        delay: toNumber(p[3], "TRIGGERS", line),
+        duration: toNumber(p[4], "TRIGGERS", line)
+      });
     }
   }
   function parseNCOSpecs(seq, lines) {
     for (const line of lines) {
-      const p = line.split(/\s+/);
-      if (p.length >= 6) {
-        seq.ncos.push({
-          id: +p[0],
-          channel: +p[1],
-          frequency: +p[2],
-          phase: +p[3],
-          delay: +p[4],
-          duration: +p[5]
-        });
-      }
+      const p = splitFields(line);
+      requireFieldCount("NCO", line, p.length, 6);
+      seq.ncos.push({
+        id: toInt(p[0], "NCO", line),
+        channel: toInt(p[1], "NCO", line),
+        frequency: toNumber(p[2], "NCO", line),
+        phase: toNumber(p[3], "NCO", line),
+        delay: toNumber(p[4], "NCO", line),
+        duration: toNumber(p[5], "NCO", line)
+      });
     }
   }
   function parseRotationSpecs(seq, lines, vc) {
     for (const line of lines) {
-      const p = line.split(/\s+/).map(Number);
+      const p = splitFields(line);
       if (vc >= VER_V15) {
-        if (p.length >= 5) {
-          const [q0, q1, q2, q3] = [p[1], p[2], p[3], p[4]];
-          const norm = Math.sqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3) || 1;
-          seq.rotations.push({
-            id: p[0],
-            values: [q0 / norm, q1 / norm, q2 / norm, q3 / norm]
-          });
+        requireFieldCount("ROTATIONS", line, p.length, 5);
+        const [q0, q1, q2, q3] = [
+          toNumber(p[1], "ROTATIONS", line),
+          toNumber(p[2], "ROTATIONS", line),
+          toNumber(p[3], "ROTATIONS", line),
+          toNumber(p[4], "ROTATIONS", line)
+        ];
+        const norm = Math.sqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
+        if (Math.abs(norm - 1) > 1e-3 || norm === 0) {
+          parseError(`ROTATIONS row has a non-normalized quaternion: ${line}`);
         }
+        seq.rotations.push({
+          id: toInt(p[0], "ROTATIONS", line),
+          values: [q0 / norm, q1 / norm, q2 / norm, q3 / norm]
+        });
       } else {
-        if (p.length >= 10) {
-          seq.rotations.push({ id: p[0], values: p.slice(1, 10) });
-        }
+        requireFieldCount("ROTATIONS", line, p.length, 10);
+        seq.rotations.push({
+          id: toInt(p[0], "ROTATIONS", line),
+          values: p.slice(1, 10).map((v) => toNumber(v, "ROTATIONS", line))
+        });
       }
     }
   }
   var KNOWN_LABELS = {
     "SLC": { labelId: 0, flagId: 0 },
     "SEG": { labelId: 1, flagId: 0 },
-    "ECO": { labelId: 2, flagId: 0 },
-    "PHS": { labelId: 3, flagId: 0 },
-    "REP": { labelId: 4, flagId: 0 },
-    "SET": { labelId: 5, flagId: 0 },
-    "AVG": { labelId: 6, flagId: 0 },
+    "REP": { labelId: 2, flagId: 0 },
+    "AVG": { labelId: 3, flagId: 0 },
+    "ECO": { labelId: 4, flagId: 0 },
+    "PHS": { labelId: 5, flagId: 0 },
+    "SET": { labelId: 6, flagId: 0 },
     "ACQ": { labelId: 7, flagId: 0 },
     "LIN": { labelId: 8, flagId: 0 },
     "PAR": { labelId: 9, flagId: 0 },
@@ -527,19 +596,19 @@ var Pulseq = (() => {
     if (known) return known;
     let id = _unknownLabels.get(name);
     if (id === void 0) {
-      id = 1e3 + ++_unknownLabelCounter;
+      id = 1e3 + _unknownLabelCounter++;
       _unknownLabels.set(name, id);
     }
     return { labelId: id, flagId: 0 };
   }
   function parseLabelSpecs(seq, lines, isSet) {
     for (const line of lines) {
-      const p = line.split(/\s+/);
-      if (p.length < 3) continue;
+      const p = splitFields(line);
+      requireFieldCount(isSet ? "LABELSET" : "LABELINC", line, p.length, 3);
       const { labelId, flagId } = decodeLabel(p[2]);
       const spec = {
-        id: +p[0],
-        value: +p[1],
+        id: toInt(p[0], isSet ? "LABELSET" : "LABELINC", line),
+        value: toNumber(p[1], isSet ? "LABELSET" : "LABELINC", line),
         labelId,
         flagId
       };
@@ -549,31 +618,31 @@ var Pulseq = (() => {
   }
   function parseSoftDelaySpecs(seq, lines) {
     for (const line of lines) {
-      const p = line.split(/\s+/);
-      if (p.length >= 4) {
-        const hintIdx = line.search(/[a-zA-Z]/);
-        seq.softDelays.push({
-          id: +p[0],
-          numId: +p[1],
-          offset: +p[2],
-          factor: +p[3],
-          hint: hintIdx > 0 ? line.substring(hintIdx).trim() : ""
-        });
-      }
+      const p = splitFields(line);
+      if (p.length < 4) parseError(`DELAYS row has ${p.length} fields, expected at least 4: ${line}`);
+      const hintMatch = line.match(/^\s*\S+\s+\S+\s+\S+\s+\S+\s*(.*)$/);
+      seq.softDelays.push({
+        id: toInt(p[0], "DELAYS", line),
+        numId: toInt(p[1], "DELAYS", line),
+        offset: toNumber(p[2], "DELAYS", line),
+        factor: toNumber(p[3], "DELAYS", line),
+        hint: hintMatch ? hintMatch[1].trim() : ""
+      });
     }
   }
   function parseRFShimSpecs(seq, lines) {
     for (const line of lines) {
-      const p = line.split(/\s+/);
-      if (p.length < 2) continue;
-      const nChan = +p[1];
+      const p = splitFields(line);
+      if (p.length < 2) parseError(`RF_SHIMS row has ${p.length} fields, expected at least 2: ${line}`);
+      const nChan = toInt(p[1], "RF_SHIMS", line);
+      requireFieldCount("RF_SHIMS", line, p.length, 2 + nChan * 2);
       const amps = [];
       const phases = [];
-      for (let c = 0; c < nChan && 2 + c * 2 + 1 < p.length; c++) {
-        amps.push(+p[2 + c * 2]);
-        phases.push(+p[2 + c * 2 + 1]);
+      for (let c = 0; c < nChan; c++) {
+        amps.push(toNumber(p[2 + c * 2], "RF_SHIMS", line));
+        phases.push(toNumber(p[2 + c * 2 + 1], "RF_SHIMS", line));
       }
-      seq.rfShims.push({ id: +p[0], nChannels: nChan, amplitudes: amps, phases });
+      seq.rfShims.push({ id: toInt(p[0], "RF_SHIMS", line), nChannels: nChan, amplitudes: amps, phases });
     }
   }
   function parseShapes(seq, lines) {
@@ -639,6 +708,81 @@ var Pulseq = (() => {
     set("RadiofrequencyRasterTime", "rfRaster");
     set("AdcRasterTime", "adcRaster");
   }
+  function validateSequence(seq, seenSections) {
+    if (!seenSections.has("VERSION")) parseError("Required [VERSION] section is missing");
+    if (seq.version.major !== 1 || seq.version.minor > 5) {
+      parseError(`Unsupported Pulseq version ${seq.version.major}.${seq.version.minor}.${seq.version.revision}`);
+    }
+    const vc = ver(seq);
+    if (vc >= VER_PRE_14) {
+      requireNumericDefinition(seq, "AdcRasterTime");
+      requireNumericDefinition(seq, "GradientRasterTime");
+      requireNumericDefinition(seq, "RadiofrequencyRasterTime");
+      requireNumericDefinition(seq, "BlockDurationRaster");
+    }
+    if (vc >= VER_V15001) {
+      const required = seq.definitionsRaw.get("RequiredExtensions")?.split(/\s+/).filter(Boolean) ?? [];
+      for (const name of required) {
+        if (extensionNameToType(name) === 999 /* EXT_UNKNOWN */) {
+          parseError(`Unknown required extension '${name}'`);
+        }
+      }
+    }
+    if (!seenSections.has("BLOCKS")) parseError("Required [BLOCKS] section is missing");
+    for (const block of seq.blocks) {
+      if (block.rfId > 0 && !seq.rfs.has(block.rfId)) {
+        parseError(`Block ${block.num} references undefined RF event ${block.rfId}`);
+      }
+      for (const [channel, gradId] of [["GX", block.gxId], ["GY", block.gyId], ["GZ", block.gzId]]) {
+        if (gradId > 0 && !seq.arbitraryGrads.has(gradId) && !seq.trapGrads.has(gradId)) {
+          parseError(`Block ${block.num} references undefined ${channel} gradient event ${gradId}`);
+        }
+      }
+      if (block.adcId > 0 && !seq.adcs.has(block.adcId)) {
+        parseError(`Block ${block.num} references undefined ADC event ${block.adcId}`);
+      }
+      if (block.extId > 0 && !seq.extensions.has(block.extId)) {
+        parseError(`Block ${block.num} references undefined extension list ${block.extId}`);
+      }
+    }
+    for (const ext of seq.extensions.values()) {
+      if (ext.nextId > 0 && !seq.extensions.has(ext.nextId)) {
+        parseError(`Extension list ${ext.id} references undefined next extension ${ext.nextId}`);
+      }
+      const type = seq.extensionTypes.get(ext.type) ?? 999 /* EXT_UNKNOWN */;
+      if (type === 999 /* EXT_UNKNOWN */) continue;
+      if (!extensionPayloadExists(seq, type, ext.ref)) {
+        const name = seq.extensionNames.get(ext.type) ?? `type ${ext.type}`;
+        parseError(`Extension list ${ext.id} references undefined ${name} payload ${ext.ref}`);
+      }
+    }
+  }
+  function requireNumericDefinition(seq, name) {
+    const value = seq.definitions.get(name);
+    if (!value || value.length === 0 || !Number.isFinite(value[0])) {
+      parseError(`Required definition ${name} is not present in the file`);
+    }
+  }
+  function extensionPayloadExists(seq, type, ref) {
+    switch (type) {
+      case 1 /* EXT_TRIGGER */:
+        return seq.triggers.some((v) => v.id === ref);
+      case 2 /* EXT_ROTATION */:
+        return seq.rotations.some((v) => v.id === ref);
+      case 3 /* EXT_LABELSET */:
+        return seq.labelSets.some((v) => v.id === ref);
+      case 4 /* EXT_LABELINC */:
+        return seq.labelIncs.some((v) => v.id === ref);
+      case 5 /* EXT_DELAY */:
+        return seq.softDelays.some((v) => v.id === ref);
+      case 6 /* EXT_RF_SHIM */:
+        return seq.rfShims.some((v) => v.id === ref);
+      case 100 /* EXT_NCO */:
+        return seq.ncos.some((v) => v.id === ref);
+      default:
+        return false;
+    }
+  }
 
   // src/pulseq/decoder.ts
   var GAMMA_HZ_T = 42576e3;
@@ -668,12 +812,12 @@ var Pulseq = (() => {
     if (s >= e) return [];
     let cumulative = 0;
     for (let i = 0; i < Math.min(s, totalBlocks); i++) {
-      cumulative += seq.blocks[i].dur * seq.rasterTimes.blockDurationRaster;
+      cumulative += blockDurationSeconds(seq, seq.blocks[i]);
     }
     const decoded = [];
     for (let i = s; i < e; i++) {
       const block = seq.blocks[i];
-      const dur = block.dur * seq.rasterTimes.blockDurationRaster;
+      const dur = blockDurationSeconds(seq, block);
       const db = { index: block.num, duration: dur, startTime: cumulative };
       if (block.rfId > 0) {
         const rf = seq.rfs.get(block.rfId);
@@ -698,13 +842,18 @@ var Pulseq = (() => {
   function getTotalDuration(seq) {
     let total = 0;
     for (const block of seq.blocks) {
-      total += block.dur * seq.rasterTimes.blockDurationRaster;
+      total += blockDurationSeconds(seq, block);
     }
     return total;
   }
+  function blockDurationSeconds(seq, block) {
+    if (seq.versionCombined < VER_PRE_14) return block.dur * 1e-6;
+    return block.dur * seq.rasterTimes.blockDurationRaster;
+  }
   function decodeRF(seq, rf, blockStart, _blockDur) {
     const raster = seq.rasterTimes.rfRaster;
-    const rfStart = blockStart + rf.delay * raster;
+    const rfDelay = rf.delay * 1e-6;
+    const rfStart = blockStart + rfDelay;
     const b0 = getB0(seq);
     const freqFull = effFreqOff(rf.freqOffset, rf.freqPPM, b0);
     const phaseFull = effPhaseOff(rf.phaseOffset, rf.phasePPM, b0);
@@ -725,6 +874,7 @@ var Pulseq = (() => {
       phase[i] = 2 * Math.PI * ph[i] + phaseFull + 2 * Math.PI * freqFull * dt;
     }
     const duration = n > 0 ? t[n - 1] - rfStart + raster : 0;
+    const centerTime = rf.center >= 0 ? blockStart + rfDelay + rf.center * 1e-6 : estimateRfPeakTime(t, amp, rfStart, duration);
     let use = rf.use || "";
     if (!use || use === "u") {
       let faDeg = 0;
@@ -737,6 +887,7 @@ var Pulseq = (() => {
     return {
       blockIndex: rf.id,
       startTime: rfStart,
+      centerTime,
       duration,
       timePoints: t,
       magnitude: amp,
@@ -816,7 +967,7 @@ var Pulseq = (() => {
     const shape = seq.shapes.get(arb.shapeId);
     if (!shape) return zeroGradient(blockStart, 0, ch);
     const raster = seq.rasterTimes.gradientRaster;
-    const delay = arb.delay * raster;
+    const delay = arb.delay * 1e-6;
     const gradStart = blockStart + delay;
     const n = shape.numSamples;
     const oversample = arb.timeId === -1 ? 2 : 1;
@@ -876,35 +1027,75 @@ var Pulseq = (() => {
     let cur = ext;
     while (cur && !visited.has(cur.id)) {
       visited.add(cur.id);
-      if (cur.type === 1) {
+      const type = seq.extensionTypes.get(cur.type) ?? 999 /* EXT_UNKNOWN */;
+      if (type === 1 /* EXT_TRIGGER */) {
         let cached = _trigCache.get(cur.id);
         if (!cached) {
-          cached = seq.triggers.map((t) => ({
-            blockIndex: t.id,
-            startTime: 0,
-            // startTime filled per-block below
-            channel: t.channel,
-            delay: t.delay * 1e-6,
-            duration: t.duration * 1e-6
-          }));
-          _trigCache.set(cur.id, cached);
+          const trigger = findById(seq.triggers, cur.ref);
+          if (trigger) {
+            cached = {
+              blockIndex: trigger.id,
+              startTime: 0,
+              channel: trigger.channel,
+              delay: trigger.delay * 1e-6,
+              duration: trigger.duration * 1e-6
+            };
+            _trigCache.set(cur.id, cached);
+          }
         }
-        db.triggers = cached.map((t) => ({ ...t, startTime: blockStart }));
-      } else if (cur.type === 2) {
+        if (cached) {
+          if (!db.triggers) db.triggers = [];
+          db.triggers.push({ ...cached, startTime: blockStart });
+        }
+      } else if (type === 100 /* EXT_NCO */) {
         let cached = _ncoCache.get(cur.id);
         if (!cached) {
-          cached = seq.ncos.map((n) => ({
-            blockIndex: n.id,
-            startTime: 0,
-            channel: n.channel,
-            frequency: n.frequency,
-            phase: n.phase,
-            delay: n.delay * 1e-6,
-            duration: n.duration * 1e-6
-          }));
-          _ncoCache.set(cur.id, cached);
+          const nco = findById(seq.ncos, cur.ref);
+          if (nco) {
+            cached = {
+              blockIndex: nco.id,
+              startTime: 0,
+              channel: nco.channel,
+              frequency: nco.frequency,
+              phase: nco.phase,
+              delay: nco.delay * 1e-6,
+              duration: nco.duration * 1e-6
+            };
+            _ncoCache.set(cur.id, cached);
+          }
         }
-        db.nco = cached.map((n) => ({ ...n, startTime: blockStart }));
+        if (cached) {
+          if (!db.nco) db.nco = [];
+          db.nco.push({ ...cached, startTime: blockStart });
+        }
+      } else if (type === 2 /* EXT_ROTATION */) {
+        const rotation = findById(seq.rotations, cur.ref);
+        if (rotation) db.rotation = { id: rotation.id, values: [...rotation.values] };
+      } else if (type === 3 /* EXT_LABELSET */) {
+        const label = findById(seq.labelSets, cur.ref);
+        if (label) {
+          if (!db.labelSets) db.labelSets = [];
+          db.labelSets.push({ ...label });
+        }
+      } else if (type === 4 /* EXT_LABELINC */) {
+        const label = findById(seq.labelIncs, cur.ref);
+        if (label) {
+          if (!db.labelIncs) db.labelIncs = [];
+          db.labelIncs.push({ ...label });
+        }
+      } else if (type === 5 /* EXT_DELAY */) {
+        const delay = findById(seq.softDelays, cur.ref);
+        if (delay) db.softDelay = { ...delay };
+      } else if (type === 6 /* EXT_RF_SHIM */) {
+        const shim = findById(seq.rfShims, cur.ref);
+        if (shim) {
+          db.rfShim = {
+            id: shim.id,
+            nChannels: shim.nChannels,
+            amplitudes: [...shim.amplitudes],
+            phases: [...shim.phases]
+          };
+        }
       }
       cur = cur.nextId > 0 ? seq.extensions.get(cur.nextId) : void 0;
     }
@@ -913,6 +1104,22 @@ var Pulseq = (() => {
     const a = new Float64Array(Math.max(n, 2));
     a.fill(value);
     return a;
+  }
+  function estimateRfPeakTime(timePoints, magnitude, startTime, duration) {
+    if (!timePoints.length || !magnitude.length) return startTime + duration * 0.5;
+    let peakIdx = 0;
+    let peak = Math.abs(magnitude[0]);
+    for (let i = 1; i < magnitude.length; i++) {
+      const v = Math.abs(magnitude[i]);
+      if (v > peak) {
+        peak = v;
+        peakIdx = i;
+      }
+    }
+    return timePoints[Math.min(peakIdx, timePoints.length - 1)];
+  }
+  function findById(items, id) {
+    return items.find((item) => item.id === id);
   }
 
   // src/pulseq/kspace.ts
@@ -933,7 +1140,7 @@ var Pulseq = (() => {
       collectBreaks(b.gy, gradBreaks);
       collectBreaks(b.gz, gradBreaks);
       if (b.rf) {
-        const iso = b.rf.startTime + b.rf.duration * 0.5;
+        const iso = Number.isFinite(b.rf.centerTime) ? b.rf.centerTime : b.rf.startTime + b.rf.duration * 0.5;
         const u = b.rf.use || "";
         if (u === "e" || u === "" || u === "u") excT.push(iso);
         else if (u === "r") refT.push(iso);
@@ -974,6 +1181,7 @@ var Pulseq = (() => {
     }
     const N = grid.length;
     if (N < 2) return null;
+    if (_options?.maxGridPoints && N > _options.maxGridPoints) return null;
     const gx = new Float64Array(N), gy = new Float64Array(N), gz = new Float64Array(N);
     const edges = [0];
     let cum = 0;
@@ -985,9 +1193,14 @@ var Pulseq = (() => {
       const t = grid[i];
       const bi = blockIdx(t, edges);
       if (bi >= 0 && bi < blocks.length) {
-        gx[i] = gradVal(blocks[bi].gx, t);
-        gy[i] = gradVal(blocks[bi].gy, t);
-        gz[i] = gradVal(blocks[bi].gz, t);
+        const block = blocks[bi];
+        const localX = gradVal(block.gx, t);
+        const localY = gradVal(block.gy, t);
+        const localZ = gradVal(block.gz, t);
+        const rotated = rotateGradient(block, localX, localY, localZ);
+        gx[i] = rotated[0];
+        gy[i] = rotated[1];
+        gz[i] = rotated[2];
       }
     }
     const kx = new Float64Array(N), ky = new Float64Array(N), kz = new Float64Array(N);
@@ -1116,6 +1329,35 @@ var Pulseq = (() => {
     if (dt <= 0) return d[i1];
     return d[i0] + (d[i1] - d[i0]) * (t - g[i0]) / dt;
   }
+  function rotateGradient(block, gx, gy, gz) {
+    const values = block.rotation?.values;
+    if (!values) return [gx, gy, gz];
+    if (values.length === 4) {
+      const [w, x, y, z] = values;
+      const r00 = 1 - 2 * y * y - 2 * z * z;
+      const r01 = 2 * x * y - 2 * w * z;
+      const r02 = 2 * x * z + 2 * w * y;
+      const r10 = 2 * x * y + 2 * w * z;
+      const r11 = 1 - 2 * x * x - 2 * z * z;
+      const r12 = 2 * y * z - 2 * w * x;
+      const r20 = 2 * x * z - 2 * w * y;
+      const r21 = 2 * y * z + 2 * w * x;
+      const r22 = 1 - 2 * x * x - 2 * y * y;
+      return [
+        r00 * gx + r01 * gy + r02 * gz,
+        r10 * gx + r11 * gy + r12 * gz,
+        r20 * gx + r21 * gy + r22 * gz
+      ];
+    }
+    if (values.length === 9) {
+      return [
+        values[0] * gx + values[1] * gy + values[2] * gz,
+        values[3] * gx + values[4] * gy + values[5] * gz,
+        values[6] * gx + values[7] * gy + values[8] * gz
+      ];
+    }
+    return [gx, gy, gz];
+  }
 
   // src/pulseq/trdetect.ts
   var GAMMA_HZ_T2 = 42576e3;
@@ -1152,13 +1394,12 @@ var Pulseq = (() => {
         rfUsePerBlock.push(0);
         continue;
       }
-      const useChar = classifyRfUse(rf, supportsRfUse, b0);
+      const useChar = classifyRfUse(rf, seq, supportsRfUse, b0);
       const useCode = useChar.charCodeAt(0);
       rfUsePerBlock.push(useCode);
       if (useChar === "e") {
-        const rfRaster = seq.rasterTimes.rfRaster;
         const center = rf.center >= 0 ? rf.center * 1e-6 : estimateRfCenter(rf, seq);
-        const excTime = blockStartTimes[i] + rf.delay * rfRaster + center;
+        const excTime = blockStartTimes[i] + rf.delay * 1e-6 + center;
         excitationTimesSec.push(excTime);
       }
       if (!supportsRfUse && useChar !== "u") rfUseGuessed = true;
@@ -1170,7 +1411,7 @@ var Pulseq = (() => {
       hasExplicitTR = false;
     }
     if (trTimeSec > 0) {
-      const totalDuration = blockStartTimes.length > 0 ? blockStartTimes[blockStartTimes.length - 1] + seq.blocks[seq.blocks.length - 1].dur * seq.rasterTimes.blockDurationRaster : 0;
+      const totalDuration = blockStartTimes.length > 0 ? blockStartTimes[blockStartTimes.length - 1] + blockDurationSeconds2(seq, seq.blocks[seq.blocks.length - 1]) : 0;
       trCount = Math.max(1, Math.ceil(totalDuration / trTimeSec));
       const tol = trTimeSec * 0.3;
       let trIdx = 0;
@@ -1216,29 +1457,73 @@ var Pulseq = (() => {
     let cum = 0;
     for (const blk of seq.blocks) {
       times.push(cum);
-      cum += blk.dur * seq.rasterTimes.blockDurationRaster;
+      cum += blockDurationSeconds2(seq, blk);
     }
     return times;
   }
-  function classifyRfUse(rf, supportsMetadata, b0Tesla) {
+  function blockDurationSeconds2(seq, block) {
+    if (seq.versionCombined < VER_PRE_14) return block.dur * 1e-6;
+    return block.dur * seq.rasterTimes.blockDurationRaster;
+  }
+  function classifyRfUse(rf, seq, supportsMetadata, b0Tesla) {
     if (supportsMetadata && rf.use && rf.use !== "u" && rf.use !== "U") {
       return rf.use.toLowerCase();
     }
-    const faDeg = estimateFlipAngleDeg(rf);
+    const faDeg = estimateFlipAngleDeg(rf, seq);
     if (faDeg < 90.01) return "e";
     const freqPPM = rf.freqPPM !== 0 ? rf.freqPPM : b0Tesla > 0 ? 1e6 * rf.freqOffset / (GAMMA_HZ_T2 * b0Tesla) : 0;
-    const durEst = 0;
+    const durEst = estimateRfDuration(rf, seq);
     if (durEst > 6e-3 && freqPPM >= -4.5 && freqPPM <= -3) return "s";
     return "r";
   }
-  function estimateFlipAngleDeg(rf) {
+  function estimateFlipAngleDeg(rf, seq) {
+    const magShape = seq.shapes.get(rf.magShapeId);
+    if (magShape && magShape.numSamples > 0) {
+      const raster = seq.rasterTimes.rfRaster;
+      const timeShape = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples : void 0;
+      let area = 0;
+      let prevT = timeShape ? timeShape[0] * raster : 0.5 * raster;
+      let prevAmp = Math.abs(rf.amplitude * magShape.samples[0]);
+      for (let i = 1; i < magShape.numSamples; i++) {
+        const t = timeShape ? timeShape[i] * raster : (i + 0.5) * raster;
+        const amp = Math.abs(rf.amplitude * magShape.samples[i]);
+        const dt = t - prevT;
+        if (dt > 0) area += 0.5 * (prevAmp + amp) * dt;
+        prevT = t;
+        prevAmp = amp;
+      }
+      return 360 * area;
+    }
     const absAmp = Math.abs(rf.amplitude);
     if (absAmp > 3e3) return 180;
     if (absAmp > 1500) return 120;
     return 90;
   }
   function estimateRfCenter(rf, _seq) {
-    return 0;
+    const magShape = _seq.shapes.get(rf.magShapeId);
+    if (!magShape || magShape.numSamples <= 0) return 0;
+    let peakIdx = 0;
+    let peak = Math.abs(magShape.samples[0]);
+    for (let i = 1; i < magShape.numSamples; i++) {
+      const v = Math.abs(magShape.samples[i]);
+      if (v > peak) {
+        peak = v;
+        peakIdx = i;
+      }
+    }
+    const raster = _seq.rasterTimes.rfRaster;
+    const timeShape = rf.timeShapeId > 0 ? _seq.shapes.get(rf.timeShapeId)?.samples : void 0;
+    return timeShape ? (timeShape[peakIdx] ?? 0) * raster : (peakIdx + 0.5) * raster;
+  }
+  function estimateRfDuration(rf, seq) {
+    const magShape = seq.shapes.get(rf.magShapeId);
+    if (!magShape || magShape.numSamples <= 0) return 0;
+    const raster = seq.rasterTimes.rfRaster;
+    const timeShape = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples : void 0;
+    if (timeShape && timeShape.length > 0) {
+      return timeShape[timeShape.length - 1] * raster + raster;
+    }
+    return magShape.numSamples * raster;
   }
   function estimateTRFromExcitations(excTimesSec) {
     if (excTimesSec.length < 2) return 0;
