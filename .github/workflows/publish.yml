@@ -30,13 +30,13 @@ jobs:
         run: npm run compile
 
       - name: Package extension
-        run: npx @vscode/vsce package --out seqeyes-plugin.vsix
+        run: npx @vscode/vsce package --out seqeyes-web.vsix
 
       - name: Upload VSIX artifact
         uses: actions/upload-artifact@v4
         with:
-          name: seqeyes-plugin-vsix
-          path: seqeyes-plugin.vsix
+          name: seqeyes-web-vsix
+          path: seqeyes-web.vsix
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -46,14 +46,14 @@ jobs:
           body: |
             ## Installation
 
-            Download `seqeyes-plugin.vsix` below and install via:
+            Download `seqeyes-web.vsix` below and install via:
             ```
-            code --install-extension seqeyes-plugin.vsix
+            code --install-extension seqeyes-web.vsix
             ```
             Or drag & drop into VS Code's Extensions panel.
 
             ## Changes
 
             See [commits since last release](https://github.com/${{ github.repository }}/compare/${{ github.event.before }}...${{ github.ref_name }}).
-          files: seqeyes-plugin.vsix
+          files: seqeyes-web.vsix
           generate_release_notes: true
