@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<toolboxInfo>
+    <name>SeqEyes</name>
+    <identifier>seqeyes</identifier>
+    <version>0.1.7</version>
+    <release>R2022a</release>
+    <author>
+        <name>SeqEyes Developers</name>
+        <contact>bughht@outlook.com</contact>
+    </author>
+    <summary>Interactive Pulseq MRI sequence viewer with k-space visualisation</summary>
+    <description>
+SeqEyes is an interactive viewer for Pulseq (.seq) MRI sequence files. It visualises
+RF pulses, gradient waveforms (Gx/Gy/Gz), ADC readouts, and triggers on a zoomable,
+pannable timeline with colour themes and a minimap. A GPU-accelerated 3D k-space viewer
+with camera presets is also included.
+
+Features:
+  • Double-click .seq files to open automatically
+  • Zoom, pan, and hover tooltips
+  • 7-channel view: RF, φ, Gx, Gy, Gz, ADC, Trig
+  • 6 colour themes (System, One Light, One Dark, Dracula, Nord, GitHub)
+  • GPU-accelerated 3D k-space trajectory viewer
+  • TR/TE auto-detection
+  • Minimap for quick navigation
+  • Time units: s, ms, µs
+  • Gradient units: Hz/m, mT/m, G/cm
+
+Requirements:
+  • MATLAB R2022a or later
+  • No additional toolboxes required
+
+Homepage: https://bughht.github.io/seqeyes_plugin/
+Source:   https://github.com/bughht/seqeyes_plugin
+    </description>
+    <image>resources/logo.png</image>
+    <gettingStarted>gettingStarted.m</gettingStarted>
+    <matlabReleaseCompatibility>
+        <release name="R2022a"/>
+        <release name="R2022b"/>
+        <release name="R2023a"/>
+        <release name="R2023b"/>
+        <release name="R2024a"/>
+        <release name="R2024b"/>
+        <release name="R2025a"/>
+    </matlabReleaseCompatibility>
+    <operatingSystemSupport>
+        <platform>windows</platform>
+        <platform>macos</platform>
+        <platform>linux</platform>
+    </operatingSystemSupport>
+    <dependency>
+        <product name="MATLAB" version="9.12" />
+    </dependency>
+</toolboxInfo>
