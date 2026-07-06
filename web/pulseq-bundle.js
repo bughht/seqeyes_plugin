@@ -970,29 +970,47 @@ var Pulseq = (() => {
     const delay = arb.delay * 1e-6;
     const gradStart = blockStart + delay;
     const n = shape.numSamples;
-    const oversample = arb.timeId === -1 ? 2 : 1;
-    const nOut = n * oversample;
+    const oversampled = arb.timeId === -1;
     const timeShape = arb.timeId > 0 ? seq.shapes.get(arb.timeId)?.samples ?? null : null;
-    const tp = new Float64Array(nOut);
-    const wf = new Float64Array(nOut);
     if (timeShape) {
+      const tp2 = new Float64Array(n);
+      const wf2 = new Float64Array(n);
       for (let i = 0; i < n; i++) {
-        tp[i] = gradStart + timeShape[i] * raster;
-        wf[i] = arb.amplitude * shape.samples[i];
+        tp2[i] = gradStart + timeShape[i] * raster;
+        wf2[i] = arb.amplitude * shape.samples[i];
       }
-    } else {
-      const dt = raster / oversample;
-      for (let i = 0; i < nOut; i++) {
-        tp[i] = gradStart + (i + 0.5) * dt;
-        const srcIdx = Math.floor(i / oversample);
-        const frac = i % oversample / oversample;
-        const s0 = shape.samples[Math.min(srcIdx, n - 1)];
-        const s1 = shape.samples[Math.min(srcIdx + 1, n - 1)];
-        const sv = s0 + (s1 - s0) * frac;
-        wf[i] = arb.amplitude * sv;
-      }
+      const dur2 = n > 0 ? tp2[n - 1] - blockStart + raster : delay;
+      return {
+        blockIndex: arb.id,
+        startTime: blockStart,
+        duration: dur2,
+        timePoints: tp2,
+        waveform: wf2,
+        amplitude: arb.amplitude,
+        type: "arb",
+        channel: ch
+      };
     }
-    const dur = nOut > 0 ? tp[nOut - 1] - blockStart + raster : delay;
+    const tp = new Float64Array(n + 2);
+    const wf = new Float64Array(n + 2);
+    tp[0] = gradStart;
+    wf[0] = edgeAmplitude(arb.first, arb.amplitude, shape.samples, true);
+    if (oversampled) {
+      const dt = raster * 0.5;
+      for (let i = 0; i < n; i++) {
+        tp[i + 1] = gradStart + (i + 1) * dt;
+        wf[i + 1] = arb.amplitude * shape.samples[i];
+      }
+      tp[n + 1] = gradStart + (n + 1) * dt;
+    } else {
+      for (let i = 0; i < n; i++) {
+        tp[i + 1] = gradStart + (i + 0.5) * raster;
+        wf[i + 1] = arb.amplitude * shape.samples[i];
+      }
+      tp[n + 1] = gradStart + n * raster;
+    }
+    wf[wf.length - 1] = edgeAmplitude(arb.last, arb.amplitude, shape.samples, false);
+    const dur = tp[tp.length - 1] - blockStart;
     return {
       blockIndex: arb.id,
       startTime: blockStart,
@@ -1003,6 +1021,22 @@ var Pulseq = (() => {
       type: "arb",
       channel: ch
     };
+  }
+  function edgeAmplitude(stored, amplitude, samples, first) {
+    let value;
+    if (Number.isFinite(stored)) {
+      value = stored;
+      if (Math.abs(value) > 1 + 1e-6 && Math.abs(amplitude) > 0) value /= amplitude;
+    } else if (samples.length === 0) {
+      value = 0;
+    } else if (samples.length === 1) {
+      value = samples[0];
+    } else if (first) {
+      value = 0.5 * (3 * samples[0] - samples[1]);
+    } else {
+      value = 0.5 * (3 * samples[samples.length - 1] - samples[samples.length - 2]);
+    }
+    return value * amplitude;
   }
   function decodeADC(adc, blockStart, seq) {
     const b0 = getB0(seq);
@@ -1107,16 +1141,22 @@ var Pulseq = (() => {
   }
   function estimateRfPeakTime(timePoints, magnitude, startTime, duration) {
     if (!timePoints.length || !magnitude.length) return startTime + duration * 0.5;
-    let peakIdx = 0;
     let peak = Math.abs(magnitude[0]);
     for (let i = 1; i < magnitude.length; i++) {
       const v = Math.abs(magnitude[i]);
-      if (v > peak) {
-        peak = v;
-        peakIdx = i;
+      if (v > peak) peak = v;
+    }
+    const threshold = Math.abs(peak) * 0.99999;
+    let firstPeak = -1;
+    let lastPeak = -1;
+    for (let i = 0; i < magnitude.length; i++) {
+      if (Math.abs(magnitude[i]) >= threshold) {
+        if (firstPeak < 0) firstPeak = i;
+        lastPeak = i;
       }
     }
-    return timePoints[Math.min(peakIdx, timePoints.length - 1)];
+    if (firstPeak < 0 || lastPeak < 0) return startTime + duration * 0.5;
+    return 0.5 * (timePoints[Math.min(firstPeak, timePoints.length - 1)] + timePoints[Math.min(lastPeak, timePoints.length - 1)]);
   }
   function findById(items, id) {
     return items.find((item) => item.id === id);
@@ -1126,9 +1166,11 @@ var Pulseq = (() => {
   function calculateKspace(blocks, gradientRaster, totalDuration, trajectoryDelay = 0, _options) {
     if (!blocks.length || !gradientRaster || gradientRaster <= 0) return null;
     const GR = gradientRaster;
+    const RF = _options?.rfRaster && _options.rfRaster > 0 ? _options.rfRaster : 1e-6;
     const tacc = 1e-10;
+    const gradientSupport = _options?.gradientSupport ?? "endpoints";
     const excT = [], refT = [];
-    const gradBreaks = [];
+    const gradTimes = [];
     let totalAdcSamples = 0;
     for (const b of blocks) {
       if (b.adc) totalAdcSamples += b.adc.numSamples;
@@ -1136,9 +1178,9 @@ var Pulseq = (() => {
     const adcT = new Float64Array(totalAdcSamples);
     let adcIdx = 0;
     for (const b of blocks) {
-      collectBreaks(b.gx, gradBreaks);
-      collectBreaks(b.gy, gradBreaks);
-      collectBreaks(b.gz, gradBreaks);
+      collectGradientSupport(b.gx, gradTimes, gradientSupport);
+      collectGradientSupport(b.gy, gradTimes, gradientSupport);
+      collectGradientSupport(b.gz, gradTimes, gradientSupport);
       if (b.rf) {
         const iso = Number.isFinite(b.rf.centerTime) ? b.rf.centerTime : b.rf.startTime + b.rf.duration * 0.5;
         const u = b.rf.use || "";
@@ -1157,14 +1199,15 @@ var Pulseq = (() => {
     const pushC = (t) => {
       if (isFinite(t) && t >= -tacc) cand.push(Math.max(0, tacc * Math.round(t / tacc)));
     };
-    for (const t of gradBreaks) pushC(t);
+    for (const t of gradTimes) pushC(t);
     for (const t of excT) {
       pushC(t);
-      pushC(t - GR);
+      pushC(t - RF);
+      pushC(t - 2 * RF);
     }
     for (const t of refT) {
       pushC(t);
-      pushC(t - GR);
+      pushC(t - RF);
     }
     for (const t of adcT) pushC(t);
     pushC(0);
@@ -1276,9 +1319,13 @@ var Pulseq = (() => {
     }
     return { ktraj: [kxP, kyP, kzP], t_ktraj: new Float64Array(grid), ktraj_adc: [kxA, kyA, kzA], t_adc: new Float64Array(adcT) };
   }
-  function collectBreaks(g, breaks) {
+  function collectGradientSupport(g, support, mode) {
     if (!g || g.type === "none" || !g.timePoints || g.timePoints.length < 2) return;
-    breaks.push(g.timePoints[0], g.timePoints[g.timePoints.length - 1]);
+    if (mode === "all") {
+      for (let i = 0; i < g.timePoints.length; i++) support.push(g.timePoints[i]);
+      return;
+    }
+    support.push(g.timePoints[0], g.timePoints[g.timePoints.length - 1]);
   }
   function gradVal(g, t) {
     if (!g || g.type === "none") return 0;

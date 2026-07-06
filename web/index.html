@@ -398,7 +398,7 @@ function loadSequenceText(text,fileName){
 
     showProgress('kspace',55,'Computing k-space...');
     kTraj=null;kAdc=null;kTime=null;kAdcTime=null;
-    var ks=Pulseq.calculateKspace(blocks,GR,TD);
+    var ks=Pulseq.calculateKspace(blocks,GR,TD,0,{rfRaster:RR});
     if(ks){
       kTraj=[ks.ktraj[0],ks.ktraj[1],ks.ktraj[2]];
       kTime=ks.t_ktraj;

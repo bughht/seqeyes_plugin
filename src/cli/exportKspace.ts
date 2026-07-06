@@ -29,6 +29,7 @@ function parseArgs(argv: string[]): CliArgs {
     let inputPath = '';
     let outputDir = '';
     let includeFullTrajectory = false;
+    let gradientSupport: KspaceExportOptions['gradientSupport'];
     let maxGridPoints: number | undefined;
     const positional: string[] = [];
 
@@ -43,6 +44,10 @@ function parseArgs(argv: string[]): CliArgs {
             outputDir = requireValue(argv, ++i, arg);
         } else if (arg === '--full') {
             includeFullTrajectory = true;
+        } else if (arg === '--fast-grid') {
+            gradientSupport = 'endpoints';
+        } else if (arg === '--seqeyes-grid') {
+            gradientSupport = 'all';
         } else if (arg === '--max-grid-points') {
             maxGridPoints = parsePositiveInteger(requireValue(argv, ++i, arg), arg);
         } else if (arg.startsWith('--')) {
@@ -68,6 +73,7 @@ function parseArgs(argv: string[]): CliArgs {
         outputDir: resolvedOutput,
         options: {
             includeFullTrajectory,
+            gradientSupport,
             maxGridPoints,
             packageVersion: readPackageVersion(),
         },
@@ -105,6 +111,8 @@ function usage(): string {
         '  --input <file>             Pulseq .seq input file, alternative to positional input',
         '  --out-dir <dir>            Output directory, alternative to positional output',
         '  --full                     Also write full ktraj.txt in addition to ktraj_adc.txt',
+        '  --seqeyes-grid             Use all gradient support points; default for parity export',
+        '  --fast-grid                Use endpoint gradient support, matching the interactive fast path',
         '  --max-grid-points <count>  Abort if the integration grid exceeds this count',
         '  -h, --help                 Show this help',
     ].join('\n');

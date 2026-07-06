@@ -79,6 +79,7 @@ describe('k-space export helper', () => {
     expect(artifacts.metadata.files.ktrajAdc).toBe('ktraj_adc.txt');
     expect(artifacts.metadata.files.ktraj).toBeUndefined();
     expect(artifacts.metadata.units.trajectory).toBe('1/m');
+    expect(artifacts.metadata.calculation.gradientSupport).toBe('all');
     expect(artifacts.metadata.adcSampleCount).toBeGreaterThan(0);
     expect(artifacts.metadata.trajectorySampleCount).toBeGreaterThan(0);
     expect(rows[0].trim().split(/\s+/)).toHaveLength(3);
@@ -98,11 +99,13 @@ describe('k-space export helper', () => {
       const metadata = JSON.parse(readFileSync(result.metadataPath, 'utf8')) as {
         files: { ktrajAdc: string; ktraj?: string };
         adcSampleCount: number;
+        calculation: { gradientSupport: string };
       };
 
       expect(readFileSync(result.ktrajAdcPath, 'utf8').trim().split('\n')).toHaveLength(metadata.adcSampleCount);
       expect(result.ktrajPath).toBeDefined();
       expect(readFileSync(result.ktrajPath!, 'utf8').length).toBeGreaterThan(0);
+      expect(metadata.calculation.gradientSupport).toBe('all');
       expect(metadata.files).toEqual({ ktrajAdc: 'ktraj_adc.txt', ktraj: 'ktraj.txt' });
     } finally {
       rmSync(workDir, { recursive: true, force: true });

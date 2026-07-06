@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
 import { decodeAllBlocks, getTotalDuration } from './decoder';
-import { calculateKspace, type KSpaceData } from './kspace';
+import { calculateKspace, type KSpaceData, type KSpaceOptions } from './kspace';
 import { parseSequenceText } from './reader';
 import type { PulseqSequence } from './types';
 
@@ -11,6 +11,12 @@ export interface KspaceExportOptions {
     includeFullTrajectory?: boolean;
     maxGridPoints?: number;
     packageVersion?: string;
+    /**
+     * Defaults to `all` so exported artifacts are suitable for SeqEyes Qt
+     * numeric parity checks. The interactive viewer keeps the faster endpoint
+     * mode by calling calculateKspace directly without this option.
+     */
+    gradientSupport?: KSpaceOptions['gradientSupport'];
 }
 
 export interface KspaceExportMetadata {
@@ -40,6 +46,9 @@ export interface KspaceExportMetadata {
         gradient: 'Hz/m';
         convention: 'Pulseq gradient integral without 2*pi factor';
     };
+    calculation: {
+        gradientSupport: 'endpoints' | 'all';
+    };
     files: {
         ktrajAdc: 'ktraj_adc.txt';
         ktraj?: 'ktraj.txt';
@@ -68,12 +77,13 @@ export function exportKspaceArtifacts(
     const seq = parseSequenceText(sequenceText);
     const decoded = decodeAllBlocks(seq);
     const totalDuration = getTotalDuration(seq);
+    const gradientSupport = options.gradientSupport ?? 'all';
     const kspace = calculateKspace(
         decoded,
         seq.rasterTimes.gradientRaster,
         totalDuration,
         0,
-        options.maxGridPoints ? { maxGridPoints: options.maxGridPoints } : undefined,
+        { maxGridPoints: options.maxGridPoints, rfRaster: seq.rasterTimes.rfRaster, gradientSupport },
     );
 
     if (!kspace) {
@@ -88,6 +98,7 @@ export function exportKspaceArtifacts(
         options.packageVersion ?? 'unknown',
         !!options.includeFullTrajectory,
         totalDuration,
+        gradientSupport,
     );
 
     return {
@@ -155,6 +166,7 @@ function createMetadata(
     packageVersion: string,
     includeFullTrajectory: boolean,
     totalDurationSec: number,
+    gradientSupport: 'endpoints' | 'all',
 ): KspaceExportMetadata {
     return {
         schemaVersion: 1,
@@ -182,6 +194,9 @@ function createMetadata(
             time: 's',
             gradient: 'Hz/m',
             convention: 'Pulseq gradient integral without 2*pi factor',
+        },
+        calculation: {
+            gradientSupport,
         },
         files: includeFullTrajectory
             ? { ktrajAdc: 'ktraj_adc.txt', ktraj: 'ktraj.txt' }
