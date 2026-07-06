@@ -13,6 +13,7 @@
  */
 
 import type { PulseqSequence, SequenceTiming, BlockEntry, RFEntry } from './types';
+import { VER_PRE_14 } from './types';
 
 /** ¹H gyromagnetic ratio in Hz/T. */
 const GAMMA_HZ_T = 42.576e6;
@@ -66,14 +67,13 @@ export function detectSequenceTiming(seq: PulseqSequence): SequenceTiming {
         const rf = seq.rfs.get(blk.rfId);
         if (!rf) { rfUsePerBlock.push(0); continue; }
 
-        const useChar = classifyRfUse(rf, supportsRfUse, b0);
+        const useChar = classifyRfUse(rf, seq, supportsRfUse, b0);
         const useCode = useChar.charCodeAt(0);
         rfUsePerBlock.push(useCode);
         if (useChar === 'e') {
             // Excitation centre time = block start + RF delay + RF centre
-            const rfRaster = seq.rasterTimes.rfRaster;
             const center = rf.center >= 0 ? rf.center * 1e-6 : estimateRfCenter(rf, seq);
-            const excTime = blockStartTimes[i] + rf.delay * rfRaster + center;
+            const excTime = blockStartTimes[i] + rf.delay * 1e-6 + center;
             excitationTimesSec.push(excTime);
         }
         if (!supportsRfUse && useChar !== 'u') rfUseGuessed = true;
@@ -92,7 +92,7 @@ export function detectSequenceTiming(seq: PulseqSequence): SequenceTiming {
     if (trTimeSec > 0) {
         // Total sequence duration
         const totalDuration = blockStartTimes.length > 0
-            ? blockStartTimes[blockStartTimes.length - 1] + seq.blocks[seq.blocks.length - 1].dur * seq.rasterTimes.blockDurationRaster
+            ? blockStartTimes[blockStartTimes.length - 1] + blockDurationSeconds(seq, seq.blocks[seq.blocks.length - 1])
             : 0;
         trCount = Math.max(1, Math.ceil(totalDuration / trTimeSec));
 
@@ -157,9 +157,14 @@ function computeCumulativeTimes(seq: PulseqSequence): number[] {
     let cum = 0;
     for (const blk of seq.blocks) {
         times.push(cum);
-        cum += blk.dur * seq.rasterTimes.blockDurationRaster;
+        cum += blockDurationSeconds(seq, blk);
     }
     return times;
+}
+
+function blockDurationSeconds(seq: PulseqSequence, block: BlockEntry): number {
+    if (seq.versionCombined < VER_PRE_14) return block.dur * 1e-6;
+    return block.dur * seq.rasterTimes.blockDurationRaster;
 }
 
 /**
@@ -170,6 +175,7 @@ function computeCumulativeTimes(seq: PulseqSequence): number[] {
  */
 function classifyRfUse(
     rf: RFEntry,
+    seq: PulseqSequence,
     supportsMetadata: boolean,
     b0Tesla: number,
 ): string {
@@ -179,7 +185,7 @@ function classifyRfUse(
     }
 
     // Estimate from flip angle for older files
-    const faDeg = estimateFlipAngleDeg(rf);
+    const faDeg = estimateFlipAngleDeg(rf, seq);
 
     if (faDeg < 90.01) return 'e';
 
@@ -189,7 +195,7 @@ function classifyRfUse(
         : (b0Tesla > 0 ? 1e6 * rf.freqOffset / (GAMMA_HZ_T * b0Tesla) : 0);
 
     // Estimate pulse duration from shape length (fallback)
-    const durEst = 0; // Not available without decompressing shape — use amplitude heuristic
+    const durEst = estimateRfDuration(rf, seq);
 
     if (durEst > 6e-3 && freqPPM >= -4.5 && freqPPM <= -3.0) return 's';
 
@@ -199,18 +205,25 @@ function classifyRfUse(
 /** Estimate flip angle in degrees from RF amplitude and pulse duration.
  *  Uses a simplified integration: FA ≈ 360 × amplitude × duration.
  *  This is a heuristic — the true FA requires full shape integration. */
-function estimateFlipAngleDeg(rf: RFEntry): number {
-    // Heuristic: typical RF pulse has area ≈ amplitude × (pulse length)
-    // Without decompressing shapes, we estimate from the amplitude alone.
-    // Excitation pulses are typically 90° (amplitude ~500–2000 Hz for 1 ms)
-    // Refocusing pulses are typically 180° (amplitude ~2× excitation)
-    //
-    // Since we don't have shape samples here, we use a simple threshold:
-    // amplitude > 2000 Hz → likely refocusing (FA ≥ 120°)
-    // amplitude ≤ 2000 Hz → likely excitation (FA ≤ 100°)
-    //
-    // This matches the C++ SeqEyes behaviour where flip angle estimation
-    // via integration is only used for the RF use guess path.
+function estimateFlipAngleDeg(rf: RFEntry, seq: PulseqSequence): number {
+    const magShape = seq.shapes.get(rf.magShapeId);
+    if (magShape && magShape.numSamples > 0) {
+        const raster = seq.rasterTimes.rfRaster;
+        const timeShape = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples : undefined;
+        let area = 0;
+        let prevT = timeShape ? timeShape[0] * raster : 0.5 * raster;
+        let prevAmp = Math.abs(rf.amplitude * magShape.samples[0]);
+        for (let i = 1; i < magShape.numSamples; i++) {
+            const t = timeShape ? timeShape[i] * raster : (i + 0.5) * raster;
+            const amp = Math.abs(rf.amplitude * magShape.samples[i]);
+            const dt = t - prevT;
+            if (dt > 0) area += 0.5 * (prevAmp + amp) * dt;
+            prevT = t;
+            prevAmp = amp;
+        }
+        return 360 * area;
+    }
+
     const absAmp = Math.abs(rf.amplitude);
     if (absAmp > 3000) return 180;  // strong → refocusing/inversion
     if (absAmp > 1500) return 120;  // moderate → likely refocusing
@@ -221,9 +234,31 @@ function estimateFlipAngleDeg(rf: RFEntry): number {
  *  Matches SeqEyes KSpaceTrajectory::rfCenterUs() legacy fallback.
  *  Without decompressed samples, approximate as half the pulse duration. */
 function estimateRfCenter(rf: RFEntry, _seq: PulseqSequence): number {
-    // Without decompressed shape data, approximate centre as 0
-    // (the true centre requires peak detection from decompressed magnitude shape)
-    return 0;
+    const magShape = _seq.shapes.get(rf.magShapeId);
+    if (!magShape || magShape.numSamples <= 0) return 0;
+    let peakIdx = 0;
+    let peak = Math.abs(magShape.samples[0]);
+    for (let i = 1; i < magShape.numSamples; i++) {
+        const v = Math.abs(magShape.samples[i]);
+        if (v > peak) {
+            peak = v;
+            peakIdx = i;
+        }
+    }
+    const raster = _seq.rasterTimes.rfRaster;
+    const timeShape = rf.timeShapeId > 0 ? _seq.shapes.get(rf.timeShapeId)?.samples : undefined;
+    return timeShape ? (timeShape[peakIdx] ?? 0) * raster : (peakIdx + 0.5) * raster;
+}
+
+function estimateRfDuration(rf: RFEntry, seq: PulseqSequence): number {
+    const magShape = seq.shapes.get(rf.magShapeId);
+    if (!magShape || magShape.numSamples <= 0) return 0;
+    const raster = seq.rasterTimes.rfRaster;
+    const timeShape = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples : undefined;
+    if (timeShape && timeShape.length > 0) {
+        return timeShape[timeShape.length - 1] * raster + raster;
+    }
+    return magShape.numSamples * raster;
 }
 
 /**

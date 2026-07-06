@@ -64,11 +64,11 @@ export interface RFEntry {
 export interface ArbitraryGradEntry {
     id: number;
     amplitude: number;   // [Hz/m]
-    first: number;       // [Hz/m] at shape start  (v1.5+; v1.4.x ≡ 0)
+    first: number;       // [Hz/m] at shape start  (v1.5+; NaN = undefined)
     last: number;        // [Hz/m] at shape end
     shapeId: number;     // normalized waveform shape
     timeId: number;      // 0 = uniform grad‑raster
-    delay: number;       // [grad‑raster units]
+    delay: number;       // [µs]
 }
 
 /** [TRAP] — trapezoid gradient */
@@ -102,12 +102,13 @@ export interface ADCEntry {
 export const enum ExtType {
     EXT_LIST    = 0,   // the extension linked-list itself
     EXT_TRIGGER = 1,   // digital trigger output
-    EXT_NCO     = 2,   // numerically‑controlled oscillator (NOT in SeqEyes; ours)
-    EXT_ROTATION= 3,   // gradient rotation matrix / quaternion
-    EXT_LABELSET= 4,   // set MDH label counters / flags
-    EXT_LABELINC= 5,   // increment MDH label counters
-    EXT_DELAY   = 6,   // soft delay (v1.5+)
-    EXT_RF_SHIM = 7,   // per‑channel RF shimming (v1.5+)
+    EXT_ROTATION= 2,   // gradient rotation matrix / quaternion
+    EXT_LABELSET= 3,   // set MDH label counters / flags
+    EXT_LABELINC= 4,   // increment MDH label counters
+    EXT_DELAY   = 5,   // soft delay (v1.5+)
+    EXT_RF_SHIM = 6,   // per‑channel RF shimming (v1.5+)
+    EXT_NCO     = 100, // numerically-controlled oscillator (plugin extension)
+    EXT_UNKNOWN = 999,
 }
 
 export interface ExtensionEntry {
@@ -191,6 +192,7 @@ export interface DecompressedShape {
 export interface DecodedRFWaveform {
     blockIndex: number;
     startTime: number;          // [s]  includes RF delay
+    centerTime: number;         // [s]  effective pulse center
     duration: number;           // [s]  pulse length
     timePoints: Float64Array;   // [s]  absolute time per sample
     magnitude: Float64Array;    // [Hz]
@@ -240,6 +242,33 @@ export interface DecodedNCOEvent {
     duration: number;
 }
 
+export interface DecodedRotationEvent {
+    id: number;
+    values: number[];
+}
+
+export interface DecodedLabelEvent {
+    id: number;
+    value: number;
+    labelId: number;
+    flagId: number;
+}
+
+export interface DecodedSoftDelayEvent {
+    id: number;
+    numId: number;
+    offset: number;
+    factor: number;
+    hint: string;
+}
+
+export interface DecodedRFShimEvent {
+    id: number;
+    nChannels: number;
+    amplitudes: number[];
+    phases: number[];
+}
+
 export interface DecodedBlock {
     index: number;           // 1‑based
     duration: number;        // [s]
@@ -251,6 +280,11 @@ export interface DecodedBlock {
     adc?: DecodedADCEvent;
     triggers?: DecodedTriggerEvent[];
     nco?: DecodedNCOEvent[];
+    rotation?: DecodedRotationEvent;
+    labelSets?: DecodedLabelEvent[];
+    labelIncs?: DecodedLabelEvent[];
+    softDelay?: DecodedSoftDelayEvent;
+    rfShim?: DecodedRFShimEvent;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -269,6 +303,9 @@ export interface PulseqSequence {
     adcs: Map<number, ADCEntry>;
     /** Extension linked-list nodes (type→ref→next). */
     extensions: Map<number, ExtensionEntry>;
+    /** Extension registry entries from `extension NAME ID` headers. */
+    extensionNames: Map<number, string>;
+    extensionTypes: Map<number, ExtType>;
     /** Extension type‑specific libraries (ALL present, even if empty). */
     triggers: TriggerSpec[];
     ncos: NCOSpec[];
