@@ -11,15 +11,43 @@ document.getElementById("kunit").onclick=function(){
 };
 
 /* ── Theme selector (toolbar) ─────────────────────────────────────── */
-var kThemeClass=null;
-document.getElementById("theme").onchange=function(){
-  var b=document.body, v=this.value;
-  if(kThemeClass)b.classList.remove(kThemeClass);
-  if(v==="system"){kThemeClass=null;}
-  else{b.classList.add("theme-"+v);kThemeClass="theme-"+v;}
-  mmCache=null;  // invalidate minimap — colours changed
-  draw(); drawKs();  // redraw both views with new colours
-};
+var themeSelect=document.getElementById("theme");
+var systemThemeQuery=(typeof window.matchMedia==="function")?window.matchMedia("(prefers-color-scheme: dark)"):null;
+var inVsCode=!!vscApi;
+function storageGet(k){try{return localStorage.getItem(k);}catch(_){return null;}}
+function storageSet(k,v){try{localStorage.setItem(k,v);}catch(_){}}
+function clearThemeClasses(){
+  var b=document.body,rm=[];
+  b.classList.forEach(function(c){if(c.indexOf("theme-")===0)rm.push(c);});
+  rm.forEach(function(c){b.classList.remove(c);});
+}
+function redrawAfterThemeChange(){
+  mmCache=null;
+  draw();drawKs();drawMinimap();
+}
+function applyThemeChoice(value,persist){
+  if(!value)value="system";
+  clearThemeClasses();
+  if(value!=="system"){
+    document.body.classList.add("theme-"+value);
+  }else if(!inVsCode){
+    document.body.classList.add(systemThemeQuery&&systemThemeQuery.matches?"theme-github":"theme-githublight");
+  }
+  if(themeSelect&&themeSelect.value!==value)themeSelect.value=value;
+  if(persist)storageSet("seqeyes.theme",value);
+  redrawAfterThemeChange();
+}
+if(themeSelect){
+  var savedTheme=storageGet("seqeyes.theme")||"system";
+  if(!themeSelect.querySelector('option[value="'+savedTheme+'"]'))savedTheme="system";
+  themeSelect.onchange=function(){applyThemeChoice(this.value,true);};
+  applyThemeChoice(savedTheme,false);
+}
+if(systemThemeQuery){
+  var onSystemTheme=function(){if(!themeSelect||themeSelect.value==="system")applyThemeChoice("system",false);};
+  if(systemThemeQuery.addEventListener)systemThemeQuery.addEventListener("change",onSystemTheme);
+  else if(systemThemeQuery.addListener)systemThemeQuery.addListener(onSystemTheme);
+}
 
 /* ═══════════════════════════════════════════════════════════════════════
    WebGL state
@@ -143,6 +171,93 @@ function resizeKc(){
 function kUnitVal(v){if(kUnit==="rad")return v*6.283185;return v;}
 function kUnitStr(){return kUnit==="rad"?"rad/m":"1/m";}
 function kTickVal(v){var u=kUnitVal(v);if(Math.abs(u)>=1000)return (u/1000).toFixed(1)+"k";if(Math.abs(u)>=1)return u.toFixed(1);if(Math.abs(u)>=0.01)return u.toFixed(2);return u.toExponential(1);}
+
+/* ── Cursor-linked trajectory sample ─────────────────────────────────── */
+function nearestTimeIndex(times,t){
+  if(!times||!times.length||!isFinite(t))return -1;
+  var lo=0,hi=times.length-1;
+  if(t<=times[0])return 0;
+  if(t>=times[hi])return hi;
+  while(lo<hi){
+    var mid=(lo+hi)>>1;
+    if(times[mid]<t)lo=mid+1;else hi=mid;
+  }
+  var a=lo,b=lo-1;
+  if(b<0)return a;
+  return Math.abs(times[a]-t)<Math.abs(times[b]-t)?a:b;
+}
+function sampleSeriesAtTime(times,series,t){
+  if(!times||!series||!series[0]||!times.length)return null;
+  var n=Math.min(times.length,series[0].length,series[1].length,series[2].length);
+  if(n<=0)return null;
+  var idx=nearestTimeIndex(times,t);
+  if(idx<0)return null;
+  if(t<=times[0]||t>=times[n-1]){
+    idx=Math.max(0,Math.min(n-1,idx));
+    return {x:series[0][idx],y:series[1][idx],z:series[2][idx],t:times[idx],source:"traj"};
+  }
+  var upper=idx;
+  if(times[upper]<t)upper++;
+  upper=Math.max(1,Math.min(n-1,upper));
+  var lower=upper-1,t0=times[lower],t1=times[upper];
+  if(!isFinite(t0)||!isFinite(t1)||Math.abs(t1-t0)<1e-15){
+    return {x:series[0][idx],y:series[1][idx],z:series[2][idx],t:times[idx],source:"traj"};
+  }
+  var a=Math.max(0,Math.min(1,(t-t0)/(t1-t0)));
+  return {
+    x:series[0][lower]+(series[0][upper]-series[0][lower])*a,
+    y:series[1][lower]+(series[1][upper]-series[1][lower])*a,
+    z:series[2][lower]+(series[2][upper]-series[2][lower])*a,
+    t:t,
+    source:"traj"
+  };
+}
+function getKCursorSample(){
+  if(!cursorActive||!isFinite(cursorT))return null;
+  if(kAdc&&kAdcTime&&kAdc[0]&&kAdcTime.length){
+    var idx=nearestTimeIndex(kAdcTime,cursorT);
+    if(idx>=0){
+      var prev=idx>0?Math.abs(kAdcTime[idx]-kAdcTime[idx-1]):Infinity;
+      var next=idx+1<kAdcTime.length?Math.abs(kAdcTime[idx+1]-kAdcTime[idx]):Infinity;
+      var localStep=Math.min(prev,next);
+      if(!isFinite(localStep))localStep=minRasterTime();
+      var tol=Math.max(minRasterTime()*0.5,localStep*0.75);
+      if(Math.abs(kAdcTime[idx]-cursorT)<=tol){
+        return {x:kAdc[0][idx],y:kAdc[1][idx],z:kAdc[2][idx],t:kAdcTime[idx],source:"adc"};
+      }
+    }
+  }
+  return sampleSeriesAtTime(kTime,kTraj,cursorT);
+}
+function fmtKShort(v){
+  var u=kUnitVal(v);
+  if(!isFinite(u))return "--";
+  if(Math.abs(u)>=1000)return (u/1000).toFixed(1)+"k";
+  if(Math.abs(u)>=10)return u.toFixed(1);
+  if(Math.abs(u)>=0.01)return u.toFixed(2);
+  return u.toExponential(1);
+}
+function formatKCursorReadout(){
+  var s=getKCursorSample();
+  if(!s)return "";
+  return "kxyz="+fmtKShort(s.x)+","+fmtKShort(s.y)+","+fmtKShort(s.z)+" "+kUnitStr();
+}
+function drawKCursorMarker(ctx,proj,cs,W,H){
+  var s=getKCursorSample();
+  if(!s||!isFinite(s.x)||!isFinite(s.y)||!isFinite(s.z))return;
+  var p=proj(s.x,s.y,s.z);
+  if(p.x<-12||p.x>W+12||p.y<-12||p.y>H+12)return;
+  ctx.save();
+  ctx.lineWidth=2;
+  ctx.strokeStyle=cs.getPropertyValue("--cr").trim()||"#ee0000";
+  ctx.fillStyle="rgba(255,215,0,0.90)";
+  ctx.beginPath();ctx.arc(p.x,p.y,Math.max(5,kDotSize+4),0,6.283);ctx.fill();ctx.stroke();
+  ctx.fillStyle=cs.getPropertyValue("--fg").trim();
+  ctx.font="10px monospace";
+  ctx.textAlign="left";
+  ctx.fillText(s.source==="adc"?"ADC":"ktraj",p.x+8,p.y-8);
+  ctx.restore();
+}
 
 /* ── Mouse ───────────────────────────────────────────────────────────── */
 kCanvas.addEventListener("mousedown",function(e){
@@ -337,6 +452,7 @@ function drawKs_core(W,H,dpr){
   drawAxis3D(0,0,1,"kz",cs.getPropertyValue("--gz").trim());
   var oo=proj(0,0,0);
   ctx.fillStyle=cs.getPropertyValue("--fg").trim();ctx.beginPath();ctx.arc(oo.x,oo.y,4,0,6.283);ctx.fill();
+  drawKCursorMarker(ctx,proj,cs,W,H);
 
 }
 
