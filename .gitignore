@@ -1,6 +1,11 @@
 node_modules/
 out/
+*.vsix
+*.mltbx
+out/
 dist/
 *.vsix
+*.mltbx
 .vscode-test/
+matlab/pulseq-bundle.js
 .DS_Store

@@ -31,8 +31,31 @@ jobs:
       - name: Validate extension and web bundle
         run: npm run check
 
-      - name: Package extension
-        run: npx @vscode/vsce package --out seqeyes-web.vsix
+      - name: Package MATLAB toolbox (.mltbx)
+        shell: bash
+        run: |
+          PKG="seqeyes-toolbox"
+          mkdir -p "$PKG/web"
+          # MATLAB source files (flat at root)
+          cp matlab/seqeyes.m matlab/openseq.m matlab/gettingStarted.m matlab/toolboxInfo.xml "$PKG/"
+          cp -r matlab/examples "$PKG/"
+          cp -r matlab/resources "$PKG/"
+          # Web assets
+          cp web/index.html web/pulseq-bundle.js web/logo.png web/logo.svg "$PKG/web/"
+          # License
+          cp LICENSE.txt "$PKG/"
+          # Read version from toolbox metadata
+          VER=$(grep -oP '<version>\K[^<]+' matlab/toolboxInfo.xml)
+          OUTFILE="seqeyes-${VER}.mltbx"
+          (cd "$PKG" && zip -r "../${OUTFILE}" .)
+          echo "mltbx=$(pwd)/${OUTFILE}" >> $GITHUB_ENV
+          echo "mltbx_name=${OUTFILE}" >> $GITHUB_ENV
+
+      - name: Upload MATLAB toolbox artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: seqeyes-mltbx
+          path: seqeyes-*.mltbx
 
       - name: Upload VSIX artifact
         uses: actions/upload-artifact@v4
@@ -48,14 +71,22 @@ jobs:
           body: |
             ## Installation
 
-            Download `seqeyes-web.vsix` below and install via:
+            **VS Code:** Download `seqeyes-web.vsix` below and install via:
             ```
             code --install-extension seqeyes-web.vsix
             ```
             Or drag & drop into VS Code's Extensions panel.
 
+            **MATLAB:** Download `seqeyes-*.mltbx` below and double-click in MATLAB, or run:
+            ```matlab
+            matlab.addons.toolbox.installToolbox('seqeyes-*.mltbx')
+            ```
+            Requires MATLAB R2022a or later.
+
             ## Changes
 
             See [commits since last release](https://github.com/${{ github.repository }}/compare/${{ github.event.before }}...${{ github.ref_name }}).
-          files: seqeyes-web.vsix
+          files: |
+            seqeyes-web.vsix
+            seqeyes-*.mltbx
           generate_release_notes: true
