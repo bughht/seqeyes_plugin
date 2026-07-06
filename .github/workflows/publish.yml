@@ -35,24 +35,9 @@ jobs:
         run: npx @vscode/vsce package --out seqeyes-web.vsix
 
       - name: Package MATLAB toolbox (.mltbx)
-        shell: bash
-        run: |
-          PKG="seqeyes-toolbox"
-          mkdir -p "$PKG/web"
-          # MATLAB source files (flat at root)
-          cp matlab/seqeyes.m matlab/openseq.m matlab/gettingStarted.m matlab/toolboxInfo.xml "$PKG/"
-          cp -r matlab/examples "$PKG/"
-          cp -r matlab/resources "$PKG/"
-          # Web assets
-          cp web/index.html web/pulseq-bundle.js web/logo.png web/logo.svg "$PKG/web/"
-          # License
-          cp LICENSE.txt "$PKG/"
-          # Read version from toolbox metadata
-          VER=$(grep -oP '<version>\K[^<]+' matlab/toolboxInfo.xml)
-          OUTFILE="seqeyes-${VER}.mltbx"
-          (cd "$PKG" && zip -r "../${OUTFILE}" .)
-          echo "mltbx=$(pwd)/${OUTFILE}" >> $GITHUB_ENV
-          echo "mltbx_name=${OUTFILE}" >> $GITHUB_ENV
+        uses: matlab-actions/run-command@v2
+        with:
+          command: cd(fullfile(getenv('GITHUB_WORKSPACE'))); run('matlab/pack_toolbox.m');
 
       - name: Upload MATLAB toolbox artifact
         uses: actions/upload-artifact@v4
