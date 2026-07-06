@@ -18,7 +18,7 @@ function draw(){
 
 /* ── Vertical cursor ──────────────────────────────────────────────────── */
 function drawCursor(w,h,s){
-  if(!cursorT)return;var cx=t2x(cursorT);
+  if(!cursorActive)return;var cx=t2x(cursorT);
   if(cx<M.l||cx>w-M.r)return;
   ctx.strokeStyle=s.getPropertyValue('--cr').trim();ctx.lineWidth=0.8;ctx.setLineDash([4,3]);
   ctx.beginPath();ctx.moveTo(cx,M.t);ctx.lineTo(cx,h-M.b);ctx.stroke();ctx.setLineDash([]);

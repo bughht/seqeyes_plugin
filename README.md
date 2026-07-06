@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="https://bughht.github.io/seqeyes_plugin/"><img src="https://img.shields.io/badge/🌐-Open%20in%20Browser-blue?logo=googlechrome&logoColor=white" alt="Web App"></a>
-  <a href="https://marketplace.visualstudio.com/items?itemName=Bughht.seqeyes-plugin"><img src="https://img.shields.io/badge/VS%20Code-Marketplace-blue?logo=visualstudiocode" alt="VS Code Marketplace"></a>
+  <a href="https://marketplace.visualstudio.com/items?itemName=SeqEyesDeveloper.seqeyes-web"><img src="https://img.shields.io/badge/VS%20Code-Marketplace-blue?logo=visualstudiocode" alt="VS Code Marketplace"></a>
   <a href="https://github.com/bughht/seqeyes_plugin/blob/main/LICENSE.txt"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
 </p>
 
@@ -34,10 +34,10 @@ Deep integration with VS Code — `.seq` files open automatically in the custom 
 
 ### Install
 
-From the [Marketplace](https://marketplace.visualstudio.com/items?itemName=Bughht.seqeyes-plugin):
+From the [Marketplace](https://marketplace.visualstudio.com/items?itemName=SeqEyesDeveloper.seqeyes-web):
 
 ```
-code --install-extension Bughht.seqeyes-plugin
+code --install-extension SeqEyesDeveloper.seqeyes-web
 ```
 
 Or build from source:
@@ -47,7 +47,7 @@ git clone https://github.com/bughht/seqeyes_plugin.git
 cd seqeyes_plugin
 npm install
 npm run package
-code --install-extension seqeyes-plugin-*.vsix --force
+code --install-extension seqeyes-web-*.vsix --force
 ```
 
 Or press **F5** to launch Extension Development Host.

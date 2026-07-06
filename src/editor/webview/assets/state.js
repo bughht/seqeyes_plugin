@@ -4,7 +4,7 @@
 var cc=document.getElementById('cc'),mc=document.getElementById('mc'),ctx=mc.getContext('2d'),
  tt=document.getElementById('tt'),curEl=document.getElementById('cur'),legend=document.getElementById('legend'),
  tuSel=document.getElementById('tu'),guSel=document.getElementById('gu');
-var BL=[],TD=0,GR=1e-5;              // blocks, total duration, gradient raster [s]
+var BL=[],TD=0,GR=1e-5,RR=1e-6,AR=1e-7,BR=1e-5; // blocks, duration, rasters [s]
 var M={t:8,r:30,b:22,l:92};                // margins
 var CH=['RF','\u03c6','Gx','Gy','Gz','ADC','Trig']; // 7 channels
 var chColors=['var(--rf)','var(--rf)','var(--gx)','var(--gy)','var(--gz)','var(--adc)','var(--tr)'];
@@ -12,7 +12,7 @@ var chVis=[true,true,true,true,true,true,true];                   // visibility 
 var gMax=[1,6.28318,1,1,1,0,0];          // global max per channel
 var ox=0,sc=1;                             // view offset [s] & scale [px/s]
 var dr=false,dsx=0,dso=0;                  // drag state
-var cursorT=0;                              // mouse time position
+var cursorT=0,cursorActive=false;            // mouse time position
 var timeUnit='ms',gradUnit='Hz/m';          // display unit selections
 var showBB=false;                            // show block boundaries (default off)
 var GAMMA=42576;                            // Hz/m per mT/m for 1H
@@ -75,8 +75,10 @@ window.addEventListener('message',function(e){
   }
   if(m.type==='sequenceData'){
     BL=m.blocks||[];TD=m.totalDuration||0;GR=m.gradRaster||1e-5;
+    RR=m.rfRaster||RR;AR=m.adcRaster||AR;BR=m.blockRaster||BR;
     blockPos=m.blockPositions||[];
     mmCache=null;  // invalidate minimap cache on new data
+    kTraj=null;kAdc=null;kTime=null;kAdcTime=null;
     // Decode binary k‑space ADC data (Float32 base64 → typed arrays)
     if(m.kspace){
       kTraj=[m.kspace.kx,m.kspace.ky,m.kspace.kz];kTime=m.kspace.tk;
@@ -334,6 +336,45 @@ function cH(){var vc=visChannels();return(mc.height/(window.devicePixelRatio||1)
 function t2x(t){return M.l+(t-ox)*sc}
 function x2t(x){return ox+(x-M.l)/sc}
 
+/* ── Viewport bounds ───────────────────────────────────────────────────── */
+function plotWidth(){
+  var dpr=window.devicePixelRatio||1,w=mc.width/dpr;
+  return Math.max(1,w-M.l-M.r);
+}
+function minRasterTime(){
+  var vals=[GR,RR,AR,BR].filter(function(v){return isFinite(v)&&v>0;});
+  return vals.length?Math.min.apply(null,vals):1e-7;
+}
+function visibleDuration(){return plotWidth()/Math.max(sc,1e-12);}
+function clampView(){
+  var pw=plotWidth();
+  if(!isFinite(TD)||TD<=0){ox=0;sc=1;return;}
+  if(!isFinite(sc)||sc<=0)sc=pw/TD;
+  var minDur=Math.min(TD,minRasterTime());
+  var dur=visibleDuration();
+  if(!isFinite(dur)||dur<=0)dur=TD;
+  dur=Math.max(minDur,Math.min(TD,dur));
+  sc=pw/dur;
+  var maxOx=Math.max(0,TD-dur);
+  if(!isFinite(ox))ox=0;
+  ox=Math.max(0,Math.min(ox,maxOx));
+}
+function zoomAt(screenX,zf){
+  if(!isFinite(zf)||zf<=0)return;
+  var tm=x2t(screenX);
+  sc*=zf;
+  var dur=visibleDuration();
+  if(!isFinite(dur)||dur<=0)dur=TD||minRasterTime();
+  var maxDur=TD||dur,minDur=Math.min(maxDur,minRasterTime());
+  dur=Math.max(minDur,Math.min(maxDur,dur));
+  sc=plotWidth()/dur;
+  ox=tm-(screenX-M.l)/sc;
+  clampView();
+}
+function zoomAtCenter(zf){
+  zoomAt(M.l+plotWidth()/2,zf);
+}
+
 /* ── Initial view: zoom to first TR ───────────────────────────────────── */
 function fitToFirstTR(){
   if(!seqTiming||seqTiming.trTimeSec<=0){fit();return;}
@@ -342,6 +383,5 @@ function fitToFirstTR(){
   var trDur=seqTiming.trTimeSec;
   sc=(w-M.l-M.r)/(trDur*1.2);
   ox=Math.max(0,-trDur*0.1);  // small negative offset for left padding
-  // Clamp scale to reasonable range
-  sc=Math.max(50/(TD||1e-3),Math.min(sc,1e7));
+  clampView();
 }

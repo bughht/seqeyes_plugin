@@ -7,16 +7,16 @@ mc.addEventListener('wheel',function(e){e.preventDefault();
     var vi2=Math.floor((my-M.t)/ch);
     if(vi2>=0&&vi2<vc.length){var ci=vc[vi2];ampZoom[ci]*=e.deltaY<0?1.3:1/1.3;ampZoom[ci]=Math.max(0.1,Math.min(100,ampZoom[ci]));}
   }else{
-    var r=mc.getBoundingClientRect(),mx2=e.clientX-r.left,tm=x2t(mx2);
-    var zf=e.deltaY<0?1.3:1/1.3;sc*=zf;sc=Math.max(50/(TD||1e-3),Math.min(sc,1e7));
-    ox=tm-(mx2-M.l)/sc;ox=Math.max(0,Math.min(ox,TD));
+    var r=mc.getBoundingClientRect(),mx2=e.clientX-r.left;
+    var zf=e.deltaY<0?1.3:1/1.3;zoomAt(mx2,zf);
   }
   draw();drawMinimap();},{passive:false});
 mc.addEventListener('mousedown',function(e){if(e.button===0){dr=true;dsx=e.clientX;dso=ox;cc.classList.add('pan')}});
 window.addEventListener('mousemove',function(e){
-  var r=mc.getBoundingClientRect(),mx2=e.clientX-r.left,my=e.clientY-r.top;cursorT=x2t(mx2);
-  curEl.textContent=fmtT(timeConv(cursorT))+' '+timeUnitStr();
-  if(dr){ox=dso-(e.clientX-dsx)/sc;ox=Math.max(0,Math.min(ox,TD));draw();drawMinimap();return}
+  var r=mc.getBoundingClientRect(),mx2=e.clientX-r.left,my=e.clientY-r.top;cursorT=x2t(mx2);cursorActive=mx2>=M.l&&mx2<=r.width-M.r&&my>=M.t&&my<=r.height-M.b;
+  var kInfo=(typeof formatKCursorReadout==='function')?formatKCursorReadout():'';
+  curEl.textContent=fmtT(timeConv(cursorT))+' '+timeUnitStr()+(kInfo?' | '+kInfo:'');
+  if(dr){ox=dso-(e.clientX-dsx)/sc;clampView();draw();drawMinimap();return}
   draw();
   // Tooltip
   var ch=cH(),vc=visChannels(),vi2=Math.floor((my-M.t)/ch);
@@ -36,15 +36,15 @@ window.addEventListener('mousemove',function(e){
   }else{tt.style.display='none'}
 });
 window.addEventListener('mouseup',function(){dr=false;cc.classList.remove('pan');drawMinimap();});
-cc.addEventListener('mouseleave',function(){cursorT=0;curEl.textContent='\u2190 hover for time';draw();drawMinimap();});
+cc.addEventListener('mouseleave',function(){cursorT=0;cursorActive=false;curEl.textContent='\u2190 hover for time';draw();drawMinimap();});
 
 /* ── Toolbar buttons ──────────────────────────────────────────────────── */
 document.getElementById('openBtn').onclick=function(){
   if(vscApi){vscApi.postMessage({command:'openFile'});}
   else{var fi=document.getElementById('fileInput');if(fi)fi.click();}
 };
-document.getElementById('zi').onclick=function(){sc*=1.5;draw();drawMinimap();};
-document.getElementById('zo').onclick=function(){sc/=1.5;sc=Math.max(50/(TD||1e-3),sc);draw();drawMinimap();};
+document.getElementById('zi').onclick=function(){zoomAtCenter(1.5);draw();drawMinimap();};
+document.getElementById('zo').onclick=function(){zoomAtCenter(1/1.5);draw();drawMinimap();};
 document.getElementById('zf').onclick=function(){fit();drawMinimap();};
 document.getElementById('zr').onclick=function(){fit();drawMinimap();};
 document.getElementById('bbc').onchange=function(){showBB=this.checked;draw();};
@@ -60,7 +60,7 @@ window.addEventListener('mousemove',function(e){
 window.addEventListener('mouseup',function(){mmDrag=false;});
 mmCanvas.addEventListener('wheel',function(e){
   e.preventDefault();
-  var zf=e.deltaY<0?1.3:1/1.3;sc*=zf;sc=Math.max(50/(TD||1e-3),Math.min(sc,1e7));
+  var zf=e.deltaY<0?1.3:1/1.3;zoomAtCenter(zf);
   draw();drawMinimap();
 },{passive:false});
 
@@ -73,16 +73,16 @@ function scrollMinimapToMouse(e){
   // Align viewport CENTER to mouse, not left edge
   var viewCenter=frac*TD;
   ox=viewCenter-vsWidth/2;
-  ox=Math.max(0,Math.min(TD-vsWidth,ox));
+  clampView();
   draw();drawMinimap();
 }
 
 /* ── Helpers ──────────────────────────────────────────────────────────── */
-function fit(){var w=mc.width/(window.devicePixelRatio||1);sc=(w-M.l-M.r)/(TD||1e-3);ox=0;draw();drawMinimap();}
+function fit(){var w=mc.width/(window.devicePixelRatio||1);sc=(w-M.l-M.r)/(TD||1e-3);ox=0;clampView();draw();drawMinimap();}
 function nice(r){var ms=[1,2,5,10,20,50,100,200,500,1000,2000,5000,10000,20000,50000];
   for(var i=0;i<ms.length;i++){var b=Math.pow(10,Math.floor(Math.log10(r)));if(ms[i]*b>=r)return ms[i]*b}return 1000*Math.pow(10,Math.floor(Math.log10(r)))}
 function fmtT(v){if(v>=1)return v.toFixed(3);if(v>=0.001)return v.toFixed(3);return v.toExponential(2)}
 function fmtAmp(v){if(v>=1e6)return(v/1e6).toFixed(1)+'M';if(v>=1e3)return(v/1e3).toFixed(1)+'k';if(v>=1)return v.toFixed(1);return v.toFixed(2)}
 function fmtG(g){var a=gradConv(g.a||0);return a.toFixed(1)+' '+gradUnitStr()+' ('+g.ty+')';}
-new MutationObserver(function(){draw();drawMinimap();}).observe(document.body,{attributes:true,attributeFilter:['class']});
+new MutationObserver(function(){mmCache=null;draw();drawKs();drawMinimap();}).observe(document.body,{attributes:true,attributeFilter:['class']});
 rs();
