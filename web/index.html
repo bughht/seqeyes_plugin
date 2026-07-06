@@ -73,7 +73,7 @@ canvas{display:block}
   <img src="logo.svg" alt="SeqEyes-Online" style="width:200px;height:200px;border-radius:12px;box-shadow:0 4px 16px rgba(0,0,0,.15)">
   <h1>SeqEyes</h1>
   <p>Pulseq MRI Sequence Viewer</p>
-  <button id="splashOpen">📂 Open .seq File</button>
+  <button id="splashOpen">Open .seq File</button>
   <div class="drop" id="dropZone">Or drag &amp; drop a <code>.seq</code> file here</div>
   <p style="font-size:11px;color:var(--lb);margin-top:8px">
     Try with example files from <a href="https://github.com/pulseq/pulseq" target="_blank" style="color:var(--adc)">pulseq/pulseq</a>
@@ -86,7 +86,7 @@ canvas{display:block}
      ═══════════════════════════════════════════════════════════════ -->
 <div id="tb">
 <img src="logo.png" alt="SeqEyes" style="width:18px;height:18px;border-radius:3px;vertical-align:middle" title="SeqEyes">
-<button id="openBtn" title="Open another .seq file">📂 Open</button><div class="sep"></div>
+<button id="openBtn" title="Open another .seq file">Open</button><div class="sep"></div>
 <button id="zi" title="Zoom In (scroll wheel)">+</button>
 <button id="zo" title="Zoom Out">−</button>
 <button id="zf" title="Fit All">Fit</button>
@@ -409,6 +409,11 @@ function loadSequenceText(text,fileName){
     alert('Error loading sequence: '+(err.message||String(err)));
   }
 }
+
+// Expose globally so MATLAB can call it via executeJS()
+window._seqeyesLoadFile = function(text, fileName) {
+  loadSequenceText(text, fileName);
+};
 
 function showProgress(phase,percent,text){
   var o=document.getElementById('poverlay'),f=document.getElementById('pfill2'),
@@ -956,6 +961,15 @@ function parseCSSColor(c){
 
 /* ── Init ── */
 rs();
+
+// Auto-load if data was pre-embedded by MATLAB (bypasses bridge entirely)
+if (window._SEQEYES_PRELOAD && window._SEQEYES_PRELOAD.text) {
+  var p = window._SEQEYES_PRELOAD;
+  window._SEQEYES_PRELOAD = null;
+  // Hide splash immediately to avoid flash
+  if (splash) splash.style.display = 'none';
+  setTimeout(function() { loadSequenceText(p.text, p.fileName); }, 50);
+}
 })();
 </script>
 </body>

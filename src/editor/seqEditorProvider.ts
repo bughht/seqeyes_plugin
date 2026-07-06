@@ -14,13 +14,11 @@
 
 import * as vscode from 'vscode';
 import { parseSequenceText } from '../pulseq/reader';
-import { decodeAllBlocks, getTotalDuration } from '../pulseq/decoder';
+import { decodeAllBlocks } from '../pulseq/decoder';
 import { calculateKspace, type KSpaceData } from '../pulseq/kspace';
 import { detectSequenceTiming } from '../pulseq/trdetect';
 import { getWebviewContent } from './webviewContent';
 import type { DecodedBlock, DecodedGradWaveform } from '../pulseq/types';
-
-declare var console: any;
 
 // ─── Constants ────────────────────────────────────────────────────────────
 

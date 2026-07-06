@@ -27,14 +27,14 @@ export interface KSpaceData {
 /**
  * Options for k-space trajectory calculation.
  *
- * `maxGridPoints` is a hard safety cap — if the integration grid would
+ * `maxGridPoints` is an optional hard safety cap — if the integration grid would
  * exceed this many points the function returns null rather than risk an
- * out‑of‑memory crash.  The uniform raster grid ALWAYS uses the native
+ * out-of-memory crash.  The uniform raster grid ALWAYS uses the native
  * gradient raster for integration accuracy; the cap only applies as a
  * last‑resort safety check after all essential points are collected.
  */
 export interface KSpaceOptions {
-    /** Hard cap on integration grid size (default 200 000). */
+    /** Optional hard cap on integration grid size. */
     maxGridPoints?: number;
 }
 
@@ -67,7 +67,9 @@ export function calculateKspace(
         collectBreaks(b.gy, gradBreaks);
         collectBreaks(b.gz, gradBreaks);
         if (b.rf) {
-            const iso = b.rf.startTime + b.rf.duration * 0.5;
+            const iso = Number.isFinite(b.rf.centerTime)
+                ? b.rf.centerTime
+                : b.rf.startTime + b.rf.duration * 0.5;
             const u = b.rf.use || '';
             if (u === 'e' || u === '' || u === 'u') excT.push(iso);
             else if (u === 'r') refT.push(iso);
@@ -106,6 +108,7 @@ export function calculateKspace(
     }
     const N = grid.length;
     if (N < 2) return null;
+    if (_options?.maxGridPoints && N > _options.maxGridPoints) return null;
 
     // ---- Pass 3: evaluate gradient at each grid point ----
     const gx = new Float64Array(N), gy = new Float64Array(N), gz = new Float64Array(N);
@@ -117,9 +120,14 @@ export function calculateKspace(
         const t = grid[i];
         const bi = blockIdx(t, edges);
         if (bi >= 0 && bi < blocks.length) {
-            gx[i] = gradVal(blocks[bi].gx, t);
-            gy[i] = gradVal(blocks[bi].gy, t);
-            gz[i] = gradVal(blocks[bi].gz, t);
+            const block = blocks[bi];
+            const localX = gradVal(block.gx, t);
+            const localY = gradVal(block.gy, t);
+            const localZ = gradVal(block.gz, t);
+            const rotated = rotateGradient(block, localX, localY, localZ);
+            gx[i] = rotated[0];
+            gy[i] = rotated[1];
+            gz[i] = rotated[2];
         }
     }
 
@@ -206,4 +214,37 @@ function interp(d: Float64Array, g: number[], t: number): number {
     const i0=lo-1,i1=lo,dt=g[i1]-g[i0];
     if(dt<=0)return d[i1];
     return d[i0]+(d[i1]-d[i0])*(t-g[i0])/dt;
+}
+
+function rotateGradient(block: DecodedBlock, gx: number, gy: number, gz: number): [number, number, number] {
+    const values = block.rotation?.values;
+    if (!values) return [gx, gy, gz];
+
+    if (values.length === 4) {
+        const [w, x, y, z] = values;
+        const r00 = 1 - 2 * y * y - 2 * z * z;
+        const r01 = 2 * x * y - 2 * w * z;
+        const r02 = 2 * x * z + 2 * w * y;
+        const r10 = 2 * x * y + 2 * w * z;
+        const r11 = 1 - 2 * x * x - 2 * z * z;
+        const r12 = 2 * y * z - 2 * w * x;
+        const r20 = 2 * x * z - 2 * w * y;
+        const r21 = 2 * y * z + 2 * w * x;
+        const r22 = 1 - 2 * x * x - 2 * y * y;
+        return [
+            r00 * gx + r01 * gy + r02 * gz,
+            r10 * gx + r11 * gy + r12 * gz,
+            r20 * gx + r21 * gy + r22 * gz,
+        ];
+    }
+
+    if (values.length === 9) {
+        return [
+            values[0] * gx + values[1] * gy + values[2] * gz,
+            values[3] * gx + values[4] * gy + values[5] * gz,
+            values[6] * gx + values[7] * gy + values[8] * gz,
+        ];
+    }
+
+    return [gx, gy, gz];
 }

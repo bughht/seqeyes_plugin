@@ -2,7 +2,7 @@
   "name": "seqeyes-web",
   "displayName": "SeqEyes",
   "description": "Visualize Pulseq MRI sequences inside VS Code — inspect sequence diagrams, k-space trajectorieswith interactive user interface.",
-  "version": "0.1.4",
+  "version": "0.1.7",
   "publisher": "SeqEyesDeveloper",
   "license": "MIT",
   "icon": "images/logo.png",
@@ -130,8 +130,9 @@
     "compile": "tsc -p ./ && npm run copy-assets",
     "watch": "npm run copy-assets && tsc -watch -p ./",
     "copy-assets": "node -e \"var s='src/editor/webview/assets',d='out/editor/webview/assets',fs=require('fs'),p=require('path');fs.mkdirSync(d,{recursive:true});fs.readdirSync(s).forEach(function(f){fs.copyFileSync(p.join(s,f),p.join(d,f))});console.log('Assets copied to out/');\"",
-    "lint": "eslint src --ext ts",
-    "test": "node ./out/test/runTest.js",
+    "lint": "eslint src web test --ext ts",
+    "test": "vitest run",
+    "check": "npm run compile && npm run lint && npm test && npm run build:web",
     "package": "vsce package",
     "build:web": "npx esbuild web/pulseq-browser.ts --bundle --format=iife --global-name=Pulseq --outfile=web/pulseq-bundle.js --target=es2020 && node -e \"require('fs').copyFileSync('images/logo.png','web/logo.png')\"",
     "predeploy": "npm run build:web"
@@ -145,6 +146,7 @@
     "esbuild": "^0.28.1",
     "eslint": "^8.56.0",
     "sharp": "^0.35.3",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^4.1.10"
   }
 }

@@ -14,8 +14,9 @@
 import type {
     PulseqSequence, DecodedBlock, DecodedRFWaveform, DecodedGradWaveform,
     DecodedADCEvent, DecodedTriggerEvent, DecodedNCOEvent,
-    RFEntry, TrapGradEntry, ArbitraryGradEntry, ADCEntry, ExtensionEntry,
+    RFEntry, TrapGradEntry, ArbitraryGradEntry, ADCEntry, ExtensionEntry, BlockEntry,
 } from './types';
+import { ExtType, VER_PRE_14 } from './types';
 
 // ─── Constants ───────────────────────────────────────────────────────────
 
@@ -92,13 +93,13 @@ export function decodeBlockRange(
     // values are absolute (needed for correct k‑space & visual alignment).
     let cumulative = 0;
     for (let i = 0; i < Math.min(s, totalBlocks); i++) {
-        cumulative += seq.blocks[i].dur * seq.rasterTimes.blockDurationRaster;
+        cumulative += blockDurationSeconds(seq, seq.blocks[i]);
     }
 
     const decoded: DecodedBlock[] = [];
     for (let i = s; i < e; i++) {
         const block = seq.blocks[i];
-        const dur = block.dur * seq.rasterTimes.blockDurationRaster;
+        const dur = blockDurationSeconds(seq, block);
         const db: DecodedBlock = { index: block.num, duration: dur, startTime: cumulative };
 
         if (block.rfId > 0) {
@@ -131,7 +132,7 @@ export function decodeBlockRange(
 export function getTotalDuration(seq: PulseqSequence): number {
     let total = 0;
     for (const block of seq.blocks) {
-        total += block.dur * seq.rasterTimes.blockDurationRaster;
+        total += blockDurationSeconds(seq, block);
     }
     return total;
 }
@@ -144,16 +145,22 @@ export function getBlockStartTime(seq: PulseqSequence, blockIdx: number): number
     let cumulative = 0;
     const n = Math.min(blockIdx, seq.blocks.length);
     for (let i = 0; i < n; i++) {
-        cumulative += seq.blocks[i].dur * seq.rasterTimes.blockDurationRaster;
+        cumulative += blockDurationSeconds(seq, seq.blocks[i]);
     }
     return cumulative;
+}
+
+function blockDurationSeconds(seq: PulseqSequence, block: BlockEntry): number {
+    if (seq.versionCombined < VER_PRE_14) return block.dur * 1e-6;
+    return block.dur * seq.rasterTimes.blockDurationRaster;
 }
 
 // ─── RF decoding ──────────────────────────────────────────────────────────
 
 function decodeRF(seq: PulseqSequence, rf: RFEntry, blockStart: number, _blockDur: number): DecodedRFWaveform {
     const raster = seq.rasterTimes.rfRaster;
-    const rfStart = blockStart + rf.delay * raster;
+    const rfDelay = rf.delay * 1e-6;
+    const rfStart = blockStart + rfDelay;
     const b0 = getB0(seq);
 
     // Effective offsets including PPM contributions (matches SeqEyes PulseqLoader.cpp)
@@ -194,6 +201,9 @@ function decodeRF(seq: PulseqSequence, rf: RFEntry, blockStart: number, _blockDu
     }
 
     const duration = n > 0 ? t[n - 1] - rfStart + raster : 0;
+    const centerTime = rf.center >= 0
+        ? blockStart + rfDelay + rf.center * 1e-6
+        : estimateRfPeakTime(t, amp, rfStart, duration);
 
     // Estimate flip angle to classify RF use when metadata is missing (pre‑v1.5)
     let use = rf.use || '';
@@ -211,6 +221,7 @@ function decodeRF(seq: PulseqSequence, rf: RFEntry, blockStart: number, _blockDu
     return {
         blockIndex: rf.id,
         startTime: rfStart,
+        centerTime,
         duration,
         timePoints: t,
         magnitude: amp,
@@ -307,7 +318,7 @@ function decodeArb(
     if (!shape) return zeroGradient(blockStart, 0, ch);
 
     const raster = seq.rasterTimes.gradientRaster;
-    const delay = arb.delay * raster;
+    const delay = arb.delay * 1e-6;
     const gradStart = blockStart + delay;
     const n = shape.numSamples;
 
@@ -371,10 +382,9 @@ function decodeADC(adc: ADCEntry, blockStart: number, seq: PulseqSequence): Deco
     };
 }
 
-// Cache for decoded trigger/NCO arrays keyed by extension id to avoid
-// repeated .map() calls when many blocks share the same extension.
-const _trigCache = new Map<number, DecodedTriggerEvent[]>();
-const _ncoCache = new Map<number, DecodedNCOEvent[]>();
+// Cache for decoded trigger/NCO payloads keyed by extension-list node id.
+const _trigCache = new Map<number, DecodedTriggerEvent>();
+const _ncoCache = new Map<number, DecodedNCOEvent>();
 
 function decodeExtensions(
     seq: PulseqSequence, ext: ExtensionEntry,
@@ -384,28 +394,75 @@ function decodeExtensions(
     let cur: ExtensionEntry | undefined = ext;
     while (cur && !visited.has(cur.id)) {
         visited.add(cur.id);
-        if (cur.type === 1) {
+        const type = seq.extensionTypes.get(cur.type) ?? ExtType.EXT_UNKNOWN;
+        if (type === ExtType.EXT_TRIGGER) {
             let cached = _trigCache.get(cur.id);
             if (!cached) {
-                cached = seq.triggers.map(t => ({
-                    blockIndex: t.id, startTime: 0,  // startTime filled per-block below
-                    channel: t.channel,
-                    delay: t.delay * 1e-6, duration: t.duration * 1e-6,
-                }));
-                _trigCache.set(cur.id, cached);
+                const trigger = findById(seq.triggers, cur.ref);
+                if (trigger) {
+                    cached = {
+                        blockIndex: trigger.id,
+                        startTime: 0,
+                        channel: trigger.channel,
+                        delay: trigger.delay * 1e-6,
+                        duration: trigger.duration * 1e-6,
+                    };
+                    _trigCache.set(cur.id, cached);
+                }
             }
-            db.triggers = cached.map(t => ({ ...t, startTime: blockStart }));
-        } else if (cur.type === 2) {
+            if (cached) {
+                if (!db.triggers) db.triggers = [];
+                db.triggers.push({ ...cached, startTime: blockStart });
+            }
+        } else if (type === ExtType.EXT_NCO) {
             let cached = _ncoCache.get(cur.id);
             if (!cached) {
-                cached = seq.ncos.map(n => ({
-                    blockIndex: n.id, startTime: 0,
-                    channel: n.channel, frequency: n.frequency, phase: n.phase,
-                    delay: n.delay * 1e-6, duration: n.duration * 1e-6,
-                }));
-                _ncoCache.set(cur.id, cached);
+                const nco = findById(seq.ncos, cur.ref);
+                if (nco) {
+                    cached = {
+                        blockIndex: nco.id,
+                        startTime: 0,
+                        channel: nco.channel,
+                        frequency: nco.frequency,
+                        phase: nco.phase,
+                        delay: nco.delay * 1e-6,
+                        duration: nco.duration * 1e-6,
+                    };
+                    _ncoCache.set(cur.id, cached);
+                }
             }
-            db.nco = cached.map(n => ({ ...n, startTime: blockStart }));
+            if (cached) {
+                if (!db.nco) db.nco = [];
+                db.nco.push({ ...cached, startTime: blockStart });
+            }
+        } else if (type === ExtType.EXT_ROTATION) {
+            const rotation = findById(seq.rotations, cur.ref);
+            if (rotation) db.rotation = { id: rotation.id, values: [...rotation.values] };
+        } else if (type === ExtType.EXT_LABELSET) {
+            const label = findById(seq.labelSets, cur.ref);
+            if (label) {
+                if (!db.labelSets) db.labelSets = [];
+                db.labelSets.push({ ...label });
+            }
+        } else if (type === ExtType.EXT_LABELINC) {
+            const label = findById(seq.labelIncs, cur.ref);
+            if (label) {
+                if (!db.labelIncs) db.labelIncs = [];
+                db.labelIncs.push({ ...label });
+            }
+        } else if (type === ExtType.EXT_DELAY) {
+            const delay = findById(seq.softDelays, cur.ref);
+            if (delay) db.softDelay = { ...delay };
+        } else if (type === ExtType.EXT_RF_SHIM) {
+            const shim = findById(seq.rfShims, cur.ref);
+            if (shim) {
+                db.rfShim = {
+                    id: shim.id,
+                    nChannels: shim.nChannels,
+                    amplitudes: [...shim.amplitudes],
+                    phases: [...shim.phases],
+                };
+            }
         }
         cur = cur.nextId > 0 ? seq.extensions.get(cur.nextId) : undefined;
     }
@@ -417,4 +474,27 @@ function makeConstant(n: number, value: number): Float64Array {
     const a = new Float64Array(Math.max(n, 2));
     a.fill(value);
     return a;
+}
+
+function estimateRfPeakTime(
+    timePoints: Float64Array,
+    magnitude: Float64Array,
+    startTime: number,
+    duration: number,
+): number {
+    if (!timePoints.length || !magnitude.length) return startTime + duration * 0.5;
+    let peakIdx = 0;
+    let peak = Math.abs(magnitude[0]);
+    for (let i = 1; i < magnitude.length; i++) {
+        const v = Math.abs(magnitude[i]);
+        if (v > peak) {
+            peak = v;
+            peakIdx = i;
+        }
+    }
+    return timePoints[Math.min(peakIdx, timePoints.length - 1)];
+}
+
+function findById<T extends { id: number }>(items: T[], id: number): T | undefined {
+    return items.find(item => item.id === id);
 }
