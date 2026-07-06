@@ -1,6 +1,6 @@
 # SeqEyes Online — Pulseq MRI Sequence Viewer
 
-**Visualize [Pulseq](https://github.com/pulseq/pulseq) MRI sequences — right in your browser or inside VS Code.** Inspect RF pulses, gradients, ADC readouts, and triggers with interactive zoom & pan. Includes a GPU‑accelerated 3D k‑space viewer with camera presets. Inspired by [SeqEyes](https://github.com/xingwangyong/seqeyes).
+**Visualize [Pulseq](https://github.com/pulseq/pulseq) MRI sequences — in your browser, MATLAB, or VS Code.** Inspect RF pulses, gradients, ADC readouts, and triggers with interactive zoom & pan. Includes a GPU‑accelerated 3D k‑space viewer with camera presets. Inspired by [SeqEyes](https://github.com/xingwangyong/seqeyes).
 
 <p align="center">
   <a href="https://bughht.github.io/seqeyes_plugin/"><strong>🌐 Try it Online — No Install Required</strong></a>
@@ -51,6 +51,27 @@ code --install-extension seqeyes-web-*.vsix --force
 ```
 
 Or press **F5** to launch Extension Development Host.
+
+## 🧪 MATLAB Toolbox
+
+Open `.seq` files directly inside MATLAB — double‑click in the Current Folder browser or call `seqeyes()`.
+
+### Install
+
+Download from [GitHub Releases](https://github.com/bughht/seqeyes_plugin/releases) and double‑click the `.mltbx`, or run:
+
+```matlab
+matlab.addons.toolbox.installToolbox('seqeyes-0.1.7.mltbx')
+```
+
+### Usage
+
+```matlab
+seqeyes('spiral_inout.seq')   % open a sequence
+open('spiral_inout.seq')      % or double‑click in Current Folder
+```
+
+All the same features as the browser & VS Code versions — 7 channels, k‑space viewer, themes, tooltips — rendered inside a native MATLAB figure. Requires R2022a+.
 
 ## Features
 
