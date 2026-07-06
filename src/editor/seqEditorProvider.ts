@@ -96,6 +96,9 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
                 blocks: serialized,
                 totalDuration: totalDur,
                 gradRaster: seq.rasterTimes.gradientRaster,
+                rfRaster: seq.rasterTimes.rfRaster,
+                adcRaster: seq.rasterTimes.adcRaster,
+                blockRaster: seq.rasterTimes.blockDurationRaster,
                 kspace: ks ? serializeKSpace(ks) : null,
                 timing: {
                     trTimeSec: timing.trTimeSec,

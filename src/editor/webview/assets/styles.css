@@ -37,7 +37,7 @@ body{font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background
 #tb .li{cursor:pointer;display:flex;align-items:center;gap:3px;padding:1px 4px;border-radius:3px;opacity:1;transition:opacity .15s}
 #tb .li.off{opacity:.30}
 #tb .ld{width:10px;height:10px;border-radius:2px;border:1px solid rgba(0,0,0,.15)}
-#tb .cur{font:11px monospace;color:var(--cr);margin-left:auto;min-width:180px;text-align:right}
+#tb .cur{font:11px monospace;color:var(--cr);margin-left:auto;min-width:300px;text-align:right;white-space:nowrap}
 #tb .ulbl{font-size:10px;color:var(--lb);margin:0 1px}
 #cc{flex:1;overflow:hidden;position:relative;cursor:crosshair}
 #cc.pan{cursor:grabbing}
