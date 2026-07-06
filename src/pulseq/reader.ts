@@ -18,9 +18,7 @@
 
 import { decompressShape } from './decompressor';
 import type {
-    PulseqSequence, BlockEntry, RFEntry, ArbitraryGradEntry,
-    TrapGradEntry, ADCEntry, ExtensionEntry, TriggerSpec, NCOSpec,
-    RotationSpec, LabelSetSpec, LabelIncSpec, SoftDelaySpec, RFShimSpec,
+    PulseqSequence, LabelSetSpec, LabelIncSpec,
 } from './types';
 import {
     ExtType, makeVersionCombined, VER_PRE_14, VER_V15, VER_V15001,
