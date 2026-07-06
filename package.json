@@ -133,6 +133,7 @@
     "lint": "eslint src web test --ext ts",
     "test": "vitest run",
     "check": "npm run compile && npm run lint && npm test && npm run build:web",
+    "export:kspace": "node out/cli/exportKspace.js",
     "package": "vsce package",
     "build:web": "npx esbuild web/pulseq-browser.ts --bundle --format=iife --global-name=Pulseq --outfile=web/pulseq-bundle.js --target=es2020 && node -e \"require('fs').copyFileSync('images/logo.png','web/logo.png')\"",
     "predeploy": "npm run build:web"

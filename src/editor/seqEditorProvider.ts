@@ -76,6 +76,8 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
                 blocks,
                 seq.rasterTimes.gradientRaster,
                 totalDur,
+                0,
+                { rfRaster: seq.rasterTimes.rfRaster },
             );
 
             postProgress('serialize', 85, 'Preparing data for display\u2026');
