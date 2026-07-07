@@ -44,7 +44,9 @@ async function run() {
     const trajectoryText = await readText(vscode.Uri.parse(result.ktrajAdcUri));
     const metadataText = await readText(vscode.Uri.parse(result.metadataUri));
     const metadata = JSON.parse(metadataText);
-    assert.match(trajectoryText, /^# SeqEyes k-space trajectory/m);
+    const trajectoryLines = trajectoryText.trim().split(/\r?\n/);
+    assert.equal(trajectoryLines.length, result.adcSampleCount);
+    assert.match(trajectoryLines[0], /^[-+0-9.eE]+\s+[-+0-9.eE]+\s+[-+0-9.eE]+$/);
     assert.equal(metadata.adcSampleCount, result.adcSampleCount);
     assert.equal(metadata.sequenceName, 'spiral_inout.seq');
   });
