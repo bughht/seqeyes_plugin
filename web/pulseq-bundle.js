@@ -36,7 +36,7 @@ var Pulseq = (() => {
     name: "seqeyes-web",
     displayName: "SeqEyes",
     description: "Visualize Pulseq MRI sequences inside VS Code \u2014 inspect sequence diagrams, k-space trajectorieswith interactive user interface.",
-    version: "0.1.9",
+    version: "0.1.10",
     publisher: "SeqEyesDeveloper",
     license: "MIT",
     icon: "images/logo.png",
