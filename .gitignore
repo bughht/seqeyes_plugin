@@ -9,5 +9,6 @@ dist/
 .vscode-test/
 test-results/
 playwright-report/
+performance-results/
 matlab/pulseq-bundle.js
 .DS_Store
