@@ -4,9 +4,9 @@
  *
  * Built via:  npm run build:web
  */
-import pkg from '../package.json';
+import { version } from '../package.json';
 
-export const PACKAGE_VERSION: string = pkg.version;
+export const PACKAGE_VERSION: string = version;
 export { parseSequenceText } from '../src/pulseq/reader';
 export { decodeAllBlocks, getTotalDuration } from '../src/pulseq/decoder';
 export { calculateKspace } from '../src/pulseq/kspace';
