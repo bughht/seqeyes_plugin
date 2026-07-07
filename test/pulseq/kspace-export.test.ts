@@ -10,6 +10,7 @@ import {
   formatFloat,
   formatTrajectoryText,
 } from '../../src/pulseq/kspaceExport';
+import { exportKspaceArtifacts as exportBrowserSafeKspaceArtifacts } from '../../src/pulseq/kspaceExportArtifacts';
 
 const fixturePath = join(__dirname, '..', 'seq', 'spiral_inout.seq');
 
@@ -83,6 +84,18 @@ describe('k-space export helper', () => {
     expect(artifacts.metadata.adcSampleCount).toBeGreaterThan(0);
     expect(artifacts.metadata.trajectorySampleCount).toBeGreaterThan(0);
     expect(rows[0].trim().split(/\s+/)).toHaveLength(3);
+  });
+
+  it('allows browser-safe artifact creation with caller-provided sequence hash', () => {
+    const artifacts = exportBrowserSafeKspaceArtifacts(tinyAdcSequence(), 'tiny.seq', {
+      packageVersion: 'web-test',
+      sequenceSha256: 'abc123',
+    });
+
+    expect(artifacts.metadata.packageVersion).toBe('web-test');
+    expect(artifacts.metadata.sequenceSha256).toBe('abc123');
+    expect(artifacts.metadata.files).toEqual({ ktrajAdc: 'ktraj_adc.txt' });
+    expect(artifacts.ktrajAdcText.trim().split('\n')).toHaveLength(artifacts.metadata.adcSampleCount);
   });
 
   it('writes ktraj_adc, optional full ktraj, and metadata files', () => {
