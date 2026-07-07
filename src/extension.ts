@@ -9,7 +9,12 @@
  */
 
 import * as vscode from 'vscode';
-import { SeqEditorProvider } from './editor/seqEditorProvider';
+import {
+    SeqEditorProvider,
+    exportKspaceToDirectoryForTest,
+    getSeqEyesDiagnosticState,
+    resetSeqEyesDiagnosticState,
+} from './editor/seqEditorProvider';
 
 /** Called when the extension is activated. */
 export function activate(context: vscode.ExtensionContext): void {
@@ -41,6 +46,21 @@ export function activate(context: vscode.ExtensionContext): void {
     status.tooltip = 'SeqEyes Plugin — MRI Sequence Viewer';
     status.show();
     context.subscriptions.push(status);
+
+    if (process.env.SEQEYES_TEST_MODE === '1') {
+        context.subscriptions.push(
+            vscode.commands.registerCommand('seqeyes.test.getState', () => getSeqEyesDiagnosticState()),
+            vscode.commands.registerCommand('seqeyes.test.resetState', () => resetSeqEyesDiagnosticState()),
+            vscode.commands.registerCommand(
+                'seqeyes.test.exportKspace',
+                async (sourceUri: vscode.Uri, outputDir: vscode.Uri) => {
+                    const pkg = context.extension.packageJSON as { version?: unknown };
+                    const packageVersion = typeof pkg.version === 'string' ? pkg.version : 'unknown';
+                    return await exportKspaceToDirectoryForTest(sourceUri, outputDir, packageVersion);
+                },
+            ),
+        );
+    }
 
     console.log('SeqEyes Plugin activated');
 }

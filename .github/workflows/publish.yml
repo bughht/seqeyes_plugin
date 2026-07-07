@@ -31,6 +31,9 @@ jobs:
       - name: Validate extension and web bundle
         run: npm run check
 
+      - name: Package VS Code extension (.vsix)
+        run: npm run package:vsix
+
       - name: Package MATLAB toolbox (.mltbx)
         shell: bash
         run: |
