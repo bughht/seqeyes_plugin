@@ -132,6 +132,8 @@
     "copy-assets": "node -e \"var s='src/editor/webview/assets',d='out/editor/webview/assets',fs=require('fs'),p=require('path');fs.mkdirSync(d,{recursive:true});fs.readdirSync(s).forEach(function(f){fs.copyFileSync(p.join(s,f),p.join(d,f))});console.log('Assets copied to out/');\"",
     "lint": "eslint src web test --ext ts",
     "test": "vitest run",
+    "test:browser": "playwright test",
+    "check:browser": "npm run build:web && npm run test:browser",
     "check": "npm run compile && npm run lint && npm test && npm run build:web",
     "export:kspace": "node out/cli/exportKspace.js",
     "package": "vsce package",
@@ -139,6 +141,7 @@
     "predeploy": "npm run build:web"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.19.0",

@@ -7,5 +7,7 @@ dist/
 *.vsix
 *.mltbx
 .vscode-test/
+test-results/
+playwright-report/
 matlab/pulseq-bundle.js
 .DS_Store
