@@ -32,6 +32,7 @@ body{font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background
 #tb{display:flex;align-items:center;gap:6px;padding:5px 10px;background:var(--bg);border-bottom:1px solid var(--gr);font-size:11px;flex-shrink:0;flex-wrap:wrap}
 #tb button{background:var(--gr);border:1px solid var(--ax);color:var(--fg);padding:2px 7px;border-radius:3px;cursor:pointer;font-size:11px}
 #tb button:hover{opacity:.75}
+#tb button:disabled{opacity:.45;cursor:not-allowed}
 #tb select{background:var(--gr);border:1px solid var(--ax);color:var(--fg);padding:2px 4px;border-radius:3px;font-size:11px;cursor:pointer}
 #tb .sep{width:1px;height:16px;background:var(--ax);margin:0 3px}
 #tb .lg{display:flex;gap:7px;align-items:center;font-size:11px}
@@ -86,7 +87,8 @@ canvas{display:block}
      ═══════════════════════════════════════════════════════════════ -->
 <div id="tb">
 <img src="logo.png" alt="SeqEyes" style="width:18px;height:18px;border-radius:3px;vertical-align:middle" title="SeqEyes">
-<button id="openBtn" title="Open another .seq file">Open</button><div class="sep"></div>
+<button id="openBtn" title="Open another .seq file">Open</button>
+<button id="exportKspaceBtn" title="Export ADC k-space trajectory and metadata" disabled>Export</button><div class="sep"></div>
 <button id="zi" title="Zoom In (scroll wheel)">+</button>
 <button id="zo" title="Zoom Out">−</button>
 <button id="zf" title="Fit All">Fit</button>
@@ -125,6 +127,7 @@ var cc=document.getElementById('cc'),mc=document.getElementById('mc'),ctx=mc.get
  tt=document.getElementById('tt'),curEl=document.getElementById('cur'),legend=document.getElementById('legend'),
  tuSel=document.getElementById('tu'),guSel=document.getElementById('gu');
 var splash=document.getElementById('splash');
+var exportBtn=document.getElementById('exportKspaceBtn');
 var BL=[],TD=0,GR=1e-5,RR=1e-6,AR=1e-7,BR=1e-5;
 var M={t:8,r:30,b:22,l:92};
 var CH=['RF','\u03c6','Gx','Gy','Gz','ADC','Trig'];
@@ -143,12 +146,14 @@ var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
 var seqTiming=null,blockPos=[];
 var mmCanvas=document.getElementById('mmc'),mmCtx=mmCanvas.getContext('2d');
 var mmCache=null,mmCacheW=0,mmCacheDpr=0,mmDrag=false;
+var currentSequenceText='',currentSequenceName='',exportBusy=false;
 
 /* ── Unit helpers ────────────────────────────────────────────────────── */
 function gradConv(v){if(gradUnit==='mT/m')return v/GAMMA;if(gradUnit==='G/cm')return v/(GAMMA*10);return v;}
 function gradUnitStr(){return gradUnit;}
 function timeConv(t){if(timeUnit==='ms')return t*1e3;if(timeUnit==='us')return t*1e6;return t;}
 function timeUnitStr(){return timeUnit;}
+function setExportButtonEnabled(enabled){if(exportBtn)exportBtn.disabled=!enabled||exportBusy;}
 
 /* ── Legend ──────────────────────────────────────────────────────────── */
 function buildLegend(){
@@ -375,6 +380,9 @@ function serializeGrad(g){
    File loading (standalone — calls Pulseq bundle directly)
    ═══════════════════════════════════════════════════════════════════════ */
 function loadSequenceText(text,fileName){
+  currentSequenceText='';
+  currentSequenceName='';
+  setExportButtonEnabled(false);
   try{
     showProgress('start',0,'Parsing sequence...');
     var seq=Pulseq.parseSequenceText(text);
@@ -413,6 +421,9 @@ function loadSequenceText(text,fileName){
     if(seqTiming&&seqTiming.trTimeSec>0){fitToFirstTR();}else{fit();}
     draw();drawKs();drawMinimap();
     var name=seq.definitionsRaw.get('Name')||fileName||'SeqEyes';
+    currentSequenceText=text;
+    currentSequenceName=fileName||name||'sequence.seq';
+    setExportButtonEnabled(true);
     document.title='SeqEyes: '+name.replace(/\.seq$/i,'');
     if(splash)splash.style.display='none';
   }catch(err){
@@ -434,6 +445,65 @@ function showProgress(phase,percent,text){
   else{f.style.width=(percent||0)+'%';p.textContent=(percent||0)+'%';t.textContent=text||'';}
 }
 
+function waitForPaint(){
+  return new Promise(function(resolve){requestAnimationFrame(function(){setTimeout(resolve,0);});});
+}
+
+async function sha256Hex(text){
+  if(!window.crypto||!window.crypto.subtle||typeof TextEncoder==='undefined')return 'unknown';
+  try{
+    var bytes=new TextEncoder().encode(text);
+    var hash=await window.crypto.subtle.digest('SHA-256',bytes);
+    var arr=Array.from(new Uint8Array(hash));
+    return arr.map(function(b){return b.toString(16).padStart(2,'0');}).join('');
+  }catch(_err){
+    return 'unknown';
+  }
+}
+
+function sanitizeFileStem(name){
+  var cleaned=(name||'sequence').replace(/\.seq$/i,'').replace(/[^A-Za-z0-9._-]+/g,'_').replace(/^_+|_+$/g,'');
+  return cleaned||'sequence';
+}
+
+function downloadTextFile(fileName,text,mimeType){
+  var blob=new Blob([text],{type:mimeType||'text/plain;charset=utf-8'});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a');
+  a.href=url;
+  a.download=fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function(){URL.revokeObjectURL(url);},1000);
+}
+
+async function exportCurrentKspace(){
+  if(!currentSequenceText){alert('Open a .seq file before exporting k-space.');return;}
+  if(exportBusy)return;
+  exportBusy=true;
+  setExportButtonEnabled(true);
+  try{
+    showProgress('export',10,'Exporting ADC k-space trajectory...');
+    await waitForPaint();
+    var sha=await sha256Hex(currentSequenceText);
+    var artifacts=Pulseq.exportKspaceArtifacts(currentSequenceText,currentSequenceName||'sequence.seq',{
+      packageVersion:Pulseq.PACKAGE_VERSION||'web',
+      sequenceSha256:sha
+    });
+    var stem=sanitizeFileStem(currentSequenceName);
+    downloadTextFile(stem+'_ktraj_adc.txt',artifacts.ktrajAdcText,'text/plain;charset=utf-8');
+    downloadTextFile(stem+'_metadata.json',JSON.stringify(artifacts.metadata,null,2)+'\n','application/json;charset=utf-8');
+    showProgress('done',100,'Exported k-space');
+  }catch(err){
+    alert('Error exporting k-space: '+(err.message||String(err)));
+    showProgress('done',100,'Ready');
+  }finally{
+    exportBusy=false;
+    setExportButtonEnabled(!!currentSequenceText);
+  }
+}
+
 function handleFile(file){
   if(!file)return;
   var reader=new FileReader();
@@ -444,6 +514,7 @@ function handleFile(file){
 /* ── Splash screen handlers ───────────────────────────────────────────── */
 document.getElementById('splashOpen').onclick=function(){document.getElementById('fileInput').click();};
 document.getElementById('openBtn').onclick=function(){document.getElementById('fileInput').click();};
+document.getElementById('exportKspaceBtn').onclick=function(){void exportCurrentKspace();};
 
 /* ── File input ──────────────────────────────────────────────────────── */
 document.getElementById('fileInput').onchange=function(){

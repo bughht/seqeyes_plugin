@@ -21,12 +21,170 @@ var Pulseq = (() => {
   // web/pulseq-browser.ts
   var pulseq_browser_exports = {};
   __export(pulseq_browser_exports, {
+    PACKAGE_VERSION: () => PACKAGE_VERSION,
     calculateKspace: () => calculateKspace,
     decodeAllBlocks: () => decodeAllBlocks,
     detectSequenceTiming: () => detectSequenceTiming,
+    exportKspaceArtifacts: () => exportKspaceArtifacts,
+    formatTrajectoryText: () => formatTrajectoryText,
     getTotalDuration: () => getTotalDuration,
     parseSequenceText: () => parseSequenceText
   });
+
+  // package.json
+  var package_default = {
+    name: "seqeyes-web",
+    displayName: "SeqEyes",
+    description: "Visualize Pulseq MRI sequences inside VS Code \u2014 inspect sequence diagrams, k-space trajectorieswith interactive user interface.",
+    version: "0.1.9",
+    publisher: "SeqEyesDeveloper",
+    license: "MIT",
+    icon: "images/logo.png",
+    repository: {
+      type: "git",
+      url: "https://github.com/bughht/seqeyes_plugin"
+    },
+    engines: {
+      vscode: "^1.85.0"
+    },
+    categories: [
+      "Visualization",
+      "Other"
+    ],
+    keywords: [
+      "pulseq",
+      "mri",
+      "sequence",
+      "visualization",
+      "k-space",
+      "gradient",
+      "seqeyes"
+    ],
+    activationEvents: [
+      "onCustomEditor:seqeyes.sequenceViewer"
+    ],
+    main: "./out/extension.js",
+    contributes: {
+      customEditors: [
+        {
+          viewType: "seqeyes.sequenceViewer",
+          displayName: "SeqEyes Sequence Viewer",
+          selector: [
+            {
+              filenamePattern: "*.seq"
+            }
+          ]
+        }
+      ],
+      commands: [
+        {
+          command: "seqeyes.helloWorld",
+          title: "SeqEyes: Hello World"
+        },
+        {
+          command: "seqeyes.openSequenceViewer",
+          title: "SeqEyes: Open Sequence Viewer",
+          icon: "$(graph)"
+        }
+      ],
+      menus: {
+        "explorer/context": [
+          {
+            command: "seqeyes.openSequenceViewer",
+            when: "resourceExtname == .seq",
+            group: "navigation"
+          }
+        ],
+        "editor/title": [
+          {
+            command: "seqeyes.openSequenceViewer",
+            when: "resourceExtname == .seq",
+            group: "navigation"
+          }
+        ]
+      },
+      configuration: {
+        title: "SeqEyes Plugin",
+        properties: {
+          "seqeyes.rfColor": {
+            type: "string",
+            default: "#e6194b",
+            description: "Color for RF waveform in sequence diagram."
+          },
+          "seqeyes.gxColor": {
+            type: "string",
+            default: "#3cb44b",
+            description: "Color for Gx gradient."
+          },
+          "seqeyes.gyColor": {
+            type: "string",
+            default: "#4363d8",
+            description: "Color for Gy gradient."
+          },
+          "seqeyes.gzColor": {
+            type: "string",
+            default: "#f58231",
+            description: "Color for Gz gradient."
+          },
+          "seqeyes.adcColor": {
+            type: "string",
+            default: "#42d4f4",
+            description: "Color for ADC readout events."
+          },
+          "seqeyes.backgroundColor": {
+            type: "string",
+            default: "#ffffff",
+            description: "Background color for sequence diagrams."
+          },
+          "seqeyes.showGrid": {
+            type: "boolean",
+            default: true,
+            description: "Show grid lines in the sequence diagram."
+          },
+          "seqeyes.timeUnit": {
+            type: "string",
+            default: "ms",
+            enum: [
+              "us",
+              "ms",
+              "s"
+            ],
+            description: "Time unit for axis labels."
+          },
+          "seqeyes.maxBlocksForFullRender": {
+            type: "number",
+            default: 5e3,
+            description: "Maximum number of blocks to render in full detail before switching to simplified view."
+          }
+        }
+      }
+    },
+    scripts: {
+      "vscode:prepublish": "npm run compile",
+      compile: "tsc -p ./ && npm run copy-assets",
+      watch: "npm run copy-assets && tsc -watch -p ./",
+      "copy-assets": `node -e "var s='src/editor/webview/assets',d='out/editor/webview/assets',fs=require('fs'),p=require('path');fs.mkdirSync(d,{recursive:true});fs.readdirSync(s).forEach(function(f){fs.copyFileSync(p.join(s,f),p.join(d,f))});console.log('Assets copied to out/');"`,
+      lint: "eslint src web test --ext ts",
+      test: "vitest run",
+      check: "npm run compile && npm run lint && npm test && npm run build:web",
+      "export:kspace": "node out/cli/exportKspace.js",
+      package: "vsce package",
+      "build:web": `npx esbuild web/pulseq-browser.ts --bundle --format=iife --global-name=Pulseq --outfile=web/pulseq-bundle.js --target=es2020 && node -e "require('fs').copyFileSync('images/logo.png','web/logo.png')"`,
+      predeploy: "npm run build:web"
+    },
+    devDependencies: {
+      "@types/node": "^20.11.0",
+      "@types/vscode": "^1.85.0",
+      "@typescript-eslint/eslint-plugin": "^6.19.0",
+      "@typescript-eslint/parser": "^6.19.0",
+      "@vscode/vsce": "^2.22.0",
+      esbuild: "^0.28.1",
+      eslint: "^8.56.0",
+      sharp: "^0.35.3",
+      typescript: "^5.3.3",
+      vitest: "^4.1.10"
+    }
+  };
 
   // src/pulseq/decompressor.ts
   function decompressShape(compressed, numSamples) {
@@ -1588,5 +1746,101 @@ var Pulseq = (() => {
   function niceRound(value, base) {
     return Math.round(value / base) * base;
   }
+
+  // src/pulseq/kspaceExportArtifacts.ts
+  function exportKspaceArtifacts(sequenceText, sequenceName, options = {}) {
+    const seq = parseSequenceText(sequenceText);
+    const decoded = decodeAllBlocks(seq);
+    const totalDuration = getTotalDuration(seq);
+    const gradientSupport = options.gradientSupport ?? "all";
+    const kspace = calculateKspace(
+      decoded,
+      seq.rasterTimes.gradientRaster,
+      totalDuration,
+      0,
+      { maxGridPoints: options.maxGridPoints, rfRaster: seq.rasterTimes.rfRaster, gradientSupport }
+    );
+    if (!kspace) {
+      throw new Error("Unable to calculate k-space trajectory for sequence");
+    }
+    const metadata = createMetadata(
+      seq,
+      kspace,
+      sequenceName,
+      options.sequenceSha256 ?? "unknown",
+      options.packageVersion ?? "unknown",
+      !!options.includeFullTrajectory,
+      totalDuration,
+      gradientSupport
+    );
+    return {
+      ktrajAdcText: formatTrajectoryText(kspace.ktraj_adc),
+      ktrajText: options.includeFullTrajectory ? formatTrajectoryText(kspace.ktraj) : void 0,
+      metadata
+    };
+  }
+  function formatTrajectoryText(series) {
+    assertThreeEqualLengthSeries(series);
+    const n = series[0].length;
+    if (n === 0) return "";
+    const rows = [];
+    for (let i = 0; i < n; i++) {
+      rows.push(`${formatFloat(series[0][i])} ${formatFloat(series[1][i])} ${formatFloat(series[2][i])}`);
+    }
+    return `${rows.join("\n")}
+`;
+  }
+  function formatFloat(value) {
+    if (Number.isNaN(value)) return "NaN";
+    if (!Number.isFinite(value)) return value > 0 ? "Infinity" : "-Infinity";
+    const normalized = Object.is(value, -0) ? 0 : value;
+    return normalized.toExponential(12).replace(/e([+-])(\d+)$/, (_match, sign, exponent) => `e${sign}${exponent.padStart(2, "0")}`);
+  }
+  function createMetadata(seq, kspace, sequenceName, sequenceSha256, packageVersion, includeFullTrajectory, totalDurationSec, gradientSupport) {
+    return {
+      schemaVersion: 1,
+      sequenceName,
+      sequenceSha256,
+      packageVersion,
+      pulseqVersion: {
+        major: seq.version.major,
+        minor: seq.version.minor,
+        revision: seq.version.revision,
+        combined: seq.versionCombined
+      },
+      blockCount: seq.blocks.length,
+      rasterTimes: {
+        blockDuration: seq.rasterTimes.blockDurationRaster,
+        gradient: seq.rasterTimes.gradientRaster,
+        rf: seq.rasterTimes.rfRaster,
+        adc: seq.rasterTimes.adcRaster
+      },
+      totalDurationSec,
+      adcSampleCount: kspace.t_adc.length,
+      trajectorySampleCount: kspace.t_ktraj.length,
+      units: {
+        trajectory: "1/m",
+        time: "s",
+        gradient: "Hz/m",
+        convention: "Pulseq gradient integral without 2*pi factor"
+      },
+      calculation: {
+        gradientSupport
+      },
+      files: includeFullTrajectory ? { ktrajAdc: "ktraj_adc.txt", ktraj: "ktraj.txt" } : { ktrajAdc: "ktraj_adc.txt" }
+    };
+  }
+  function assertThreeEqualLengthSeries(series) {
+    if (series.length !== 3) {
+      throw new Error(`Expected three trajectory axes, received ${series.length}`);
+    }
+    const n = series[0].length;
+    if (series[1].length !== n || series[2].length !== n) {
+      throw new Error("Trajectory axes have mismatched sample counts");
+    }
+  }
+
+  // web/pulseq-browser.ts
+  var PACKAGE_VERSION = package_default.version;
   return __toCommonJS(pulseq_browser_exports);
 })();

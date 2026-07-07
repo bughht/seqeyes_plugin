@@ -16,6 +16,7 @@ import * as vscode from 'vscode';
 import { parseSequenceText } from '../pulseq/reader';
 import { decodeAllBlocks } from '../pulseq/decoder';
 import { calculateKspace, type KSpaceData } from '../pulseq/kspace';
+import { exportKspaceArtifacts } from '../pulseq/kspaceExport';
 import { detectSequenceTiming } from '../pulseq/trdetect';
 import { getWebviewContent } from './webviewContent';
 import type { DecodedBlock, DecodedGradWaveform } from '../pulseq/types';
@@ -48,15 +49,17 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
     ): Promise<void> {
         panel.webview.options = { enableScripts: true };
         panel.webview.html = this._loadingHtml();
+        let activeUri = doc.uri;
 
         // ── Core: parse, decode, compute k‑space, send ──
         const sendSequenceData = async (uri: vscode.Uri) => {
+            activeUri = uri;
             const postProgress = (phase: string, percent: number, text: string) => {
                 panel.webview.postMessage({ type: 'progress', phase, percent, text });
             };
 
             postProgress('start', 0, 'Reading file\u2026');
-            const text = (await vscode.workspace.fs.readFile(uri)).toString();
+            const text = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
 
             postProgress('parse', 5, 'Parsing Pulseq sequence\u2026');
             const seq = parseSequenceText(text);
@@ -118,7 +121,7 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
 
         // ── Initial load: validate, set full UI, show progress, then send data ──
         try {
-            parseSequenceText((await vscode.workspace.fs.readFile(doc.uri)).toString());
+            parseSequenceText(Buffer.from(await vscode.workspace.fs.readFile(doc.uri)).toString('utf8'));
             panel.webview.html = getWebviewContent(0);
             // Give the webview a moment to parse its new HTML, then start progress
             panel.webview.postMessage({ type: 'progress', phase: 'start', percent: 0, text: 'Preparing\u2026' });
@@ -147,8 +150,49 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
                         );
                     }
                 }
+            } else if (msg.command === 'exportKspace') {
+                await this._exportKspace(activeUri);
             }
         });
+    }
+
+    private async _exportKspace(uri: vscode.Uri): Promise<void> {
+        try {
+            const sequenceText = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
+            const sequenceName = uriFileName(uri);
+            const defaultStem = sanitizeFileStem(sequenceName.replace(/\.seq$/i, '') || 'sequence');
+            const saveUri = await vscode.window.showSaveDialog({
+                defaultUri: siblingUri(uri, `${defaultStem}_ktraj_adc.txt`),
+                filters: { 'Text': ['txt'] },
+                title: 'Export ADC K-Space Trajectory',
+            });
+            if (!saveUri) return;
+
+            const artifacts = exportKspaceArtifacts(sequenceText, sequenceName, {
+                packageVersion: this._packageVersion(),
+            });
+            await vscode.workspace.fs.writeFile(saveUri, Buffer.from(artifacts.ktrajAdcText, 'utf8'));
+
+            const outputStem = sanitizeFileStem(uriFileName(saveUri).replace(/\.[^.]*$/i, '').replace(/_?ktraj_adc$/i, ''));
+            const metadataUri = siblingUri(saveUri, `${outputStem || defaultStem}_metadata.json`);
+            await vscode.workspace.fs.writeFile(
+                metadataUri,
+                Buffer.from(`${JSON.stringify(artifacts.metadata, null, 2)}\n`, 'utf8'),
+            );
+
+            vscode.window.showInformationMessage(
+                `Exported k-space trajectory (${artifacts.metadata.adcSampleCount} ADC samples) and metadata.`
+            );
+        } catch (err) {
+            vscode.window.showErrorMessage(
+                'Failed to export k-space trajectory: ' + (err instanceof Error ? err.message : String(err))
+            );
+        }
+    }
+
+    private _packageVersion(): string {
+        const pkg = this._ctx.extension.packageJSON as { version?: unknown };
+        return typeof pkg.version === 'string' ? pkg.version : 'unknown';
     }
 
     // ── HTML helpers ─────────────────────────────────────────────────
@@ -170,6 +214,25 @@ body{font-family:sans-serif;display:flex;align-items:center;justify-content:cent
 .e pre{background:#f5f5f5;padding:16px;border-radius:4px;text-align:left;overflow:auto;font-size:12px;color:#333}
 </style></head><body><div class="e"><h2>Parse Error</h2><pre>${msg.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</pre></div></body></html>`;
     }
+}
+
+function uriFileName(uri: vscode.Uri): string {
+    const rawName = uri.path.split('/').pop() || 'sequence.seq';
+    try {
+        return decodeURIComponent(rawName);
+    } catch {
+        return rawName;
+    }
+}
+
+function siblingUri(uri: vscode.Uri, fileName: string): vscode.Uri {
+    const dir = uri.path.replace(/\/[^/]*$/, '');
+    return uri.with({ path: `${dir}/${fileName}` });
+}
+
+function sanitizeFileStem(name: string): string {
+    const cleaned = name.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '');
+    return cleaned || 'sequence';
 }
 
 // ─── Webview serialisation ────────────────────────────────────────────────

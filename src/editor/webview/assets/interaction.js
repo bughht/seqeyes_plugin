@@ -44,6 +44,9 @@ document.getElementById('openBtn').onclick=function(){
   if(vscApi){vscApi.postMessage({command:'openFile'});}
   else{var fi=document.getElementById('fileInput');if(fi)fi.click();}
 };
+document.getElementById('exportKspaceBtn').onclick=function(){
+  if(vscApi){vscApi.postMessage({command:'exportKspace'});}
+};
 document.getElementById('zi').onclick=function(){zoomAtCenter(1.5);draw();drawMinimap();};
 document.getElementById('zo').onclick=function(){zoomAtCenter(1/1.5);draw();drawMinimap();};
 document.getElementById('zf').onclick=function(){fit();drawMinimap();};

@@ -4,9 +4,13 @@
  *
  * Built via:  npm run build:web
  */
+import pkg from '../package.json';
+
+export const PACKAGE_VERSION: string = pkg.version;
 export { parseSequenceText } from '../src/pulseq/reader';
 export { decodeAllBlocks, getTotalDuration } from '../src/pulseq/decoder';
 export { calculateKspace } from '../src/pulseq/kspace';
 export { detectSequenceTiming } from '../src/pulseq/trdetect';
+export { exportKspaceArtifacts, formatTrajectoryText } from '../src/pulseq/kspaceExportArtifacts';
 export type { KSpaceData } from '../src/pulseq/kspace';
 export type { DecodedBlock, DecodedGradWaveform } from '../src/pulseq/types';

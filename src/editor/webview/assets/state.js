@@ -4,6 +4,7 @@
 var cc=document.getElementById('cc'),mc=document.getElementById('mc'),ctx=mc.getContext('2d'),
  tt=document.getElementById('tt'),curEl=document.getElementById('cur'),legend=document.getElementById('legend'),
  tuSel=document.getElementById('tu'),guSel=document.getElementById('gu');
+var exportBtn=document.getElementById('exportKspaceBtn');
 var BL=[],TD=0,GR=1e-5,RR=1e-6,AR=1e-7,BR=1e-5; // blocks, duration, rasters [s]
 var M={t:8,r:30,b:22,l:92};                // margins
 var CH=['RF','\u03c6','Gx','Gy','Gz','ADC','Trig']; // 7 channels
@@ -52,6 +53,7 @@ function buildLegend(){
 buildLegend();
 tuSel.onchange=function(){timeUnit=tuSel.value;draw();};
 guSel.onchange=function(){gradUnit=guSel.value;draw();};
+function setExportButtonEnabled(enabled){if(exportBtn)exportBtn.disabled=!enabled;}
 
 /* ── Data reception ───────────────────────────────────────────────────── */
 window.addEventListener('message',function(e){
@@ -60,6 +62,7 @@ window.addEventListener('message',function(e){
     var overlay=document.getElementById('poverlay'),fill=document.getElementById('pfill2'),
         text=document.getElementById('ptext'),pct=document.getElementById('ppct');
     if(m.phase==='start'){
+      setExportButtonEnabled(false);
       overlay.style.display='flex';fill.style.width='0%';
       text.textContent=m.text||'Loading sequence\u2026';pct.textContent='0%';
     }else if(m.phase==='done'){
@@ -95,6 +98,7 @@ window.addEventListener('message',function(e){
     // Auto-zoom: if TR is known, zoom to first TR; otherwise fit full sequence
     if(seqTiming&&seqTiming.trTimeSec>0){fitToFirstTR();}else{fit();}
     draw();drawKs();drawMinimap();
+    setExportButtonEnabled(true);
   }
 });
 
