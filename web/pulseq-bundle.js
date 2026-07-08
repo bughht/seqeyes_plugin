@@ -23,16 +23,20 @@ var Pulseq = (() => {
   __export(pulseq_browser_exports, {
     PACKAGE_VERSION: () => PACKAGE_VERSION,
     calculateKspace: () => calculateKspace,
+    calculateM1: () => calculateM1,
+    calculatePns: () => calculatePns,
     decodeAllBlocks: () => decodeAllBlocks,
     detectSequenceTiming: () => detectSequenceTiming,
     exportKspaceArtifacts: () => exportKspaceArtifacts,
     formatTrajectoryText: () => formatTrajectoryText,
     getTotalDuration: () => getTotalDuration,
-    parseSequenceText: () => parseSequenceText
+    parsePnsHardwareAsc: () => parsePnsHardwareAsc,
+    parseSequenceText: () => parseSequenceText,
+    safePnsModel: () => safePnsModel
   });
 
   // package.json
-  var version = "0.1.12";
+  var version = "0.1.13";
 
   // src/pulseq/decompressor.ts
   function decompressShape(compressed, numSamples) {
@@ -1412,6 +1416,595 @@ var Pulseq = (() => {
     return [gx, gy, gz];
   }
 
+  // src/pulseq/m1.ts
+  var TIME_EPS = 1e-15;
+  function calculateM1(blocks, gradientRaster) {
+    if (!blocks.length) {
+      return invalidM1("Empty or invalid block list.");
+    }
+    const gx = collectGradientSeries(blocks, "gx");
+    const gy = collectGradientSeries(blocks, "gy");
+    const gz = collectGradientSeries(blocks, "gz");
+    const ranges = [gx, gy, gz].filter((series) => series.time.length > 0).map((series) => [series.time[0], series.time[series.time.length - 1]]);
+    if (!ranges.length) {
+      return invalidM1("No gradient waveform available for M1.");
+    }
+    const tMin = Math.min(...ranges.map((range) => range[0]));
+    const tMax = Math.max(...ranges.map((range) => range[1]));
+    if (!Number.isFinite(tMin) || !Number.isFinite(tMax) || tMax < tMin) {
+      return invalidM1("Invalid gradient time range for M1.");
+    }
+    const warnings = [];
+    const rfEvents = collectRfEvents(blocks, warnings);
+    const excitationTimes = rfEvents.filter((rf) => rf.use === "e").map((rf) => rf.tSec);
+    const refocusingTimes = rfEvents.filter((rf) => rf.use === "r").map((rf) => rf.tSec);
+    const events = buildWalkerEvents(rfEvents);
+    let recentExcCount = 0;
+    let lastExcT = -1e9;
+    for (const rf of rfEvents) {
+      if (rf.use === "e") {
+        if (rf.tSec - lastExcT < 0.1) recentExcCount++;
+        lastExcT = rf.tSec;
+      }
+    }
+    if (recentExcCount > 8) {
+      warnings.push(
+        `Sequence shows ${recentExcCount} closely-spaced (<100 ms) excitation events. This pattern is consistent with a steady-state sequence for which the simplified reset/flip bookkeeping does NOT model coherent pathway interference. Treat the M1 curve as advisory only.`
+      );
+    }
+    if (!excitationTimes.length) {
+      warnings.push(`No excitation RF events found in sequence. M1 will be integrated from t=${tMin.toFixed(6)} s with no signal basis.`);
+    }
+    const rasterSec = gradientRaster > 0 ? gradientRaster : 1e-5;
+    if (rasterSec <= 0) {
+      return invalidM1("gradientRaster must be positive.");
+    }
+    const samples = buildSampleTimes(tMin, tMax, rasterSec);
+    const x = walkM1(gx, samples, events, excitationTimes, tMin);
+    const y = walkM1(gy, samples, events, excitationTimes, tMin);
+    const z = walkM1(gz, samples, events, excitationTimes, tMin);
+    if (x.t.length !== y.t.length || x.t.length !== z.t.length) {
+      warnings.push(`Internal warning: per-axis M1 output sizes disagree (${x.t.length}, ${y.t.length}, ${z.t.length}). Plot may be inconsistent.`);
+    }
+    return {
+      valid: true,
+      ok: true,
+      tSec: new Float64Array(x.t),
+      m1x: new Float64Array(x.m1),
+      m1y: new Float64Array(y.m1),
+      m1z: new Float64Array(z.m1),
+      warnings,
+      excitationTimesSec: new Float64Array(excitationTimes),
+      refocusingTimesSec: new Float64Array(refocusingTimes)
+    };
+  }
+  function invalidM1(error) {
+    return {
+      valid: false,
+      ok: false,
+      error,
+      tSec: new Float64Array(),
+      m1x: new Float64Array(),
+      m1y: new Float64Array(),
+      m1z: new Float64Array(),
+      warnings: [],
+      excitationTimesSec: new Float64Array(),
+      refocusingTimesSec: new Float64Array()
+    };
+  }
+  function collectGradientSeries(blocks, channel) {
+    const time = [];
+    const value = [];
+    for (const block of blocks) {
+      const grad = block[channel];
+      if (!grad?.timePoints || !grad.waveform) continue;
+      const n = Math.min(grad.timePoints.length, grad.waveform.length);
+      for (let i = 0; i < n; i++) {
+        time.push(grad.timePoints[i]);
+        value.push(grad.waveform[i]);
+      }
+    }
+    return sanitizeGradientSeries(time, value);
+  }
+  function sanitizeGradientSeries(time, value) {
+    const pairs = [];
+    const n = Math.min(time.length, value.length);
+    for (let i = 0; i < n; i++) {
+      const t = time[i];
+      const v = value[i];
+      if (Number.isFinite(t) && Number.isFinite(v)) pairs.push([t, v]);
+    }
+    pairs.sort((a, b) => a[0] - b[0]);
+    const outT = [];
+    const outV = [];
+    for (const [t, v] of pairs) {
+      const last = outT.length - 1;
+      if (last >= 0 && Math.abs(t - outT[last]) <= TIME_EPS) {
+        outV[last] = 0.5 * (outV[last] + v);
+        continue;
+      }
+      outT.push(t);
+      outV.push(v);
+    }
+    return { time: outT, value: outV };
+  }
+  function collectRfEvents(blocks, warnings) {
+    const events = [];
+    for (const block of blocks) {
+      if (!block.rf) continue;
+      const use = classifyRfUse(block.rf.use);
+      if (!use) continue;
+      const rec = { tSec: block.rf.centerTime, use };
+      events.push(rec);
+      if (use === "u") {
+        warnings.push(`Unknown RF use 'u' at t=${rec.tSec.toFixed(6)} s; M1 bookkeeping treats it as no-op.`);
+      } else if (use === "p") {
+        warnings.push(
+          `Preparation module 'p' at t=${rec.tSec.toFixed(6)} s; treated as M1 reset (simplified handling; prep modules that preserve phase encoding will give wrong results).`
+        );
+      }
+    }
+    events.sort((a, b) => a.tSec - b.tSec);
+    return events;
+  }
+  function classifyRfUse(raw) {
+    const c = (raw || "u").toLowerCase();
+    if (c === "e" || c === "r" || c === "s" || c === "i" || c === "p") return c;
+    return "u";
+  }
+  function buildWalkerEvents(rfs) {
+    const events = [];
+    for (const rf of rfs) {
+      if (rf.use === "i" || rf.use === "u") continue;
+      events.push({
+        tSec: rf.tSec,
+        kind: rf.use === "r" ? "flip" : "reset"
+      });
+    }
+    events.sort((a, b) => {
+      if (a.tSec !== b.tSec) return a.tSec - b.tSec;
+      return a.kind === "reset" && b.kind === "flip" ? -1 : 1;
+    });
+    return events;
+  }
+  function buildSampleTimes(tMin, tMax, rasterSec) {
+    const samples = [];
+    const nSamples = Math.floor((tMax - tMin) / rasterSec) + 1;
+    for (let i = 0; i < nSamples; i++) samples.push(tMin + i * rasterSec);
+    if (!samples.length || samples[samples.length - 1] < tMax - TIME_EPS) samples.push(tMax);
+    return samples;
+  }
+  function walkM1(gradient, samples, events, excitationTimes, tMin) {
+    const outT = [];
+    const outM1 = [];
+    let sign = 1;
+    let tReset = excitationTimes.length ? excitationTimes[0] : tMin;
+    if (samples.length && samples[0] < tReset) tReset = samples[0];
+    let currentT = tReset;
+    let unsignedM0 = 0;
+    let unsignedM1 = 0;
+    const reportedM1At = (t) => sign * (unsignedM1 - (t - tReset) * unsignedM0);
+    const advanceTo = (targetT) => {
+      if (!(targetT > currentT + TIME_EPS)) return;
+      while (currentT < targetT - TIME_EPS) {
+        let nextT = nextGradientBreakpoint(gradient.time, currentT, targetT);
+        if (!(nextT > currentT)) nextT = targetT;
+        const ga = sampleGradientAt(gradient, currentT);
+        const gb = sampleGradientAt(gradient, nextT);
+        const [m0Seg, m1Seg] = integrateLinearSegment(currentT, nextT, tReset, ga, gb);
+        unsignedM0 += m0Seg;
+        unsignedM1 += m1Seg;
+        currentT = nextT;
+      }
+    };
+    let ei = 0;
+    let si = 0;
+    while (ei < events.length || si < samples.length) {
+      const nextEvtT = ei < events.length ? events[ei].tSec : Number.POSITIVE_INFINITY;
+      const nextSampT = si < samples.length ? samples[si] : Number.POSITIVE_INFINITY;
+      if (nextEvtT <= nextSampT) {
+        advanceTo(nextEvtT);
+        if (events[ei].kind === "reset") {
+          if (!outT.length || outT[outT.length - 1] < nextEvtT - TIME_EPS) {
+            outT.push(nextEvtT);
+            outM1.push(0);
+          } else {
+            outT[outT.length - 1] = nextEvtT;
+            outM1[outM1.length - 1] = 0;
+          }
+          sign = 1;
+          tReset = nextEvtT;
+          currentT = nextEvtT;
+          unsignedM0 = 0;
+          unsignedM1 = 0;
+        } else {
+          outT.push(nextEvtT);
+          outM1.push(reportedM1At(nextEvtT));
+          sign = -sign;
+        }
+        ei++;
+      } else {
+        advanceTo(nextSampT);
+        outT.push(nextSampT);
+        outM1.push(reportedM1At(nextSampT));
+        si++;
+      }
+    }
+    return { t: outT, m1: outM1 };
+  }
+  function sampleGradientAt(gradient, t) {
+    const n = gradient.time.length;
+    if (n <= 0 || t < gradient.time[0] || t > gradient.time[n - 1]) return 0;
+    if (n === 1 || t <= gradient.time[0]) return gradient.value[0];
+    if (t >= gradient.time[n - 1]) return gradient.value[n - 1];
+    let lo = 0;
+    let hi = n - 1;
+    while (hi - lo > 1) {
+      const mid = lo + hi >> 1;
+      if (gradient.time[mid] <= t) lo = mid;
+      else hi = mid;
+    }
+    const t0 = gradient.time[lo];
+    const t1 = gradient.time[hi];
+    if (!(t1 > t0)) return gradient.value[lo];
+    const alpha = (t - t0) / (t1 - t0);
+    return gradient.value[lo] + alpha * (gradient.value[hi] - gradient.value[lo]);
+  }
+  function nextGradientBreakpoint(times, t, target) {
+    if (times.length <= 1 || t >= times[times.length - 1]) return target;
+    let lo = 0;
+    let hi = times.length;
+    const threshold = t + TIME_EPS;
+    while (lo < hi) {
+      const mid = lo + hi >> 1;
+      if (times[mid] <= threshold) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo < times.length ? Math.min(target, times[lo]) : target;
+  }
+  function integrateLinearSegment(a, b, tRef, ga, gb) {
+    const h = b - a;
+    if (!(h > 0)) return [0, 0];
+    const slope = (gb - ga) / h;
+    const aRel = a - tRef;
+    const m0 = ga * h + 0.5 * slope * h * h;
+    const m1 = ga * (aRel * h + 0.5 * h * h) + slope * (0.5 * aRel * h * h + h * h * h / 3);
+    return [m0, m1];
+  }
+
+  // src/pulseq/pns.ts
+  var GAMMA_HZ_PER_T = 42576e3;
+  var TIME_EPS2 = 1e-15;
+  function parsePnsHardwareAsc(text) {
+    const asc = parseAscText(text);
+    const prefix = resolvePnsPrefix(asc);
+    const x = getAxisHardware(
+      asc,
+      `${prefix}flGSWDTauX`,
+      `${prefix}flGSWDAX`,
+      `${prefix}flGSWDStimulationLimitX`,
+      `${prefix}flGSWDStimulationThresholdX`,
+      [
+        "asGPAParameters[0].sGCParameters.flGScaleFactorX",
+        "asGPAParameters.sGCParameters.flGScaleFactorX",
+        "flGScaleFactorX",
+        "flGCGScaleFactorX",
+        "GScaleFactorX"
+      ]
+    );
+    const y = getAxisHardware(
+      asc,
+      `${prefix}flGSWDTauY`,
+      `${prefix}flGSWDAY`,
+      `${prefix}flGSWDStimulationLimitY`,
+      `${prefix}flGSWDStimulationThresholdY`,
+      [
+        "asGPAParameters[0].sGCParameters.flGScaleFactorY",
+        "asGPAParameters.sGCParameters.flGScaleFactorY",
+        "flGScaleFactorY",
+        "flGCGScaleFactorY",
+        "GScaleFactorY"
+      ]
+    );
+    const z = getAxisHardware(
+      asc,
+      `${prefix}flGSWDTauZ`,
+      `${prefix}flGSWDAZ`,
+      `${prefix}flGSWDStimulationLimitZ`,
+      `${prefix}flGSWDStimulationThresholdZ`,
+      [
+        "asGPAParameters[0].sGCParameters.flGScaleFactorZ",
+        "asGPAParameters.sGCParameters.flGScaleFactorZ",
+        "flGScaleFactorZ",
+        "flGCGScaleFactorZ",
+        "GScaleFactorZ"
+      ]
+    );
+    if (!hasValidWeights(x) || !hasValidWeights(y) || !hasValidWeights(z)) {
+      throw new Error("ASC hardware coefficients are invalid (a1+a2+a3 or stim limit).");
+    }
+    return { x, y, z, valid: true };
+  }
+  function calculatePns(blocks, gradientRaster, hardware, gammaHzPerT = GAMMA_HZ_PER_T) {
+    if (!hardware.valid) return invalidPns("PNS hardware is not initialized.");
+    if (!blocks.length) return invalidPns("No sequence loaded.");
+    if (gradientRaster <= 0 || gammaHzPerT <= 0) return invalidPns("Missing GradientRasterTime or gamma.");
+    const dtSec = gradientRaster;
+    const waves = [
+      collectGradientSeries2(blocks, "gx"),
+      collectGradientSeries2(blocks, "gy"),
+      collectGradientSeries2(blocks, "gz")
+    ];
+    const nonEmpty = waves.filter((wave) => wave.time.length > 0);
+    if (!nonEmpty.length) return invalidPns("No gradient waveform available for PNS.");
+    const tFirst = Math.min(...nonEmpty.map((wave) => wave.time[0]));
+    const tLast = Math.max(...nonEmpty.map((wave) => wave.time[wave.time.length - 1]));
+    if (!Number.isFinite(tFirst) || !Number.isFinite(tLast) || tLast <= tFirst) {
+      return invalidPns("No gradient waveform available for PNS.");
+    }
+    let ntMin = Math.floor(tFirst / dtSec + Number.EPSILON) + 0.5;
+    const ntMax = Math.ceil(tLast / dtSec - Number.EPSILON) - 0.5;
+    if (ntMin < 0.5) ntMin = 0.5;
+    if (ntMax < ntMin) return invalidPns("Unable to build regular PNS raster.");
+    const nSamples = Math.floor(ntMax - ntMin + 1);
+    if (nSamples < 2) return invalidPns("Too few samples for PNS computation.");
+    const tAxis = new Float64Array(nSamples);
+    const gxTpm = new Float64Array(nSamples);
+    const gyTpm = new Float64Array(nSamples);
+    const gzTpm = new Float64Array(nSamples);
+    for (let i = 0; i < nSamples; i++) {
+      const tSec = (ntMin + i) * dtSec;
+      tAxis[i] = tSec;
+      gxTpm[i] = interpLinearZero(waves[0], tSec) / gammaHzPerT;
+      gyTpm[i] = interpLinearZero(waves[1], tSec) / gammaHzPerT;
+      gzTpm[i] = interpLinearZero(waves[2], tSec) / gammaHzPerT;
+    }
+    const longestTauMs = Math.max(
+      hardware.x.tau1Ms,
+      hardware.x.tau2Ms,
+      hardware.x.tau3Ms,
+      hardware.y.tau1Ms,
+      hardware.y.tau2Ms,
+      hardware.y.tau3Ms,
+      hardware.z.tau1Ms,
+      hardware.z.tau2Ms,
+      hardware.z.tau3Ms
+    );
+    const zptSec = longestTauMs * 4 / 1e3;
+    const preCount = Math.max(0, Math.round(zptSec / (4 * dtSec)));
+    const postCount = Math.max(0, Math.round(zptSec / dtSec));
+    const gxPadded = padSamples(gxTpm, preCount, postCount);
+    const gyPadded = padSamples(gyTpm, preCount, postCount);
+    const gzPadded = padSamples(gzTpm, preCount, postCount);
+    const stimX = safePnsModel(diff(gxPadded, dtSec), dtSec, hardware.x);
+    const stimY = safePnsModel(diff(gyPadded, dtSec), dtSec, hardware.y);
+    const stimZ = safePnsModel(diff(gzPadded, dtSec), dtSec, hardware.z);
+    const hasAnyNonTrap = blocks.some((block) => block.gx?.type === "arb" || block.gy?.type === "arb" || block.gz?.type === "arb");
+    const hasAnyLabelExt = blocks.some((block) => !!(block.labelSets?.length || block.labelIncs?.length));
+    const shift = hasAnyNonTrap || hasAnyLabelExt ? 1 : 0;
+    const selectedX = [];
+    const selectedY = [];
+    const selectedZ = [];
+    const selectedT = [];
+    for (let origIdx = 0; origIdx < nSamples; origIdx++) {
+      const paddedIdx = preCount + origIdx;
+      let stimIdx = paddedIdx - shift;
+      if (shift > 0 && hasAnyLabelExt && origIdx === tAxis.length - 1) {
+        stimIdx = Math.min(paddedIdx, stimX.length - 1);
+      }
+      if (stimIdx < 0 || stimIdx >= stimX.length || stimIdx >= stimY.length || stimIdx >= stimZ.length) continue;
+      selectedX.push(stimX[stimIdx]);
+      selectedY.push(stimY[stimIdx]);
+      selectedZ.push(stimZ[stimIdx]);
+      selectedT.push(tAxis[origIdx]);
+    }
+    const timeSec = new Float64Array(selectedX.length);
+    const pnsX = new Float64Array(selectedX.length);
+    const pnsY = new Float64Array(selectedX.length);
+    const pnsZ = new Float64Array(selectedX.length);
+    const pnsNorm = new Float64Array(selectedX.length);
+    let ok = true;
+    for (let i = 0; i < selectedX.length; i++) {
+      const xNorm = 0.01 * selectedX[i];
+      const yNorm = 0.01 * selectedY[i];
+      const zNorm = 0.01 * selectedZ[i];
+      const norm = Math.sqrt(xNorm * xNorm + yNorm * yNorm + zNorm * zNorm);
+      timeSec[i] = selectedT[i];
+      pnsX[i] = xNorm;
+      pnsY[i] = yNorm;
+      pnsZ[i] = zNorm;
+      pnsNorm[i] = norm;
+      if (norm >= 1) ok = false;
+    }
+    return { valid: true, ok, timeSec, pnsX, pnsY, pnsZ, pnsNorm };
+  }
+  function safePnsModel(dgdt, dtSec, hw) {
+    const absDgdt = new Float64Array(dgdt.length);
+    for (let i = 0; i < dgdt.length; i++) absDgdt[i] = Math.abs(dgdt[i]);
+    const dtMs = dtSec * 1e3;
+    const lp1 = lowpassTau(dgdt, hw.tau1Ms, dtMs);
+    const lp2 = lowpassTau(absDgdt, hw.tau2Ms, dtMs);
+    const lp3 = lowpassTau(dgdt, hw.tau3Ms, dtMs);
+    const stim = new Float64Array(dgdt.length);
+    const denom = hw.stimLimit > 0 ? hw.stimLimit : 1;
+    for (let i = 0; i < dgdt.length; i++) {
+      const s1 = hw.a1 * Math.abs(lp1[i]);
+      const s2 = hw.a2 * lp2[i];
+      const s3 = hw.a3 * Math.abs(lp3[i]);
+      stim[i] = (s1 + s2 + s3) / denom * hw.gScale * 100;
+    }
+    return stim;
+  }
+  function invalidPns(error) {
+    return {
+      valid: false,
+      ok: false,
+      error,
+      timeSec: new Float64Array(),
+      pnsX: new Float64Array(),
+      pnsY: new Float64Array(),
+      pnsZ: new Float64Array(),
+      pnsNorm: new Float64Array()
+    };
+  }
+  function parseAscText(text) {
+    const scalar = /* @__PURE__ */ new Map();
+    const array = /* @__PURE__ */ new Map();
+    const re = /^\s*([A-Za-z0-9_.[\]]+?)(?:\[(\d+)])?\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*$/;
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#") || line.startsWith("###")) continue;
+      if (/^\$include\b/i.test(line)) {
+        throw new Error("ASC contains $include directives. Use a combined ASC profile in the web viewer, or open it through the VS Code extension so companion ASC files can be resolved.");
+      }
+      const match = re.exec(line);
+      if (!match) continue;
+      const key = match[1].trim();
+      const index = match[2] === void 0 ? -1 : Number.parseInt(match[2], 10);
+      const value = Number(match[3]);
+      if (!Number.isFinite(value)) continue;
+      if (index >= 0) {
+        const values = array.get(key) ?? [];
+        values[index] = value;
+        array.set(key, values);
+      } else {
+        scalar.set(key, value);
+      }
+    }
+    return { scalar, array };
+  }
+  function resolvePnsPrefix(asc) {
+    if (asc.array.has("flGSWDTauX")) return "";
+    if (asc.array.has("GradPatSup.Phys.PNS.flGSWDTauX")) return "GradPatSup.Phys.PNS.";
+    const candidates = [...asc.array.keys()].filter((key) => key.endsWith("flGSWDTauX") && !key.toLowerCase().includes(".carns.")).sort();
+    if (candidates.length) return candidates[0].slice(0, -"flGSWDTauX".length);
+    return "GradPatSup.Phys.PNS.";
+  }
+  function getAxisHardware(asc, tauKey, aKey, stimLimitKey, stimThreshKey, gScaleKeys) {
+    const tau = findArray(asc, tauKey);
+    const weights = findArray(asc, aKey);
+    if (!tau || !weights) throw new Error(`Missing ASC arrays for ${tauKey} or ${aKey}`);
+    if (tau.length < 3 || weights.length < 3) throw new Error(`ASC arrays ${tauKey}/${aKey} require at least 3 values`);
+    const stimLimit = findScalar(asc, stimLimitKey);
+    const stimThreshold = findScalar(asc, stimThreshKey);
+    if (stimLimit === void 0 || stimThreshold === void 0) {
+      throw new Error(`Missing ASC scalar ${stimLimitKey} or ${stimThreshKey}`);
+    }
+    let gScale;
+    for (const key of gScaleKeys) {
+      gScale = findScalar(asc, key);
+      if (gScale !== void 0) break;
+    }
+    if (gScale === void 0) {
+      throw new Error("ASC is missing g_scale factors (X/Y/Z). Select a full ASC (e.g. *_twoFilesCombined.asc).");
+    }
+    return {
+      tau1Ms: tau[0],
+      tau2Ms: tau[1],
+      tau3Ms: tau[2],
+      a1: weights[0],
+      a2: weights[1],
+      a3: weights[2],
+      stimLimit,
+      stimThreshold,
+      gScale
+    };
+  }
+  function findArray(asc, key) {
+    const exact = asc.array.get(key);
+    if (exact) return exact;
+    const keyNorm = normalizeAscKey(key);
+    const chosen = [...asc.array.keys()].filter((candidate) => normalizeAscKey(candidate) === keyNorm && !candidate.toLowerCase().includes(".carns.")).sort()[0];
+    return chosen ? asc.array.get(chosen) : void 0;
+  }
+  function findScalar(asc, key) {
+    const exact = asc.scalar.get(key);
+    if (exact !== void 0) return exact;
+    const keyNorm = normalizeAscKey(key);
+    const chosen = [...asc.scalar.keys()].filter((candidate) => normalizeAscKey(candidate) === keyNorm && !candidate.toLowerCase().includes(".carns.")).sort()[0];
+    return chosen ? asc.scalar.get(chosen) : void 0;
+  }
+  function normalizeAscKey(key) {
+    return key.trim().replace(/\[\d+]/g, "");
+  }
+  function hasValidWeights(hw) {
+    return Math.abs(hw.a1 + hw.a2 + hw.a3 - 1) <= 0.01 && hw.stimLimit > 0;
+  }
+  function lowpassTau(input, tauMs, dtMs) {
+    const out = new Float64Array(input.length);
+    if (!input.length) return out;
+    if (tauMs <= 0 || dtMs <= 0) {
+      out.set(input);
+      return out;
+    }
+    const alpha = dtMs / (tauMs + dtMs);
+    out[0] = alpha * input[0];
+    for (let i = 1; i < input.length; i++) out[i] = alpha * input[i] + (1 - alpha) * out[i - 1];
+    return out;
+  }
+  function collectGradientSeries2(blocks, channel) {
+    const time = [];
+    const value = [];
+    for (const block of blocks) {
+      const grad = block[channel];
+      if (!grad?.timePoints || !grad.waveform) continue;
+      const n = Math.min(grad.timePoints.length, grad.waveform.length);
+      for (let i = 0; i < n; i++) {
+        time.push(grad.timePoints[i]);
+        value.push(grad.waveform[i]);
+      }
+    }
+    return sanitizeGradientSeries2(time, value);
+  }
+  function sanitizeGradientSeries2(time, value) {
+    const pairs = [];
+    const n = Math.min(time.length, value.length);
+    for (let i = 0; i < n; i++) {
+      if (Number.isFinite(time[i]) && Number.isFinite(value[i])) pairs.push([time[i], value[i]]);
+    }
+    pairs.sort((a, b) => a[0] - b[0]);
+    const outT = [];
+    const outV = [];
+    for (const [t, v] of pairs) {
+      const last = outT.length - 1;
+      if (last >= 0 && Math.abs(t - outT[last]) <= TIME_EPS2) {
+        outV[last] = 0.5 * (outV[last] + v);
+        continue;
+      }
+      outT.push(t);
+      outV.push(v);
+    }
+    return { time: outT, value: outV };
+  }
+  function interpLinearZero(series, t) {
+    const n = series.time.length;
+    if (!n || t < series.time[0] || t > series.time[n - 1]) return 0;
+    if (n === 1 || t <= series.time[0]) return series.value[0];
+    if (t >= series.time[n - 1]) return series.value[n - 1];
+    let lo = 0;
+    let hi = n - 1;
+    while (hi - lo > 1) {
+      const mid = lo + hi >> 1;
+      if (series.time[mid] <= t) lo = mid;
+      else hi = mid;
+    }
+    const t0 = series.time[lo];
+    const t1 = series.time[hi];
+    if (!(t1 > t0)) return series.value[lo];
+    const alpha = (t - t0) / (t1 - t0);
+    return series.value[lo] + alpha * (series.value[hi] - series.value[lo]);
+  }
+  function padSamples(input, preCount, postCount) {
+    const out = new Float64Array(preCount + input.length + postCount);
+    out.set(input, preCount);
+    return out;
+  }
+  function diff(input, dtSec) {
+    const out = new Float64Array(Math.max(0, input.length - 1));
+    for (let i = 0; i < out.length; i++) out[i] = (input[i + 1] - input[i]) / dtSec;
+    return out;
+  }
+
   // src/pulseq/trdetect.ts
   var GAMMA_HZ_T2 = 42576e3;
   var DEFAULT_B0_T2 = 3;
@@ -1447,7 +2040,7 @@ var Pulseq = (() => {
         rfUsePerBlock.push(0);
         continue;
       }
-      const useChar = classifyRfUse(rf, seq, supportsRfUse, b0);
+      const useChar = classifyRfUse2(rf, seq, supportsRfUse, b0);
       const useCode = useChar.charCodeAt(0);
       rfUsePerBlock.push(useCode);
       if (useChar === "e") {
@@ -1518,7 +2111,7 @@ var Pulseq = (() => {
     if (seq.versionCombined < VER_PRE_14) return block.dur * 1e-6;
     return block.dur * seq.rasterTimes.blockDurationRaster;
   }
-  function classifyRfUse(rf, seq, supportsMetadata, b0Tesla) {
+  function classifyRfUse2(rf, seq, supportsMetadata, b0Tesla) {
     if (supportsMetadata && rf.use && rf.use !== "u" && rf.use !== "U") {
       return rf.use.toLowerCase();
     }

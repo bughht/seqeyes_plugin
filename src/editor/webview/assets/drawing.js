@@ -11,6 +11,7 @@ function draw(){
   drawZeroLines(w,h,s);
   if(showBB)drawBlockBounds(w,h,s);
   drawBlocks(vs,ve,s);
+  drawDerivedChannels(vs,ve,s);
   drawAxes(w,h,vs,ve,s);
   drawCursor(w,h,s);
   drawKs();  // sync k-space ADC points with current time window
@@ -30,7 +31,7 @@ function drawCursor(w,h,s){
 /* ── Zero lines & grid ────────────────────────────────────────────────── */
 function drawZeroLines(w,h,s){
   ctx.strokeStyle=s.getPropertyValue('--gr').trim();ctx.lineWidth=0.4;ctx.setLineDash([2,4]);
-  var vc=visChannels();for(var vi=0;vi<vc.length;vi++){var i=vc[vi];if(i>=2&&i<=4){ctx.beginPath();ctx.moveTo(M.l,cy(vi));ctx.lineTo(w-M.r,cy(vi));ctx.stroke();}}
+  var vc=visChannels();for(var vi=0;vi<vc.length;vi++){var i=vc[vi];if((i>=2&&i<=4)||(i>=8&&i<=10)){ctx.beginPath();ctx.moveTo(M.l,cy(vi));ctx.lineTo(w-M.r,cy(vi));ctx.stroke();}}
   ctx.setLineDash([]);
 }
 function drawBlockBounds(w,h,s){
@@ -56,6 +57,8 @@ function channelRange(ci){
   if(ci===0)return Math.max((gMax[0]||1)*z,1e-9);
   if(ci===1)return Math.max(6.28318*z,1e-9);
   if(ci>=2&&ci<=4)return Math.max((gMax[ci]||1)*z,0.001);
+  if(ci===7)return Math.max((gMax[7]||1)*z,0.001);
+  if(ci>=8&&ci<=10)return Math.max((gMax[ci]||1)*z,1e-12);
   return 1;
 }
 function fmtPhase(v){if(Math.abs(v-6.28318)<1e-3)return'2\u03c0';if(Math.abs(v-3.14159)<1e-3)return'\u03c0';if(v>=1)return v.toFixed(2);if(v>=0.01)return v.toFixed(3);return v.toExponential(1);}
@@ -90,6 +93,8 @@ function drawAxes(w,h,vs,ve,s){
     else if(ci>=2&&ci<=4){var d=gradConv(channelRange(ci));ctx.fillText('\u00b1'+fmtAmp(d)+gradUnitStr(),lblX,M.t+vi*ch+12);ctx.fillText('0',lblX,y0+4);}
     else if(ci===5){ctx.fillText('on',lblX,M.t+vi*ch+12);}
     else if(ci===6){ctx.fillText('ch',lblX,M.t+vi*ch+12);}
+    else if(ci===7){ctx.fillText(fmtAmp(channelRange(7))+'%',lblX,M.t+vi*ch+12);ctx.fillText('0',lblX,M.t+(vi+1)*ch-4);}
+    else if(ci>=8&&ci<=10){ctx.fillText('\u00b1'+fmtAmp(channelRange(ci))+'s/m',lblX,M.t+vi*ch+12);ctx.fillText('0',lblX,y0+4);}
 
     // Small tick marks
     ctx.strokeStyle=s.getPropertyValue('--ax').trim();ctx.lineWidth=0.5;
@@ -97,6 +102,56 @@ function drawAxes(w,h,vs,ve,s){
     ctx.beginPath();ctx.moveTo(M.l-2,y0);ctx.lineTo(M.l+2,y0);ctx.stroke();
     ctx.beginPath();ctx.moveTo(M.l-2,M.t+(vi+1)*ch);ctx.lineTo(M.l+2,M.t+(vi+1)*ch);ctx.stroke();
   }
+}
+
+/* ── Derived calculation overlays: PNS and M1 ────────────────────────── */
+function drawDerivedChannels(vs,ve,s){
+  var ch=cH(),vc=visChannels();
+  var viP=-1,viM1x=-1,viM1y=-1,viM1z=-1;
+  for(var vi=0;vi<vc.length;vi++){
+    if(vc[vi]===7)viP=vi;if(vc[vi]===8)viM1x=vi;if(vc[vi]===9)viM1y=vi;if(vc[vi]===10)viM1z=vi;
+  }
+  if(pnsData&&viP>=0&&pnsData.t&&pnsData.t.length){
+    drawPercentSeries(pnsData.t,pnsData.x,viP,7,s.getPropertyValue('--gx').trim(),ch);
+    drawPercentSeries(pnsData.t,pnsData.y,viP,7,s.getPropertyValue('--gy').trim(),ch);
+    drawPercentSeries(pnsData.t,pnsData.z,viP,7,s.getPropertyValue('--gz').trim(),ch);
+    ctx.setLineDash([5,3]);
+    drawPercentSeries(pnsData.t,pnsData.n,viP,7,s.getPropertyValue('--fg').trim(),ch);
+    ctx.setLineDash([]);
+  }
+  if(m1Data&&m1Data.t&&m1Data.t.length){
+    if(viM1x>=0)drawBipolarSeries(m1Data.t,m1Data.x,viM1x,8,s.getPropertyValue('--gx').trim(),ch);
+    if(viM1y>=0)drawBipolarSeries(m1Data.t,m1Data.y,viM1y,9,s.getPropertyValue('--gy').trim(),ch);
+    if(viM1z>=0)drawBipolarSeries(m1Data.t,m1Data.z,viM1z,10,s.getPropertyValue('--gz').trim(),ch);
+  }
+}
+
+function drawPercentSeries(t,v,vi,ci,c,ch){
+  if(!t||!v||t.length<2||v.length<2)return;
+  rowClip(vi,ch,function(){
+    var maxA=channelRange(ci),base=M.t+(vi+1)*ch-ch*.08,scale=ch*.84/maxA;
+    ctx.strokeStyle=c;ctx.lineWidth=1;ctx.beginPath();
+    var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r;
+    for(var i=0,f=1,n=Math.min(t.length,v.length);i<n;i++){
+      var sx=t2x(t[i]);if(sx<clipL||sx>clipR){f=1;continue}
+      var sy=base-(v[i]||0)*scale;if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
+    }
+    ctx.stroke();
+  });
+}
+
+function drawBipolarSeries(t,v,vi,ci,c,ch){
+  if(!t||!v||t.length<2||v.length<2)return;
+  rowClip(vi,ch,function(){
+    var maxA=channelRange(ci),y=cy(vi),scale=ch*.4/maxA;
+    ctx.strokeStyle=c;ctx.lineWidth=1;ctx.beginPath();
+    var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r;
+    for(var i=0,f=1,n=Math.min(t.length,v.length);i<n;i++){
+      var sx=t2x(t[i]);if(sx<clipL||sx>clipR){f=1;continue}
+      var sy=y-(v[i]||0)*scale;if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
+    }
+    ctx.stroke();
+  });
 }
 
 /* ═══════════════════════════════════════════════════════════════════════

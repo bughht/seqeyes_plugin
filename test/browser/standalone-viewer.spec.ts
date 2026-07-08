@@ -176,6 +176,25 @@ test('reloads sequence state without leaking previous viewer data', async ({ pag
   expect(warmSpiral).toEqual(coldSpiral);
 });
 
+test('calculates M1 lazily and accepts a synthetic ASC profile for PNS', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+
+  const m1Legend = page.locator('#legend .li').filter({ hasText: 'M1x' });
+  await expect(m1Legend).toHaveClass(/off/);
+  await page.locator('#m1Btn').click();
+  await expect(m1Legend).not.toHaveClass(/off/, { timeout: 20_000 });
+
+  const pnsLegend = page.locator('#legend .li').filter({ hasText: 'PNS' });
+  await expect(pnsLegend).toHaveClass(/off/);
+  await page.locator('#ascInput').setInputFiles({
+    name: 'synthetic.asc',
+    mimeType: 'text/plain',
+    buffer: Buffer.from(syntheticAsc()),
+  });
+  await expect(pnsLegend).not.toHaveClass(/off/, { timeout: 20_000 });
+  await expectCanvasVaried(page.locator('#mc'));
+});
+
 async function loadViewer(page: Page, sequencePath: string): Promise<void> {
   await page.goto('/?debug=1');
   await openSequence(page, sequencePath);
@@ -239,6 +258,25 @@ function stableState(state: DebugState): Pick<DebugState, 'blocks' | 'adcCount' 
     title: state.title,
     totalDuration: Number(state.totalDuration.toPrecision(12)),
   };
+}
+
+function syntheticAsc(): string {
+  const axes = ['X', 'Y', 'Z'];
+  const lines: string[] = [];
+  for (const axis of axes) {
+    lines.push(
+      `GradPatSup.Phys.PNS.flGSWDTau${axis}[0] = 1`,
+      `GradPatSup.Phys.PNS.flGSWDTau${axis}[1] = 2`,
+      `GradPatSup.Phys.PNS.flGSWDTau${axis}[2] = 3`,
+      `GradPatSup.Phys.PNS.flGSWDA${axis}[0] = 0.2`,
+      `GradPatSup.Phys.PNS.flGSWDA${axis}[1] = 0.3`,
+      `GradPatSup.Phys.PNS.flGSWDA${axis}[2] = 0.5`,
+      `GradPatSup.Phys.PNS.flGSWDStimulationLimit${axis} = 1000000000`,
+      `GradPatSup.Phys.PNS.flGSWDStimulationThreshold${axis} = 1`,
+      `asGPAParameters[0].sGCParameters.flGScaleFactor${axis} = 1`,
+    );
+  }
+  return `${lines.join('\n')}\n`;
 }
 
 function clamp(value: number, min: number, max: number): number {

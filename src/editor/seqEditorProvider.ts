@@ -16,6 +16,8 @@ import * as vscode from 'vscode';
 import { parseSequenceText } from '../pulseq/reader';
 import { decodeAllBlocks } from '../pulseq/decoder';
 import { calculateKspace, type KSpaceData } from '../pulseq/kspace';
+import { calculateM1, type M1Data } from '../pulseq/m1';
+import { calculatePns, parsePnsHardwareAsc, type PnsResult } from '../pulseq/pns';
 import { exportKspaceArtifacts } from '../pulseq/kspaceExport';
 import { detectSequenceTiming } from '../pulseq/trdetect';
 import { getWebviewContent } from './webviewContent';
@@ -105,6 +107,8 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
         panel.webview.options = { enableScripts: true };
         panel.webview.html = this._loadingHtml();
         let activeUri = doc.uri;
+        let activeBlocks: DecodedBlock[] = [];
+        let activeGradientRaster = 0;
 
         // ── Core: parse, decode, compute k‑space, send ──
         const sendSequenceData = async (uri: vscode.Uri) => {
@@ -127,6 +131,8 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
                 const totalBlocks = seq.blocks.length;
                 postProgress('decode', 15, `Decoding ${totalBlocks} blocks\u2026`);
                 const blocks = decodeAllBlocks(seq);
+                activeBlocks = blocks;
+                activeGradientRaster = seq.rasterTimes.gradientRaster;
                 const totalDur = blocks.length > 0
                     ? blocks[blocks.length - 1].startTime + blocks[blocks.length - 1].duration
                     : 0;
@@ -227,6 +233,35 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
                 }
             } else if (msg.command === 'exportKspace') {
                 await this._exportKspace(activeUri);
+            } else if (msg.command === 'calculateM1') {
+                if (!activeBlocks.length || activeGradientRaster <= 0) {
+                    panel.webview.postMessage({ type: 'm1Error', message: 'Load a sequence before calculating M1.' });
+                    return;
+                }
+                const m1 = calculateM1(activeBlocks, activeGradientRaster);
+                panel.webview.postMessage({ type: 'm1Data', m1: serializeM1(m1) });
+            } else if (msg.command === 'openPnsAsc') {
+                if (!activeBlocks.length || activeGradientRaster <= 0) {
+                    panel.webview.postMessage({ type: 'pnsError', message: 'Load a sequence before calculating PNS.' });
+                    return;
+                }
+                const uris = await vscode.window.showOpenDialog({
+                    canSelectMany: false,
+                    filters: { 'Siemens ASC Profiles': ['asc'], 'All Files': ['*'] },
+                    title: 'Open Siemens ASC Profile For PNS Prediction',
+                });
+                if (!uris || uris.length === 0) return;
+                try {
+                    const ascText = await readAscProfileText(uris[0]);
+                    const hardware = parsePnsHardwareAsc(ascText);
+                    const pns = calculatePns(activeBlocks, activeGradientRaster, hardware);
+                    panel.webview.postMessage({ type: 'pnsData', pns: serializePns(pns) });
+                } catch (err) {
+                    panel.webview.postMessage({
+                        type: 'pnsError',
+                        message: err instanceof Error ? err.message : String(err),
+                    });
+                }
             }
         });
     }
@@ -297,6 +332,43 @@ function siblingUri(uri: vscode.Uri, fileName: string): vscode.Uri {
 function sanitizeFileStem(name: string): string {
     const cleaned = name.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '');
     return cleaned || 'sequence';
+}
+
+async function readAscProfileText(uri: vscode.Uri, visited = new Set<string>()): Promise<string> {
+    const key = uri.toString();
+    if (visited.has(key)) return '';
+    visited.add(key);
+
+    const text = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
+    const output: string[] = [];
+    const parentPath = uri.path.replace(/\/[^/]*$/, '');
+    for (const rawLine of text.split(/\r?\n/)) {
+        const match = /^\s*\$include\s+([A-Za-z0-9_.-]+)\s*$/i.exec(rawLine);
+        if (!match) {
+            output.push(rawLine);
+            continue;
+        }
+
+        const names = match[1].toLowerCase().endsWith('.asc')
+            ? [match[1]]
+            : [match[1], `${match[1]}.asc`];
+        let included = false;
+        for (const name of names) {
+            const candidate = uri.with({ path: `${parentPath}/${name}` });
+            try {
+                await vscode.workspace.fs.stat(candidate);
+                output.push(await readAscProfileText(candidate, visited));
+                included = true;
+                break;
+            } catch {
+                // Try the next supported include spelling.
+            }
+        }
+        if (!included) {
+            throw new Error(`ASC include file not found beside ${uriFileName(uri)}: ${match[1]}`);
+        }
+    }
+    return output.join('\n');
 }
 
 async function writeKspaceArtifacts(
@@ -397,6 +469,36 @@ function serializeKSpace(ks: KSpaceData): Record<string, unknown> {
     };
 }
 
+function serializeM1(m1: M1Data): Record<string, unknown> {
+    const MAX_M1_PTS = 30000;
+    return {
+        valid: m1.valid,
+        ok: m1.ok,
+        error: m1.error,
+        warnings: m1.warnings,
+        t: downsample(m1.tSec, MAX_M1_PTS),
+        x: downsample(m1.m1x, MAX_M1_PTS),
+        y: downsample(m1.m1y, MAX_M1_PTS),
+        z: downsample(m1.m1z, MAX_M1_PTS),
+        excitationTimesSec: downsample(m1.excitationTimesSec, MAX_M1_PTS),
+        refocusingTimesSec: downsample(m1.refocusingTimesSec, MAX_M1_PTS),
+    };
+}
+
+function serializePns(pns: PnsResult): Record<string, unknown> {
+    const MAX_PNS_PTS = 30000;
+    return {
+        valid: pns.valid,
+        ok: pns.ok,
+        error: pns.error,
+        t: downsample(pns.timeSec, MAX_PNS_PTS),
+        x: downsampleToPercent(pns.pnsX, MAX_PNS_PTS),
+        y: downsampleToPercent(pns.pnsY, MAX_PNS_PTS),
+        z: downsampleToPercent(pns.pnsZ, MAX_PNS_PTS),
+        n: downsampleToPercent(pns.pnsNorm, MAX_PNS_PTS),
+    };
+}
+
 /** Encode a Float64Array (or number[]) as a base64‑encoded Float32 blob.
  *  Uses Node's Buffer for efficient base64 conversion. */
 function encodeF32B64(data: Float64Array | number[]): string {
@@ -413,4 +515,8 @@ function downsample(arr: Float64Array | number[], maxPts: number): number[] {
     const out = new Array<number>(maxPts);
     for (let i = 0; i < maxPts; i++) out[i] = arr[Math.floor(i * step)];
     return out;
+}
+
+function downsampleToPercent(arr: Float64Array | number[], maxPts: number): number[] {
+    return downsample(arr, maxPts).map(value => value * 100.0);
 }

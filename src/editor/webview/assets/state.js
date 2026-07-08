@@ -5,12 +5,13 @@ var cc=document.getElementById('cc'),mc=document.getElementById('mc'),ctx=mc.get
  tt=document.getElementById('tt'),curEl=document.getElementById('cur'),legend=document.getElementById('legend'),
  tuSel=document.getElementById('tu'),guSel=document.getElementById('gu');
 var exportBtn=document.getElementById('exportKspaceBtn');
+var m1Btn=document.getElementById('m1Btn'),pnsBtn=document.getElementById('pnsBtn');
 var BL=[],TD=0,GR=1e-5,RR=1e-6,AR=1e-7,BR=1e-5; // blocks, duration, rasters [s]
 var M={t:8,r:30,b:22,l:92};                // margins
-var CH=['RF','\u03c6','Gx','Gy','Gz','ADC','Trig']; // 7 channels
-var chColors=['var(--rf)','var(--rf)','var(--gx)','var(--gy)','var(--gz)','var(--adc)','var(--tr)'];
-var chVis=[true,true,true,true,true,true,true];                   // visibility toggles
-var gMax=[1,6.28318,1,1,1,0,0];          // global max per channel
+var CH=['RF','\u03c6','Gx','Gy','Gz','ADC','Trig','PNS','M1x','M1y','M1z'];
+var chColors=['var(--rf)','var(--rf)','var(--gx)','var(--gy)','var(--gz)','var(--adc)','var(--tr)','var(--fg)','var(--gx)','var(--gy)','var(--gz)'];
+var chVis=[true,true,true,true,true,true,true,false,false,false,false];                   // visibility toggles
+var gMax=[1,6.28318,1,1,1,0,0,1,0.001,0.001,0.001];          // global max per channel
 var ox=0,sc=1;                             // view offset [s] & scale [px/s]
 var dr=false,dsx=0,dso=0;                  // drag state
 var cursorT=0,cursorActive=false;            // mouse time position
@@ -19,8 +20,10 @@ var showBB=false;                            // show block boundaries (default o
 var GAMMA=42576;                            // Hz/m per mT/m for 1H
 
 var ampZoom=[1,1,1,1,1,1,1];
+ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;
 /* K‑space data — pre‑computed on the extension side */
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
+var m1Data=null,pnsData=null,m1Busy=false,pnsBusy=false;
 
 /* Timing metadata (TR/TE info for minimap tooltip) */
 var seqTiming=null;  // {trTimeSec,trCount,hasExplicitTR,teTimeSec,hasExplicitTE,rfUseGuessed}
@@ -82,6 +85,7 @@ window.addEventListener('message',function(e){
     blockPos=m.blockPositions||[];
     mmCache=null;  // invalidate minimap cache on new data
     kTraj=null;kAdc=null;kTime=null;kAdcTime=null;
+    m1Data=null;pnsData=null;chVis[7]=false;chVis[8]=false;chVis[9]=false;chVis[10]=false;
     // Decode binary k‑space ADC data (Float32 base64 → typed arrays)
     if(m.kspace){
       kTraj=[m.kspace.kx,m.kspace.ky,m.kspace.kz];kTime=m.kspace.tk;
@@ -95,10 +99,35 @@ window.addEventListener('message',function(e){
     // Store timing metadata for minimap tooltip
     if(m.timing) seqTiming=m.timing; else seqTiming=null;
     computeGlobalMax();
+    buildLegend();
     // Auto-zoom: if TR is known, zoom to first TR; otherwise fit full sequence
     if(seqTiming&&seqTiming.trTimeSec>0){fitToFirstTR();}else{fit();}
     draw();drawKs();drawMinimap();
     setExportButtonEnabled(true);
+  }else if(m.type==='m1Data'){
+    m1Busy=false;if(m1Btn)m1Btn.disabled=false;
+    if(m.m1&&m.m1.valid){
+      m1Data=m.m1;chVis[8]=true;chVis[9]=true;chVis[10]=true;
+      computeGlobalMax();buildLegend();draw();
+      if(m.m1.warnings&&m.m1.warnings.length)console.warn('[SeqEyes M1]',m.m1.warnings.join('\n'));
+    }else{
+      alert('M1 calculation failed: '+((m.m1&&m.m1.error)||'unknown error'));
+    }
+  }else if(m.type==='m1Error'){
+    m1Busy=false;if(m1Btn)m1Btn.disabled=false;
+    alert('M1 calculation failed: '+(m.message||'unknown error'));
+  }else if(m.type==='pnsData'){
+    pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
+    if(m.pns&&m.pns.valid){
+      pnsData=m.pns;chVis[7]=true;
+      computeGlobalMax();buildLegend();draw();
+      if(!m.pns.ok)alert('PNS warning: predicted level reaches/exceeds 100%.');
+    }else{
+      alert('PNS calculation failed: '+((m.pns&&m.pns.error)||'unknown error'));
+    }
+  }else if(m.type==='pnsError'){
+    pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
+    alert('PNS calculation failed: '+(m.message||'unknown error'));
   }
 });
 
@@ -108,13 +137,15 @@ function decodeB64F32(b64,n){var bin=atob(b64),len=bin.length,b=new Uint8Array(l
 
 /* ── Global amplitude ranges ──────────────────────────────────────────── */
 function computeGlobalMax(){
-  gMax=[0.001,6.28318,0.001,0.001,0.001,1,1,0.001,0.001];
+  gMax=[0.001,6.28318,0.001,0.001,0.001,1,1,0.001,0.001,0.001,0.001];
   for(var i=0;i<BL.length;i++){var b=BL[i];
     if(b.rf){var a=Math.abs(b.rf.a||0);if(a>gMax[0])gMax[0]=a;}
     if(b.gx&&b.gx.ty!=='none'&&Math.abs(b.gx.a||0)>gMax[2])gMax[2]=Math.abs(b.gx.a);
     if(b.gy&&b.gy.ty!=='none'&&Math.abs(b.gy.a||0)>gMax[3])gMax[3]=Math.abs(b.gy.a);
     if(b.gz&&b.gz.ty!=='none'&&Math.abs(b.gz.a||0)>gMax[4])gMax[4]=Math.abs(b.gz.a);
   }
+  if(pnsData&&pnsData.n){for(var p=0;p<pnsData.n.length;p++){gMax[7]=Math.max(gMax[7],Math.abs(pnsData.n[p]||0),Math.abs((pnsData.x&&pnsData.x[p])||0),Math.abs((pnsData.y&&pnsData.y[p])||0),Math.abs((pnsData.z&&pnsData.z[p])||0));}}
+  if(m1Data&&m1Data.x){for(var mi=0;mi<m1Data.x.length;mi++){gMax[8]=Math.max(gMax[8],Math.abs(m1Data.x[mi]||0));gMax[9]=Math.max(gMax[9],Math.abs((m1Data.y&&m1Data.y[mi])||0));gMax[10]=Math.max(gMax[10],Math.abs((m1Data.z&&m1Data.z[mi])||0));}}
   gMax[0]=Math.max(gMax[0],100);
 }
 

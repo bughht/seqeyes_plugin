@@ -47,6 +47,18 @@ document.getElementById('openBtn').onclick=function(){
 document.getElementById('exportKspaceBtn').onclick=function(){
   if(vscApi){vscApi.postMessage({command:'exportKspace'});}
 };
+document.getElementById('m1Btn').onclick=function(){
+  if(m1Busy)return;
+  if(m1Data){chVis[8]=!chVis[8];chVis[9]=chVis[8];chVis[10]=chVis[8];buildLegend();draw();return;}
+  m1Busy=true;if(m1Btn)m1Btn.disabled=true;
+  if(vscApi){vscApi.postMessage({command:'calculateM1'});}
+};
+document.getElementById('pnsBtn').onclick=function(){
+  if(pnsBusy)return;
+  if(pnsData){chVis[7]=!chVis[7];buildLegend();draw();return;}
+  pnsBusy=true;if(pnsBtn)pnsBtn.disabled=true;
+  if(vscApi){vscApi.postMessage({command:'openPnsAsc'});}
+};
 document.getElementById('zi').onclick=function(){zoomAtCenter(1.5);draw();drawMinimap();};
 document.getElementById('zo').onclick=function(){zoomAtCenter(1/1.5);draw();drawMinimap();};
 document.getElementById('zf').onclick=function(){fit();drawMinimap();};
