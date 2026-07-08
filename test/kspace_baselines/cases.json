@@ -1,0 +1,30 @@
+[
+  {
+    "id": "v151_gre",
+    "description": "Pulseq v1.5.1 gradient echo demo from SeqEyes test fixtures",
+    "sequencePath": "v151_gre/seq/writeGradientEcho.seq",
+    "baselinePath": "v151_gre/baseline/ktraj_adc.txt",
+    "expectedAdcSamples": 16384,
+    "sequenceSha256": "25f5d37d4d44554785bf99f3280a3883b4df6e7ff443ade591896004cca7a05a",
+    "baselineSha256": "22885d741dbf6e25cabcbf7759ae7f5699a505d37476e923dfd964688c31e29c",
+    "thresholds": {
+      "maxAbs": 1e-5,
+      "rmse": 1e-5,
+      "meanAbs": 5e-6
+    }
+  },
+  {
+    "id": "v151_spiral",
+    "description": "Pulseq v1.5.1 spiral demo from SeqEyes test fixtures",
+    "sequencePath": "v151_spiral/seq/writeSpiral.seq",
+    "baselinePath": "v151_spiral/baseline/ktraj_adc.txt",
+    "expectedAdcSamples": 52000,
+    "sequenceSha256": "17069755984a869b3afa315cdcea55f54a7653ff549c918031f0f51184158d6e",
+    "baselineSha256": "118f7216d09ffef5e5886a035a7dd35bc2e64c2594051311bbe30070080a0dff",
+    "thresholds": {
+      "maxAbs": 1e-5,
+      "rmse": 1e-5,
+      "meanAbs": 5e-6
+    }
+  }
+]

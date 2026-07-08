@@ -36,6 +36,16 @@ export interface KSpaceData {
 export interface KSpaceOptions {
     /** Optional hard cap on integration grid size. */
     maxGridPoints?: number;
+    /** RF raster time in seconds, used to place reset-adjacent grid points. */
+    rfRaster?: number;
+    /**
+     * Gradient waveform support points to include in the integration grid.
+     *
+     * `endpoints` keeps the interactive viewer fast by using waveform bounds plus
+     * the native gradient raster. `all` matches SeqEyes Qt more closely for
+     * arbitrary/oversampled gradients and is intended for exports and CI baselines.
+     */
+    gradientSupport?: 'endpoints' | 'all';
 }
 
 export function calculateKspace(
@@ -48,11 +58,14 @@ export function calculateKspace(
     if (!blocks.length || !gradientRaster || gradientRaster <= 0) return null;
 
     const GR = gradientRaster;
+    const RF = _options?.rfRaster && _options.rfRaster > 0 ? _options.rfRaster : 1e-6;
     const tacc = 1e-10;
 
-    // ---- Pass 1: count total ADC samples & collect RF/ADC events & gradient breakpoints ----
+    const gradientSupport = _options?.gradientSupport ?? 'endpoints';
+
+    // ---- Pass 1: count total ADC samples & collect RF/ADC events & gradient support points ----
     const excT: number[] = [], refT: number[] = [];
-    const gradBreaks: number[] = [];  // only start/end of each gradient waveform
+    const gradTimes: number[] = [];
     let totalAdcSamples = 0;
     for (const b of blocks) {
         if (b.adc) totalAdcSamples += b.adc.numSamples;
@@ -62,10 +75,9 @@ export function calculateKspace(
     let adcIdx = 0;
 
     for (const b of blocks) {
-        // Collect only gradient breakpoints (first/last time), not every sample
-        collectBreaks(b.gx, gradBreaks);
-        collectBreaks(b.gy, gradBreaks);
-        collectBreaks(b.gz, gradBreaks);
+        collectGradientSupport(b.gx, gradTimes, gradientSupport);
+        collectGradientSupport(b.gy, gradTimes, gradientSupport);
+        collectGradientSupport(b.gz, gradTimes, gradientSupport);
         if (b.rf) {
             const iso = Number.isFinite(b.rf.centerTime)
                 ? b.rf.centerTime
@@ -85,13 +97,13 @@ export function calculateKspace(
 
     // ---- Pass 2: build non-uniform time grid (memory‑safe: sort+dedup array) ----
     // Use a sorted-array dedup instead of Set to avoid V8's ~16.7M Set size limit.
-    // Only essential points are included: gradient breakpoints, RF centres,
+    // Only essential points are included: selected gradient support, RF centres,
     // ADC sample times, block boundaries, and a uniform raster grid.
     const cand: number[] = [];
     const pushC = (t: number) => { if (isFinite(t) && t >= -tacc) cand.push(Math.max(0, tacc * Math.round(t/tacc))); };
-    for (const t of gradBreaks) pushC(t);
-    for (const t of excT) { pushC(t); pushC(t - GR); }
-    for (const t of refT) { pushC(t); pushC(t - GR); }
+    for (const t of gradTimes) pushC(t);
+    for (const t of excT) { pushC(t); pushC(t - RF); pushC(t - 2 * RF); }
+    for (const t of refT) { pushC(t); pushC(t - RF); }
     for (const t of adcT) pushC(t);
     pushC(0); pushC(totalDuration);
     if (totalDuration > 0) {
@@ -177,13 +189,21 @@ export function calculateKspace(
 }
 
 // ---- helpers ----
-/** Collect only the first and last time point of a gradient waveform (breakpoints).
- *  The full waveform is evaluated via `gradVal` interpolation — individual sample
- *  points do NOT need to be in the integration grid.  This avoids blowing up the
- *  candidate array for sequences with many arbitrary (shaped) gradients. */
-function collectBreaks(g: DecodedGradWaveform|undefined, breaks: number[]): void {
+/** Collect selected time points from a gradient waveform.
+ *  The full waveform is evaluated via `gradVal` interpolation. The interactive
+ *  path can use only endpoints, while export/CI can include every support point
+ *  to match SeqEyes Qt's trajectory integration more closely. */
+function collectGradientSupport(
+    g: DecodedGradWaveform|undefined,
+    support: number[],
+    mode: 'endpoints' | 'all',
+): void {
     if (!g || g.type === 'none' || !g.timePoints || g.timePoints.length < 2) return;
-    breaks.push(g.timePoints[0], g.timePoints[g.timePoints.length - 1]);
+    if (mode === 'all') {
+        for (let i = 0; i < g.timePoints.length; i++) support.push(g.timePoints[i]);
+        return;
+    }
+    support.push(g.timePoints[0], g.timePoints[g.timePoints.length - 1]);
 }
 function gradVal(g: DecodedGradWaveform|undefined, t: number): number {
     if (!g || g.type === 'none') return 0;

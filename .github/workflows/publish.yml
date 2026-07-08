@@ -32,7 +32,7 @@ jobs:
         run: npm run check
 
       - name: Package VS Code extension (.vsix)
-        run: npx @vscode/vsce package --out seqeyes-web.vsix
+        run: npm run package:vsix
 
       - name: Package MATLAB toolbox (.mltbx)
         # Requires MATLAB — build locally with:  run('matlab/pack_toolbox.m')

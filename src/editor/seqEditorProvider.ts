@@ -16,6 +16,7 @@ import * as vscode from 'vscode';
 import { parseSequenceText } from '../pulseq/reader';
 import { decodeAllBlocks } from '../pulseq/decoder';
 import { calculateKspace, type KSpaceData } from '../pulseq/kspace';
+import { exportKspaceArtifacts } from '../pulseq/kspaceExport';
 import { detectSequenceTiming } from '../pulseq/trdetect';
 import { getWebviewContent } from './webviewContent';
 import type { DecodedBlock, DecodedGradWaveform } from '../pulseq/types';
@@ -24,6 +25,61 @@ import type { DecodedBlock, DecodedGradWaveform } from '../pulseq/types';
 
 const VIEW_TYPE = 'seqeyes.sequenceViewer';
 const MAX_DISPLAY_PTS = 500;   // downsample waveforms to ≤ 500 pts for webview
+
+export interface SeqEyesDiagnosticLoadState {
+    activeUri: string;
+    sequenceName: string;
+    blockCount: number;
+    totalDuration: number;
+    adcCount: number;
+    kspaceSampleCount: number;
+    hasKspace: boolean;
+    hasTiming: boolean;
+    panelTitle: string;
+    loadedAt: string;
+}
+
+export interface SeqEyesDiagnosticErrorState {
+    activeUri: string;
+    message: string;
+    failedAt: string;
+}
+
+export interface SeqEyesDiagnosticState {
+    activeUri?: string;
+    lastLoad?: SeqEyesDiagnosticLoadState;
+    lastError?: SeqEyesDiagnosticErrorState;
+}
+
+export interface SeqEyesDiagnosticExportResult {
+    ktrajAdcUri: string;
+    metadataUri: string;
+    adcSampleCount: number;
+    sequenceName: string;
+}
+
+const diagnosticState: SeqEyesDiagnosticState = {};
+
+export function getSeqEyesDiagnosticState(): SeqEyesDiagnosticState {
+    return JSON.parse(JSON.stringify(diagnosticState)) as SeqEyesDiagnosticState;
+}
+
+export function resetSeqEyesDiagnosticState(): void {
+    delete diagnosticState.activeUri;
+    delete diagnosticState.lastLoad;
+    delete diagnosticState.lastError;
+}
+
+export async function exportKspaceToDirectoryForTest(
+    sourceUri: vscode.Uri,
+    outputDir: vscode.Uri,
+    packageVersion: string,
+): Promise<SeqEyesDiagnosticExportResult> {
+    const sequenceName = uriFileName(sourceUri);
+    const defaultStem = sanitizeFileStem(sequenceName.replace(/\.seq$/i, '') || 'sequence');
+    const saveUri = vscode.Uri.joinPath(outputDir, `${defaultStem}_ktraj_adc.txt`);
+    return await writeKspaceArtifacts(sourceUri, saveUri, packageVersion, defaultStem);
+}
 
 // ─── Provider class ───────────────────────────────────────────────────────
 
@@ -48,80 +104,104 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
     ): Promise<void> {
         panel.webview.options = { enableScripts: true };
         panel.webview.html = this._loadingHtml();
+        let activeUri = doc.uri;
 
         // ── Core: parse, decode, compute k‑space, send ──
         const sendSequenceData = async (uri: vscode.Uri) => {
-            const postProgress = (phase: string, percent: number, text: string) => {
-                panel.webview.postMessage({ type: 'progress', phase, percent, text });
-            };
+            try {
+                activeUri = uri;
+                diagnosticState.activeUri = uri.toString();
+                const postProgress = (phase: string, percent: number, text: string) => {
+                    panel.webview.postMessage({ type: 'progress', phase, percent, text });
+                };
 
-            postProgress('start', 0, 'Reading file\u2026');
-            const text = (await vscode.workspace.fs.readFile(uri)).toString();
+                postProgress('start', 0, 'Reading file\u2026');
+                const text = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
 
-            postProgress('parse', 5, 'Parsing Pulseq sequence\u2026');
-            const seq = parseSequenceText(text);
+                postProgress('parse', 5, 'Parsing Pulseq sequence\u2026');
+                const seq = parseSequenceText(text);
 
-            postProgress('timing', 10, 'Detecting TR/TE timing\u2026');
-            const timing = detectSequenceTiming(seq);
+                postProgress('timing', 10, 'Detecting TR/TE timing\u2026');
+                const timing = detectSequenceTiming(seq);
 
-            const totalBlocks = seq.blocks.length;
-            postProgress('decode', 15, `Decoding ${totalBlocks} blocks\u2026`);
-            const blocks = decodeAllBlocks(seq);
-            const totalDur = blocks.length > 0
-                ? blocks[blocks.length - 1].startTime + blocks[blocks.length - 1].duration
-                : 0;
+                const totalBlocks = seq.blocks.length;
+                postProgress('decode', 15, `Decoding ${totalBlocks} blocks\u2026`);
+                const blocks = decodeAllBlocks(seq);
+                const totalDur = blocks.length > 0
+                    ? blocks[blocks.length - 1].startTime + blocks[blocks.length - 1].duration
+                    : 0;
 
-            postProgress('kspace', 55, 'Computing k-space trajectory\u2026');
-            const ks = calculateKspace(
-                blocks,
-                seq.rasterTimes.gradientRaster,
-                totalDur,
-            );
+                postProgress('kspace', 55, 'Computing k-space trajectory\u2026');
+                const ks = calculateKspace(
+                    blocks,
+                    seq.rasterTimes.gradientRaster,
+                    totalDur,
+                    0,
+                    { rfRaster: seq.rasterTimes.rfRaster },
+                );
 
-            postProgress('serialize', 85, 'Preparing data for display\u2026');
-            // Build lightweight block‑position array for the minimap
-            const blockPositions = seq.blocks.map((b, i) => {
-                let cum = 0;
-                for (let j = 0; j < i; j++) cum += seq.blocks[j].dur * seq.rasterTimes.blockDurationRaster;
-                return { i: b.num, s: cum, d: b.dur * seq.rasterTimes.blockDurationRaster };
-            });
+                postProgress('serialize', 85, 'Preparing data for display\u2026');
+                // Build lightweight block‑position array for the minimap
+                const blockPositions = seq.blocks.map((b, i) => {
+                    let cum = 0;
+                    for (let j = 0; j < i; j++) cum += seq.blocks[j].dur * seq.rasterTimes.blockDurationRaster;
+                    return { i: b.num, s: cum, d: b.dur * seq.rasterTimes.blockDurationRaster };
+                });
 
-            const serialized = serializeBlocks(blocks);
+                const serialized = serializeBlocks(blocks);
 
-            postProgress('send', 95, 'Rendering\u2026');
-            panel.webview.postMessage({
-                type: 'sequenceData',
-                blocks: serialized,
-                totalDuration: totalDur,
-                gradRaster: seq.rasterTimes.gradientRaster,
-                rfRaster: seq.rasterTimes.rfRaster,
-                adcRaster: seq.rasterTimes.adcRaster,
-                blockRaster: seq.rasterTimes.blockDurationRaster,
-                kspace: ks ? serializeKSpace(ks) : null,
-                timing: {
-                    trTimeSec: timing.trTimeSec,
-                    trCount: timing.trCount,
-                    hasExplicitTR: timing.hasExplicitTR,
-                    teTimeSec: timing.teTimeSec,
-                    hasExplicitTE: timing.hasExplicitTE,
-                    rfUseGuessed: timing.rfUseGuessed,
-                },
-                blockPositions,
-            });
+                postProgress('send', 95, 'Rendering\u2026');
+                panel.webview.postMessage({
+                    type: 'sequenceData',
+                    blocks: serialized,
+                    totalDuration: totalDur,
+                    gradRaster: seq.rasterTimes.gradientRaster,
+                    rfRaster: seq.rasterTimes.rfRaster,
+                    adcRaster: seq.rasterTimes.adcRaster,
+                    blockRaster: seq.rasterTimes.blockDurationRaster,
+                    kspace: ks ? serializeKSpace(ks) : null,
+                    timing: {
+                        trTimeSec: timing.trTimeSec,
+                        trCount: timing.trCount,
+                        hasExplicitTR: timing.hasExplicitTR,
+                        teTimeSec: timing.teTimeSec,
+                        hasExplicitTE: timing.hasExplicitTE,
+                        rfUseGuessed: timing.rfUseGuessed,
+                    },
+                    blockPositions,
+                });
 
-            postProgress('done', 100, 'Ready');
-            const name = seq.definitionsRaw.get('Name') || uri.path.split(/[\\/]/).pop() || 'SeqEyes Viewer';
-            panel.title = `SeqEyes: ${name.replace(/\.seq$/i, '')}`;
+                postProgress('done', 100, 'Ready');
+                const name = seq.definitionsRaw.get('Name') || uri.path.split(/[\\/]/).pop() || 'SeqEyes Viewer';
+                panel.title = `SeqEyes: ${name.replace(/\.seq$/i, '')}`;
+                diagnosticState.lastLoad = {
+                    activeUri: uri.toString(),
+                    sequenceName: name,
+                    blockCount: seq.blocks.length,
+                    totalDuration: totalDur,
+                    adcCount: ks?.t_adc.length ?? 0,
+                    kspaceSampleCount: ks?.t_ktraj.length ?? 0,
+                    hasKspace: !!ks,
+                    hasTiming: true,
+                    panelTitle: panel.title,
+                    loadedAt: new Date().toISOString(),
+                };
+                delete diagnosticState.lastError;
+            } catch (err) {
+                recordDiagnosticError(uri, err);
+                throw err;
+            }
         };
 
         // ── Initial load: validate, set full UI, show progress, then send data ──
         try {
-            parseSequenceText((await vscode.workspace.fs.readFile(doc.uri)).toString());
+            parseSequenceText(Buffer.from(await vscode.workspace.fs.readFile(doc.uri)).toString('utf8'));
             panel.webview.html = getWebviewContent(0);
             // Give the webview a moment to parse its new HTML, then start progress
             panel.webview.postMessage({ type: 'progress', phase: 'start', percent: 0, text: 'Preparing\u2026' });
             await sendSequenceData(doc.uri);
         } catch (err) {
+            recordDiagnosticError(doc.uri, err);
             panel.webview.html = this._errorHtml(err);
             return;
         }
@@ -145,8 +225,38 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
                         );
                     }
                 }
+            } else if (msg.command === 'exportKspace') {
+                await this._exportKspace(activeUri);
             }
         });
+    }
+
+    private async _exportKspace(uri: vscode.Uri): Promise<void> {
+        try {
+            const sequenceName = uriFileName(uri);
+            const defaultStem = sanitizeFileStem(sequenceName.replace(/\.seq$/i, '') || 'sequence');
+            const saveUri = await vscode.window.showSaveDialog({
+                defaultUri: siblingUri(uri, `${defaultStem}_ktraj_adc.txt`),
+                filters: { 'Text': ['txt'] },
+                title: 'Export ADC K-Space Trajectory',
+            });
+            if (!saveUri) return;
+
+            const result = await writeKspaceArtifacts(uri, saveUri, this._packageVersion(), defaultStem);
+
+            vscode.window.showInformationMessage(
+                `Exported k-space trajectory (${result.adcSampleCount} ADC samples) and metadata.`
+            );
+        } catch (err) {
+            vscode.window.showErrorMessage(
+                'Failed to export k-space trajectory: ' + (err instanceof Error ? err.message : String(err))
+            );
+        }
+    }
+
+    private _packageVersion(): string {
+        const pkg = this._ctx.extension.packageJSON as { version?: unknown };
+        return typeof pkg.version === 'string' ? pkg.version : 'unknown';
     }
 
     // ── HTML helpers ─────────────────────────────────────────────────
@@ -168,6 +278,60 @@ body{font-family:sans-serif;display:flex;align-items:center;justify-content:cent
 .e pre{background:#f5f5f5;padding:16px;border-radius:4px;text-align:left;overflow:auto;font-size:12px;color:#333}
 </style></head><body><div class="e"><h2>Parse Error</h2><pre>${msg.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</pre></div></body></html>`;
     }
+}
+
+function uriFileName(uri: vscode.Uri): string {
+    const rawName = uri.path.split('/').pop() || 'sequence.seq';
+    try {
+        return decodeURIComponent(rawName);
+    } catch {
+        return rawName;
+    }
+}
+
+function siblingUri(uri: vscode.Uri, fileName: string): vscode.Uri {
+    const dir = uri.path.replace(/\/[^/]*$/, '');
+    return uri.with({ path: `${dir}/${fileName}` });
+}
+
+function sanitizeFileStem(name: string): string {
+    const cleaned = name.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '');
+    return cleaned || 'sequence';
+}
+
+async function writeKspaceArtifacts(
+    sourceUri: vscode.Uri,
+    ktrajAdcUri: vscode.Uri,
+    packageVersion: string,
+    metadataFallbackStem = 'sequence',
+): Promise<SeqEyesDiagnosticExportResult> {
+    const sequenceText = Buffer.from(await vscode.workspace.fs.readFile(sourceUri)).toString('utf8');
+    const sequenceName = uriFileName(sourceUri);
+    const artifacts = exportKspaceArtifacts(sequenceText, sequenceName, { packageVersion });
+    await vscode.workspace.fs.writeFile(ktrajAdcUri, Buffer.from(artifacts.ktrajAdcText, 'utf8'));
+
+    const outputStem = sanitizeFileStem(uriFileName(ktrajAdcUri).replace(/\.[^.]*$/i, '').replace(/_?ktraj_adc$/i, ''));
+    const metadataUri = siblingUri(ktrajAdcUri, `${outputStem || metadataFallbackStem}_metadata.json`);
+    await vscode.workspace.fs.writeFile(
+        metadataUri,
+        Buffer.from(`${JSON.stringify(artifacts.metadata, null, 2)}\n`, 'utf8'),
+    );
+
+    return {
+        ktrajAdcUri: ktrajAdcUri.toString(),
+        metadataUri: metadataUri.toString(),
+        adcSampleCount: artifacts.metadata.adcSampleCount,
+        sequenceName,
+    };
+}
+
+function recordDiagnosticError(uri: vscode.Uri, err: unknown): void {
+    diagnosticState.activeUri = uri.toString();
+    diagnosticState.lastError = {
+        activeUri: uri.toString(),
+        message: err instanceof Error ? err.message : String(err),
+        failedAt: new Date().toISOString(),
+    };
 }
 
 // ─── Webview serialisation ────────────────────────────────────────────────

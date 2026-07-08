@@ -1,0 +1,52 @@
+name: VS Code Extension Tests
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master, 'feature/**', 'fix/**']
+  workflow_dispatch:
+
+jobs:
+  vscode-e2e:
+    name: VS Code E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run standard checks
+        run: npm run check
+
+      - name: Run VS Code extension E2E
+        run: xvfb-run -a npm run test:vscode
+
+      - name: Run VSIX package smoke
+        run: npm run test:package
+
+      - name: Upload VSIX smoke artifact
+        uses: actions/upload-artifact@v5
+        if: ${{ !cancelled() }}
+        with:
+          name: seqeyes-web-vsix-smoke
+          path: seqeyes-web.vsix
+          retention-days: 14
+
+      - name: Upload VS Code test logs
+        uses: actions/upload-artifact@v5
+        if: ${{ failure() }}
+        with:
+          name: vscode-test-logs
+          path: .vscode-test/**
+          retention-days: 14

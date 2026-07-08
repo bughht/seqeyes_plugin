@@ -81,7 +81,7 @@ All the same features as the browser & VS Code versions — 7 channels, k‑spac
 - **ADC phase curve** on φ axis — continuous $\phi(t) = \phi_0 + 2\pi \cdot f_{offset} \cdot (t - t_0)$
 - **K‑space viewer**: WebGL‑accelerated 3D scatter (millions of points @ 60 fps) with camera presets
 - **Camera presets** (xy / xz / yz) rotate the 3D view; any drag reverts to free 3D
-- **Interactive Canvas**: scroll‑zoom (anchored at cursor), drag‑pan, hover tooltips
+- **Interactive Canvas**: cursor‑anchored time zoom, per‑row y‑axis zoom, drag‑pan, hover tooltips
 - **6 built‑in themes**: One Light · One Dark · Dracula · Nord · GitHub Light · GitHub Dark (+ system auto)
 - **Vertical cursor** with live time readout
 - **Unit switchers** for time (s / ms / µs) and gradient (Hz/m / mT/m / G/cm)
@@ -97,6 +97,8 @@ All the same features as the browser & VS Code versions — 7 channels, k‑spac
 | Open a `.seq` file | Double‑click in Explorer, or click **📂 Open** in toolbar |
 | Switch to another sequence | **📂 Open** button (top‑left) |
 | Zoom waveform | Scroll wheel or toolbar `+` / `−` |
+| Zoom waveform y‑axis | `Ctrl` + scroll wheel over a waveform row |
+| Fine wheel zoom | Hold `Alt` while scrolling; `Ctrl` + `Alt` + scroll gives finer y‑axis zoom where supported by the browser/OS |
 | Pan waveform | Click & drag |
 | Fit to view | Toolbar `Fit` |
 | Toggle channel | Click legend label |
