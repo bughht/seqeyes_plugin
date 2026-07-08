@@ -19,6 +19,8 @@ interface DebugState {
   adcCount: number;
   exportEnabled: boolean;
   derivedRenderPoints: number;
+  derivedEnvelopeCurves: number;
+  derivedRawCurves: number;
   lastDrawDurationMs: number;
   drawCount: number;
   title: string;
@@ -215,12 +217,16 @@ test('calculates M1 lazily and accepts a synthetic ASC profile for PNS', async (
   const zoomedOut = await debugState(page);
   expect(zoomedOut.visibleDuration).toBeLessThanOrEqual(zoomedOut.totalDuration * 1.001);
   expect(zoomedOut.derivedRenderPoints).toBeLessThan(25_000);
+  expect(zoomedOut.derivedEnvelopeCurves).toBeGreaterThan(0);
   const drawCountAtClamp = zoomedOut.drawCount;
   await page.locator('#mc').dispatchEvent('wheel', { deltaY: 1200 });
   await page.waitForTimeout(50);
   expect((await debugState(page)).drawCount).toBe(drawCountAtClamp);
   await expectCanvasVaried(page.locator('#mc'));
   await expectCanvasRegionVaried(page.locator('#mc'), 0, 0, 0.12, 1);
+
+  for (let i = 0; i < 24; i++) await wheelOn(page, page.locator('#mc'), -1200);
+  expect((await debugState(page)).derivedRawCurves).toBeGreaterThan(0);
 });
 
 async function loadViewer(page: Page, sequencePath: string): Promise<void> {

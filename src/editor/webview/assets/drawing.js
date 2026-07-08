@@ -2,7 +2,7 @@
    Main draw loop
    ═══════════════════════════════════════════════════════════════════════ */
 function draw(){
-  var drawStarted=performance.now();derivedRenderPointCount=0;viewerDrawCount++;
+  var drawStarted=performance.now();derivedRenderPointCount=0;derivedEnvelopeCurveCount=0;derivedRawCurveCount=0;viewerDrawCount++;
   var w=mc.width/(window.devicePixelRatio||1),h=mc.height/(window.devicePixelRatio||1);
   var s=getComputedStyle(document.body);
   ctx.clearRect(0,0,w,h);
@@ -133,13 +133,26 @@ function drawPercentSeries(series,vi,ci,c,ch,vs,ve){
   if(!series||series.n<2)return;
   rowClip(vi,ch,function(){
     var maxA=channelRange(ci),base=M.t+(vi+1)*ch-ch*.08,scale=ch*.84/maxA;
+    var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r;
+    var rawLimit=Math.max(64,Math.ceil((clipR-clipL)*2));
     ctx.strokeStyle=c;ctx.lineWidth=1;ctx.beginPath();
-    var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r,f=1;
-    derivedRenderPointCount+=forEachDerivedPoint(series,vs,ve,Math.max(64,Math.ceil((clipR-clipL)*2)),function(tv,vv){
-      var sx=t2x(tv);if(!isFinite(sx)||sx<clipL||sx>clipR){f=1;return}
-      var sy=base-vv*scale;if(!isFinite(sy)){f=1;return}
-      if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
-    });
+    if(derivedSeriesWindow(series,vs,ve).count<=rawLimit){
+      derivedRawCurveCount++;
+      var f=1;
+      derivedRenderPointCount+=forEachDerivedPoint(series,vs,ve,rawLimit,function(tv,vv){
+        var sx=t2x(tv);if(!isFinite(sx)||sx<clipL||sx>clipR){f=1;return}
+        var sy=base-vv*scale;if(!isFinite(sy)){f=1;return}
+        if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
+      });
+    }else{
+      derivedEnvelopeCurveCount++;
+      var first=1;
+      derivedRenderPointCount+=forEachDerivedRange(series,vs,ve,Math.max(32,Math.ceil(clipR-clipL)),function(tv,_minValue,maxValue){
+        var sx=t2x(tv),sy=base-maxValue*scale;
+        if(!isFinite(sx)||!isFinite(sy)||sx<clipL||sx>clipR){first=1;return}
+        if(first){ctx.moveTo(sx,sy);first=0}else ctx.lineTo(sx,sy);
+      });
+    }
     ctx.stroke();
   });
 }
@@ -148,14 +161,39 @@ function drawBipolarSeries(series,vi,ci,c,ch,vs,ve){
   if(!series||series.n<2)return;
   rowClip(vi,ch,function(){
     var maxA=channelRange(ci),y=cy(vi),scale=ch*.4/maxA;
-    ctx.strokeStyle=c;ctx.lineWidth=1;ctx.beginPath();
-    var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r,f=1;
-    derivedRenderPointCount+=forEachDerivedPoint(series,vs,ve,Math.max(64,Math.ceil((clipR-clipL)*2)),function(tv,vv){
-      var sx=t2x(tv);if(!isFinite(sx)||sx<clipL||sx>clipR){f=1;return}
-      var sy=y-vv*scale;if(!isFinite(sy)){f=1;return}
-      if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
-    });
-    ctx.stroke();
+    var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r;
+    var rawLimit=Math.max(64,Math.ceil((clipR-clipL)*2));
+    if(derivedSeriesWindow(series,vs,ve).count<=rawLimit){
+      derivedRawCurveCount++;
+      ctx.strokeStyle=c;ctx.lineWidth=1;ctx.beginPath();var f=1;
+      derivedRenderPointCount+=forEachDerivedPoint(series,vs,ve,rawLimit,function(tv,vv){
+        var sx=t2x(tv);if(!isFinite(sx)||sx<clipL||sx>clipR){f=1;return}
+        var sy=y-vv*scale;if(!isFinite(sy)){f=1;return}
+        if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
+      });
+      ctx.stroke();
+    }else{
+      derivedEnvelopeCurveCount++;
+      var ranges=[];
+      var rangeCount=forEachDerivedRange(series,vs,ve,Math.max(32,Math.ceil(clipR-clipL)),function(tv,minValue,maxValue){
+        var sx=t2x(tv),upper=y-maxValue*scale,lower=y-minValue*scale;
+        if(isFinite(sx)&&isFinite(upper)&&isFinite(lower)&&sx>=clipL&&sx<=clipR)ranges.push([sx,upper,lower]);
+      });
+      derivedRenderPointCount+=rangeCount*2;
+      if(ranges.length){
+        ctx.fillStyle=c;ctx.globalAlpha=.14;ctx.beginPath();
+        ctx.moveTo(ranges[0][0],ranges[0][1]);
+        for(var ri=1;ri<ranges.length;ri++)ctx.lineTo(ranges[ri][0],ranges[ri][1]);
+        for(var rj=ranges.length-1;rj>=0;rj--)ctx.lineTo(ranges[rj][0],ranges[rj][2]);
+        ctx.closePath();ctx.fill();
+        ctx.globalAlpha=.9;ctx.strokeStyle=c;ctx.lineWidth=.8;
+        ctx.beginPath();ctx.moveTo(ranges[0][0],ranges[0][1]);
+        for(var rk=1;rk<ranges.length;rk++)ctx.lineTo(ranges[rk][0],ranges[rk][1]);
+        ctx.stroke();ctx.beginPath();ctx.moveTo(ranges[0][0],ranges[0][2]);
+        for(var rl=1;rl<ranges.length;rl++)ctx.lineTo(ranges[rl][0],ranges[rl][2]);
+        ctx.stroke();ctx.globalAlpha=1;
+      }
+    }
   });
 }
 

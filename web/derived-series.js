@@ -51,10 +51,59 @@ function upperBoundSeries(values,target){
   return lo;
 }
 
+function derivedSeriesWindow(series,viewStart,viewEnd){
+  if(!series||series.n<1)return{i0:0,i1:0,count:0};
+  var i0=Math.max(0,lowerBoundSeries(series.t,viewStart)-1);
+  var i1=Math.min(series.n,upperBoundSeries(series.t,viewEnd)+1);
+  return{i0:i0,i1:i1,count:Math.max(0,i1-i0)};
+}
+
+function forEachDerivedRange(series,viewStart,viewEnd,maxBuckets,visit){
+  var windowRange=derivedSeriesWindow(series,viewStart,viewEnd);
+  if(windowRange.count<1)return 0;
+  var i0=windowRange.i0,i1=windowRange.i1,t=series.t,v=series.v,n=series.n;
+  var level=series.levels[series.levels.length-1];
+  for(var li=0;li<series.levels.length;li++){
+    var candidate=series.levels[li];
+    var visibleBuckets=Math.ceil(i1/candidate.bucketSize)-Math.floor(i0/candidate.bucketSize);
+    if(visibleBuckets<=maxBuckets){level=candidate;break}
+  }
+  var emitted=0,size=level.bucketSize;
+  var firstBucket=Math.floor(i0/size),lastBucket=Math.floor((i1-1)/size);
+  function emitRange(start,end,minIndex,maxIndex){
+    if(end<=start)return;
+    if(minIndex===undefined||maxIndex===undefined){
+      minIndex=-1;maxIndex=-1;
+      for(var index=start;index<end;index++){
+        if(!isFinite(v[index]))continue;
+        if(minIndex<0||v[index]<v[minIndex])minIndex=index;
+        if(maxIndex<0||v[index]>v[maxIndex])maxIndex=index;
+      }
+    }
+    if(minIndex<0||maxIndex<0)return;
+    var center=0.5*(t[start]+t[end-1]);
+    if(!isFinite(center))return;
+    visit(center,v[minIndex]*series.scale,v[maxIndex]*series.scale);
+    emitted++;
+  }
+  if(firstBucket===lastBucket){
+    emitRange(i0,i1);
+    return emitted;
+  }
+  emitRange(i0,Math.min(i1,(firstBucket+1)*size));
+  for(var bucket=firstBucket+1;bucket<lastBucket;bucket++){
+    var start=bucket*size,end=Math.min(n,start+size);
+    emitRange(start,end,level.mins[bucket],level.maxs[bucket]);
+  }
+  emitRange(Math.max(i0,lastBucket*size),i1);
+  return emitted;
+}
+
 function forEachDerivedPoint(series,viewStart,viewEnd,maxPoints,visit){
   if(!series||series.n<1)return 0;
   var t=series.t,v=series.v,n=series.n;
-  var i0=Math.max(0,lowerBoundSeries(t,viewStart)-1),i1=Math.min(n,upperBoundSeries(t,viewEnd)+1);
+  var windowRange=derivedSeriesWindow(series,viewStart,viewEnd);
+  var i0=windowRange.i0,i1=windowRange.i1;
   if(i1<=i0)return 0;
   var count=i1-i0,emitted=0;
   function emit(index){

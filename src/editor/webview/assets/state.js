@@ -24,7 +24,7 @@ ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;
 /* K‑space data — pre‑computed on the extension side */
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
 var m1Data=null,pnsData=null,m1Busy=false,pnsBusy=false,m1RequestedChannel=8;
-var derivedRenderPointCount=0,lastDrawDurationMs=0,viewerDrawCount=0;
+var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,lastDrawDurationMs=0,viewerDrawCount=0;
 var viewerDrawFrame=0,viewerDrawMinimap=false;
 
 function scheduleViewerDraw(includeMinimap){
