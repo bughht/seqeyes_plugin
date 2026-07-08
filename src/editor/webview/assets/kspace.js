@@ -5,6 +5,44 @@ var kRotX=-0.5, kRotY=0.7;           // default 3D perspective
 var kDragging=false, kDragPrev=null, kDragBtn=0;
 var kCanvas=document.getElementById("kc"), kCtx=kCanvas.getContext("2d");
 var kDotSize=2, kUnit="cyc";         // cyc=1/m, rad=rad/m
+
+// ── Smooth animation targets ──────────────────────────────────────────
+var _tRotX=kRotX, _tRotY=kRotY, _tScl=kScl, _tCx=kCx, _tCy=kCy, _tCz=kCz;
+var _kAnimId=null;
+var _kEasing=0.12;  // higher = snappier, lower = smoother (0.06–0.20)
+
+function startKSpaceAnim() {
+  if (_kAnimId || kDragging) return;
+  function tick() {
+    var changed = false;
+    var eps = 0.0005;
+    if (Math.abs(_tRotX - kRotX) > eps)  { kRotX += (_tRotX - kRotX) * _kEasing; changed = true; }
+    if (Math.abs(_tRotY - kRotY) > eps)  { kRotY += (_tRotY - kRotY) * _kEasing; changed = true; }
+    if (Math.abs(_tScl  - kScl)  > 0.001){ kScl  += (_tScl  - kScl)  * _kEasing; changed = true; }
+    if (Math.abs(_tCx   - kCx)   > 0.001){ kCx   += (_tCx   - kCx)   * _kEasing; changed = true; }
+    if (Math.abs(_tCy   - kCy)   > 0.001){ kCy   += (_tCy   - kCy)   * _kEasing; changed = true; }
+    if (Math.abs(_tCz   - kCz)   > 0.001){ kCz   += (_tCz   - kCz)   * _kEasing; changed = true; }
+    if (changed) {
+      drawKs();
+      _kAnimId = requestAnimationFrame(tick);
+    } else {
+      // Snap to exact targets
+      kRotX=_tRotX; kRotY=_tRotY; kScl=_tScl; kCx=_tCx; kCy=_tCy; kCz=_tCz;
+      _kAnimId = null;
+    }
+  }
+  _kAnimId = requestAnimationFrame(tick);
+}
+
+function setKSpaceTarget(rx, ry, s, cx, cy, cz, instant) {
+  if (instant) {
+    kRotX=_tRotX=rx; kRotY=_tRotY=ry; kScl=_tScl=s; kCx=_tCx=cx; kCy=_tCy=cy; kCz=_tCz=cz;
+    drawKs();
+  } else {
+    _tRotX=rx; _tRotY=ry; _tScl=s; _tCx=cx; _tCy=cy; _tCz=cz;
+    startKSpaceAnim();
+  }
+}
 document.getElementById("kdot").oninput=function(){kDotSize=parseInt(this.value);drawKs();};
 document.getElementById("kunit").onclick=function(){
   kUnit=kUnit==="cyc"?"rad":"cyc";this.textContent=kUnit==="cyc"?"Unit: 1/m":"Unit: rad/m";drawKs();
@@ -56,6 +94,10 @@ var gl=null, glProgram=null, glBuf=null, glN=0;
 var glAttribPos=-1, glAttribTime=-1;
 var glU_cy=-1,glU_sy=-1,glU_cx=-1,glU_sx=-1,glU_center=-1,glU_scale=-1;
 var glU_halfRes=-1,glU_tMin=-1,glU_tMax=-1,glU_dot=-1,glU_color=-1;
+
+// ── Cached bounds (computed once when data is uploaded) ──────────────
+var _kBxmin=0,_kBxmax=0,_kBymin=0,_kBymax=0,_kBzmin=0,_kBzmax=0,_kBrng=0;
+var _kBoundsDirty=true;  // set true when new data arrives
 
 function initWebGL(){
   var c=document.getElementById("kg");
@@ -114,7 +156,6 @@ function uploadKSpaceGPU(){
   if(!kAdc||!kAdc[0]||kAdc[0].length===0){glN=0;return;}
   if(!gl&&!initWebGL())return;
   var n=kAdc[0].length;
-  // Interleave: [kx,ky,kz,time] × n  →  4 floats per point  (16 bytes)
   var data=new Float32Array(n*4);
   var ax=kAdc[0],ay=kAdc[1],az=kAdc[2],at=kAdcTime;
   for(var i=0;i<n;i++){var j=i*4;data[j]=ax[i];data[j+1]=ay[i];data[j+2]=az[i];data[j+3]=at[i];}
@@ -123,6 +164,12 @@ function uploadKSpaceGPU(){
   gl.bindBuffer(gl.ARRAY_BUFFER,glBuf);
   gl.bufferData(gl.ARRAY_BUFFER,data,gl.STATIC_DRAW);
   glN=n;
+  // Compute bounds once
+  var xmin=Infinity,xmax=-Infinity,ymin=Infinity,ymax=-Infinity,zmin=Infinity,zmax=-Infinity;
+  for(var a=0;a<n;a++){var xi=ax[a],yi=ay[a],zi=az[a];if(isFinite(xi)){if(xi<xmin)xmin=xi;if(xi>xmax)xmax=xi;}if(isFinite(yi)){if(yi<ymin)ymin=yi;if(yi>ymax)ymax=yi;}if(isFinite(zi)){if(zi<zmin)zmin=zi;if(zi>zmax)zmax=zi;}}
+  _kBxmin=xmin;_kBxmax=xmax;_kBymin=ymin;_kBymax=ymax;_kBzmin=zmin;_kBzmax=zmax;
+  _kBrng=Math.max(xmax-xmin,ymax-ymin,zmax-zmin,1e-6);
+  _kBoundsDirty=false;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -138,20 +185,23 @@ document.getElementById("kbtn").onclick=function(){
 };
 document.getElementById("kax").textContent="3D";
 document.getElementById("krst").onclick=function(){
-  kAutoFit=true;kRotX=-0.5;kRotY=0.7;kView="3d";
+  kView="3d";
   document.getElementById("kax").textContent="3D";
-  drawKs();
+  var af=_kAutoFitVals();
+  setKSpaceTarget(-0.5, 0.7, af.scl, af.cx, af.cy, af.cz, false);
 };
-// Camera presets: rotate the 3D view to look straight down an axis
+// Camera presets: smoothly rotate to look straight down an axis
 document.getElementById("kax").onclick=function(){
   var views=["3d","xy","xz","yz"];var idx=views.indexOf(kView);
-  kView=views[(idx+1)%4];kAutoFit=true;
-  if(kView==="xy"){kRotX=0;kRotY=0;}
-  else if(kView==="xz"){kRotX=-Math.PI/2;kRotY=0;}
-  else if(kView==="yz"){kRotX=0;kRotY=Math.PI/2;}
-  else{kRotX=-0.5;kRotY=0.7;}  // 3d — default perspective
+  kView=views[(idx+1)%4];
+  var trx=_tRotX, tr=_tRotY;
+  if(kView==="xy"){trx=0; tr=0;}
+  else if(kView==="xz"){trx=-Math.PI/2; tr=0;}
+  else if(kView==="yz"){trx=0; tr=Math.PI/2;}
+  else{trx=-0.5; tr=0.7;}  // 3d — default perspective
   document.getElementById("kax").textContent=kView.toUpperCase();
-  drawKs();
+  var af=_kAutoFitVals();
+  setKSpaceTarget(trx, tr, af.scl, af.cx, af.cy, af.cz, false);
 };
 
 function resizeKc(){
@@ -262,6 +312,8 @@ function drawKCursorMarker(ctx,proj,cs,W,H){
 /* ── Mouse ───────────────────────────────────────────────────────────── */
 kCanvas.addEventListener("mousedown",function(e){
   kDragging=true;kDragPrev={x:e.clientX,y:e.clientY};kDragBtn=e.button;
+  // Cancel any running animation so it doesn't fight the drag
+  if(_kAnimId){cancelAnimationFrame(_kAnimId);_kAnimId=null;}
   e.preventDefault();
 });
 kCanvas.addEventListener("contextmenu",function(e){e.preventDefault();});
@@ -270,35 +322,31 @@ kCanvas.addEventListener("wheel",function(e){e.preventDefault();
   var r=kCanvas.getBoundingClientRect(),dpr=window.devicePixelRatio||1;
   var mx=(e.clientX-r.left)/dpr, my=(e.clientY-r.top)/dpr;
   var zf=e.deltaY<0?1.25:0.8, W=kCanvas.width/dpr, H=kCanvas.height/dpr;
-  // Zoom toward the mouse cursor (NOT the canvas centre).
-  // Derivation:  screenX = W/2 + (kx - kCx) * kScl / dpr
-  //   → kCx' = kCx + (mx - W/2) * dpr/kScl * (1 - 1/zf)
-  //   → kCy' = kCy - (my - H/2) * dpr/kScl * (1 - 1/zf)   (Y is flipped)
   var dz=(1-1/zf)*dpr/kScl;
-  kScl*=zf;kAutoFit=false;
-  kCx+=(mx-W/2)*dz;
-  kCy-=(my-H/2)*dz;
-  drawKs();
+  kAutoFit=false;
+  setKSpaceTarget(kRotX, kRotY, kScl*zf, kCx+(mx-W/2)*dz, kCy-(my-H/2)*dz, kCz, false);
 },{passive:false});
 
 window.addEventListener("mousemove",function(e){
   if(!kDragging||!kDragPrev||!kOpen)return;
   var dx=e.clientX-kDragPrev.x, dy=e.clientY-kDragPrev.y;
   kDragPrev={x:e.clientX,y:e.clientY};
-  // Any manual drag reverts the camera‑preset button to "3D"
   if(kView!=="3d"){kView="3d";document.getElementById("kax").textContent="3D";}
   if(kDragBtn===0){
-    kRotY+=dx*0.008;kRotX-=dy*0.008;  // left drag = rotate
+    // left drag = instant rotate (no lerp — feels responsive)
+    kRotY+=dx*0.008; kRotX-=dy*0.008;
+    _tRotY=kRotY; _tRotX=kRotX;  // sync targets
   }else{
-    // right / middle drag = pan in 3D (inverse rotation)
+    // right/middle drag = instant pan
     var cz=Math.cos(kRotY),sz=Math.sin(kRotY),cx=Math.cos(kRotX),sx=Math.sin(kRotX);
     var dpr=window.devicePixelRatio||1;
     dx/=(dpr*kScl); dy/=(dpr*kScl);
     if(Math.abs(cz)>0.01){kCy+=dy/cx;kCx+=(-dx-sz*sx*(dy/cx))/cz;}
     else{kCy+=dy/cx;kCz+=(dx-cz*sx*(dy/cx))/sz;}
+    _tCy=kCy; _tCx=kCx; _tCz=kCz;  // sync targets
     kAutoFit=false;
   }
-  drawKs();
+  drawKsFast();
 });
 window.addEventListener("mouseup",function(){kDragging=false;kDragPrev=null;});
 
@@ -322,6 +370,11 @@ window.addEventListener("resize",function(){if(kOpen){resizeKc();drawKs();}});
    Nice tick spacing
    ═══════════════════════════════════════════════════════════════════════ */
 function kNice(range){var ms=[1,2,5,10,20,50,100,200,500];for(var i=0;i<ms.length;i++){var b=Math.pow(10,Math.floor(Math.log10(range)));if(ms[i]*b>=range/4)return ms[i]*b;}return 1;}
+
+function _kAutoFitVals(){
+  var rng=_kBrng||1,W=kCanvas.width/(window.devicePixelRatio||1),H=kCanvas.height/(window.devicePixelRatio||1);
+  return{cx:(_kBxmin+_kBxmax)/2,cy:(_kBymin+_kBymax)/2,cz:(_kBzmin+_kBzmax)/2,scl:Math.min(W,H)/(rng*1.15)};
+}
 
 /* ═══════════════════════════════════════════════════════════════════════
    Drawing  (Canvas 2D axes + WebGL scatter)
@@ -352,6 +405,13 @@ function drawKs(){
   drawKs_core(W,H,dpr);
 }
 
+/** Fast draw: skips canvas resize (use during drag for responsiveness). */
+function drawKsFast(){
+  var dpr=window.devicePixelRatio||1;
+  var W=kCanvas.width/dpr, H=kCanvas.height/dpr;
+  drawKs_core(W,H,dpr);
+}
+
 /** Core rendering — assumes canvases are already sized, W & H in CSS px. */
 function drawKs_core(W,H,dpr){
   if(W<=0||H<=0)return;
@@ -367,17 +427,23 @@ function drawKs_core(W,H,dpr){
   }
   var adcX=kAdc[0],adcY=kAdc[1],adcZ=kAdc[2], nAdc=adcX.length;
 
-  // ── Bounds (scan all points) ──
-  var xmin=Infinity,xmax=-Infinity,ymin=Infinity,ymax=-Infinity,zmin=Infinity,zmax=-Infinity;
-  for(var a=0;a<nAdc;a++){var xi=adcX[a],yi=adcY[a],zi=adcZ[a];if(isFinite(xi)){if(xi<xmin)xmin=xi;if(xi>xmax)xmax=xi;}if(isFinite(yi)){if(yi<ymin)ymin=yi;if(yi>ymax)ymax=yi;}if(isFinite(zi)){if(zi<zmin)zmin=zi;if(zi>zmax)zmax=zi;}}
-  if(!isFinite(xmin)){ctx.fillStyle="#f00";ctx.font="11px monospace";ctx.fillText("ALL NaN",10,20);return;}
-  var rng3=Math.max(xmax-xmin,ymax-ymin,zmax-zmin,1e-6);
+  // ── Use cached bounds (computed once in uploadKSpaceGPU) ──────────
+  if (_kBoundsDirty || !isFinite(_kBxmin)) {
+    // Recompute if needed (shouldn't happen normally)
+    var xmin=Infinity,xmax=-Infinity,ymin=Infinity,ymax=-Infinity,zmin=Infinity,zmax=-Infinity;
+    for(var a=0;a<nAdc;a++){var xi=adcX[a],yi=adcY[a],zi=adcZ[a];if(isFinite(xi)){if(xi<xmin)xmin=xi;if(xi>xmax)xmax=xi;}if(isFinite(yi)){if(yi<ymin)ymin=yi;if(yi>ymax)ymax=yi;}if(isFinite(zi)){if(zi<zmin)zmin=zi;if(zi>zmax)zmax=zi;}}
+    _kBxmin=xmin;_kBxmax=xmax;_kBymin=ymin;_kBymax=ymax;_kBzmin=zmin;_kBzmax=zmax;
+    _kBrng=Math.max(xmax-xmin,ymax-ymin,zmax-zmin,1e-6);
+    _kBoundsDirty=false;
+  }
+  var rng3=_kBrng;
+  if(!isFinite(_kBxmin)){ctx.fillStyle="#f00";ctx.font="11px monospace";ctx.fillText("ALL NaN",10,20);return;}
 
-  // ── Auto-fit ──
+  // ── Auto-fit (initial open only) ──
   if(kAutoFit){
-    kCx=(xmin+xmax)/2;kCy=(ymin+ymax)/2;kCz=(zmin+zmax)/2;
-    kScl=Math.min(W,H)/(rng3*1.15);
     kAutoFit=false;
+    var af=_kAutoFitVals();
+    setKSpaceTarget(kRotX, kRotY, af.scl, af.cx, af.cy, af.cz, false);
   }
 
   // ── Time window ──
@@ -414,11 +480,10 @@ function drawKs_core(W,H,dpr){
   }
 
   // ═══════════════════════════════════════════════════════════════════
-  // Canvas 2D axes / labels  (overlay — transparent background)
-  //   Projection MUST match the WebGL vertex shader:
-  //     cssX = W/2 + rx * kScl / dpr
-  //     cssY = H/2 - ry * kScl / dpr
+  // Canvas 2D axes — skip every 2nd frame during animation for perf
   // ═══════════════════════════════════════════════════════════════════
+  _kAxisFrame = (_kAxisFrame||0)+1;
+  if (!_kAnimId || _kAxisFrame % 2 === 0) {
   var cz=Math.cos(kRotY),sz=Math.sin(kRotY),cxR=Math.cos(kRotX),sxR=Math.sin(kRotX);
   var invDpr=1/dpr;
   function proj(px,py,pz){
@@ -453,6 +518,7 @@ function drawKs_core(W,H,dpr){
   var oo=proj(0,0,0);
   ctx.fillStyle=cs.getPropertyValue("--fg").trim();ctx.beginPath();ctx.arc(oo.x,oo.y,4,0,6.283);ctx.fill();
   drawKCursorMarker(ctx,proj,cs,W,H);
+  } // end axis frame-skip if
 
 }
 

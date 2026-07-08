@@ -35,24 +35,9 @@ jobs:
         run: npm run package:vsix
 
       - name: Package MATLAB toolbox (.mltbx)
-        shell: bash
-        run: |
-          PKG="seqeyes-toolbox"
-          mkdir -p "$PKG/web"
-          # MATLAB source files (flat at root)
-          cp matlab/seqeyes.m matlab/openseq.m matlab/gettingStarted.m matlab/toolboxInfo.xml "$PKG/"
-          cp -r matlab/examples "$PKG/"
-          cp -r matlab/resources "$PKG/"
-          # Web assets
-          cp web/index.html web/pulseq-bundle.js web/logo.png web/logo.svg "$PKG/web/"
-          # License
-          cp LICENSE.txt "$PKG/"
-          # Read version from toolbox metadata
-          VER=$(grep -oP '<version>\K[^<]+' matlab/toolboxInfo.xml)
-          OUTFILE="seqeyes-${VER}.mltbx"
-          (cd "$PKG" && zip -r "../${OUTFILE}" .)
-          echo "mltbx=$(pwd)/${OUTFILE}" >> $GITHUB_ENV
-          echo "mltbx_name=${OUTFILE}" >> $GITHUB_ENV
+        # Requires MATLAB — build locally with:  run('matlab/pack_toolbox.m')
+        # Then upload with:  gh release upload v0.1.7 seqeyes-0.1.7.mltbx
+        run: echo "Skipping .mltbx — build locally with pack_toolbox.m"
 
       - name: Upload MATLAB toolbox artifact
         uses: actions/upload-artifact@v4
@@ -80,11 +65,11 @@ jobs:
             ```
             Or drag & drop into VS Code's Extensions panel.
 
-            **MATLAB:** Download `seqeyes-*.mltbx` below and double-click in MATLAB, or run:
+            **MATLAB:** Build and install locally:
             ```matlab
-            matlab.addons.toolbox.installToolbox('seqeyes-*.mltbx')
+            run('matlab/pack_toolbox.m')
             ```
-            Requires MATLAB R2022a or later.
+            Requires MATLAB R2022a+. See [DEPLOY.md](matlab/DEPLOY.md) for details.
 
             ## Changes
 
