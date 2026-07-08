@@ -2,6 +2,7 @@
    Main draw loop
    ═══════════════════════════════════════════════════════════════════════ */
 function draw(){
+  var drawStarted=performance.now();derivedRenderPointCount=0;viewerDrawCount++;
   var w=mc.width/(window.devicePixelRatio||1),h=mc.height/(window.devicePixelRatio||1);
   var s=getComputedStyle(document.body);
   ctx.clearRect(0,0,w,h);
@@ -15,6 +16,7 @@ function draw(){
   drawAxes(w,h,vs,ve,s);
   drawCursor(w,h,s);
   drawKs();  // sync k-space ADC points with current time window
+  lastDrawDurationMs=performance.now()-drawStarted;
 }
 
 /* ── Vertical cursor ──────────────────────────────────────────────────── */
@@ -112,49 +114,47 @@ function drawDerivedChannels(vs,ve,s){
   for(var vi=0;vi<vc.length;vi++){
     if(vc[vi]===7)viP=vi;if(vc[vi]===8)viM1x=vi;if(vc[vi]===9)viM1y=vi;if(vc[vi]===10)viM1z=vi;
   }
-  if(pnsData&&viP>=0&&pnsData.t&&pnsData.t.length){
-    drawPercentSeries(pnsData.t,pnsData.x,viP,7,s.getPropertyValue('--gx').trim(),ch);
-    drawPercentSeries(pnsData.t,pnsData.y,viP,7,s.getPropertyValue('--gy').trim(),ch);
-    drawPercentSeries(pnsData.t,pnsData.z,viP,7,s.getPropertyValue('--gz').trim(),ch);
+  if(pnsData&&viP>=0){
+    drawPercentSeries(pnsData.x,viP,7,s.getPropertyValue('--gx').trim(),ch,vs,ve);
+    drawPercentSeries(pnsData.y,viP,7,s.getPropertyValue('--gy').trim(),ch,vs,ve);
+    drawPercentSeries(pnsData.z,viP,7,s.getPropertyValue('--gz').trim(),ch,vs,ve);
     ctx.setLineDash([5,3]);
-    drawPercentSeries(pnsData.t,pnsData.n,viP,7,s.getPropertyValue('--fg').trim(),ch);
+    drawPercentSeries(pnsData.n,viP,7,s.getPropertyValue('--fg').trim(),ch,vs,ve);
     ctx.setLineDash([]);
   }
-  if(m1Data&&m1Data.t&&m1Data.t.length){
-    if(viM1x>=0)drawBipolarSeries(m1Data.t,m1Data.x,viM1x,8,s.getPropertyValue('--gx').trim(),ch);
-    if(viM1y>=0)drawBipolarSeries(m1Data.t,m1Data.y,viM1y,9,s.getPropertyValue('--gy').trim(),ch);
-    if(viM1z>=0)drawBipolarSeries(m1Data.t,m1Data.z,viM1z,10,s.getPropertyValue('--gz').trim(),ch);
+  if(m1Data){
+    if(viM1x>=0)drawBipolarSeries(m1Data.x,viM1x,8,s.getPropertyValue('--gx').trim(),ch,vs,ve);
+    if(viM1y>=0)drawBipolarSeries(m1Data.y,viM1y,9,s.getPropertyValue('--gy').trim(),ch,vs,ve);
+    if(viM1z>=0)drawBipolarSeries(m1Data.z,viM1z,10,s.getPropertyValue('--gz').trim(),ch,vs,ve);
   }
 }
 
-function drawPercentSeries(t,v,vi,ci,c,ch){
-  if(!t||!v||t.length<2||v.length<2)return;
+function drawPercentSeries(series,vi,ci,c,ch,vs,ve){
+  if(!series||series.n<2)return;
   rowClip(vi,ch,function(){
     var maxA=channelRange(ci),base=M.t+(vi+1)*ch-ch*.08,scale=ch*.84/maxA;
     ctx.strokeStyle=c;ctx.lineWidth=1;ctx.beginPath();
-    var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r;
-    for(var i=0,f=1,n=Math.min(t.length,v.length);i<n;i++){
-      var tv=t[i],vv=v[i];if(!isFinite(tv)||!isFinite(vv)){f=1;continue}
-      var sx=t2x(tv);if(!isFinite(sx)||sx<clipL||sx>clipR){f=1;continue}
-      var sy=base-vv*scale;if(!isFinite(sy)){f=1;continue}
+    var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r,f=1;
+    derivedRenderPointCount+=forEachDerivedPoint(series,vs,ve,Math.max(64,Math.ceil((clipR-clipL)*2)),function(tv,vv){
+      var sx=t2x(tv);if(!isFinite(sx)||sx<clipL||sx>clipR){f=1;return}
+      var sy=base-vv*scale;if(!isFinite(sy)){f=1;return}
       if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
-    }
+    });
     ctx.stroke();
   });
 }
 
-function drawBipolarSeries(t,v,vi,ci,c,ch){
-  if(!t||!v||t.length<2||v.length<2)return;
+function drawBipolarSeries(series,vi,ci,c,ch,vs,ve){
+  if(!series||series.n<2)return;
   rowClip(vi,ch,function(){
     var maxA=channelRange(ci),y=cy(vi),scale=ch*.4/maxA;
     ctx.strokeStyle=c;ctx.lineWidth=1;ctx.beginPath();
-    var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r;
-    for(var i=0,f=1,n=Math.min(t.length,v.length);i<n;i++){
-      var tv=t[i],vv=v[i];if(!isFinite(tv)||!isFinite(vv)){f=1;continue}
-      var sx=t2x(tv);if(!isFinite(sx)||sx<clipL||sx>clipR){f=1;continue}
-      var sy=y-vv*scale;if(!isFinite(sy)){f=1;continue}
+    var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r,f=1;
+    derivedRenderPointCount+=forEachDerivedPoint(series,vs,ve,Math.max(64,Math.ceil((clipR-clipL)*2)),function(tv,vv){
+      var sx=t2x(tv);if(!isFinite(sx)||sx<clipL||sx>clipR){f=1;return}
+      var sy=y-vv*scale;if(!isFinite(sy)){f=1;return}
       if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
-    }
+    });
     ctx.stroke();
   });
 }

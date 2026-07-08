@@ -8,6 +8,7 @@
  *   webview/assets/styles.css        → <style> block
  *   webview/assets/template.html     → <body> markup
  *   webview/assets/state.js          → state, helpers, data reception
+ *   webview/assets/derived-series.js → multiresolution derived-curve summaries
  *   webview/assets/drawing.js        → Canvas rendering functions
  *   webview/assets/kspace.js         → WebGL k-space viewer
  *   webview/assets/interaction.js    → mouse, wheel, toolbar & IIFE close
@@ -32,6 +33,7 @@ function readAsset(filename: string): string {
 const CSS = readAsset('styles.css');
 const HTML_BODY = readAsset('template.html');
 const JS_STATE = readAsset('state.js');
+const JS_DERIVED_SERIES = readAsset('derived-series.js');
 const JS_DRAWING = readAsset('drawing.js');
 const JS_KSPACE = readAsset('kspace.js');
 const JS_INTERACTION = readAsset('interaction.js');
@@ -53,6 +55,7 @@ export function getWebviewContent(_hint: number): string {
         '<script>',
         '(function(){',
         JS_STATE,
+        JS_DERIVED_SERIES,
         JS_DRAWING,
         JS_KSPACE,
         JS_INTERACTION,

@@ -18,6 +18,9 @@ interface DebugState {
   kScale: number;
   adcCount: number;
   exportEnabled: boolean;
+  derivedRenderPoints: number;
+  lastDrawDurationMs: number;
+  drawCount: number;
   title: string;
 }
 
@@ -211,6 +214,11 @@ test('calculates M1 lazily and accepts a synthetic ASC profile for PNS', async (
   for (let i = 0; i < 40; i++) await wheelOn(page, page.locator('#mc'), 1200);
   const zoomedOut = await debugState(page);
   expect(zoomedOut.visibleDuration).toBeLessThanOrEqual(zoomedOut.totalDuration * 1.001);
+  expect(zoomedOut.derivedRenderPoints).toBeLessThan(25_000);
+  const drawCountAtClamp = zoomedOut.drawCount;
+  await page.locator('#mc').dispatchEvent('wheel', { deltaY: 1200 });
+  await page.waitForTimeout(50);
+  expect((await debugState(page)).drawCount).toBe(drawCountAtClamp);
   await expectCanvasVaried(page.locator('#mc'));
   await expectCanvasRegionVaried(page.locator('#mc'), 0, 0, 0.12, 1);
 });

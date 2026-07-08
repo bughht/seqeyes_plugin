@@ -18,6 +18,7 @@ import { decodeAllBlocks } from '../pulseq/decoder';
 import { calculateKspace, type KSpaceData } from '../pulseq/kspace';
 import { calculateM1, type M1Data } from '../pulseq/m1';
 import { calculatePns, parsePnsHardwareAsc, type PnsHardware, type PnsResult } from '../pulseq/pns';
+import { downsampleM4 } from '../pulseq/displayDownsampling';
 import { exportKspaceArtifacts } from '../pulseq/kspaceExport';
 import { detectSequenceTiming } from '../pulseq/trdetect';
 import { getWebviewContent } from './webviewContent';
@@ -481,15 +482,20 @@ function serializeKSpace(ks: KSpaceData): Record<string, unknown> {
 
 function serializeM1(m1: M1Data): Record<string, unknown> {
     const MAX_M1_PTS = 30000;
+    const x = downsampleM4(m1.tSec, m1.m1x, MAX_M1_PTS);
+    const y = downsampleM4(m1.tSec, m1.m1y, MAX_M1_PTS);
+    const z = downsampleM4(m1.tSec, m1.m1z, MAX_M1_PTS);
     return {
         valid: m1.valid,
         ok: m1.ok,
         error: m1.error,
         warnings: m1.warnings,
-        t: downsample(m1.tSec, MAX_M1_PTS),
-        x: downsample(m1.m1x, MAX_M1_PTS),
-        y: downsample(m1.m1y, MAX_M1_PTS),
-        z: downsample(m1.m1z, MAX_M1_PTS),
+        tx: x.time,
+        x: x.values,
+        ty: y.time,
+        y: y.values,
+        tz: z.time,
+        z: z.values,
         excitationTimesSec: downsample(m1.excitationTimesSec, MAX_M1_PTS),
         refocusingTimesSec: downsample(m1.refocusingTimesSec, MAX_M1_PTS),
     };
@@ -497,15 +503,22 @@ function serializeM1(m1: M1Data): Record<string, unknown> {
 
 function serializePns(pns: PnsResult): Record<string, unknown> {
     const MAX_PNS_PTS = 30000;
+    const x = downsampleM4(pns.timeSec, pns.pnsX, MAX_PNS_PTS);
+    const y = downsampleM4(pns.timeSec, pns.pnsY, MAX_PNS_PTS);
+    const z = downsampleM4(pns.timeSec, pns.pnsZ, MAX_PNS_PTS);
+    const norm = downsampleM4(pns.timeSec, pns.pnsNorm, MAX_PNS_PTS);
     return {
         valid: pns.valid,
         ok: pns.ok,
         error: pns.error,
-        t: downsample(pns.timeSec, MAX_PNS_PTS),
-        x: downsampleToPercent(pns.pnsX, MAX_PNS_PTS),
-        y: downsampleToPercent(pns.pnsY, MAX_PNS_PTS),
-        z: downsampleToPercent(pns.pnsZ, MAX_PNS_PTS),
-        n: downsampleToPercent(pns.pnsNorm, MAX_PNS_PTS),
+        tx: x.time,
+        x: x.values.map(value => value * 100.0),
+        ty: y.time,
+        y: y.values.map(value => value * 100.0),
+        tz: z.time,
+        z: z.values.map(value => value * 100.0),
+        tn: norm.time,
+        n: norm.values.map(value => value * 100.0),
     };
 }
 
@@ -525,8 +538,4 @@ function downsample(arr: Float64Array | number[], maxPts: number): number[] {
     const out = new Array<number>(maxPts);
     for (let i = 0; i < maxPts; i++) out[i] = arr[Math.floor(i * step)];
     return out;
-}
-
-function downsampleToPercent(arr: Float64Array | number[], maxPts: number): number[] {
-    return downsample(arr, maxPts).map(value => value * 100.0);
 }

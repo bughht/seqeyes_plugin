@@ -24,6 +24,18 @@ ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;
 /* K‑space data — pre‑computed on the extension side */
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
 var m1Data=null,pnsData=null,m1Busy=false,pnsBusy=false,m1RequestedChannel=8;
+var derivedRenderPointCount=0,lastDrawDurationMs=0,viewerDrawCount=0;
+var viewerDrawFrame=0,viewerDrawMinimap=false;
+
+function scheduleViewerDraw(includeMinimap){
+  viewerDrawMinimap=viewerDrawMinimap||includeMinimap;
+  if(viewerDrawFrame)return;
+  viewerDrawFrame=requestAnimationFrame(function(){
+    viewerDrawFrame=0;draw();
+    if(viewerDrawMinimap)drawMinimap();
+    viewerDrawMinimap=false;
+  });
+}
 
 /* Timing metadata (TR/TE info for minimap tooltip) */
 var seqTiming=null;  // {trTimeSec,trCount,hasExplicitTR,teTimeSec,hasExplicitTE,rfUseGuessed}
@@ -111,7 +123,12 @@ window.addEventListener('message',function(e){
   }else if(m.type==='m1Data'){
     m1Busy=false;
     if(m.m1&&m.m1.valid){
-      m1Data=m.m1;chVis[m1RequestedChannel]=true;
+      m1Data={
+        warnings:m.m1.warnings||[],
+        x:createDerivedSeries(m.m1.tx||m.m1.t,m.m1.x,1),
+        y:createDerivedSeries(m.m1.ty||m.m1.t,m.m1.y,1),
+        z:createDerivedSeries(m.m1.tz||m.m1.t,m.m1.z,1)
+      };chVis[m1RequestedChannel]=true;
       computeGlobalMax();buildLegend();draw();
       if(m.m1.warnings&&m.m1.warnings.length)console.warn('[SeqEyes M1]',m.m1.warnings.join('\n'));
     }else{
@@ -123,7 +140,12 @@ window.addEventListener('message',function(e){
   }else if(m.type==='pnsData'){
     pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
     if(m.pns&&m.pns.valid){
-      pnsData=m.pns;chVis[7]=true;
+      pnsData={
+        x:createDerivedSeries(m.pns.tx||m.pns.t,m.pns.x,1),
+        y:createDerivedSeries(m.pns.ty||m.pns.t,m.pns.y,1),
+        z:createDerivedSeries(m.pns.tz||m.pns.t,m.pns.z,1),
+        n:createDerivedSeries(m.pns.tn||m.pns.t,m.pns.n,1)
+      };chVis[7]=true;
       computeGlobalMax();buildLegend();draw();
       if(!m.pns.ok)alert('PNS warning: predicted level reaches/exceeds 100%.');
     }else{
@@ -150,8 +172,8 @@ function computeGlobalMax(){
     if(b.gy&&b.gy.ty!=='none'&&Math.abs(b.gy.a||0)>gMax[3])gMax[3]=Math.abs(b.gy.a);
     if(b.gz&&b.gz.ty!=='none'&&Math.abs(b.gz.a||0)>gMax[4])gMax[4]=Math.abs(b.gz.a);
   }
-  if(pnsData&&pnsData.n){for(var p=0;p<pnsData.n.length;p++){var pv=[pnsData.n[p],pnsData.x&&pnsData.x[p],pnsData.y&&pnsData.y[p],pnsData.z&&pnsData.z[p]];for(var pi=0;pi<pv.length;pi++)if(isFinite(pv[pi]))gMax[7]=Math.max(gMax[7],Math.abs(pv[pi]));}}
-  if(m1Data&&m1Data.x){for(var mi=0;mi<m1Data.x.length;mi++){var mv=[m1Data.x[mi],m1Data.y&&m1Data.y[mi],m1Data.z&&m1Data.z[mi]];for(var mj=0;mj<mv.length;mj++)if(isFinite(mv[mj]))gMax[8+mj]=Math.max(gMax[8+mj],Math.abs(mv[mj]));}}
+  if(pnsData)gMax[7]=Math.max(gMax[7],pnsData.x.maxAbs,pnsData.y.maxAbs,pnsData.z.maxAbs,pnsData.n.maxAbs);
+  if(m1Data){gMax[8]=Math.max(gMax[8],m1Data.x.maxAbs);gMax[9]=Math.max(gMax[9],m1Data.y.maxAbs);gMax[10]=Math.max(gMax[10],m1Data.z.maxAbs);}
   gMax[0]=Math.max(gMax[0],100);
 }
 
@@ -401,7 +423,8 @@ function clampView(){
   ox=Math.max(0,Math.min(ox,maxOx));
 }
 function zoomAt(screenX,zf){
-  if(!isFinite(zf)||zf<=0)return;
+  if(!isFinite(zf)||zf<=0)return false;
+  var oldSc=sc,oldOx=ox;
   var tm=x2t(screenX);
   sc*=zf;
   var dur=visibleDuration();
@@ -411,9 +434,11 @@ function zoomAt(screenX,zf){
   sc=plotWidth()/dur;
   ox=tm-(screenX-M.l)/sc;
   clampView();
+  var scaleTol=Math.max(1,Math.abs(oldSc))*1e-12,offsetTol=Math.max(1,TD)*1e-12;
+  return Math.abs(sc-oldSc)>scaleTol||Math.abs(ox-oldOx)>offsetTol;
 }
 function zoomAtCenter(zf){
-  zoomAt(M.l+plotWidth()/2,zf);
+  return zoomAt(M.l+plotWidth()/2,zf);
 }
 
 /* ── Initial view: zoom to first TR ───────────────────────────────────── */
