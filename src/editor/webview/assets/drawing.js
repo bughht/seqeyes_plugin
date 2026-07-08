@@ -65,7 +65,8 @@ function fmtPhase(v){if(Math.abs(v-6.28318)<1e-3)return'2\u03c0';if(Math.abs(v-3
 function rowClip(vi,ch,fn){
   var w=mc.width/(window.devicePixelRatio||1),top=M.t+vi*ch,bottom=M.t+(vi+1)*ch,rw=Math.max(0,w-M.l-M.r);
   if(rw<=0||bottom<=top)return;
-  ctx.save();ctx.beginPath();ctx.rect(M.l,top,rw,bottom-top);ctx.clip();fn();ctx.restore();
+  ctx.save();ctx.beginPath();ctx.rect(M.l,top,rw,bottom-top);ctx.clip();
+  try{fn();}finally{ctx.restore();}
 }
 
 /* ── Axes (X time + Y per channel) ────────────────────────────────────── */
@@ -133,8 +134,10 @@ function drawPercentSeries(t,v,vi,ci,c,ch){
     ctx.strokeStyle=c;ctx.lineWidth=1;ctx.beginPath();
     var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r;
     for(var i=0,f=1,n=Math.min(t.length,v.length);i<n;i++){
-      var sx=t2x(t[i]);if(sx<clipL||sx>clipR){f=1;continue}
-      var sy=base-(v[i]||0)*scale;if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
+      var tv=t[i],vv=v[i];if(!isFinite(tv)||!isFinite(vv)){f=1;continue}
+      var sx=t2x(tv);if(!isFinite(sx)||sx<clipL||sx>clipR){f=1;continue}
+      var sy=base-vv*scale;if(!isFinite(sy)){f=1;continue}
+      if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
     }
     ctx.stroke();
   });
@@ -147,8 +150,10 @@ function drawBipolarSeries(t,v,vi,ci,c,ch){
     ctx.strokeStyle=c;ctx.lineWidth=1;ctx.beginPath();
     var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r;
     for(var i=0,f=1,n=Math.min(t.length,v.length);i<n;i++){
-      var sx=t2x(t[i]);if(sx<clipL||sx>clipR){f=1;continue}
-      var sy=y-(v[i]||0)*scale;if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
+      var tv=t[i],vv=v[i];if(!isFinite(tv)||!isFinite(vv)){f=1;continue}
+      var sx=t2x(tv);if(!isFinite(sx)||sx<clipL||sx>clipR){f=1;continue}
+      var sy=y-vv*scale;if(!isFinite(sy)){f=1;continue}
+      if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
     }
     ctx.stroke();
   });

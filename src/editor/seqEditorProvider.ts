@@ -17,7 +17,7 @@ import { parseSequenceText } from '../pulseq/reader';
 import { decodeAllBlocks } from '../pulseq/decoder';
 import { calculateKspace, type KSpaceData } from '../pulseq/kspace';
 import { calculateM1, type M1Data } from '../pulseq/m1';
-import { calculatePns, parsePnsHardwareAsc, type PnsResult } from '../pulseq/pns';
+import { calculatePns, parsePnsHardwareAsc, type PnsHardware, type PnsResult } from '../pulseq/pns';
 import { exportKspaceArtifacts } from '../pulseq/kspaceExport';
 import { detectSequenceTiming } from '../pulseq/trdetect';
 import { getWebviewContent } from './webviewContent';
@@ -109,6 +109,7 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
         let activeUri = doc.uri;
         let activeBlocks: DecodedBlock[] = [];
         let activeGradientRaster = 0;
+        let activePnsHardware: PnsHardware | undefined;
 
         // ── Core: parse, decode, compute k‑space, send ──
         const sendSequenceData = async (uri: vscode.Uri) => {
@@ -250,10 +251,19 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
                     filters: { 'Siemens ASC Profiles': ['asc'], 'All Files': ['*'] },
                     title: 'Open Siemens ASC Profile For PNS Prediction',
                 });
-                if (!uris || uris.length === 0) return;
+                if (!uris || uris.length === 0) {
+                    if (activePnsHardware) {
+                        const pns = calculatePns(activeBlocks, activeGradientRaster, activePnsHardware);
+                        panel.webview.postMessage({ type: 'pnsData', pns: serializePns(pns) });
+                    } else {
+                        panel.webview.postMessage({ type: 'pnsSelectionCancelled' });
+                    }
+                    return;
+                }
                 try {
                     const ascText = await readAscProfileText(uris[0]);
                     const hardware = parsePnsHardwareAsc(ascText);
+                    activePnsHardware = hardware;
                     const pns = calculatePns(activeBlocks, activeGradientRaster, hardware);
                     panel.webview.postMessage({ type: 'pnsData', pns: serializePns(pns) });
                 } catch (err) {

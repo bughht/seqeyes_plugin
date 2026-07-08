@@ -6,6 +6,7 @@ src/**
 **/tsconfig.json
 **/*.map
 **/*.ts
+**/*.asc
 node_modules/**
 test/**
 test-results/**

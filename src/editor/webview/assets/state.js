@@ -5,7 +5,7 @@ var cc=document.getElementById('cc'),mc=document.getElementById('mc'),ctx=mc.get
  tt=document.getElementById('tt'),curEl=document.getElementById('cur'),legend=document.getElementById('legend'),
  tuSel=document.getElementById('tu'),guSel=document.getElementById('gu');
 var exportBtn=document.getElementById('exportKspaceBtn');
-var m1Btn=document.getElementById('m1Btn'),pnsBtn=document.getElementById('pnsBtn');
+var pnsBtn=document.getElementById('pnsBtn');
 var BL=[],TD=0,GR=1e-5,RR=1e-6,AR=1e-7,BR=1e-5; // blocks, duration, rasters [s]
 var M={t:8,r:30,b:22,l:92};                // margins
 var CH=['RF','\u03c6','Gx','Gy','Gz','ADC','Trig','PNS','M1x','M1y','M1z'];
@@ -23,7 +23,7 @@ var ampZoom=[1,1,1,1,1,1,1];
 ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;
 /* K‑space data — pre‑computed on the extension side */
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
-var m1Data=null,pnsData=null,m1Busy=false,pnsBusy=false;
+var m1Data=null,pnsData=null,m1Busy=false,pnsBusy=false,m1RequestedChannel=8;
 
 /* Timing metadata (TR/TE info for minimap tooltip) */
 var seqTiming=null;  // {trTimeSec,trCount,hasExplicitTR,teTimeSec,hasExplicitTE,rfUseGuessed}
@@ -46,7 +46,11 @@ function buildLegend(){
   chColors.forEach(function(c,i){
     var d=document.createElement('div');d.className='li'+(chVis[i]?'':' off');d.title='Toggle '+CH[i];
     d.innerHTML='<div class="ld" style="background:'+c+'"></div>'+CH[i];
+    if(i>=8&&i<=10&&!m1Data)d.title='Calculate and show '+CH[i];
+    else if(i===7&&!pnsData)d.title='Select a PNS ASC file before showing PNS';
     d.onclick=function(){
+      if(i>=8&&i<=10&&!m1Data){requestM1(i);return;}
+      if(i===7&&!pnsData)return;
       chVis[i]=!chVis[i];
       buildLegend();computeGlobalMax();draw();
     };
@@ -105,16 +109,16 @@ window.addEventListener('message',function(e){
     draw();drawKs();drawMinimap();
     setExportButtonEnabled(true);
   }else if(m.type==='m1Data'){
-    m1Busy=false;if(m1Btn)m1Btn.disabled=false;
+    m1Busy=false;
     if(m.m1&&m.m1.valid){
-      m1Data=m.m1;chVis[8]=true;chVis[9]=true;chVis[10]=true;
+      m1Data=m.m1;chVis[m1RequestedChannel]=true;
       computeGlobalMax();buildLegend();draw();
       if(m.m1.warnings&&m.m1.warnings.length)console.warn('[SeqEyes M1]',m.m1.warnings.join('\n'));
     }else{
       alert('M1 calculation failed: '+((m.m1&&m.m1.error)||'unknown error'));
     }
   }else if(m.type==='m1Error'){
-    m1Busy=false;if(m1Btn)m1Btn.disabled=false;
+    m1Busy=false;
     alert('M1 calculation failed: '+(m.message||'unknown error'));
   }else if(m.type==='pnsData'){
     pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
@@ -128,6 +132,8 @@ window.addEventListener('message',function(e){
   }else if(m.type==='pnsError'){
     pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
     alert('PNS calculation failed: '+(m.message||'unknown error'));
+  }else if(m.type==='pnsSelectionCancelled'){
+    pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
   }
 });
 
@@ -144,8 +150,8 @@ function computeGlobalMax(){
     if(b.gy&&b.gy.ty!=='none'&&Math.abs(b.gy.a||0)>gMax[3])gMax[3]=Math.abs(b.gy.a);
     if(b.gz&&b.gz.ty!=='none'&&Math.abs(b.gz.a||0)>gMax[4])gMax[4]=Math.abs(b.gz.a);
   }
-  if(pnsData&&pnsData.n){for(var p=0;p<pnsData.n.length;p++){gMax[7]=Math.max(gMax[7],Math.abs(pnsData.n[p]||0),Math.abs((pnsData.x&&pnsData.x[p])||0),Math.abs((pnsData.y&&pnsData.y[p])||0),Math.abs((pnsData.z&&pnsData.z[p])||0));}}
-  if(m1Data&&m1Data.x){for(var mi=0;mi<m1Data.x.length;mi++){gMax[8]=Math.max(gMax[8],Math.abs(m1Data.x[mi]||0));gMax[9]=Math.max(gMax[9],Math.abs((m1Data.y&&m1Data.y[mi])||0));gMax[10]=Math.max(gMax[10],Math.abs((m1Data.z&&m1Data.z[mi])||0));}}
+  if(pnsData&&pnsData.n){for(var p=0;p<pnsData.n.length;p++){var pv=[pnsData.n[p],pnsData.x&&pnsData.x[p],pnsData.y&&pnsData.y[p],pnsData.z&&pnsData.z[p]];for(var pi=0;pi<pv.length;pi++)if(isFinite(pv[pi]))gMax[7]=Math.max(gMax[7],Math.abs(pv[pi]));}}
+  if(m1Data&&m1Data.x){for(var mi=0;mi<m1Data.x.length;mi++){var mv=[m1Data.x[mi],m1Data.y&&m1Data.y[mi],m1Data.z&&m1Data.z[mi]];for(var mj=0;mj<mv.length;mj++)if(isFinite(mv[mj]))gMax[8+mj]=Math.max(gMax[8+mj],Math.abs(mv[mj]));}}
   gMax[0]=Math.max(gMax[0],100);
 }
 

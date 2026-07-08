@@ -180,19 +180,39 @@ test('calculates M1 lazily and accepts a synthetic ASC profile for PNS', async (
   await loadViewer(page, fixtures.gre);
 
   const m1Legend = page.locator('#legend .li').filter({ hasText: 'M1x' });
+  const m1yLegend = page.locator('#legend .li').filter({ hasText: 'M1y' });
+  const m1zLegend = page.locator('#legend .li').filter({ hasText: 'M1z' });
   await expect(m1Legend).toHaveClass(/off/);
-  await page.locator('#m1Btn').click();
+  await expect(page.locator('#m1Btn')).toHaveCount(0);
+  await m1Legend.click();
   await expect(m1Legend).not.toHaveClass(/off/, { timeout: 20_000 });
+  await expect(m1yLegend).toHaveClass(/off/);
+  await m1yLegend.click();
+  await m1zLegend.click();
+  await expect(m1yLegend).not.toHaveClass(/off/);
+  await expect(m1zLegend).not.toHaveClass(/off/);
 
   const pnsLegend = page.locator('#legend .li').filter({ hasText: 'PNS' });
   await expect(pnsLegend).toHaveClass(/off/);
-  await page.locator('#ascInput').setInputFiles({
+  await expect(page.locator('#pnsBtn')).toHaveText('Select PNS ASC file');
+  const chooserPromise = page.waitForEvent('filechooser');
+  await page.locator('#pnsBtn').click();
+  const chooser = await chooserPromise;
+  await chooser.setFiles({
     name: 'synthetic.asc',
     mimeType: 'text/plain',
     buffer: Buffer.from(syntheticAsc()),
   });
   await expect(pnsLegend).not.toHaveClass(/off/, { timeout: 20_000 });
+
+  await page.locator('#ascInput').dispatchEvent('cancel');
+  await expect(pnsLegend).not.toHaveClass(/off/);
+
+  for (let i = 0; i < 40; i++) await wheelOn(page, page.locator('#mc'), 1200);
+  const zoomedOut = await debugState(page);
+  expect(zoomedOut.visibleDuration).toBeLessThanOrEqual(zoomedOut.totalDuration * 1.001);
   await expectCanvasVaried(page.locator('#mc'));
+  await expectCanvasRegionVaried(page.locator('#mc'), 0, 0, 0.12, 1);
 });
 
 async function loadViewer(page: Page, sequencePath: string): Promise<void> {
@@ -236,6 +256,33 @@ async function expectCanvasVaried(locator: Locator): Promise<void> {
       }
       return false;
     });
+  }, { timeout: 10_000 }).toBe(true);
+}
+
+async function expectCanvasRegionVaried(
+  locator: Locator,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): Promise<void> {
+  await expect.poll(async () => {
+    return await locator.evaluate((element, region) => {
+      const canvas = element as HTMLCanvasElement;
+      const context = canvas.getContext('2d');
+      if (!context || !canvas.width || !canvas.height) return false;
+      const sx = Math.floor(canvas.width * region.x);
+      const sy = Math.floor(canvas.height * region.y);
+      const sw = Math.max(1, Math.floor(canvas.width * region.width));
+      const sh = Math.max(1, Math.floor(canvas.height * region.height));
+      const image = context.getImageData(sx, sy, sw, sh).data;
+      const colors = new Set<string>();
+      for (let i = 0; i < image.length; i += 16) {
+        colors.add(`${image[i]},${image[i + 1]},${image[i + 2]},${image[i + 3]}`);
+        if (colors.size >= 3) return true;
+      }
+      return false;
+    }, { x, y, width, height });
   }, { timeout: 10_000 }).toBe(true);
 }
 

@@ -104,8 +104,8 @@ All the same features as the browser & VS Code versions — 7 channels, k‑spac
 | Pan waveform | Click & drag |
 | Fit to view | Toolbar `Fit` |
 | Toggle channel | Click legend label |
-| Calculate M1 | Toolbar `M1` button |
-| Calculate PNS | Toolbar `PNS ASC` button, then select a valid scanner ASC profile |
+| Calculate M1 | Select any `M1x`, `M1y`, or `M1z` legend entry; use the legend to toggle each axis |
+| Calculate PNS | `Select PNS ASC file`, then choose a valid scanner ASC profile; use the `PNS` legend entry to toggle the axis |
 | Toggle block boundaries | Checkbox `☐ Blocks` in toolbar |
 | Block details & values | Hover waveform |
 | Switch theme | Toolbar `Theme` dropdown |

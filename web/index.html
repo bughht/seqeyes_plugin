@@ -90,8 +90,7 @@ canvas{display:block}
 <img src="logo.png" alt="SeqEyes" style="width:18px;height:18px;border-radius:3px;vertical-align:middle" title="SeqEyes">
 <button id="openBtn" title="Open another .seq file">Open</button>
 <button id="exportKspaceBtn" title="Export ADC k-space trajectory and metadata" disabled>Export</button><div class="sep"></div>
-<button id="m1Btn" title="Calculate and show M1 channels">M1</button>
-<button id="pnsBtn" title="Load ASC profile and calculate PNS">PNS ASC</button><div class="sep"></div>
+<button id="pnsBtn" title="Select or replace the ASC profile used for PNS prediction">Select PNS ASC file</button><div class="sep"></div>
 <button id="zi" title="Zoom In (scroll wheel)">+</button>
 <button id="zo" title="Zoom Out">−</button>
 <button id="zf" title="Fit All">Fit</button>
@@ -131,7 +130,7 @@ var cc=document.getElementById('cc'),mc=document.getElementById('mc'),ctx=mc.get
  tuSel=document.getElementById('tu'),guSel=document.getElementById('gu');
 var splash=document.getElementById('splash');
 var exportBtn=document.getElementById('exportKspaceBtn');
-var m1Btn=document.getElementById('m1Btn'),pnsBtn=document.getElementById('pnsBtn');
+var pnsBtn=document.getElementById('pnsBtn');
 var BL=[],TD=0,GR=1e-5,RR=1e-6,AR=1e-7,BR=1e-5;
 var M={t:8,r:30,b:22,l:92};
 var CH=['RF','\u03c6','Gx','Gy','Gz','ADC','Trig','PNS','M1x','M1y','M1z'];
@@ -147,7 +146,7 @@ var GAMMA=42576;
 var ampZoom=[1,1,1,1,1,1,1];
 ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
-var decodedBlocks=null,m1Data=null,pnsData=null,m1Busy=false,pnsBusy=false;
+var decodedBlocks=null,m1Data=null,pnsData=null,pnsHardware=null,m1Busy=false,pnsBusy=false,m1RequestedChannel=8;
 /* Timing & minimap state */
 var seqTiming=null,blockPos=[];
 var mmCanvas=document.getElementById('mmc'),mmCtx=mmCanvas.getContext('2d');
@@ -167,7 +166,13 @@ function buildLegend(){
   chColors.forEach(function(c,i){
     var d=document.createElement('div');d.className='li'+(chVis[i]?'':' off');d.title='Toggle '+CH[i];
     d.innerHTML='<div class="ld" style="background:'+c+'"></div>'+CH[i];
-    d.onclick=function(){chVis[i]=!chVis[i];buildLegend();computeGlobalMax();draw();};
+    if(i>=8&&i<=10&&!m1Data)d.title='Calculate and show '+CH[i];
+    else if(i===7&&!pnsData)d.title='Select a PNS ASC file before showing PNS';
+    d.onclick=function(){
+      if(i>=8&&i<=10&&!m1Data){requestM1(i);return;}
+      if(i===7&&!pnsData)return;
+      chVis[i]=!chVis[i];buildLegend();computeGlobalMax();draw();
+    };
     legend.appendChild(d);
   });
 }
@@ -214,8 +219,8 @@ function computeGlobalMax(){
     if(b.gy&&b.gy.ty!=='none'&&Math.abs(b.gy.a||0)>gMax[3])gMax[3]=Math.abs(b.gy.a);
     if(b.gz&&b.gz.ty!=='none'&&Math.abs(b.gz.a||0)>gMax[4])gMax[4]=Math.abs(b.gz.a);
   }
-  if(pnsData&&pnsData.n){for(var p=0;p<pnsData.n.length;p++){gMax[7]=Math.max(gMax[7],Math.abs(pnsData.n[p]||0),Math.abs((pnsData.x&&pnsData.x[p])||0),Math.abs((pnsData.y&&pnsData.y[p])||0),Math.abs((pnsData.z&&pnsData.z[p])||0));}}
-  if(m1Data&&m1Data.x){for(var mi=0;mi<m1Data.x.length;mi++){gMax[8]=Math.max(gMax[8],Math.abs(m1Data.x[mi]||0));gMax[9]=Math.max(gMax[9],Math.abs((m1Data.y&&m1Data.y[mi])||0));gMax[10]=Math.max(gMax[10],Math.abs((m1Data.z&&m1Data.z[mi])||0));}}
+  if(pnsData&&pnsData.n){for(var p=0;p<pnsData.n.length;p++){var pv=[pnsData.n[p],pnsData.x&&pnsData.x[p],pnsData.y&&pnsData.y[p],pnsData.z&&pnsData.z[p]];for(var pi=0;pi<pv.length;pi++)if(isFinite(pv[pi]))gMax[7]=Math.max(gMax[7],Math.abs(pv[pi]));}}
+  if(m1Data&&m1Data.x){for(var mi=0;mi<m1Data.x.length;mi++){var mv=[m1Data.x[mi],m1Data.y&&m1Data.y[mi],m1Data.z&&m1Data.z[mi]];for(var mj=0;mj<mv.length;mj++)if(isFinite(mv[mj]))gMax[8+mj]=Math.max(gMax[8+mj],Math.abs(mv[mj]));}}
   gMax[0]=Math.max(gMax[0],100);
 }
 
@@ -515,7 +520,7 @@ async function exportCurrentKspace(){
 }
 
 function showM1Result(result){
-  m1Busy=false;if(m1Btn)m1Btn.disabled=false;
+  m1Busy=false;
   if(!result||!result.valid){alert('M1 calculation failed: '+((result&&result.error)||'unknown error'));return;}
   m1Data={
     valid:result.valid,
@@ -526,18 +531,18 @@ function showM1Result(result){
     y:Array.from(result.m1y||[]),
     z:Array.from(result.m1z||[])
   };
-  chVis[8]=true;chVis[9]=true;chVis[10]=true;
+  chVis[m1RequestedChannel]=true;
   computeGlobalMax();buildLegend();draw();
   if(m1Data.warnings&&m1Data.warnings.length)console.warn('[SeqEyes M1]',m1Data.warnings.join('\n'));
 }
 
-function requestM1(){
+function requestM1(channel){
   if(m1Busy)return;
-  if(m1Data){chVis[8]=!chVis[8];chVis[9]=chVis[8];chVis[10]=chVis[8];buildLegend();draw();return;}
+  if(m1Data){chVis[channel]=!chVis[channel];buildLegend();draw();return;}
   if(!decodedBlocks){alert('Open a .seq file before calculating M1.');return;}
-  m1Busy=true;if(m1Btn)m1Btn.disabled=true;
+  m1RequestedChannel=channel;m1Busy=true;buildLegend();
   try{showM1Result(Pulseq.calculateM1(decodedBlocks,GR));}
-  catch(err){m1Busy=false;if(m1Btn)m1Btn.disabled=false;alert('M1 calculation failed: '+(err.message||String(err)));}
+  catch(err){m1Busy=false;alert('M1 calculation failed: '+(err.message||String(err)));}
 }
 
 function showPnsResult(result){
@@ -558,7 +563,6 @@ function showPnsResult(result){
 
 function requestPnsAsc(){
   if(pnsBusy)return;
-  if(pnsData){chVis[7]=!chVis[7];buildLegend();draw();return;}
   if(!decodedBlocks){alert('Open a .seq file before calculating PNS.');return;}
   document.getElementById('ascInput').click();
 }
@@ -574,7 +578,6 @@ function handleFile(file){
 document.getElementById('splashOpen').onclick=function(){document.getElementById('fileInput').click();};
 document.getElementById('openBtn').onclick=function(){document.getElementById('fileInput').click();};
 document.getElementById('exportKspaceBtn').onclick=function(){void exportCurrentKspace();};
-document.getElementById('m1Btn').onclick=function(){requestM1();};
 document.getElementById('pnsBtn').onclick=function(){requestPnsAsc();};
 
 /* ── File input ──────────────────────────────────────────────────────── */
@@ -588,8 +591,8 @@ document.getElementById('ascInput').onchange=function(){
     pnsBusy=true;if(pnsBtn)pnsBtn.disabled=true;
     reader.onload=function(){
       try{
-        var hardware=Pulseq.parsePnsHardwareAsc(reader.result);
-        showPnsResult(Pulseq.calculatePns(decodedBlocks,GR,hardware));
+        pnsHardware=Pulseq.parsePnsHardwareAsc(reader.result);
+        showPnsResult(Pulseq.calculatePns(decodedBlocks,GR,pnsHardware));
       }catch(err){
         pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
         alert('PNS calculation failed: '+(err.message||String(err)));
@@ -603,6 +606,9 @@ document.getElementById('ascInput').onchange=function(){
   }
   this.value='';
 };
+document.getElementById('ascInput').addEventListener('cancel',function(){
+  if(pnsHardware)showPnsResult(Pulseq.calculatePns(decodedBlocks,GR,pnsHardware));
+});
 
 /* ── Drag & drop ──────────────────────────────────────────────────────── */
 var dropZone=document.getElementById('dropZone');
@@ -690,7 +696,8 @@ function fmtPhase(v){if(Math.abs(v-6.28318)<1e-3)return'2\u03c0';if(Math.abs(v-3
 function rowClip(vi,ch,fn){
   var w=mc.width/(window.devicePixelRatio||1),top=M.t+vi*ch,bottom=M.t+(vi+1)*ch,rw=Math.max(0,w-M.l-M.r);
   if(rw<=0||bottom<=top)return;
-  ctx.save();ctx.beginPath();ctx.rect(M.l,top,rw,bottom-top);ctx.clip();fn();ctx.restore();
+  ctx.save();ctx.beginPath();ctx.rect(M.l,top,rw,bottom-top);ctx.clip();
+  try{fn();}finally{ctx.restore();}
 }
 
 function drawAxes(w,h,vs,ve,s){
@@ -747,8 +754,10 @@ function drawPercentSeries(t,v,vi,ci,c,ch){
     ctx.strokeStyle=c;ctx.lineWidth=1;ctx.beginPath();
     var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r;
     for(var i=0,f=1,n=Math.min(t.length,v.length);i<n;i++){
-      var sx=t2x(t[i]);if(sx<clipL||sx>clipR){f=1;continue}
-      var sy=base-(v[i]||0)*scale;if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
+      var tv=t[i],vv=v[i];if(!isFinite(tv)||!isFinite(vv)){f=1;continue}
+      var sx=t2x(tv);if(!isFinite(sx)||sx<clipL||sx>clipR){f=1;continue}
+      var sy=base-vv*scale;if(!isFinite(sy)){f=1;continue}
+      if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
     }
     ctx.stroke();
   });
@@ -761,8 +770,10 @@ function drawBipolarSeries(t,v,vi,ci,c,ch){
     ctx.strokeStyle=c;ctx.lineWidth=1;ctx.beginPath();
     var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r;
     for(var i=0,f=1,n=Math.min(t.length,v.length);i<n;i++){
-      var sx=t2x(t[i]);if(sx<clipL||sx>clipR){f=1;continue}
-      var sy=y-(v[i]||0)*scale;if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
+      var tv=t[i],vv=v[i];if(!isFinite(tv)||!isFinite(vv)){f=1;continue}
+      var sx=t2x(tv);if(!isFinite(sx)||sx<clipL||sx>clipR){f=1;continue}
+      var sy=y-vv*scale;if(!isFinite(sy)){f=1;continue}
+      if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
     }
     ctx.stroke();
   });

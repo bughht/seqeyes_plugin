@@ -47,15 +47,15 @@ document.getElementById('openBtn').onclick=function(){
 document.getElementById('exportKspaceBtn').onclick=function(){
   if(vscApi){vscApi.postMessage({command:'exportKspace'});}
 };
-document.getElementById('m1Btn').onclick=function(){
+function requestM1(channel){
   if(m1Busy)return;
-  if(m1Data){chVis[8]=!chVis[8];chVis[9]=chVis[8];chVis[10]=chVis[8];buildLegend();draw();return;}
-  m1Busy=true;if(m1Btn)m1Btn.disabled=true;
+  if(m1Data){chVis[channel]=!chVis[channel];buildLegend();draw();return;}
+  m1RequestedChannel=channel;
+  m1Busy=true;buildLegend();
   if(vscApi){vscApi.postMessage({command:'calculateM1'});}
-};
+}
 document.getElementById('pnsBtn').onclick=function(){
   if(pnsBusy)return;
-  if(pnsData){chVis[7]=!chVis[7];buildLegend();draw();return;}
   pnsBusy=true;if(pnsBtn)pnsBtn.disabled=true;
   if(vscApi){vscApi.postMessage({command:'openPnsAsc'});}
 };
