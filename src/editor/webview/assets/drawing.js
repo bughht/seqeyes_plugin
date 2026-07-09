@@ -162,7 +162,7 @@ function drawBipolarSeries(series,vi,ci,c,ch,vs,ve){
   rowClip(vi,ch,function(){
     var maxA=channelRange(ci),y=cy(vi),scale=ch*.4/maxA;
     var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r;
-    var rawLimit=Math.max(64,Math.ceil((clipR-clipL)*2));
+    var rawLimit=Math.max(128,Math.ceil((clipR-clipL)*8));
     if(derivedSeriesWindow(series,vs,ve).count<=rawLimit){
       derivedRawCurveCount++;
       ctx.strokeStyle=c;ctx.lineWidth=1;ctx.beginPath();var f=1;
@@ -186,11 +186,9 @@ function drawBipolarSeries(series,vi,ci,c,ch,vs,ve){
         for(var ri=1;ri<ranges.length;ri++)ctx.lineTo(ranges[ri][0],ranges[ri][1]);
         for(var rj=ranges.length-1;rj>=0;rj--)ctx.lineTo(ranges[rj][0],ranges[rj][2]);
         ctx.closePath();ctx.fill();
-        ctx.globalAlpha=.9;ctx.strokeStyle=c;ctx.lineWidth=.8;
-        ctx.beginPath();ctx.moveTo(ranges[0][0],ranges[0][1]);
-        for(var rk=1;rk<ranges.length;rk++)ctx.lineTo(ranges[rk][0],ranges[rk][1]);
-        ctx.stroke();ctx.beginPath();ctx.moveTo(ranges[0][0],ranges[0][2]);
-        for(var rl=1;rl<ranges.length;rl++)ctx.lineTo(ranges[rl][0],ranges[rl][2]);
+        ctx.globalAlpha=.65;ctx.strokeStyle=c;ctx.lineWidth=.8;
+        ctx.beginPath();ctx.moveTo(ranges[0][0],(ranges[0][1]+ranges[0][2])*.5);
+        for(var rk=1;rk<ranges.length;rk++)ctx.lineTo(ranges[rk][0],(ranges[rk][1]+ranges[rk][2])*.5);
         ctx.stroke();ctx.globalAlpha=1;
       }
     }
