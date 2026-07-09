@@ -16,6 +16,9 @@ import * as vscode from 'vscode';
 import { parseSequenceText } from '../pulseq/reader';
 import { decodeAllBlocks } from '../pulseq/decoder';
 import { calculateKspace, type KSpaceData } from '../pulseq/kspace';
+import { calculateM1, type M1Data } from '../pulseq/m1';
+import { calculatePns, parsePnsHardwareAsc, type PnsHardware, type PnsResult } from '../pulseq/pns';
+import { downsampleM4 } from '../pulseq/displayDownsampling';
 import { exportKspaceArtifacts } from '../pulseq/kspaceExport';
 import { detectSequenceTiming } from '../pulseq/trdetect';
 import { getWebviewContent } from './webviewContent';
@@ -105,6 +108,9 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
         panel.webview.options = { enableScripts: true };
         panel.webview.html = this._loadingHtml();
         let activeUri = doc.uri;
+        let activeBlocks: DecodedBlock[] = [];
+        let activeGradientRaster = 0;
+        let activePnsHardware: PnsHardware | undefined;
 
         // ── Core: parse, decode, compute k‑space, send ──
         const sendSequenceData = async (uri: vscode.Uri) => {
@@ -127,6 +133,8 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
                 const totalBlocks = seq.blocks.length;
                 postProgress('decode', 15, `Decoding ${totalBlocks} blocks\u2026`);
                 const blocks = decodeAllBlocks(seq);
+                activeBlocks = blocks;
+                activeGradientRaster = seq.rasterTimes.gradientRaster;
                 const totalDur = blocks.length > 0
                     ? blocks[blocks.length - 1].startTime + blocks[blocks.length - 1].duration
                     : 0;
@@ -227,6 +235,44 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
                 }
             } else if (msg.command === 'exportKspace') {
                 await this._exportKspace(activeUri);
+            } else if (msg.command === 'calculateM1') {
+                if (!activeBlocks.length || activeGradientRaster <= 0) {
+                    panel.webview.postMessage({ type: 'm1Error', message: 'Load a sequence before calculating M1.' });
+                    return;
+                }
+                const m1 = calculateM1(activeBlocks, activeGradientRaster);
+                panel.webview.postMessage({ type: 'm1Data', m1: serializeM1(m1) });
+            } else if (msg.command === 'openPnsAsc') {
+                if (!activeBlocks.length || activeGradientRaster <= 0) {
+                    panel.webview.postMessage({ type: 'pnsError', message: 'Load a sequence before calculating PNS.' });
+                    return;
+                }
+                const uris = await vscode.window.showOpenDialog({
+                    canSelectMany: false,
+                    filters: { 'Siemens ASC Profiles': ['asc'], 'All Files': ['*'] },
+                    title: 'Open Siemens ASC Profile For PNS Prediction',
+                });
+                if (!uris || uris.length === 0) {
+                    if (activePnsHardware) {
+                        const pns = calculatePns(activeBlocks, activeGradientRaster, activePnsHardware);
+                        panel.webview.postMessage({ type: 'pnsData', pns: serializePns(pns) });
+                    } else {
+                        panel.webview.postMessage({ type: 'pnsSelectionCancelled' });
+                    }
+                    return;
+                }
+                try {
+                    const ascText = await readAscProfileText(uris[0]);
+                    const hardware = parsePnsHardwareAsc(ascText);
+                    activePnsHardware = hardware;
+                    const pns = calculatePns(activeBlocks, activeGradientRaster, hardware);
+                    panel.webview.postMessage({ type: 'pnsData', pns: serializePns(pns) });
+                } catch (err) {
+                    panel.webview.postMessage({
+                        type: 'pnsError',
+                        message: err instanceof Error ? err.message : String(err),
+                    });
+                }
             }
         });
     }
@@ -297,6 +343,43 @@ function siblingUri(uri: vscode.Uri, fileName: string): vscode.Uri {
 function sanitizeFileStem(name: string): string {
     const cleaned = name.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '');
     return cleaned || 'sequence';
+}
+
+async function readAscProfileText(uri: vscode.Uri, visited = new Set<string>()): Promise<string> {
+    const key = uri.toString();
+    if (visited.has(key)) return '';
+    visited.add(key);
+
+    const text = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
+    const output: string[] = [];
+    const parentPath = uri.path.replace(/\/[^/]*$/, '');
+    for (const rawLine of text.split(/\r?\n/)) {
+        const match = /^\s*\$include\s+([A-Za-z0-9_.-]+)\s*$/i.exec(rawLine);
+        if (!match) {
+            output.push(rawLine);
+            continue;
+        }
+
+        const names = match[1].toLowerCase().endsWith('.asc')
+            ? [match[1]]
+            : [match[1], `${match[1]}.asc`];
+        let included = false;
+        for (const name of names) {
+            const candidate = uri.with({ path: `${parentPath}/${name}` });
+            try {
+                await vscode.workspace.fs.stat(candidate);
+                output.push(await readAscProfileText(candidate, visited));
+                included = true;
+                break;
+            } catch {
+                // Try the next supported include spelling.
+            }
+        }
+        if (!included) {
+            throw new Error(`ASC include file not found beside ${uriFileName(uri)}: ${match[1]}`);
+        }
+    }
+    return output.join('\n');
 }
 
 async function writeKspaceArtifacts(
@@ -394,6 +477,48 @@ function serializeKSpace(ks: KSpaceData): Record<string, unknown> {
         azb: encodeF32B64(ks.ktraj_adc[2]),
         tab: encodeF32B64(ks.t_adc),
         nAdc: ks.ktraj_adc[0].length,
+    };
+}
+
+function serializeM1(m1: M1Data): Record<string, unknown> {
+    const MAX_M1_PTS = 30000;
+    const x = downsampleM4(m1.tSec, m1.m1x, MAX_M1_PTS);
+    const y = downsampleM4(m1.tSec, m1.m1y, MAX_M1_PTS);
+    const z = downsampleM4(m1.tSec, m1.m1z, MAX_M1_PTS);
+    return {
+        valid: m1.valid,
+        ok: m1.ok,
+        error: m1.error,
+        warnings: m1.warnings,
+        tx: x.time,
+        x: x.values,
+        ty: y.time,
+        y: y.values,
+        tz: z.time,
+        z: z.values,
+        excitationTimesSec: downsample(m1.excitationTimesSec, MAX_M1_PTS),
+        refocusingTimesSec: downsample(m1.refocusingTimesSec, MAX_M1_PTS),
+    };
+}
+
+function serializePns(pns: PnsResult): Record<string, unknown> {
+    const MAX_PNS_PTS = 30000;
+    const x = downsampleM4(pns.timeSec, pns.pnsX, MAX_PNS_PTS);
+    const y = downsampleM4(pns.timeSec, pns.pnsY, MAX_PNS_PTS);
+    const z = downsampleM4(pns.timeSec, pns.pnsZ, MAX_PNS_PTS);
+    const norm = downsampleM4(pns.timeSec, pns.pnsNorm, MAX_PNS_PTS);
+    return {
+        valid: pns.valid,
+        ok: pns.ok,
+        error: pns.error,
+        tx: x.time,
+        x: x.values.map(value => value * 100.0),
+        ty: y.time,
+        y: y.values.map(value => value * 100.0),
+        tz: z.time,
+        z: z.values.map(value => value * 100.0),
+        tn: norm.time,
+        n: norm.values.map(value => value * 100.0),
     };
 }
 

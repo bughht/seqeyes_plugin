@@ -6,6 +6,7 @@ out/
 dist/
 *.vsix
 *.mltbx
+*.asc
 .vscode-test/
 test-results/
 playwright-report/

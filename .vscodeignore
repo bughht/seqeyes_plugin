@@ -6,8 +6,11 @@ src/**
 **/tsconfig.json
 **/*.map
 **/*.ts
+**/*.asc
 node_modules/**
 test/**
+test-results/**
+playwright-report/**
 matlab/**
 web/**
 images/*.svg

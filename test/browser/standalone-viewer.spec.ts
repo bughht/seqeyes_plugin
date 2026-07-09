@@ -18,6 +18,11 @@ interface DebugState {
   kScale: number;
   adcCount: number;
   exportEnabled: boolean;
+  derivedRenderPoints: number;
+  derivedEnvelopeCurves: number;
+  derivedRawCurves: number;
+  lastDrawDurationMs: number;
+  drawCount: number;
   title: string;
 }
 
@@ -176,6 +181,54 @@ test('reloads sequence state without leaking previous viewer data', async ({ pag
   expect(warmSpiral).toEqual(coldSpiral);
 });
 
+test('calculates M1 lazily and accepts a synthetic ASC profile for PNS', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+
+  const m1Legend = page.locator('#legend .li').filter({ hasText: 'M1x' });
+  const m1yLegend = page.locator('#legend .li').filter({ hasText: 'M1y' });
+  const m1zLegend = page.locator('#legend .li').filter({ hasText: 'M1z' });
+  await expect(m1Legend).toHaveClass(/off/);
+  await expect(page.locator('#m1Btn')).toHaveCount(0);
+  await m1Legend.click();
+  await expect(m1Legend).not.toHaveClass(/off/, { timeout: 20_000 });
+  await expect(m1yLegend).toHaveClass(/off/);
+  await m1yLegend.click();
+  await m1zLegend.click();
+  await expect(m1yLegend).not.toHaveClass(/off/);
+  await expect(m1zLegend).not.toHaveClass(/off/);
+
+  const pnsLegend = page.locator('#legend .li').filter({ hasText: 'PNS' });
+  await expect(pnsLegend).toHaveClass(/off/);
+  await expect(page.locator('#pnsBtn')).toHaveText('Select PNS ASC file');
+  const chooserPromise = page.waitForEvent('filechooser');
+  await page.locator('#pnsBtn').click();
+  const chooser = await chooserPromise;
+  await chooser.setFiles({
+    name: 'synthetic.asc',
+    mimeType: 'text/plain',
+    buffer: Buffer.from(syntheticAsc()),
+  });
+  await expect(pnsLegend).not.toHaveClass(/off/, { timeout: 20_000 });
+
+  await page.locator('#ascInput').dispatchEvent('cancel');
+  await expect(pnsLegend).not.toHaveClass(/off/);
+
+  for (let i = 0; i < 40; i++) await wheelOn(page, page.locator('#mc'), 1200);
+  const zoomedOut = await debugState(page);
+  expect(zoomedOut.visibleDuration).toBeLessThanOrEqual(zoomedOut.totalDuration * 1.001);
+  expect(zoomedOut.derivedRenderPoints).toBeLessThan(25_000);
+  expect(zoomedOut.derivedEnvelopeCurves).toBeGreaterThan(0);
+  const drawCountAtClamp = zoomedOut.drawCount;
+  await page.locator('#mc').dispatchEvent('wheel', { deltaY: 1200 });
+  await page.waitForTimeout(50);
+  expect((await debugState(page)).drawCount).toBe(drawCountAtClamp);
+  await expectCanvasVaried(page.locator('#mc'));
+  await expectCanvasRegionVaried(page.locator('#mc'), 0, 0, 0.12, 1);
+
+  for (let i = 0; i < 24; i++) await wheelOn(page, page.locator('#mc'), -1200);
+  expect((await debugState(page)).derivedRawCurves).toBeGreaterThan(0);
+});
+
 async function loadViewer(page: Page, sequencePath: string): Promise<void> {
   await page.goto('/?debug=1');
   await openSequence(page, sequencePath);
@@ -220,6 +273,33 @@ async function expectCanvasVaried(locator: Locator): Promise<void> {
   }, { timeout: 10_000 }).toBe(true);
 }
 
+async function expectCanvasRegionVaried(
+  locator: Locator,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): Promise<void> {
+  await expect.poll(async () => {
+    return await locator.evaluate((element, region) => {
+      const canvas = element as HTMLCanvasElement;
+      const context = canvas.getContext('2d');
+      if (!context || !canvas.width || !canvas.height) return false;
+      const sx = Math.floor(canvas.width * region.x);
+      const sy = Math.floor(canvas.height * region.y);
+      const sw = Math.max(1, Math.floor(canvas.width * region.width));
+      const sh = Math.max(1, Math.floor(canvas.height * region.height));
+      const image = context.getImageData(sx, sy, sw, sh).data;
+      const colors = new Set<string>();
+      for (let i = 0; i < image.length; i += 16) {
+        colors.add(`${image[i]},${image[i + 1]},${image[i + 2]},${image[i + 3]}`);
+        if (colors.size >= 3) return true;
+      }
+      return false;
+    }, { x, y, width, height });
+  }, { timeout: 10_000 }).toBe(true);
+}
+
 async function wheelOn(page: Page, locator: Locator, deltaY: number): Promise<void> {
   const box = await requireBox(locator);
   await page.mouse.move(box.x + box.width * 0.5, box.y + box.height * 0.5);
@@ -239,6 +319,25 @@ function stableState(state: DebugState): Pick<DebugState, 'blocks' | 'adcCount' 
     title: state.title,
     totalDuration: Number(state.totalDuration.toPrecision(12)),
   };
+}
+
+function syntheticAsc(): string {
+  const axes = ['X', 'Y', 'Z'];
+  const lines: string[] = [];
+  for (const axis of axes) {
+    lines.push(
+      `GradPatSup.Phys.PNS.flGSWDTau${axis}[0] = 1`,
+      `GradPatSup.Phys.PNS.flGSWDTau${axis}[1] = 2`,
+      `GradPatSup.Phys.PNS.flGSWDTau${axis}[2] = 3`,
+      `GradPatSup.Phys.PNS.flGSWDA${axis}[0] = 0.2`,
+      `GradPatSup.Phys.PNS.flGSWDA${axis}[1] = 0.3`,
+      `GradPatSup.Phys.PNS.flGSWDA${axis}[2] = 0.5`,
+      `GradPatSup.Phys.PNS.flGSWDStimulationLimit${axis} = 1000000000`,
+      `GradPatSup.Phys.PNS.flGSWDStimulationThreshold${axis} = 1`,
+      `asGPAParameters[0].sGCParameters.flGScaleFactor${axis} = 1`,
+    );
+  }
+  return `${lines.join('\n')}\n`;
 }
 
 function clamp(value: number, min: number, max: number): number {

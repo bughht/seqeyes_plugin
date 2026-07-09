@@ -23,7 +23,7 @@
 No download, no extension, no setup. Just drag & drop a `.seq` file and explore:
 
 - **Drag & drop** a `.seq` file onto the page (or click **📂 Open**)
-- **All the same features** as the VS Code extension — 7 channels, k‑space viewer, 6 themes, tooltips
+- **All the same features** as the VS Code extension — sequence channels, optional M1/PNS, k‑space viewer, 6 themes, tooltips
 - **GPU‑accelerated** 3D k‑space rendered in your browser via WebGL
 - **Zero‑dependency parsing** — the Pulseq engine runs entirely in the browser
 - **Works offline** — no server calls, your data stays local
@@ -77,7 +77,9 @@ All the same features as the browser & VS Code versions — 7 channels, k‑spac
 
 - **Custom editor for `.seq` files** — opens automatically on double‑click
 - **📂 Open button** — switch between sequences without closing the editor
-- **7 toggle‑able channels**: RF · φ · Gx · Gy · Gz · ADC · Trigger
+- **7 primary channels**: RF · φ · Gx · Gy · Gz · ADC · Trigger
+- **Optional M1 channels**: calculate M1x, M1y, and M1z on demand
+- **Optional SAFE PNS prediction**: load a user-provided Siemens ASC profile to display PNS X/Y/Z/Norm
 - **ADC phase curve** on φ axis — continuous $\phi(t) = \phi_0 + 2\pi \cdot f_{offset} \cdot (t - t_0)$
 - **K‑space viewer**: WebGL‑accelerated 3D scatter (millions of points @ 60 fps) with camera presets
 - **Camera presets** (xy / xz / yz) rotate the 3D view; any drag reverts to free 3D
@@ -102,6 +104,8 @@ All the same features as the browser & VS Code versions — 7 channels, k‑spac
 | Pan waveform | Click & drag |
 | Fit to view | Toolbar `Fit` |
 | Toggle channel | Click legend label |
+| Calculate M1 | Select any `M1x`, `M1y`, or `M1z` legend entry; use the legend to toggle each axis |
+| Calculate PNS | `Select PNS ASC file`, then choose a valid scanner ASC profile; use the `PNS` legend entry to toggle the axis |
 | Toggle block boundaries | Checkbox `☐ Blocks` in toolbar |
 | Block details & values | Hover waveform |
 | Switch theme | Toolbar `Theme` dropdown |
@@ -118,3 +122,7 @@ All the same features as the browser & VS Code versions — 7 channels, k‑spac
 ## License
 
 MIT © [Bughht](https://github.com/bughht)
+
+SAFE PNS prediction components are distributed under the BSD 3-Clause License.
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). PNS output is an advisory
+prediction, not a clinical, scanner-vendor, or regulatory safety certification.
