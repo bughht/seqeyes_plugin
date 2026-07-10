@@ -65,6 +65,33 @@ canvas{display:block}
 #pbar2{height:5px;background:var(--gr);border-radius:3px;overflow:hidden;margin:0 0 6px}
 #pfill2{height:100%;width:0%;background:var(--adc);border-radius:3px;transition:width .4s ease}
 #ppct{font-size:11px;color:var(--lb);font-family:monospace}
+/* ── Touch & mobile ── */
+#mc,#kc,#mmc{touch-action:none}
+body{overscroll-behavior:none}
+#menuBtn{display:none;background:var(--gr);border:1px solid var(--ax);color:var(--fg);font-size:18px;line-height:1;padding:4px 8px;border-radius:3px;cursor:pointer;min-width:38px;min-height:38px}
+#tbMore{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+/* ── Vertical (portrait) layout (CSS fallback; JS handles primary) ── */
+body.layout-vertical #main{flex-direction:column}
+body.layout-vertical #left{flex:1;min-height:0}
+body.layout-vertical #right{width:100%!important;height:0;border-left:none;border-top:1px solid var(--gr);transition:height .25s;flex-shrink:0}
+body.layout-vertical #right.open{height:300px;width:100%!important}
+body.layout-vertical #right .handle{left:0;right:0;top:0;width:100%;height:5px;cursor:row-resize;bottom:auto}
+body.layout-vertical #rc{flex-direction:row;gap:4px;top:6px;left:4px}
+body.layout-vertical #rc button{padding:4px 8px;font-size:10px}
+/* ── Narrow / touch-device toolbar ── */
+@media(max-width:768px),(pointer:coarse){
+  #tb{min-height:44px;padding:6px 8px;gap:5px;position:relative}
+  #tb button,#tb select{min-height:36px;min-width:36px;font-size:12px;padding:5px 9px}
+  #tb .sep{margin:0 2px}
+  #tb .cur{min-width:0;font-size:10px;flex-basis:100%;text-align:left;margin-left:0;order:99}
+  #menuBtn{display:inline-block}
+  #tbMore{display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--gr);border-top:none;z-index:200;padding:8px 10px;flex-direction:column;align-items:flex-start;gap:8px;box-shadow:0 4px 12px rgba(0,0,0,.15)}
+  #tbMore.open{display:flex}
+  #cc{cursor:crosshair}
+  #tt{font-size:12px;max-width:280px;padding:6px 10px}
+  #mmap{height:30px}
+  #rc button{min-height:32px;min-width:32px;padding:4px 8px}
+}
 </style>
 </head>
 <body>
