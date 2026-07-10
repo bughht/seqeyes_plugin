@@ -123,12 +123,13 @@ function drawDerivedChannels(vs,ve,s){
   for(var vi=0;vi<vc.length;vi++){
     if(vc[vi]===7)viP=vi;if(vc[vi]===8)viM1x=vi;if(vc[vi]===9)viM1y=vi;if(vc[vi]===10)viM1z=vi;
   }
-  if(pnsData&&viP>=0){
-    drawPercentSeries(pnsData.x,viP,7,s.getPropertyValue('--gx').trim(),ch,vs,ve);
-    drawPercentSeries(pnsData.y,viP,7,s.getPropertyValue('--gy').trim(),ch,vs,ve);
-    drawPercentSeries(pnsData.z,viP,7,s.getPropertyValue('--gz').trim(),ch,vs,ve);
+  var pnsDrawData=pnsSeriesForView(vs,ve);
+  if(pnsDrawData&&viP>=0){
+    drawPercentSeries(pnsDrawData.x,viP,7,s.getPropertyValue('--gx').trim(),ch,vs,ve);
+    drawPercentSeries(pnsDrawData.y,viP,7,s.getPropertyValue('--gy').trim(),ch,vs,ve);
+    drawPercentSeries(pnsDrawData.z,viP,7,s.getPropertyValue('--gz').trim(),ch,vs,ve);
     ctx.setLineDash([5,3]);
-    drawPercentSeries(pnsData.n,viP,7,s.getPropertyValue('--fg').trim(),ch,vs,ve);
+    drawPercentSeries(pnsDrawData.n,viP,7,s.getPropertyValue('--fg').trim(),ch,vs,ve);
     ctx.setLineDash([]);
   }
   if(m1Data){
