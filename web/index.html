@@ -147,7 +147,7 @@ var GAMMA=42576;
 var ampZoom=[1,1,1,1,1,1,1];
 ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
-var decodedBlocks=null,m1Data=null,pnsData=null,pnsHardware=null,m1Busy=false,pnsBusy=false,m1RequestedChannel=8;
+var decodedBlocks=null,m1Data=null,pnsData=null,pnsHardware=null,m1Busy=false,pnsBusy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null;
 var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,lastDrawDurationMs=0,viewerDrawCount=0;
 var viewerDrawFrame=0,viewerDrawMinimap=false;
 function scheduleViewerDraw(includeMinimap){
@@ -176,6 +176,30 @@ function gradUnitStr(){return gradUnit;}
 function timeConv(t){if(timeUnit==='ms')return t*1e3;if(timeUnit==='us')return t*1e6;return t;}
 function timeUnitStr(){return timeUnit;}
 function setExportButtonEnabled(enabled){if(exportBtn)exportBtn.disabled=!enabled||exportBusy;}
+function normalizeM1ReferenceMode(mode){return mode==='observationTime'?'observationTime':'rfCenter';}
+function readM1ReferenceMode(){
+  try{return normalizeM1ReferenceMode(localStorage.getItem('seqeyes.m1ReferenceMode'));}catch(_){return 'rfCenter';}
+}
+function writeM1ReferenceMode(mode){
+  try{localStorage.setItem('seqeyes.m1ReferenceMode',mode);}catch(_){}
+}
+function setM1ReferenceMode(mode){
+  var next=normalizeM1ReferenceMode(mode);
+  if(next===m1ReferenceMode)return m1ReferenceMode;
+  var restore=[!!chVis[8],!!chVis[9],!!chVis[10]];
+  var shouldRecalc=!!m1Data&&(chVis[8]||chVis[9]||chVis[10]);
+  m1ReferenceMode=next;writeM1ReferenceMode(next);
+  m1Data=null;chVis[8]=false;chVis[9]=false;chVis[10]=false;
+  computeGlobalMax();buildLegend();draw();
+  if(shouldRecalc){
+    m1RestoreChannels=restore;
+    requestM1(restore[0]?8:(restore[1]?9:(restore[2]?10:(m1RequestedChannel||8))));
+  }
+  return m1ReferenceMode;
+}
+window.SeqEyesDev=window.SeqEyesDev||{};
+window.SeqEyesDev.getM1ReferenceMode=function(){return m1ReferenceMode;};
+window.SeqEyesDev.setM1ReferenceMode=setM1ReferenceMode;
 
 /* ── Responsive layout ────────────────────────────────────────────────── */
 var layoutMode='horizontal';
@@ -600,12 +624,15 @@ function showM1Result(result){
   m1Data={
     valid:result.valid,
     ok:result.ok,
+    referenceMode:result.referenceMode||m1ReferenceMode,
     warnings:result.warnings||[],
     x:createDerivedSeries(result.tSec,result.m1x,1),
     y:createDerivedSeries(result.tSec,result.m1y,1),
     z:createDerivedSeries(result.tSec,result.m1z,1)
   };
-  chVis[m1RequestedChannel]=true;
+  if(m1RestoreChannels){
+    chVis[8]=!!m1RestoreChannels[0];chVis[9]=!!m1RestoreChannels[1];chVis[10]=!!m1RestoreChannels[2];m1RestoreChannels=null;
+  }else chVis[m1RequestedChannel]=true;
   computeGlobalMax();buildLegend();draw();
   if(m1Data.warnings&&m1Data.warnings.length)console.warn('[SeqEyes M1]',m1Data.warnings.join('\n'));
 }
@@ -615,7 +642,7 @@ function requestM1(channel){
   if(m1Data){chVis[channel]=!chVis[channel];buildLegend();draw();return;}
   if(!decodedBlocks){alert('Open a .seq file before calculating M1.');return;}
   m1RequestedChannel=channel;m1Busy=true;buildLegend();
-  try{showM1Result(Pulseq.calculateM1(decodedBlocks,GR));}
+  try{showM1Result(Pulseq.calculateM1(decodedBlocks,GR,{referenceMode:m1ReferenceMode}));}
   catch(err){m1Busy=false;alert('M1 calculation failed: '+(err.message||String(err)));}
 }
 
@@ -837,12 +864,16 @@ function drawPercentSeries(series,vi,ci,c,ch,vs,ve){
   rowClip(vi,ch,function(){
     var maxA=channelRange(ci),base=M.t+(vi+1)*ch-ch*.08,scale=ch*.84/maxA;
     var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r;
-    var rawLimit=Math.max(64,Math.ceil((clipR-clipL)*2));
+    var plotW=Math.max(1,clipR-clipL);
+    var rawLimit=Math.max(64,Math.ceil(plotW*2));
+    var fineLimit=Math.max(128,Math.ceil(plotW*8));
+    var windowRange=derivedSeriesWindow(series,vs,ve);
+    var useFinePns=shouldUseFinePnsRendering(windowRange.count,plotW,vs,ve);
     ctx.strokeStyle=c;ctx.lineWidth=1;ctx.beginPath();
-    if(derivedSeriesWindow(series,vs,ve).count<=rawLimit){
+    if(windowRange.count<=rawLimit||useFinePns){
       derivedRawCurveCount++;
       var f=1;
-      derivedRenderPointCount+=forEachDerivedPoint(series,vs,ve,rawLimit,function(tv,vv){
+      derivedRenderPointCount+=forEachDerivedPoint(series,vs,ve,useFinePns?fineLimit:rawLimit,function(tv,vv){
         var sx=t2x(tv);if(!isFinite(sx)||sx<clipL||sx>clipR){f=1;return}
         var sy=base-vv*scale;if(!isFinite(sy)){f=1;return}
         if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
@@ -858,6 +889,12 @@ function drawPercentSeries(series,vi,ci,c,ch,vs,ve){
     }
     ctx.stroke();
   });
+}
+
+function shouldUseFinePnsRendering(count,plotW,vs,ve){
+  var dur=ve-vs;
+  if(seqTiming&&seqTiming.trTimeSec>0&&dur<=seqTiming.trTimeSec*10.5)return true;
+  return count<=Math.max(256,Math.ceil(plotW*12));
 }
 
 function drawBipolarSeries(series,vi,ci,c,ch,vs,ve){
@@ -1063,21 +1100,65 @@ mc.addEventListener('touchend',function(e){
 mc.addEventListener('touchcancel',function(){_tchDragging=false;cc.classList.remove('pan');_tchPinch0=0;_tchPinchMid=null;});
 
 /* ── Tooltip helper (shared by mouse hover and touch tap) ─────────── */
+function sampleDerivedSeriesAtTime(series,t){
+  if(!series||!series.t||!series.v||series.n<1||!isFinite(t))return null;
+  var n=Math.min(series.n,series.t.length,series.v.length);
+  if(n<1||t<series.t[0]||t>series.t[n-1])return null;
+  if(n===1||t<=series.t[0])return series.v[0]*series.scale;
+  if(t>=series.t[n-1])return series.v[n-1]*series.scale;
+  var lo=0,hi=n-1;
+  while(hi-lo>1){var m=(lo+hi)>>1;if(series.t[m]<=t)lo=m;else hi=m;}
+  var dt=series.t[hi]-series.t[lo];
+  if(dt<=0)return series.v[lo]*series.scale;
+  return (series.v[lo]+(series.v[hi]-series.v[lo])*(t-series.t[lo])/dt)*series.scale;
+}
+function fmtSignedAmp(v){
+  var av=Math.abs(v),s;if(av>=1e6)s=(av/1e6).toFixed(1)+'M';else if(av>=1e3)s=(av/1e3).toFixed(1)+'k';else if(av>=1)s=av.toFixed(1);else s=av.toFixed(2);
+  return(v<0?'-':'')+s;
+}
+function fmtDerivedValue(v,unit){return unit==='%'?v.toFixed(1)+'%':fmtSignedAmp(v)+' '+unit;}
+function pushDerivedPart(parts,label,series,t,unit){
+  var v=sampleDerivedSeriesAtTime(series,t);if(v===null)return;
+  parts.push(label+'='+fmtDerivedValue(v,unit));
+}
+function appendDerivedTooltipLines(lines,ct){
+  if(pnsData&&chVis[7]){
+    var p=[];pushDerivedPart(p,'X',pnsData.x,ct,'%');pushDerivedPart(p,'Y',pnsData.y,ct,'%');pushDerivedPart(p,'Z',pnsData.z,ct,'%');pushDerivedPart(p,'Norm',pnsData.n,ct,'%');
+    if(p.length)lines.push('PNS: '+p.join('  '));
+  }
+  if(m1Data&&(chVis[8]||chVis[9]||chVis[10])){
+    var m=[];if(chVis[8])pushDerivedPart(m,'M1x',m1Data.x,ct,'s/m');if(chVis[9])pushDerivedPart(m,'M1y',m1Data.y,ct,'s/m');if(chVis[10])pushDerivedPart(m,'M1z',m1Data.z,ct,'s/m');
+    if(m.length)lines.push('M1: '+m.join('  '));
+  }
+}
+function placeTooltip(cx,cy){
+  var pad=8;tt.style.left='0px';tt.style.top='0px';
+  var r=tt.getBoundingClientRect(),vw=window.innerWidth,vh=window.innerHeight;
+  var left=Math.min(Math.max(pad,cx+15),Math.max(pad,vw-r.width-pad));
+  var top=cy+12;if(top+r.height+pad>vh)top=cy-r.height-12;if(top<pad)top=pad;
+  tt.style.left=left+'px';tt.style.top=top+'px';
+}
 function showTooltipAt(cx,cy,ct){
   var ch=cH(),vc=visChannels(),vi2=Math.floor((cy-mc.getBoundingClientRect().top-M.t)/ch);
   if(vi2>=0&&vi2<vc.length){
     var found=null;for(var i=0;i<BL.length;i++){if(ct>=BL[i].s&&ct<=BL[i].s+BL[i].d){found=BL[i];break}}
+    var lines=[];
     if(found){
       var blockDt=Math.max(0,Math.min(found.d,ct-found.s));
-      var lines=['Block #'+found.i,'Time: '+fmtT(timeConv(ct))+' '+timeUnitStr()+' (\u0394 '+fmtT(timeConv(blockDt))+' / dur: '+fmtT(timeConv(found.d))+' '+timeUnitStr()+')'];
+      lines=['Block #'+found.i,'Time: '+fmtT(timeConv(ct))+' '+timeUnitStr()+' (\u0394 '+fmtT(timeConv(blockDt))+' / dur: '+fmtT(timeConv(found.d))+' '+timeUnitStr()+')'];
       if(found.rf){lines.push('RF: '+(found.rf.a||0).toFixed(1)+' Hz  fo='+(found.rf.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.rf.po||0)%6.283).toFixed(2)+' rad');}
       if(found.gx&&found.gx.ty!=='none')lines.push('Gx: '+fmtG(found.gx,ct));
       if(found.gy&&found.gy.ty!=='none')lines.push('Gy: '+fmtG(found.gy,ct));
       if(found.gz&&found.gz.ty!=='none')lines.push('Gz: '+fmtG(found.gz,ct));
       if(found.adc){lines.push('ADC: '+found.adc.n+'pts @'+(found.adc.dw*1e6).toFixed(1)+'\u00b5s  fo='+(found.adc.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.adc.po||0)%6.283).toFixed(2)+' rad');}
       if(found.trg)lines.push('Trig: ch'+found.trg.map(function(x){return x.c}).join(',')+' \u0394'+found.trg.map(function(x){return fmtT(timeConv(x.dr))+' '+timeUnitStr()}).join(','));
+    }else{
+      lines=['Time: '+fmtT(timeConv(ct))+' '+timeUnitStr()];
+    }
+    appendDerivedTooltipLines(lines,ct);
+    if(lines.length>1||found){
       tt.textContent=lines.join('\n');tt.style.display='block';
-      tt.style.left=Math.min(cx+15,window.innerWidth-350)+'px';tt.style.top=(cy-10)+'px';
+      placeTooltip(cx,cy);
       if(_touchTooltipTimer)clearTimeout(_touchTooltipTimer);
       if(isTouchDevice())_touchTooltipTimer=setTimeout(function(){tt.style.display='none';},3000);
       return;
@@ -1553,7 +1634,7 @@ if(location.search.indexOf("debug=1")>=0){
   window.__seqeyesDebug={
     state:function(){
       var adcCount=(kAdc&&kAdc[0])?kAdc[0].length:0;
-      return{blocks:BL.length,totalDuration:TD,offset:ox,scale:sc,visibleDuration:visibleDuration(),minRasterTime:minRasterTime(),kOpen:kOpen,kView:kView,kRotX:kRotX,kRotY:kRotY,kScale:kScl,adcCount:adcCount,exportEnabled:!!(exportBtn&&!exportBtn.disabled),derivedRenderPoints:derivedRenderPointCount,derivedEnvelopeCurves:derivedEnvelopeCurveCount,derivedRawCurves:derivedRawCurveCount,lastDrawDurationMs:lastDrawDurationMs,drawCount:viewerDrawCount,title:document.title};
+      return{blocks:BL.length,totalDuration:TD,offset:ox,scale:sc,visibleDuration:visibleDuration(),minRasterTime:minRasterTime(),kOpen:kOpen,kView:kView,kRotX:kRotX,kRotY:kRotY,kScale:kScl,adcCount:adcCount,exportEnabled:!!(exportBtn&&!exportBtn.disabled),derivedRenderPoints:derivedRenderPointCount,derivedEnvelopeCurves:derivedEnvelopeCurveCount,derivedRawCurves:derivedRawCurveCount,lastDrawDurationMs:lastDrawDurationMs,drawCount:viewerDrawCount,m1ReferenceMode:m1ReferenceMode,title:document.title};
     },
     hoverPoint:function(){
       var t=(kAdcTime&&kAdcTime.length)?kAdcTime[Math.floor(kAdcTime.length/2)]:TD*0.5;

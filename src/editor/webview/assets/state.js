@@ -23,7 +23,7 @@ var ampZoom=[1,1,1,1,1,1,1];
 ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;
 /* K‑space data — pre‑computed on the extension side */
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
-var m1Data=null,pnsData=null,m1Busy=false,pnsBusy=false,m1RequestedChannel=8;
+var m1Data=null,pnsData=null,m1Busy=false,pnsBusy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null;
 var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,lastDrawDurationMs=0,viewerDrawCount=0;
 var viewerDrawFrame=0,viewerDrawMinimap=false;
 
@@ -45,6 +45,31 @@ var blockPos=[];
 
 /* VS Code API — acquired once, used for postMessage to extension host */
 var vscApi=(typeof acquireVsCodeApi!=='undefined')?acquireVsCodeApi():null;
+
+function normalizeM1ReferenceMode(mode){return mode==='observationTime'?'observationTime':'rfCenter';}
+function readM1ReferenceMode(){
+  try{return normalizeM1ReferenceMode(localStorage.getItem('seqeyes.m1ReferenceMode'));}catch(_){return 'rfCenter';}
+}
+function writeM1ReferenceMode(mode){
+  try{localStorage.setItem('seqeyes.m1ReferenceMode',mode);}catch(_){}
+}
+function setM1ReferenceMode(mode){
+  var next=normalizeM1ReferenceMode(mode);
+  if(next===m1ReferenceMode)return m1ReferenceMode;
+  var restore=[!!chVis[8],!!chVis[9],!!chVis[10]];
+  var shouldRecalc=!!m1Data&&(chVis[8]||chVis[9]||chVis[10]);
+  m1ReferenceMode=next;writeM1ReferenceMode(next);
+  m1Data=null;chVis[8]=false;chVis[9]=false;chVis[10]=false;
+  computeGlobalMax();buildLegend();draw();
+  if(shouldRecalc){
+    m1RestoreChannels=restore;
+    requestM1(restore[0]?8:(restore[1]?9:(restore[2]?10:(m1RequestedChannel||8))));
+  }
+  return m1ReferenceMode;
+}
+window.SeqEyesDev=window.SeqEyesDev||{};
+window.SeqEyesDev.getM1ReferenceMode=function(){return m1ReferenceMode;};
+window.SeqEyesDev.setM1ReferenceMode=setM1ReferenceMode;
 
 /* ── Shared touch utilities (used by kspace.js & interaction.js) ──────── */
 function isTouchDevice(){return('ontouchstart' in window)||(navigator.maxTouchPoints>0);}
@@ -206,11 +231,15 @@ window.addEventListener('message',function(e){
     m1Busy=false;
     if(m.m1&&m.m1.valid){
       m1Data={
+        referenceMode:m.m1.referenceMode||m1ReferenceMode,
         warnings:m.m1.warnings||[],
         x:createDerivedSeries(m.m1.tx||m.m1.t,m.m1.x,1),
         y:createDerivedSeries(m.m1.ty||m.m1.t,m.m1.y,1),
         z:createDerivedSeries(m.m1.tz||m.m1.t,m.m1.z,1)
-      };chVis[m1RequestedChannel]=true;
+      };
+      if(m1RestoreChannels){
+        chVis[8]=!!m1RestoreChannels[0];chVis[9]=!!m1RestoreChannels[1];chVis[10]=!!m1RestoreChannels[2];m1RestoreChannels=null;
+      }else chVis[m1RequestedChannel]=true;
       computeGlobalMax();buildLegend();draw();
       if(m.m1.warnings&&m.m1.warnings.length)console.warn('[SeqEyes M1]',m.m1.warnings.join('\n'));
     }else{

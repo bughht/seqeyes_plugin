@@ -1418,21 +1418,22 @@ var Pulseq = (() => {
 
   // src/pulseq/m1.ts
   var TIME_EPS = 1e-15;
-  function calculateM1(blocks, gradientRaster) {
+  function calculateM1(blocks, gradientRaster, options = {}) {
+    const referenceMode = normalizeReferenceMode(options.referenceMode);
     if (!blocks.length) {
-      return invalidM1("Empty or invalid block list.");
+      return invalidM1("Empty or invalid block list.", referenceMode);
     }
     const gx = collectGradientSeries(blocks, "gx");
     const gy = collectGradientSeries(blocks, "gy");
     const gz = collectGradientSeries(blocks, "gz");
     const ranges = [gx, gy, gz].filter((series) => series.time.length > 0).map((series) => [series.time[0], series.time[series.time.length - 1]]);
     if (!ranges.length) {
-      return invalidM1("No gradient waveform available for M1.");
+      return invalidM1("No gradient waveform available for M1.", referenceMode);
     }
     const tMin = Math.min(...ranges.map((range) => range[0]));
     const tMax = Math.max(...ranges.map((range) => range[1]));
     if (!Number.isFinite(tMin) || !Number.isFinite(tMax) || tMax < tMin) {
-      return invalidM1("Invalid gradient time range for M1.");
+      return invalidM1("Invalid gradient time range for M1.", referenceMode);
     }
     const warnings = [];
     const rfEvents = collectRfEvents(blocks, warnings);
@@ -1457,18 +1458,19 @@ var Pulseq = (() => {
     }
     const rasterSec = gradientRaster > 0 ? gradientRaster : 1e-5;
     if (rasterSec <= 0) {
-      return invalidM1("gradientRaster must be positive.");
+      return invalidM1("gradientRaster must be positive.", referenceMode);
     }
     const samples = buildSampleTimes(tMin, tMax, rasterSec);
-    const x = walkM1(gx, samples, events, excitationTimes, tMin);
-    const y = walkM1(gy, samples, events, excitationTimes, tMin);
-    const z = walkM1(gz, samples, events, excitationTimes, tMin);
+    const x = walkM1(gx, samples, events, excitationTimes, tMin, referenceMode);
+    const y = walkM1(gy, samples, events, excitationTimes, tMin, referenceMode);
+    const z = walkM1(gz, samples, events, excitationTimes, tMin, referenceMode);
     if (x.t.length !== y.t.length || x.t.length !== z.t.length) {
       warnings.push(`Internal warning: per-axis M1 output sizes disagree (${x.t.length}, ${y.t.length}, ${z.t.length}). Plot may be inconsistent.`);
     }
     return {
       valid: true,
       ok: true,
+      referenceMode,
       tSec: new Float64Array(x.t),
       m1x: new Float64Array(x.m1),
       m1y: new Float64Array(y.m1),
@@ -1478,10 +1480,11 @@ var Pulseq = (() => {
       refocusingTimesSec: new Float64Array(refocusingTimes)
     };
   }
-  function invalidM1(error) {
+  function invalidM1(error, referenceMode = "rfCenter") {
     return {
       valid: false,
       ok: false,
+      referenceMode,
       error,
       tSec: new Float64Array(),
       m1x: new Float64Array(),
@@ -1491,6 +1494,9 @@ var Pulseq = (() => {
       excitationTimesSec: new Float64Array(),
       refocusingTimesSec: new Float64Array()
     };
+  }
+  function normalizeReferenceMode(mode) {
+    return mode === "observationTime" ? "observationTime" : "rfCenter";
   }
   function collectGradientSeries(blocks, channel) {
     const time = [];
@@ -1574,7 +1580,7 @@ var Pulseq = (() => {
     if (!samples.length || samples[samples.length - 1] < tMax - TIME_EPS) samples.push(tMax);
     return samples;
   }
-  function walkM1(gradient, samples, events, excitationTimes, tMin) {
+  function walkM1(gradient, samples, events, excitationTimes, tMin, referenceMode) {
     const outT = [];
     const outM1 = [];
     let sign = 1;
@@ -1583,7 +1589,10 @@ var Pulseq = (() => {
     let currentT = tReset;
     let unsignedM0 = 0;
     let unsignedM1 = 0;
-    const reportedM1At = (t) => sign * (unsignedM1 - (t - tReset) * unsignedM0);
+    const reportedM1At = (t) => {
+      if (referenceMode === "observationTime") return sign * (unsignedM1 - (t - tReset) * unsignedM0);
+      return sign * unsignedM1;
+    };
     const advanceTo = (targetT) => {
       if (!(targetT > currentT + TIME_EPS)) return;
       while (currentT < targetT - TIME_EPS) {

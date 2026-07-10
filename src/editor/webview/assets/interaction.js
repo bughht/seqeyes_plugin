@@ -71,21 +71,65 @@ mc.addEventListener('touchend',function(e){
 mc.addEventListener('touchcancel',function(){_tchDragging=false;cc.classList.remove('pan');_tchPinch0=0;_tchPinchMid=null;});
 
 /* ── Tooltip helper (also used by touch tap) ──────────────────────── */
+function sampleDerivedSeriesAtTime(series,t){
+  if(!series||!series.t||!series.v||series.n<1||!isFinite(t))return null;
+  var n=Math.min(series.n,series.t.length,series.v.length);
+  if(n<1||t<series.t[0]||t>series.t[n-1])return null;
+  if(n===1||t<=series.t[0])return series.v[0]*series.scale;
+  if(t>=series.t[n-1])return series.v[n-1]*series.scale;
+  var lo=0,hi=n-1;
+  while(hi-lo>1){var m=(lo+hi)>>1;if(series.t[m]<=t)lo=m;else hi=m;}
+  var dt=series.t[hi]-series.t[lo];
+  if(dt<=0)return series.v[lo]*series.scale;
+  return (series.v[lo]+(series.v[hi]-series.v[lo])*(t-series.t[lo])/dt)*series.scale;
+}
+function fmtSignedAmp(v){
+  var av=Math.abs(v),s;if(av>=1e6)s=(av/1e6).toFixed(1)+'M';else if(av>=1e3)s=(av/1e3).toFixed(1)+'k';else if(av>=1)s=av.toFixed(1);else s=av.toFixed(2);
+  return(v<0?'-':'')+s;
+}
+function fmtDerivedValue(v,unit){return unit==='%'?v.toFixed(1)+'%':fmtSignedAmp(v)+' '+unit;}
+function pushDerivedPart(parts,label,series,t,unit){
+  var v=sampleDerivedSeriesAtTime(series,t);if(v===null)return;
+  parts.push(label+'='+fmtDerivedValue(v,unit));
+}
+function appendDerivedTooltipLines(lines,ct){
+  if(pnsData&&chVis[7]){
+    var p=[];pushDerivedPart(p,'X',pnsData.x,ct,'%');pushDerivedPart(p,'Y',pnsData.y,ct,'%');pushDerivedPart(p,'Z',pnsData.z,ct,'%');pushDerivedPart(p,'Norm',pnsData.n,ct,'%');
+    if(p.length)lines.push('PNS: '+p.join('  '));
+  }
+  if(m1Data&&(chVis[8]||chVis[9]||chVis[10])){
+    var m=[];if(chVis[8])pushDerivedPart(m,'M1x',m1Data.x,ct,'s/m');if(chVis[9])pushDerivedPart(m,'M1y',m1Data.y,ct,'s/m');if(chVis[10])pushDerivedPart(m,'M1z',m1Data.z,ct,'s/m');
+    if(m.length)lines.push('M1: '+m.join('  '));
+  }
+}
+function placeTooltip(cx,cy){
+  var pad=8;tt.style.left='0px';tt.style.top='0px';
+  var r=tt.getBoundingClientRect(),vw=window.innerWidth,vh=window.innerHeight;
+  var left=Math.min(Math.max(pad,cx+15),Math.max(pad,vw-r.width-pad));
+  var top=cy+12;if(top+r.height+pad>vh)top=cy-r.height-12;if(top<pad)top=pad;
+  tt.style.left=left+'px';tt.style.top=top+'px';
+}
 function showTooltipAt(cx,cy,ct){
   var ch=cH(),vc=visChannels(),vi2=Math.floor((cy-mc.getBoundingClientRect().top-M.t)/ch);
   if(vi2>=0&&vi2<vc.length){
     var found=null;for(var i=0;i<BL.length;i++){if(ct>=BL[i].s&&ct<=BL[i].s+BL[i].d){found=BL[i];break}}
+    var lines=[];
     if(found){
       var blockDt=Math.max(0,Math.min(found.d,ct-found.s));
-      var lines=['Block #'+found.i,'Time: '+fmtT(timeConv(ct))+' '+timeUnitStr()+' (\u0394 '+fmtT(timeConv(blockDt))+' / dur: '+fmtT(timeConv(found.d))+' '+timeUnitStr()+')'];
+      lines=['Block #'+found.i,'Time: '+fmtT(timeConv(ct))+' '+timeUnitStr()+' (\u0394 '+fmtT(timeConv(blockDt))+' / dur: '+fmtT(timeConv(found.d))+' '+timeUnitStr()+')'];
       if(found.rf){lines.push('RF: '+(found.rf.a||0).toFixed(1)+' Hz  fo='+(found.rf.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.rf.po||0)%6.283).toFixed(2)+' rad');}
       if(found.gx&&found.gx.ty!=='none')lines.push('Gx: '+fmtG(found.gx,ct));
       if(found.gy&&found.gy.ty!=='none')lines.push('Gy: '+fmtG(found.gy,ct));
       if(found.gz&&found.gz.ty!=='none')lines.push('Gz: '+fmtG(found.gz,ct));
       if(found.adc){lines.push('ADC: '+found.adc.n+'pts @'+(found.adc.dw*1e6).toFixed(1)+'\u00b5s  fo='+(found.adc.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.adc.po||0)%6.283).toFixed(2)+' rad');}
       if(found.trg)lines.push('Trig: ch'+found.trg.map(function(x){return x.c}).join(',')+' \u0394'+found.trg.map(function(x){return fmtT(timeConv(x.dr))+' '+timeUnitStr()}).join(','));
+    }else{
+      lines=['Time: '+fmtT(timeConv(ct))+' '+timeUnitStr()];
+    }
+    appendDerivedTooltipLines(lines,ct);
+    if(lines.length>1||found){
       tt.textContent=lines.join('\n');tt.style.display='block';
-      tt.style.left=Math.min(cx+15,window.innerWidth-350)+'px';tt.style.top=(cy-10)+'px';
+      placeTooltip(cx,cy);
       // Auto-dismiss on touch devices
       if(_touchTooltipTimer)clearTimeout(_touchTooltipTimer);
       if(isTouchDevice())_touchTooltipTimer=setTimeout(function(){tt.style.display='none';},3000);
@@ -108,7 +152,7 @@ function requestM1(channel){
   if(m1Data){chVis[channel]=!chVis[channel];buildLegend();draw();return;}
   m1RequestedChannel=channel;
   m1Busy=true;buildLegend();
-  if(vscApi){vscApi.postMessage({command:'calculateM1'});}
+  if(vscApi){vscApi.postMessage({command:'calculateM1',referenceMode:m1ReferenceMode});}
 }
 document.getElementById('pnsBtn').onclick=function(){
   if(pnsBusy)return;
