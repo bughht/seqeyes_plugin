@@ -176,10 +176,29 @@ function uploadKSpaceGPU(){
    Toggle / View cycle / Canvas sizing
    ═══════════════════════════════════════════════════════════════════════ */
 document.getElementById("kbtn").onclick=function(){
+  // Ensure layout class is in sync before toggling
+  if(typeof refreshLayout==='function')refreshLayout();
   kOpen=!kOpen;
   var p=document.getElementById("right");
-  if(kOpen){p.classList.add("open");this.textContent="K Space ✕";kAutoFit=true;}
-  else{p.classList.remove("open");p.style.width="";this.textContent="K Space";}
+  if(kOpen){
+    p.classList.add("open");
+    if(typeof layoutMode!=='undefined'&&layoutMode==='vertical'){
+      // In vertical mode, apply height via inline !important to match applyLayoutMode
+      p.style.setProperty('height','300px','important');
+      p.style.setProperty('width','100%','important');
+    }else{
+      p.style.width='500px';
+    }
+    this.textContent="K Space ✕";kAutoFit=true;
+  }else{
+    p.classList.remove("open");
+    if(typeof layoutMode!=='undefined'&&layoutMode==='vertical'){
+      p.style.setProperty('height','0','important');
+    }else{
+      p.style.width='';
+    }
+    this.textContent="K Space";
+  }
   if(kOpen){requestAnimationFrame(function(){drawKs_init();});}
   else{requestAnimationFrame(function(){resizeKc();drawKs();});}
 };
@@ -350,20 +369,128 @@ window.addEventListener("mousemove",function(e){
 });
 window.addEventListener("mouseup",function(){kDragging=false;kDragPrev=null;});
 
-/* ── Resize handle ───────────────────────────────────────────────────── */
-var kResizing=false, kResizeStart=0, kResizeW=500;
-document.getElementById("khandle").addEventListener("mousedown",function(e){
-  kResizing=true;kResizeStart=e.clientX;e.preventDefault();e.stopPropagation();
+/* ── Touch: 3D k-space viewer ─────────────────────────────────────── */
+var _kTouchActive=false,_kTouchPrev=null,_kTouchPinch0=0,_kTouchMid=null,_kTouchBtn=0;
+kCanvas.addEventListener("touchstart",function(e){
+  if(_kAnimId){cancelAnimationFrame(_kAnimId);_kAnimId=null;}
+  if(e.touches.length===1){
+    _kTouchActive=true;_kTouchBtn=0;
+    _kTouchPrev={x:e.touches[0].clientX,y:e.touches[0].clientY};
+  }else if(e.touches.length===2){
+    _kTouchActive=true;_kTouchBtn=1;
+    _kTouchPinch0=getTouchDist(e.touches);
+    _kTouchMid=getTouchMid(e.touches);
+    _kTouchPrev={x:_kTouchMid.x,y:_kTouchMid.y};
+  }
+  e.preventDefault();
+},{passive:false});
+kCanvas.addEventListener("touchmove",function(e){
+  if(!_kTouchActive||!_kTouchPrev||!kOpen)return;
+  if(kView!=="3d"){kView="3d";document.getElementById("kax").textContent="3D";}
+  if(e.touches.length===1&&_kTouchBtn===0){
+    // 1‑finger rotate
+    var dx=e.touches[0].clientX-_kTouchPrev.x;
+    var dy=e.touches[0].clientY-_kTouchPrev.y;
+    _kTouchPrev={x:e.touches[0].clientX,y:e.touches[0].clientY};
+    kRotY+=dx*0.008; kRotX-=dy*0.008;
+    _tRotY=kRotY; _tRotX=kRotX;
+    drawKsFast();
+  }else if(e.touches.length===2){
+    // 2‑finger pinch-zoom + pan
+    var d=getTouchDist(e.touches);
+    if(_kTouchPinch0>0){
+      var zf=d/_kTouchPinch0;
+      kScl*=zf; kScl=Math.max(0.001,Math.min(1e6,kScl));
+      _tScl=kScl; kAutoFit=false;
+      _kTouchPinch0=d;
+    }
+    var mid=getTouchMid(e.touches);
+    var pdx=(mid.x-_kTouchPrev.x), pdy=(mid.y-_kTouchPrev.y);
+    _kTouchPrev={x:mid.x,y:mid.y};
+    var cz=Math.cos(kRotY),sz=Math.sin(kRotY),cx=Math.cos(kRotX),sx=Math.sin(kRotX);
+    var dpr=window.devicePixelRatio||1;
+    pdx/=(dpr*kScl); pdy/=(dpr*kScl);
+    if(Math.abs(cz)>0.01){kCy+=pdy/cx;kCx+=(-pdx-sz*sx*(pdy/cx))/cz;}
+    else{kCy+=pdy/cx;kCz+=(pdx-cz*sx*(pdy/cx))/sz;}
+    _tCy=kCy; _tCx=kCx; _tCz=kCz; kAutoFit=false;
+    drawKsFast();
+  }
+  e.preventDefault();
+},{passive:false});
+kCanvas.addEventListener("touchend",function(e){
+  _kTouchActive=false;_kTouchPrev=null;_kTouchPinch0=0;_kTouchMid=null;
+  if(e.touches.length===1){
+    // Transition from 2‑finger to 1‑finger
+    _kTouchActive=true;_kTouchBtn=0;
+    _kTouchPrev={x:e.touches[0].clientX,y:e.touches[0].clientY};
+  }
 });
+kCanvas.addEventListener("touchcancel",function(){
+  _kTouchActive=false;_kTouchPrev=null;_kTouchPinch0=0;_kTouchMid=null;
+});
+
+/* ── Resize handle ───────────────────────────────────────────────────── */
+var kResizing=false, kResizeStart=0, kResizeW=500, kResizeH=300;
+document.getElementById("khandle").addEventListener("mousedown",function(e){
+  kResizing=true;
+  if(typeof layoutMode!=='undefined'&&layoutMode==='vertical')kResizeStart=e.clientY;
+  else kResizeStart=e.clientX;
+  e.preventDefault();e.stopPropagation();
+});
+document.getElementById("khandle").addEventListener("touchstart",function(e){
+  kResizing=true;
+  if(typeof layoutMode!=='undefined'&&layoutMode==='vertical')kResizeStart=e.touches[0].clientY;
+  else kResizeStart=e.touches[0].clientX;
+  e.preventDefault();e.stopPropagation();
+},{passive:false});
 window.addEventListener("mousemove",function(e){
   if(!kResizing)return;
   var p=document.getElementById("right");
-  kResizeW=Math.max(200,Math.min(1200,kResizeW-(e.clientX-kResizeStart)));
-  kResizeStart=e.clientX;
-  p.style.width=kResizeW+"px";p.style.transition="none";
+  var vertical=(typeof layoutMode!=='undefined'&&layoutMode==='vertical');
+  if(vertical){
+    kResizeH=Math.max(120,Math.min(800,kResizeH-(e.clientY-kResizeStart)));
+    kResizeStart=e.clientY;
+    p.style.setProperty('height',kResizeH+'px','important');p.style.setProperty('transition','none','important');
+  }else{
+    kResizeW=Math.max(200,Math.min(1200,kResizeW-(e.clientX-kResizeStart)));
+    kResizeStart=e.clientX;
+    p.style.width=kResizeW+"px";p.style.transition="none";
+  }
   resizeKc();drawKs();
 });
-window.addEventListener("mouseup",function(){if(kResizing){kResizing=false;document.getElementById("right").style.transition="";}});
+window.addEventListener("touchmove",function(e){
+  if(!kResizing||e.touches.length!==1)return;
+  var p=document.getElementById("right");
+  var vertical=(typeof layoutMode!=='undefined'&&layoutMode==='vertical');
+  if(vertical){
+    kResizeH=Math.max(120,Math.min(800,kResizeH-(e.touches[0].clientY-kResizeStart)));
+    kResizeStart=e.touches[0].clientY;
+    p.style.setProperty('height',kResizeH+'px','important');p.style.setProperty('transition','none','important');
+  }else{
+    kResizeW=Math.max(200,Math.min(1200,kResizeW-(e.touches[0].clientX-kResizeStart)));
+    kResizeStart=e.touches[0].clientX;
+    p.style.width=kResizeW+"px";p.style.transition="none";
+  }
+  resizeKc();drawKs();
+},{passive:false});
+window.addEventListener("mouseup",function(){
+  if(kResizing){
+    kResizing=false;
+    var p=document.getElementById("right");
+    var vertical=(typeof layoutMode!=='undefined'&&layoutMode==='vertical');
+    if(vertical){p.style.setProperty('transition','height .25s','important');}
+    else{p.style.transition='';}
+  }
+});
+window.addEventListener("touchend",function(){
+  if(kResizing){
+    kResizing=false;
+    var p=document.getElementById("right");
+    var vertical=(typeof layoutMode!=='undefined'&&layoutMode==='vertical');
+    if(vertical){p.style.setProperty('transition','height .25s','important');}
+    else{p.style.transition='';}
+  }
+});
 window.addEventListener("resize",function(){if(kOpen){resizeKc();drawKs();}});
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -381,11 +508,13 @@ function _kAutoFitVals(){
    ═══════════════════════════════════════════════════════════════════════ */
 
 /** First‑open initialisation: sizes canvases to the KNOWN CSS target
- *  width (500px) so auto‑fit never sees a mid‑transition partial width. */
+ *  dimensions so auto‑fit never sees a mid‑transition partial size. */
 function drawKs_init(){
   var dpr=window.devicePixelRatio||1;
-  var targetW=500;
-  var targetH=document.getElementById("right").getBoundingClientRect().height||500;
+  var vertical=(typeof layoutMode!=='undefined'&&layoutMode==='vertical');
+  var targetW=vertical?document.getElementById("right").getBoundingClientRect().width||500:500;
+  var targetH=vertical?300:document.getElementById("right").getBoundingClientRect().height||500;
+  if(targetW<=0)targetW=500;
   if(targetH<=0)targetH=500;
   // Size both canvases directly — no DOM width read
   var kg=document.getElementById("kg");

@@ -73,8 +73,11 @@ function rowClip(vi,ch,fn){
 
 /* ── Axes (X time + Y per channel) ────────────────────────────────────── */
 function drawAxes(w,h,vs,ve,s){
+  var narrow=(typeof layoutMode!=='undefined'&&layoutMode==='vertical')||w<600;
+  var axFont=narrow?'9px monospace':'10px monospace';
+  var chFont=narrow?'bold 14px monospace':'bold 18px monospace';
   // X-axis
-  ctx.fillStyle=s.getPropertyValue('--lb').trim();ctx.font='10px monospace';ctx.textAlign='center';
+  ctx.fillStyle=s.getPropertyValue('--lb').trim();ctx.font=axFont;ctx.textAlign='center';
   ctx.strokeStyle=s.getPropertyValue('--ax').trim();ctx.lineWidth=1;
   ctx.beginPath();ctx.moveTo(M.l,h-M.b);ctx.lineTo(w-M.r,h-M.b);ctx.stroke();
   var st=nice((ve-vs)/8),t=Math.floor(vs/st)*st;
@@ -85,12 +88,18 @@ function drawAxes(w,h,vs,ve,s){
   var vc=visChannels(),ch=cH();
   for(var vi=0;vi<vc.length;vi++){
     var ci=vc[vi],y0=cy(vi);
-    // Channel label (bold, coloured)
-    ctx.textAlign='right';ctx.font='bold 18px monospace';
-    ctx.fillStyle=chColors[ci];ctx.fillText(CH[ci],M.l-40,y0+4);
-    // Tick values
-    ctx.fillStyle=s.getPropertyValue('--lb').trim();ctx.font='10px monospace';
-    var lblX=M.l-12;
+    // Channel label (bold, coloured) — left-aligned on narrow to avoid off-screen overflow
+    if(narrow){
+      ctx.textAlign='left';ctx.font=chFont;
+      ctx.fillStyle=chColors[ci];ctx.fillText(CH[ci],4,y0+4);
+    }else{
+      ctx.textAlign='right';ctx.font=chFont;
+      ctx.fillStyle=chColors[ci];ctx.fillText(CH[ci],M.l-40,y0+4);
+    }
+    // Tick values — left-aligned on narrow to stay within reduced margin
+    ctx.fillStyle=s.getPropertyValue('--lb').trim();ctx.font=axFont;
+    var lblX=narrow?4:M.l-12;
+    ctx.textAlign=narrow?'left':'right';
     if(ci===0){ctx.fillText(fmtAmp(channelRange(0))+'Hz',lblX,M.t+vi*ch+12);ctx.fillText('0',lblX,y0+ch/2-2);}
     else if(ci===1){var ph=channelRange(1);ctx.fillText(fmtPhase(ph),lblX,M.t+vi*ch+12);ctx.fillText(fmtPhase(ph/2),lblX,y0+4);ctx.fillText('0',lblX,y0+ch/2-2);}
     else if(ci>=2&&ci<=4){var d=gradConv(channelRange(ci));ctx.fillText('\u00b1'+fmtAmp(d)+gradUnitStr(),lblX,M.t+vi*ch+12);ctx.fillText('0',lblX,y0+4);}
