@@ -208,6 +208,14 @@ test('calculates M1 lazily and accepts a synthetic ASC profile for PNS', async (
   await m1zLegend.click();
   await expect(m1yLegend).not.toHaveClass(/off/);
   await expect(m1zLegend).not.toHaveClass(/off/);
+  await page.evaluate(() => {
+    (window as unknown as { SeqEyesDev: { setM1ReferenceMode: (mode: string) => string } })
+      .SeqEyesDev.setM1ReferenceMode('observationTime');
+  });
+  await expect(m1Legend).not.toHaveClass(/off/);
+  await expect(m1yLegend).not.toHaveClass(/off/);
+  await expect(m1zLegend).not.toHaveClass(/off/);
+  expect((await debugState(page)).m1ReferenceMode).toBe('observationTime');
 
   const pnsLegend = page.locator('#legend .li').filter({ hasText: 'PNS' });
   await expect(pnsLegend).toHaveClass(/off/);
@@ -221,6 +229,11 @@ test('calculates M1 lazily and accepts a synthetic ASC profile for PNS', async (
     buffer: Buffer.from(syntheticAsc()),
   });
   await expect(pnsLegend).not.toHaveClass(/off/, { timeout: 20_000 });
+  const canvasBox = await page.locator('#mc').boundingBox();
+  if (!canvasBox) throw new Error('Waveform canvas is not visible');
+  await page.mouse.move(canvasBox.x + canvasBox.width * 0.5, canvasBox.y + canvasBox.height * 0.5);
+  await expect(page.locator('#tt')).toContainText('M1:', { timeout: 10_000 });
+  await expect(page.locator('#tt')).toContainText('PNS:', { timeout: 10_000 });
 
   await page.locator('#ascInput').dispatchEvent('cancel');
   await expect(pnsLegend).not.toHaveClass(/off/);
