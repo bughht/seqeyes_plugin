@@ -108,7 +108,7 @@ function requestM1(channel){
   if(m1Data){chVis[channel]=!chVis[channel];buildLegend();draw();return;}
   m1RequestedChannel=channel;
   m1Busy=true;buildLegend();
-  if(vscApi){vscApi.postMessage({command:'calculateM1'});}
+  if(vscApi){vscApi.postMessage({command:'calculateM1',referenceMode:m1ReferenceMode});}
 }
 document.getElementById('pnsBtn').onclick=function(){
   if(pnsBusy)return;

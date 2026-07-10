@@ -240,7 +240,8 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
                     panel.webview.postMessage({ type: 'm1Error', message: 'Load a sequence before calculating M1.' });
                     return;
                 }
-                const m1 = calculateM1(activeBlocks, activeGradientRaster);
+                const referenceMode = msg.referenceMode === 'observationTime' ? 'observationTime' : 'rfCenter';
+                const m1 = calculateM1(activeBlocks, activeGradientRaster, { referenceMode });
                 panel.webview.postMessage({ type: 'm1Data', m1: serializeM1(m1) });
             } else if (msg.command === 'openPnsAsc') {
                 if (!activeBlocks.length || activeGradientRaster <= 0) {
@@ -488,6 +489,7 @@ function serializeM1(m1: M1Data): Record<string, unknown> {
     return {
         valid: m1.valid,
         ok: m1.ok,
+        referenceMode: m1.referenceMode,
         error: m1.error,
         warnings: m1.warnings,
         tx: x.time,

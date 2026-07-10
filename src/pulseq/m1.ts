@@ -3,6 +3,7 @@ import type { DecodedBlock, DecodedGradWaveform } from './types';
 export interface M1Data {
     valid: boolean;
     ok: boolean;
+    referenceMode: M1ReferenceMode;
     error?: string;
     tSec: Float64Array;
     m1x: Float64Array;
@@ -11,6 +12,12 @@ export interface M1Data {
     warnings: string[];
     excitationTimesSec: Float64Array;
     refocusingTimesSec: Float64Array;
+}
+
+export type M1ReferenceMode = 'rfCenter' | 'observationTime';
+
+export interface M1Options {
+    referenceMode?: M1ReferenceMode;
 }
 
 interface RfEvent {
@@ -30,9 +37,10 @@ interface GradientSeries {
 
 const TIME_EPS = 1e-15;
 
-export function calculateM1(blocks: DecodedBlock[], gradientRaster: number): M1Data {
+export function calculateM1(blocks: DecodedBlock[], gradientRaster: number, options: M1Options = {}): M1Data {
+    const referenceMode = normalizeReferenceMode(options.referenceMode);
     if (!blocks.length) {
-        return invalidM1('Empty or invalid block list.');
+        return invalidM1('Empty or invalid block list.', referenceMode);
     }
 
     const gx = collectGradientSeries(blocks, 'gx');
@@ -42,13 +50,13 @@ export function calculateM1(blocks: DecodedBlock[], gradientRaster: number): M1D
         .filter(series => series.time.length > 0)
         .map(series => [series.time[0], series.time[series.time.length - 1]] as const);
     if (!ranges.length) {
-        return invalidM1('No gradient waveform available for M1.');
+        return invalidM1('No gradient waveform available for M1.', referenceMode);
     }
 
     const tMin = Math.min(...ranges.map(range => range[0]));
     const tMax = Math.max(...ranges.map(range => range[1]));
     if (!Number.isFinite(tMin) || !Number.isFinite(tMax) || tMax < tMin) {
-        return invalidM1('Invalid gradient time range for M1.');
+        return invalidM1('Invalid gradient time range for M1.', referenceMode);
     }
 
     const warnings: string[] = [];
@@ -78,13 +86,13 @@ export function calculateM1(blocks: DecodedBlock[], gradientRaster: number): M1D
 
     const rasterSec = gradientRaster > 0 ? gradientRaster : 10e-6;
     if (rasterSec <= 0) {
-        return invalidM1('gradientRaster must be positive.');
+        return invalidM1('gradientRaster must be positive.', referenceMode);
     }
     const samples = buildSampleTimes(tMin, tMax, rasterSec);
 
-    const x = walkM1(gx, samples, events, excitationTimes, tMin);
-    const y = walkM1(gy, samples, events, excitationTimes, tMin);
-    const z = walkM1(gz, samples, events, excitationTimes, tMin);
+    const x = walkM1(gx, samples, events, excitationTimes, tMin, referenceMode);
+    const y = walkM1(gy, samples, events, excitationTimes, tMin, referenceMode);
+    const z = walkM1(gz, samples, events, excitationTimes, tMin, referenceMode);
     if (x.t.length !== y.t.length || x.t.length !== z.t.length) {
         warnings.push(`Internal warning: per-axis M1 output sizes disagree (${x.t.length}, ${y.t.length}, ${z.t.length}). Plot may be inconsistent.`);
     }
@@ -92,6 +100,7 @@ export function calculateM1(blocks: DecodedBlock[], gradientRaster: number): M1D
     return {
         valid: true,
         ok: true,
+        referenceMode,
         tSec: new Float64Array(x.t),
         m1x: new Float64Array(x.m1),
         m1y: new Float64Array(y.m1),
@@ -102,10 +111,11 @@ export function calculateM1(blocks: DecodedBlock[], gradientRaster: number): M1D
     };
 }
 
-function invalidM1(error: string): M1Data {
+function invalidM1(error: string, referenceMode: M1ReferenceMode = 'rfCenter'): M1Data {
     return {
         valid: false,
         ok: false,
+        referenceMode,
         error,
         tSec: new Float64Array(),
         m1x: new Float64Array(),
@@ -115,6 +125,10 @@ function invalidM1(error: string): M1Data {
         excitationTimesSec: new Float64Array(),
         refocusingTimesSec: new Float64Array(),
     };
+}
+
+function normalizeReferenceMode(mode: M1ReferenceMode | undefined): M1ReferenceMode {
+    return mode === 'observationTime' ? 'observationTime' : 'rfCenter';
 }
 
 function collectGradientSeries(blocks: DecodedBlock[], channel: 'gx' | 'gy' | 'gz'): GradientSeries {
@@ -213,6 +227,7 @@ function walkM1(
     events: WalkerEvent[],
     excitationTimes: number[],
     tMin: number,
+    referenceMode: M1ReferenceMode,
 ): { t: number[]; m1: number[] } {
     const outT: number[] = [];
     const outM1: number[] = [];
@@ -223,7 +238,10 @@ function walkM1(
     let unsignedM0 = 0;
     let unsignedM1 = 0;
 
-    const reportedM1At = (t: number): number => sign * (unsignedM1 - (t - tReset) * unsignedM0);
+    const reportedM1At = (t: number): number => {
+        if (referenceMode === 'observationTime') return sign * (unsignedM1 - (t - tReset) * unsignedM0);
+        return sign * unsignedM1;
+    };
 
     const advanceTo = (targetT: number): void => {
         if (!(targetT > currentT + TIME_EPS)) return;

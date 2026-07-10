@@ -23,6 +23,7 @@ interface DebugState {
   derivedRawCurves: number;
   lastDrawDurationMs: number;
   drawCount: number;
+  m1ReferenceMode: string;
   title: string;
 }
 
@@ -189,6 +190,17 @@ test('calculates M1 lazily and accepts a synthetic ASC profile for PNS', async (
   const m1zLegend = page.locator('#legend .li').filter({ hasText: 'M1z' });
   await expect(m1Legend).toHaveClass(/off/);
   await expect(page.locator('#m1Btn')).toHaveCount(0);
+  expect((await debugState(page)).m1ReferenceMode).toBe('rfCenter');
+  await page.evaluate(() => {
+    (window as unknown as { SeqEyesDev: { setM1ReferenceMode: (mode: string) => string } })
+      .SeqEyesDev.setM1ReferenceMode('observationTime');
+  });
+  expect((await debugState(page)).m1ReferenceMode).toBe('observationTime');
+  await page.evaluate(() => {
+    (window as unknown as { SeqEyesDev: { setM1ReferenceMode: (mode: string) => string } })
+      .SeqEyesDev.setM1ReferenceMode('rfCenter');
+  });
+  expect((await debugState(page)).m1ReferenceMode).toBe('rfCenter');
   await m1Legend.click();
   await expect(m1Legend).not.toHaveClass(/off/, { timeout: 20_000 });
   await expect(m1yLegend).toHaveClass(/off/);

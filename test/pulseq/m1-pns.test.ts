@@ -5,7 +5,7 @@ import { calculatePns, parsePnsHardwareAsc, safePnsModel } from '../../src/pulse
 import type { DecodedBlock, DecodedGradWaveform } from '../../src/pulseq/types';
 
 describe('M1 calculation', () => {
-  it('integrates a constant gradient about the current sample time', () => {
+  it('integrates a constant gradient about the RF-centered reference by default', () => {
     const blocks = [
       block(1, 0, 0.2, grad('gx', [0, 0.2], [100, 100])),
     ];
@@ -13,12 +13,28 @@ describe('M1 calculation', () => {
     const result = calculateM1(blocks, 0.1);
 
     expect(result.valid).toBe(true);
+    expect(result.referenceMode).toBe('rfCenter');
+    expect(Array.from(result.tSec)).toEqual([0, 0.1, 0.2]);
+    expect(result.m1x[0]).toBeCloseTo(0, 12);
+    expect(result.m1x[1]).toBeCloseTo(0.5, 12);
+    expect(result.m1x[2]).toBeCloseTo(2.0, 12);
+    expect(result.m1y[2]).toBeCloseTo(0, 12);
+    expect(result.warnings.some(warning => warning.includes('No excitation RF events'))).toBe(true);
+  });
+
+  it('keeps the observation-time convention as an explicit developer mode', () => {
+    const blocks = [
+      block(1, 0, 0.2, grad('gx', [0, 0.2], [100, 100])),
+    ];
+
+    const result = calculateM1(blocks, 0.1, { referenceMode: 'observationTime' });
+
+    expect(result.valid).toBe(true);
+    expect(result.referenceMode).toBe('observationTime');
     expect(Array.from(result.tSec)).toEqual([0, 0.1, 0.2]);
     expect(result.m1x[0]).toBeCloseTo(0, 12);
     expect(result.m1x[1]).toBeCloseTo(-0.5, 12);
     expect(result.m1x[2]).toBeCloseTo(-2.0, 12);
-    expect(result.m1y[2]).toBeCloseTo(0, 12);
-    expect(result.warnings.some(warning => warning.includes('No excitation RF events'))).toBe(true);
   });
 
   it('resets M1 at excitation RF center and flips sign at refocusing RF center', () => {
@@ -38,11 +54,12 @@ describe('M1 calculation', () => {
     const refocusIndex = Array.from(result.tSec).findIndex(t => Math.abs(t - 0.15) < 1e-12);
 
     expect(result.valid).toBe(true);
+    expect(result.referenceMode).toBe('rfCenter');
     expect(eventIndex).toBeGreaterThanOrEqual(0);
     expect(refocusIndex).toBeGreaterThanOrEqual(0);
     expect(result.m1x[eventIndex]).toBeCloseTo(0, 12);
-    expect(result.m1x[refocusIndex]).toBeLessThan(0);
-    expect(result.m1x[result.m1x.length - 1]).toBeGreaterThan(0);
+    expect(result.m1x[refocusIndex]).toBeGreaterThan(0);
+    expect(result.m1x[result.m1x.length - 1]).toBeLessThan(0);
   });
 });
 

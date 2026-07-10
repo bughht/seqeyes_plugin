@@ -147,7 +147,7 @@ var GAMMA=42576;
 var ampZoom=[1,1,1,1,1,1,1];
 ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
-var decodedBlocks=null,m1Data=null,pnsData=null,pnsHardware=null,m1Busy=false,pnsBusy=false,m1RequestedChannel=8;
+var decodedBlocks=null,m1Data=null,pnsData=null,pnsHardware=null,m1Busy=false,pnsBusy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode();
 var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,lastDrawDurationMs=0,viewerDrawCount=0;
 var viewerDrawFrame=0,viewerDrawMinimap=false;
 function scheduleViewerDraw(includeMinimap){
@@ -176,6 +176,26 @@ function gradUnitStr(){return gradUnit;}
 function timeConv(t){if(timeUnit==='ms')return t*1e3;if(timeUnit==='us')return t*1e6;return t;}
 function timeUnitStr(){return timeUnit;}
 function setExportButtonEnabled(enabled){if(exportBtn)exportBtn.disabled=!enabled||exportBusy;}
+function normalizeM1ReferenceMode(mode){return mode==='observationTime'?'observationTime':'rfCenter';}
+function readM1ReferenceMode(){
+  try{return normalizeM1ReferenceMode(localStorage.getItem('seqeyes.m1ReferenceMode'));}catch(_){return 'rfCenter';}
+}
+function writeM1ReferenceMode(mode){
+  try{localStorage.setItem('seqeyes.m1ReferenceMode',mode);}catch(_){}
+}
+function setM1ReferenceMode(mode){
+  var next=normalizeM1ReferenceMode(mode);
+  if(next===m1ReferenceMode)return m1ReferenceMode;
+  var shouldRecalc=!!m1Data&&(chVis[8]||chVis[9]||chVis[10]);
+  m1ReferenceMode=next;writeM1ReferenceMode(next);
+  m1Data=null;chVis[8]=false;chVis[9]=false;chVis[10]=false;
+  computeGlobalMax();buildLegend();draw();
+  if(shouldRecalc)requestM1(m1RequestedChannel||8);
+  return m1ReferenceMode;
+}
+window.SeqEyesDev=window.SeqEyesDev||{};
+window.SeqEyesDev.getM1ReferenceMode=function(){return m1ReferenceMode;};
+window.SeqEyesDev.setM1ReferenceMode=setM1ReferenceMode;
 
 /* ── Responsive layout ────────────────────────────────────────────────── */
 var layoutMode='horizontal';
@@ -600,6 +620,7 @@ function showM1Result(result){
   m1Data={
     valid:result.valid,
     ok:result.ok,
+    referenceMode:result.referenceMode||m1ReferenceMode,
     warnings:result.warnings||[],
     x:createDerivedSeries(result.tSec,result.m1x,1),
     y:createDerivedSeries(result.tSec,result.m1y,1),
@@ -615,7 +636,7 @@ function requestM1(channel){
   if(m1Data){chVis[channel]=!chVis[channel];buildLegend();draw();return;}
   if(!decodedBlocks){alert('Open a .seq file before calculating M1.');return;}
   m1RequestedChannel=channel;m1Busy=true;buildLegend();
-  try{showM1Result(Pulseq.calculateM1(decodedBlocks,GR));}
+  try{showM1Result(Pulseq.calculateM1(decodedBlocks,GR,{referenceMode:m1ReferenceMode}));}
   catch(err){m1Busy=false;alert('M1 calculation failed: '+(err.message||String(err)));}
 }
 
@@ -837,12 +858,16 @@ function drawPercentSeries(series,vi,ci,c,ch,vs,ve){
   rowClip(vi,ch,function(){
     var maxA=channelRange(ci),base=M.t+(vi+1)*ch-ch*.08,scale=ch*.84/maxA;
     var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r;
-    var rawLimit=Math.max(64,Math.ceil((clipR-clipL)*2));
+    var plotW=Math.max(1,clipR-clipL);
+    var rawLimit=Math.max(64,Math.ceil(plotW*2));
+    var fineLimit=Math.max(128,Math.ceil(plotW*8));
+    var windowRange=derivedSeriesWindow(series,vs,ve);
+    var useFinePns=shouldUseFinePnsRendering(windowRange.count,plotW,vs,ve);
     ctx.strokeStyle=c;ctx.lineWidth=1;ctx.beginPath();
-    if(derivedSeriesWindow(series,vs,ve).count<=rawLimit){
+    if(windowRange.count<=rawLimit||useFinePns){
       derivedRawCurveCount++;
       var f=1;
-      derivedRenderPointCount+=forEachDerivedPoint(series,vs,ve,rawLimit,function(tv,vv){
+      derivedRenderPointCount+=forEachDerivedPoint(series,vs,ve,useFinePns?fineLimit:rawLimit,function(tv,vv){
         var sx=t2x(tv);if(!isFinite(sx)||sx<clipL||sx>clipR){f=1;return}
         var sy=base-vv*scale;if(!isFinite(sy)){f=1;return}
         if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
@@ -858,6 +883,12 @@ function drawPercentSeries(series,vi,ci,c,ch,vs,ve){
     }
     ctx.stroke();
   });
+}
+
+function shouldUseFinePnsRendering(count,plotW,vs,ve){
+  var dur=ve-vs;
+  if(seqTiming&&seqTiming.trTimeSec>0&&dur<=seqTiming.trTimeSec*10.5)return true;
+  return count<=Math.max(256,Math.ceil(plotW*12));
 }
 
 function drawBipolarSeries(series,vi,ci,c,ch,vs,ve){
@@ -1553,7 +1584,7 @@ if(location.search.indexOf("debug=1")>=0){
   window.__seqeyesDebug={
     state:function(){
       var adcCount=(kAdc&&kAdc[0])?kAdc[0].length:0;
-      return{blocks:BL.length,totalDuration:TD,offset:ox,scale:sc,visibleDuration:visibleDuration(),minRasterTime:minRasterTime(),kOpen:kOpen,kView:kView,kRotX:kRotX,kRotY:kRotY,kScale:kScl,adcCount:adcCount,exportEnabled:!!(exportBtn&&!exportBtn.disabled),derivedRenderPoints:derivedRenderPointCount,derivedEnvelopeCurves:derivedEnvelopeCurveCount,derivedRawCurves:derivedRawCurveCount,lastDrawDurationMs:lastDrawDurationMs,drawCount:viewerDrawCount,title:document.title};
+      return{blocks:BL.length,totalDuration:TD,offset:ox,scale:sc,visibleDuration:visibleDuration(),minRasterTime:minRasterTime(),kOpen:kOpen,kView:kView,kRotX:kRotX,kRotY:kRotY,kScale:kScl,adcCount:adcCount,exportEnabled:!!(exportBtn&&!exportBtn.disabled),derivedRenderPoints:derivedRenderPointCount,derivedEnvelopeCurves:derivedEnvelopeCurveCount,derivedRawCurves:derivedRawCurveCount,lastDrawDurationMs:lastDrawDurationMs,drawCount:viewerDrawCount,m1ReferenceMode:m1ReferenceMode,title:document.title};
     },
     hoverPoint:function(){
       var t=(kAdcTime&&kAdcTime.length)?kAdcTime[Math.floor(kAdcTime.length/2)]:TD*0.5;

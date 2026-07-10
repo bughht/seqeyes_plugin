@@ -143,12 +143,16 @@ function drawPercentSeries(series,vi,ci,c,ch,vs,ve){
   rowClip(vi,ch,function(){
     var maxA=channelRange(ci),base=M.t+(vi+1)*ch-ch*.08,scale=ch*.84/maxA;
     var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r;
-    var rawLimit=Math.max(64,Math.ceil((clipR-clipL)*2));
+    var plotW=Math.max(1,clipR-clipL);
+    var rawLimit=Math.max(64,Math.ceil(plotW*2));
+    var fineLimit=Math.max(128,Math.ceil(plotW*8));
+    var windowRange=derivedSeriesWindow(series,vs,ve);
+    var useFinePns=shouldUseFinePnsRendering(windowRange.count,plotW,vs,ve);
     ctx.strokeStyle=c;ctx.lineWidth=1;ctx.beginPath();
-    if(derivedSeriesWindow(series,vs,ve).count<=rawLimit){
+    if(windowRange.count<=rawLimit||useFinePns){
       derivedRawCurveCount++;
       var f=1;
-      derivedRenderPointCount+=forEachDerivedPoint(series,vs,ve,rawLimit,function(tv,vv){
+      derivedRenderPointCount+=forEachDerivedPoint(series,vs,ve,useFinePns?fineLimit:rawLimit,function(tv,vv){
         var sx=t2x(tv);if(!isFinite(sx)||sx<clipL||sx>clipR){f=1;return}
         var sy=base-vv*scale;if(!isFinite(sy)){f=1;return}
         if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
@@ -164,6 +168,12 @@ function drawPercentSeries(series,vi,ci,c,ch,vs,ve){
     }
     ctx.stroke();
   });
+}
+
+function shouldUseFinePnsRendering(count,plotW,vs,ve){
+  var dur=ve-vs;
+  if(seqTiming&&seqTiming.trTimeSec>0&&dur<=seqTiming.trTimeSec*10.5)return true;
+  return count<=Math.max(256,Math.ceil(plotW*12));
 }
 
 function drawBipolarSeries(series,vi,ci,c,ch,vs,ve){
