@@ -23,7 +23,7 @@ var ampZoom=[1,1,1,1,1,1,1];
 ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;
 /* K‑space data — pre‑computed on the extension side */
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
-var m1Data=null,pnsData=null,m1Busy=false,pnsBusy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null;
+var m1Data=null,pnsData=null,pnsWindowData=null,pnsWindowPending=null,pnsWindowRequestId=0,pnsBusy=false,m1Busy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null;
 var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,lastDrawDurationMs=0,viewerDrawCount=0;
 var viewerDrawFrame=0,viewerDrawMinimap=false;
 
@@ -208,7 +208,7 @@ window.addEventListener('message',function(e){
     blockPos=m.blockPositions||[];
     mmCache=null;  // invalidate minimap cache on new data
     kTraj=null;kAdc=null;kTime=null;kAdcTime=null;
-    m1Data=null;pnsData=null;chVis[7]=false;chVis[8]=false;chVis[9]=false;chVis[10]=false;
+    m1Data=null;pnsData=null;pnsWindowData=null;pnsWindowPending=null;chVis[7]=false;chVis[8]=false;chVis[9]=false;chVis[10]=false;
     // Decode binary k‑space ADC data (Float32 base64 → typed arrays)
     if(m.kspace){
       kTraj=[m.kspace.kx,m.kspace.ky,m.kspace.kz];kTime=m.kspace.tk;
@@ -251,16 +251,19 @@ window.addEventListener('message',function(e){
   }else if(m.type==='pnsData'){
     pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
     if(m.pns&&m.pns.valid){
-      pnsData={
-        x:createDerivedSeries(m.pns.tx||m.pns.t,m.pns.x,1),
-        y:createDerivedSeries(m.pns.ty||m.pns.t,m.pns.y,1),
-        z:createDerivedSeries(m.pns.tz||m.pns.t,m.pns.z,1),
-        n:createDerivedSeries(m.pns.tn||m.pns.t,m.pns.n,1)
-      };chVis[7]=true;
+      pnsData=createPnsSeriesPayload(m.pns);
+      pnsWindowData=null;pnsWindowPending=null;chVis[7]=true;
       computeGlobalMax();buildLegend();draw();
       if(!m.pns.ok)alert('PNS warning: predicted level reaches/exceeds 100%.');
     }else{
       alert('PNS calculation failed: '+((m.pns&&m.pns.error)||'unknown error'));
+    }
+  }else if(m.type==='pnsWindowData'){
+    if(pnsWindowPending&&m.requestId!==pnsWindowPending.requestId)return;
+    pnsWindowPending=null;
+    if(m.pns&&m.pns.valid){
+      pnsWindowData=createPnsSeriesPayload(m.pns);
+      draw();
     }
   }else if(m.type==='pnsError'){
     pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
@@ -286,6 +289,45 @@ function computeGlobalMax(){
   if(pnsData)gMax[7]=Math.max(gMax[7],pnsData.x.maxAbs,pnsData.y.maxAbs,pnsData.z.maxAbs,pnsData.n.maxAbs);
   if(m1Data){gMax[8]=Math.max(gMax[8],m1Data.x.maxAbs);gMax[9]=Math.max(gMax[9],m1Data.y.maxAbs);gMax[10]=Math.max(gMax[10],m1Data.z.maxAbs);}
   gMax[0]=Math.max(gMax[0],100);
+}
+
+function createPnsSeriesPayload(pns){
+  return{
+    startSec:isFinite(pns.startSec)?pns.startSec:null,
+    endSec:isFinite(pns.endSec)?pns.endSec:null,
+    x:createDerivedSeries(pns.tx||pns.t,pns.x,1),
+    y:createDerivedSeries(pns.ty||pns.t,pns.y,1),
+    z:createDerivedSeries(pns.tz||pns.t,pns.z,1),
+    n:createDerivedSeries(pns.tn||pns.t,pns.n,1)
+  };
+}
+
+function shouldRequestFinePnsWindow(vs,ve){
+  if(!vscApi||!pnsData||!chVis[7])return false;
+  var dur=ve-vs;
+  return !!(seqTiming&&seqTiming.trTimeSec>0&&dur<=seqTiming.trTimeSec*10.5);
+}
+
+function pnsWindowCovers(data,vs,ve){
+  return !!(data&&data.startSec!==null&&data.endSec!==null&&data.startSec<=vs+1e-12&&data.endSec>=ve-1e-12);
+}
+
+function requestPnsWindow(vs,ve){
+  if(!shouldRequestFinePnsWindow(vs,ve))return;
+  if(pnsWindowCovers(pnsWindowData,vs,ve)||pnsWindowCovers(pnsWindowPending,vs,ve))return;
+  var dur=Math.max(ve-vs,minRasterTime()),pad=Math.max(dur*.5,seqTiming&&seqTiming.trTimeSec?seqTiming.trTimeSec:0);
+  var start=Math.max(0,vs-pad),end=Math.min(TD||ve,ve+pad);
+  pnsWindowPending={startSec:start,endSec:end,requestId:++pnsWindowRequestId};
+  vscApi.postMessage({command:'calculatePnsWindow',requestId:pnsWindowPending.requestId,startSec:start,endSec:end,maxPoints:120000});
+}
+
+function pnsSeriesForView(vs,ve){
+  if(!pnsData)return null;
+  if(shouldRequestFinePnsWindow(vs,ve)){
+    requestPnsWindow(vs,ve);
+    if(pnsWindowCovers(pnsWindowData,vs,ve))return pnsWindowData;
+  }
+  return pnsData;
 }
 
 /* ── Minimap ──────────────────────────────────────────────────────────── */

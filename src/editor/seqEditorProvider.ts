@@ -111,6 +111,7 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
         let activeBlocks: DecodedBlock[] = [];
         let activeGradientRaster = 0;
         let activePnsHardware: PnsHardware | undefined;
+        let activePnsResult: PnsResult | undefined;
 
         // ── Core: parse, decode, compute k‑space, send ──
         const sendSequenceData = async (uri: vscode.Uri) => {
@@ -135,6 +136,7 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
                 const blocks = decodeAllBlocks(seq);
                 activeBlocks = blocks;
                 activeGradientRaster = seq.rasterTimes.gradientRaster;
+                activePnsResult = undefined;
                 const totalDur = blocks.length > 0
                     ? blocks[blocks.length - 1].startTime + blocks[blocks.length - 1].duration
                     : 0;
@@ -256,6 +258,7 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
                 if (!uris || uris.length === 0) {
                     if (activePnsHardware) {
                         const pns = calculatePns(activeBlocks, activeGradientRaster, activePnsHardware);
+                        activePnsResult = pns;
                         panel.webview.postMessage({ type: 'pnsData', pns: serializePns(pns) });
                     } else {
                         panel.webview.postMessage({ type: 'pnsSelectionCancelled' });
@@ -267,6 +270,7 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
                     const hardware = parsePnsHardwareAsc(ascText);
                     activePnsHardware = hardware;
                     const pns = calculatePns(activeBlocks, activeGradientRaster, hardware);
+                    activePnsResult = pns;
                     panel.webview.postMessage({ type: 'pnsData', pns: serializePns(pns) });
                 } catch (err) {
                     panel.webview.postMessage({
@@ -274,6 +278,25 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
                         message: err instanceof Error ? err.message : String(err),
                     });
                 }
+            } else if (msg.command === 'calculatePnsWindow') {
+                if (!activePnsResult?.valid) {
+                    panel.webview.postMessage({
+                        type: 'pnsWindowData',
+                        requestId: msg.requestId,
+                        pns: { valid: false, error: 'Calculate PNS before requesting a high-resolution PNS window.' },
+                    });
+                    return;
+                }
+                panel.webview.postMessage({
+                    type: 'pnsWindowData',
+                    requestId: msg.requestId,
+                    pns: serializePnsWindow(
+                        activePnsResult,
+                        Number(msg.startSec),
+                        Number(msg.endSec),
+                        Number(msg.maxPoints),
+                    ),
+                });
             }
         });
     }
@@ -522,6 +545,86 @@ function serializePns(pns: PnsResult): Record<string, unknown> {
         tn: norm.time,
         n: norm.values.map(value => value * 100.0),
     };
+}
+
+function serializePnsWindow(
+    pns: PnsResult,
+    startSec: number,
+    endSec: number,
+    maxPoints: number,
+): Record<string, unknown> {
+    if (pns.timeSec.length === 0) {
+        return {
+            valid: false,
+            ok: pns.ok,
+            error: 'No PNS samples are available.',
+            startSec: 0,
+            endSec: 0,
+        };
+    }
+    const maxWindowPoints = Number.isFinite(maxPoints)
+        ? Math.max(1024, Math.min(200_000, Math.floor(maxPoints)))
+        : 120_000;
+    const fallbackStart = pns.timeSec[0] ?? 0;
+    const boundedStart = Number.isFinite(startSec) ? startSec : fallbackStart;
+    const boundedEnd = Number.isFinite(endSec) ? endSec : boundedStart;
+    const lastTime = pns.timeSec[pns.timeSec.length - 1] ?? boundedEnd;
+    const start = Math.max(0, Math.min(Math.min(boundedStart, boundedEnd), lastTime));
+    const end = Math.max(start, Math.min(Math.max(boundedStart, boundedEnd), lastTime));
+    const i0 = Math.max(0, lowerBoundNumeric(pns.timeSec, start) - 1);
+    const i1 = Math.min(pns.timeSec.length, upperBoundNumeric(pns.timeSec, end) + 1);
+    if (i1 <= i0) {
+        return {
+            valid: false,
+            ok: pns.ok,
+            error: 'No PNS samples in requested time window.',
+            startSec: start,
+            endSec: end,
+        };
+    }
+
+    const t = pns.timeSec.subarray(i0, i1);
+    const x = downsampleM4(t, pns.pnsX.subarray(i0, i1), maxWindowPoints);
+    const y = downsampleM4(t, pns.pnsY.subarray(i0, i1), maxWindowPoints);
+    const z = downsampleM4(t, pns.pnsZ.subarray(i0, i1), maxWindowPoints);
+    const norm = downsampleM4(t, pns.pnsNorm.subarray(i0, i1), maxWindowPoints);
+    return {
+        valid: pns.valid,
+        ok: pns.ok,
+        error: pns.error,
+        startSec: start,
+        endSec: end,
+        tx: x.time,
+        x: x.values.map(value => value * 100.0),
+        ty: y.time,
+        y: y.values.map(value => value * 100.0),
+        tz: z.time,
+        z: z.values.map(value => value * 100.0),
+        tn: norm.time,
+        n: norm.values.map(value => value * 100.0),
+    };
+}
+
+function lowerBoundNumeric(values: ArrayLike<number>, target: number): number {
+    let lo = 0;
+    let hi = values.length;
+    while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (values[mid] < target) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+function upperBoundNumeric(values: ArrayLike<number>, target: number): number {
+    let lo = 0;
+    let hi = values.length;
+    while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (values[mid] <= target) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
 }
 
 /** Encode a Float64Array (or number[]) as a base64‑encoded Float32 blob.
