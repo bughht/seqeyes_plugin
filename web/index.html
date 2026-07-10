@@ -327,8 +327,8 @@ function rs(){
   mc.style.width=r.width+'px';mc.style.height=r.height+'px';
   ctx.setTransform(dpr,0,0,dpr,0,0);
   if(typeof layoutMode!=='undefined'&&(layoutMode==='vertical'||r.width<600)){
-    M.l=60;M.r=10;M.t=5;M.b=18;
-  }else{M.l=92;M.r=30;M.t=8;M.b=22;}
+    M.l=60;M.r=5;M.t=5;M.b=18;
+  }else{M.l=92;M.r=6;M.t=8;M.b=22;}
   var mr=document.getElementById('mmap').getBoundingClientRect();
   mmCanvas.width=mr.width*dpr;mmCanvas.height=mr.height*dpr;
   mmCanvas.style.width=mr.width+'px';mmCanvas.style.height=mr.height+'px';
@@ -810,7 +810,8 @@ function drawAxes(w,h,vs,ve,s){
   ctx.beginPath();ctx.moveTo(M.l,h-M.b);ctx.lineTo(w-M.r,h-M.b);ctx.stroke();
   var st=nice((ve-vs)/8),t=Math.floor(vs/st)*st;
   while(t<=ve){ctx.fillText(fmtT(timeConv(t)),t2x(t),h-M.b+14);t+=st;}
-  ctx.fillText('time ('+timeUnitStr()+')',w-M.r+24,h-M.b+4);
+  ctx.textAlign='right';
+  ctx.fillText('time ('+timeUnitStr()+')',w-4,h-M.b+4);
   var vc=visChannels(),ch=cH();
   for(var vi=0;vi<vc.length;vi++){
     var ci=vc[vi],y0=cy(vi);
