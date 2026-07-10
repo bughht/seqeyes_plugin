@@ -496,9 +496,9 @@ function rs(){
   ctx.setTransform(dpr,0,0,dpr,0,0);
   // Adaptive margins for small/narrow screens
   if(layoutMode==='vertical'||r.width<600){
-    M.l=60;M.r=10;M.t=5;M.b=18;
+    M.l=60;M.r=3;M.t=5;M.b=18;
   }else{
-    M.l=92;M.r=30;M.t=8;M.b=22;
+    M.l=92;M.r=4;M.t=8;M.b=22;
   }
   // Resize minimap canvas too
   var mr=document.getElementById('mmap').getBoundingClientRect();

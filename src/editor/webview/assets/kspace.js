@@ -608,11 +608,7 @@ function drawKs_core(W,H,dpr){
     gl.drawArrays(gl.POINTS,0,glN);
   }
 
-  // ═══════════════════════════════════════════════════════════════════
-  // Canvas 2D axes — skip every 2nd frame during animation for perf
-  // ═══════════════════════════════════════════════════════════════════
-  _kAxisFrame = (_kAxisFrame||0)+1;
-  if (!_kAnimId || _kAxisFrame % 2 === 0) {
+  // Canvas 2D axes
   var cz=Math.cos(kRotY),sz=Math.sin(kRotY),cxR=Math.cos(kRotX),sxR=Math.sin(kRotX);
   var invDpr=1/dpr;
   function proj(px,py,pz){
@@ -647,7 +643,6 @@ function drawKs_core(W,H,dpr){
   var oo=proj(0,0,0);
   ctx.fillStyle=cs.getPropertyValue("--fg").trim();ctx.beginPath();ctx.arc(oo.x,oo.y,4,0,6.283);ctx.fill();
   drawKCursorMarker(ctx,proj,cs,W,H);
-  } // end axis frame-skip if
 
 }
 

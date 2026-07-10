@@ -82,7 +82,8 @@ function drawAxes(w,h,vs,ve,s){
   ctx.beginPath();ctx.moveTo(M.l,h-M.b);ctx.lineTo(w-M.r,h-M.b);ctx.stroke();
   var st=nice((ve-vs)/8),t=Math.floor(vs/st)*st;
   while(t<=ve){ctx.fillText(fmtT(timeConv(t)),t2x(t),h-M.b+14);t+=st;}
-  ctx.fillText('time ('+timeUnitStr()+')',w-M.r+24,h-M.b+4);
+  ctx.textAlign='right';
+  ctx.fillText('time ('+timeUnitStr()+')',w-4,h-M.b+4);
 
   // Y-axes — one per visible channel
   var vc=visChannels(),ch=cH();
