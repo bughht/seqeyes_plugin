@@ -1,18 +1,21 @@
 <!-- ── Toolbar ── -->
 <div id="tb">
+<button id="menuBtn" class="mobile-only" title="Menu">☰</button>
 <button id="openBtn" title="Open another .seq file">📂 Open</button>
-<button id="exportKspaceBtn" title="Export ADC k-space trajectory and metadata" disabled>Export</button><div class="sep"></div>
-<button id="pnsBtn" title="Select or replace the ASC profile used for PNS prediction">Select PNS ASC file</button><div class="sep"></div>
 <button id="zi" title="Zoom In (scroll wheel)">+</button>
 <button id="zo" title="Zoom Out">−</button>
 <button id="zf" title="Fit All">Fit</button>
 <button id="zr" title="Reset">↺</button><div class="sep"></div>
+<span id="tbMore">
+<button id="exportKspaceBtn" title="Export ADC k-space trajectory and metadata" disabled>Export</button>
+<button id="pnsBtn" title="Select or replace the ASC profile used for PNS prediction">PNS ASC</button><div class="sep"></div>
 <span class="ulbl">Theme:</span><select id="theme"><option value="system">System</option><option value="onelight">One Light</option><option value="onedark">One Dark</option><option value="dracula">Dracula</option><option value="nord">Nord</option><option value="githublight">GitHub Light</option><option value="github">GitHub</option></select>
 <div class="sep"></div>
 <span class="ulbl">Time:</span><select id="tu"><option value="s">s</option><option value="ms" selected>ms</option><option value="us">µs</option></select>
 <span class="ulbl">Grad:</span><select id="gu"><option value="Hz/m" selected>Hz/m</option><option value="mT/m">mT/m</option><option value="G/cm">G/cm</option></select>
 <div class="sep"></div>
 <label class="li" id="bbt" title="Toggle block boundary lines"><input type="checkbox" id="bbc" style="margin:0;cursor:pointer"><span style="font-size:11px;color:var(--fg)">Blocks</span></label>
+</span>
 <div class="sep"></div><div class="lg" id="legend"></div>
 <button id="kbtn" title="Toggle K-Space View" style="margin-left:4px">K-Space</button>
 <span class="cur" id="cur">← hover for time</span>

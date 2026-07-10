@@ -46,6 +46,88 @@ var blockPos=[];
 /* VS Code API — acquired once, used for postMessage to extension host */
 var vscApi=(typeof acquireVsCodeApi!=='undefined')?acquireVsCodeApi():null;
 
+/* ── Shared touch utilities (used by kspace.js & interaction.js) ──────── */
+function isTouchDevice(){return('ontouchstart' in window)||(navigator.maxTouchPoints>0);}
+function getTouchPos(touch,el){var r=el.getBoundingClientRect();return {x:touch.clientX-r.left, y:touch.clientY-r.top};}
+function getTouchMid(touches){return {x:(touches[0].clientX+touches[1].clientX)/2, y:(touches[0].clientY+touches[1].clientY)/2};}
+function getTouchDist(touches){var dx=touches[0].clientX-touches[1].clientX, dy=touches[0].clientY-touches[1].clientY;return Math.sqrt(dx*dx+dy*dy);}
+
+/* ── Responsive layout ────────────────────────────────────────────────── */
+var layoutMode='horizontal';  // 'horizontal' (kspace right) or 'vertical' (kspace bottom)
+function detectLayoutMode(){
+  var was=layoutMode;
+  layoutMode=(window.innerHeight>window.innerWidth)?'vertical':'horizontal';
+  return layoutMode!==was;
+}
+function applyLayoutMode(){
+  document.body.classList.remove('layout-vertical','layout-horizontal');
+  document.body.classList.add('layout-'+layoutMode);
+  
+  var main=document.getElementById('main');
+  var left=document.getElementById('left');
+  var right=document.getElementById('right');
+  var handle=document.getElementById('khandle');
+  var rc=document.getElementById('rc');
+  
+  if(layoutMode==='vertical'){
+    // Direct inline !important styles — beats everything in CSS cascade
+    main.style.setProperty('flex-direction','column','important');
+    left.style.setProperty('flex','1 1 0%','important');
+    left.style.setProperty('min-height','0','important');
+    left.style.setProperty('min-width','0','important');
+    right.style.setProperty('width','100%','important');
+    right.style.setProperty('height','0','important');
+    right.style.setProperty('border-left','none','important');
+    right.style.setProperty('border-top','1px solid var(--gr)','important');
+    right.style.setProperty('transition','height .25s','important');
+    right.style.setProperty('flex-shrink','0','important');
+    right.style.setProperty('overflow','hidden','important');
+    right.style.setProperty('position','relative','important');
+    handle.style.setProperty('cursor','row-resize','important');
+    handle.style.setProperty('left','0','important');
+    handle.style.setProperty('right','0','important');
+    handle.style.setProperty('top','0','important');
+    handle.style.setProperty('width','100%','important');
+    handle.style.setProperty('height','5px','important');
+    handle.style.setProperty('bottom','auto','important');
+    if(rc){rc.style.setProperty('flex-direction','row','important');}
+    // If kspace is open, apply open height inline
+    if(typeof kOpen!=='undefined'&&kOpen){
+      right.style.setProperty('height','300px','important');
+    }
+  }else{
+    // Remove all inline !important overrides — base CSS takes over
+    main.style.cssText='';
+    left.style.cssText='';
+    right.style.cssText='';
+    handle.style.cssText='';
+    if(rc)rc.style.cssText='';
+    // If kspace is open, restore width
+    if(typeof kOpen!=='undefined'&&kOpen){
+      right.style.width='500px';
+    }
+  }
+}
+function refreshLayout(){
+  if(detectLayoutMode()){
+    applyLayoutMode();
+    rs();
+    if(typeof drawKs==='function')drawKs();
+    if(typeof drawMinimap==='function')drawMinimap();
+  }
+}
+applyLayoutMode();
+// Use ResizeObserver on #main for reliable layout detection
+var _mainEl=document.getElementById('main');
+if(_mainEl&&typeof ResizeObserver!=='undefined'){
+  new ResizeObserver(function(){refreshLayout();}).observe(_mainEl);
+}
+// Fallback listeners
+window.addEventListener('resize',function(){refreshLayout();});
+if(typeof window.matchMedia==='function'){
+  window.matchMedia('(orientation: portrait)').addEventListener('change',function(){refreshLayout();});
+}
+
 /* ── Unit conversion helpers ──────────────────────────────────────────── */
 function gradConv(v){if(gradUnit==='mT/m')return v/GAMMA;if(gradUnit==='G/cm')return v/(GAMMA*10);return v;}
 function gradUnitStr(){return gradUnit;}
@@ -383,6 +465,12 @@ function rs(){
   mc.width=r.width*dpr;mc.height=r.height*dpr;
   mc.style.width=r.width+'px';mc.style.height=r.height+'px';
   ctx.setTransform(dpr,0,0,dpr,0,0);
+  // Adaptive margins for small/narrow screens
+  if(layoutMode==='vertical'||r.width<600){
+    M.l=60;M.r=10;M.t=5;M.b=18;
+  }else{
+    M.l=92;M.r=30;M.t=8;M.b=22;
+  }
   // Resize minimap canvas too
   var mr=document.getElementById('mmap').getBoundingClientRect();
   mmCanvas.width=mr.width*dpr;mmCanvas.height=mr.height*dpr;
