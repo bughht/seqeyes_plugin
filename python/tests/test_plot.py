@@ -121,19 +121,25 @@ class TestPatchPypulseq:
 
     def test_set_and_reset(self):
         """set() should store defaults, reset() should clear them."""
-        import seqeyes
+        try:
+            import seqeyes
 
-        seqeyes.set(theme="dracula", time_disp="ms", show_blocks=True)
-        seqeyes.reset()
-        # After reset, calling set again should work
-        seqeyes.set(theme="dark")
-        seqeyes.reset()
+            seqeyes.set(theme="dracula", time_disp="ms", show_blocks=True)
+            seqeyes.reset()
+            # After reset, calling set again should work
+            seqeyes.set(theme="dark")
+            seqeyes.reset()
+        except ImportError:
+            pytest.skip("pypulseq not installed")
 
     def test_set_defaults_merge(self):
         """Global defaults should merge with per-call args."""
-        import seqeyes
+        try:
+            import seqeyes
 
-        seqeyes.set(theme="dracula", time_disp="ms")
-        # Call set again to update a single key
-        seqeyes.set(grad_disp="mT/m")
-        seqeyes.reset()
+            seqeyes.set(theme="dracula", time_disp="ms")
+            # Call set again to update a single key
+            seqeyes.set(grad_disp="mT/m")
+            seqeyes.reset()
+        except ImportError:
+            pytest.skip("pypulseq not installed")
