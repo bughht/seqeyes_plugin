@@ -7,6 +7,7 @@ src/**
 **/*.map
 **/*.ts
 **/*.asc
+*.mltbx
 node_modules/**
 test/**
 test-results/**

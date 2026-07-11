@@ -45,7 +45,7 @@ cd('e:\MGH\seqeyes_plugin');
 run('matlab\pack_toolbox.m');
 ```
 
-This produces `seqeyes-0.1.4.mltbx` in the current directory.
+This produces `seqeyes-<package.json version>.mltbx` in the current directory.
 
 ## Step 4: Test the Packaged Toolbox
 
@@ -53,7 +53,7 @@ Install the .mltbx file to verify it works end-to-end:
 
 ```matlab
 % Install
-matlab.addons.toolbox.installToolbox('seqeyes-0.1.4.mltbx');
+matlab.addons.toolbox.installToolbox('seqeyes-<version>.mltbx');
 
 % Restart MATLAB (recommended after install)
 
@@ -70,7 +70,7 @@ matlab.addons.toolbox.uninstallToolbox('seqeyes');
 
 1. Go to https://www.mathworks.com/matlabcentral/fileexchange/
 2. Click **Submit** → **Toolbox**
-3. Upload `seqeyes-0.1.4.mltbx`
+3. Upload `seqeyes-<version>.mltbx`
 4. Fill in metadata:
    - **Title**: SeqEyes — Pulseq MRI Sequence Viewer
    - **Summary**: Interactive viewer for Pulseq .seq files with k-space visualisation
@@ -84,8 +84,8 @@ matlab.addons.toolbox.uninstallToolbox('seqeyes');
 
 When releasing a new version:
 
-1. Update version in `matlab/toolboxInfo.xml`
-2. Update version in `matlab/pack_toolbox.m` (or it reads from the XML)
+1. Update version in `package.json` / `package-lock.json`
+2. `matlab/pack_toolbox.m` reads `package.json` and syncs the packaged toolbox metadata
 3. Commit and tag: `git tag vX.Y.Z`
 4. Re-run `matlab/pack_toolbox.m` to produce the new .mltbx
 5. Upload the new .mltbx to File Exchange
