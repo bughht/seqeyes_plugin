@@ -2,7 +2,7 @@
    Mouse interaction
    ═══════════════════════════════════════════════════════════════════════ */
 
-var _touchTooltipTimer=null;
+var _touchTooltipTimer=null,_pointerFrame=0,_pendingPointer=null;
 
 mc.addEventListener('wheel',function(e){e.preventDefault();
   var changed=false;
@@ -17,18 +17,41 @@ mc.addEventListener('wheel',function(e){e.preventDefault();
   if(changed)scheduleViewerDraw(true);},{passive:false});
 mc.addEventListener('mousedown',function(e){if(e.button===0){dr=true;dsx=e.clientX;dso=ox;cc.classList.add('pan')}});
 window.addEventListener('mousemove',function(e){
-  // Skip waveform redraw while user is dragging/rotating k‑space
+  // Skip waveform pointer work while user is dragging/rotating k-space.
   if(typeof kDragging!=='undefined'&&kDragging)return;
-  var r=mc.getBoundingClientRect(),mx2=e.clientX-r.left,my=e.clientY-r.top;cursorT=x2t(mx2);cursorActive=mx2>=M.l&&mx2<=r.width-M.r&&my>=M.t&&my<=r.height-M.b;
-  var kInfo=(typeof formatKCursorReadout==='function')?formatKCursorReadout():'';
-  curEl.textContent=fmtT(timeConv(cursorT))+' '+timeUnitStr()+(kInfo?' | '+kInfo:'');
-  if(dr){ox=dso-(e.clientX-dsx)/sc;clampView();draw();drawMinimap();return}
-  draw();
-  // Tooltip (desktop hover)
-  showTooltipAt(e.clientX,e.clientY,cursorT);
+  _pendingPointer={x:e.clientX,y:e.clientY,dragging:dr};
+  if(_pointerFrame)return;
+  _pointerFrame=requestAnimationFrame(flushPointerUpdate);
 });
 window.addEventListener('mouseup',function(){dr=false;cc.classList.remove('pan');drawMinimap();});
-cc.addEventListener('mouseleave',function(){cursorT=0;cursorActive=false;curEl.textContent='\u2190 hover for time';draw();drawMinimap();});
+cc.addEventListener('mouseleave',function(){
+  if(dr)return;
+  _pendingPointer=null;if(_pointerFrame){cancelAnimationFrame(_pointerFrame);_pointerFrame=0;}
+  clearViewerCursor();
+});
+
+function flushPointerUpdate(){
+  _pointerFrame=0;var p=_pendingPointer;_pendingPointer=null;if(!p)return;
+  var r=mc.getBoundingClientRect();
+  var inside=p.x>=r.left&&p.x<=r.right&&p.y>=r.top&&p.y<=r.bottom;
+  if(!p.dragging&&!inside){if(cursorActive)clearViewerCursor();return;}
+  var mx=p.x-r.left,my=p.y-r.top;cursorT=x2t(mx);
+  cursorActive=mx>=M.l&&mx<=r.width-M.r&&my>=M.t&&my<=r.height-M.b;
+  var kInfo=(typeof formatKCursorReadout==='function')?formatKCursorReadout():'';
+  curEl.textContent=fmtT(timeConv(cursorT))+' '+timeUnitStr()+(kInfo?' | '+kInfo:'');
+  if(p.dragging){
+    ox=dso-(p.x-dsx)/sc;clampView();tt.style.display='none';
+    draw();if(typeof drawKs==='function')drawKs();drawMinimap();return;
+  }
+  drawCursorOverlay();
+  if(typeof drawKsOverlayFast==='function')drawKsOverlayFast();
+  showTooltipAt(p.x,p.y,cursorT);
+}
+
+function clearViewerCursor(){
+  cursorT=0;cursorActive=false;curEl.textContent='\u2190 hover for time';tt.style.display='none';
+  drawCursorOverlay();if(typeof drawKsOverlayFast==='function')drawKsOverlayFast();
+}
 
 /* ── Touch: waveform viewer ───────────────────────────────────────── */
 var _tchDragging=false,_tchStartX=0,_tchStartO=0,_tchPinch0=0,_tchPinchMid=null,_tchMoved=false;
@@ -219,7 +242,7 @@ function scrollMinimapToTouch(touch){
   var viewCenter=frac*TD;
   ox=viewCenter-vsWidth/2;
   clampView();
-  draw();drawMinimap();
+  draw();if(typeof drawKs==='function')drawKs();drawMinimap();
 }
 
 /* ── Old mouse minimap ────────────────────────────────────────────── */
@@ -239,11 +262,11 @@ function scrollMinimapToMouse(e){
   var viewCenter=frac*TD;
   ox=viewCenter-vsWidth/2;
   clampView();
-  draw();drawMinimap();
+  draw();if(typeof drawKs==='function')drawKs();drawMinimap();
 }
 
 /* ── Helpers ──────────────────────────────────────────────────────────── */
-function fit(){var w=mc.width/(window.devicePixelRatio||1);sc=(w-M.l-M.r)/(TD||1e-3);ox=0;clampView();draw();drawMinimap();}
+function fit(){var w=mc.width/(window.devicePixelRatio||1);sc=(w-M.l-M.r)/(TD||1e-3);ox=0;clampView();draw();if(typeof drawKs==='function')drawKs();drawMinimap();}
 function nice(r){var ms=[1,2,5,10,20,50,100,200,500,1000,2000,5000,10000,20000,50000];
   for(var i=0;i<ms.length;i++){var b=Math.pow(10,Math.floor(Math.log10(r)));if(ms[i]*b>=r)return ms[i]*b}return 1000*Math.pow(10,Math.floor(Math.log10(r)))}
 function fmtT(v){if(v>=1)return v.toFixed(3);if(v>=0.001)return v.toFixed(3);return v.toExponential(2)}

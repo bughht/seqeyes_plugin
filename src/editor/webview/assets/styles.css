@@ -42,6 +42,7 @@ body{font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background
 #tb .ulbl{font-size:10px;color:var(--lb);margin:0 1px}
 #cc{flex:1;overflow:hidden;position:relative;cursor:crosshair}
 #cc.pan{cursor:grabbing}
+#moc{position:absolute;inset:0;pointer-events:none;z-index:2}
 canvas{display:block}
 /* ── Minimap overview strip ── */
 #mmap{height:22px;border-bottom:1px solid var(--gr);background:var(--trbg);flex-shrink:0;cursor:pointer;position:relative}

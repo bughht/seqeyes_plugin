@@ -2,6 +2,7 @@
    Application state & configuration
    ═══════════════════════════════════════════════════════════════════════ */
 var cc=document.getElementById('cc'),mc=document.getElementById('mc'),ctx=mc.getContext('2d'),
+ moc=document.getElementById('moc'),moctx=moc.getContext('2d'),
  tt=document.getElementById('tt'),curEl=document.getElementById('cur'),legend=document.getElementById('legend'),
  tuSel=document.getElementById('tu'),guSel=document.getElementById('gu');
 var exportBtn=document.getElementById('exportKspaceBtn');
@@ -24,7 +25,7 @@ ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;
 /* K‑space data — pre‑computed on the extension side */
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
 var m1Data=null,pnsData=null,pnsWindowData=null,pnsWindowPending=null,pnsWindowRequestId=0,pnsBusy=false,m1Busy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null;
-var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,lastDrawDurationMs=0,viewerDrawCount=0;
+var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
 var viewerDrawFrame=0,viewerDrawMinimap=false;
 
 function scheduleViewerDraw(includeMinimap){
@@ -32,6 +33,7 @@ function scheduleViewerDraw(includeMinimap){
   if(viewerDrawFrame)return;
   viewerDrawFrame=requestAnimationFrame(function(){
     viewerDrawFrame=0;draw();
+    if(typeof drawKs==='function')drawKs();
     if(viewerDrawMinimap)drawMinimap();
     viewerDrawMinimap=false;
   });
@@ -537,6 +539,9 @@ function rs(){
   mc.width=r.width*dpr;mc.height=r.height*dpr;
   mc.style.width=r.width+'px';mc.style.height=r.height+'px';
   ctx.setTransform(dpr,0,0,dpr,0,0);
+  moc.width=r.width*dpr;moc.height=r.height*dpr;
+  moc.style.width=r.width+'px';moc.style.height=r.height+'px';
+  moctx.setTransform(dpr,0,0,dpr,0,0);
   // Adaptive margins for small/narrow screens
   if(layoutMode==='vertical'||r.width<600){
     M.l=60;M.r=3;M.t=5;M.b=18;

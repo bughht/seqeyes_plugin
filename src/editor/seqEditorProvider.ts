@@ -152,11 +152,26 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
 
                 postProgress('serialize', 85, 'Preparing data for display\u2026');
                 // Build lightweight block‑position array for the minimap
-                const blockPositions = seq.blocks.map((b, i) => {
-                    let cum = 0;
-                    for (let j = 0; j < i; j++) cum += seq.blocks[j].dur * seq.rasterTimes.blockDurationRaster;
-                    return { i: b.num, s: cum, d: b.dur * seq.rasterTimes.blockDurationRaster };
+                const blockDurationRaster =
+                    seq.rasterTimes.blockDurationRaster;
+
+                let cumulative = 0;
+
+                const blockPositions = seq.blocks.map((block) => {
+                    const duration =
+                        block.dur * blockDurationRaster;
+
+                    const position = {
+                        i: block.num,
+                        s: cumulative,
+                        d: duration,
+                    };
+
+                    cumulative += duration;
+
+                    return position;
                 });
+
 
                 const serialized = serializeBlocks(blocks);
 
