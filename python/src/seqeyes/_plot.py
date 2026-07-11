@@ -66,13 +66,6 @@ def reset() -> None:
         _Seq.plot = _original_plot  # type: ignore[attr-defined]
 
 
-# ── Backward‑compatible alias ────────────────────────────────────────────
-
-def patch_pypulseq() -> None:
-    """Deprecated — use :func:`set` instead."""
-    set()
-
-
 # ── Internal helpers ──────────────────────────────────────────────────────
 
 def _store_defaults(

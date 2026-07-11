@@ -1,5 +1,5 @@
 """
-Tests for seqeyes — SeqEyesViewer and patch_pypulseq.
+Tests for seqeyes — SeqEyesViewer, set(), and reset().
 """
 from __future__ import annotations
 
@@ -86,15 +86,15 @@ class TestSeqEyesViewer:
         assert '"mT/m"' in raw
 
 
-class TestPatchPypulseq:
-    """Tests for patch_pypulseq(), set(), and reset()."""
+class TestSetAndReset:
+    """Tests for set() and reset()."""
 
-    def test_patch_pypulseq_adds_plot(self):
+    def test_set_patches_plot(self):
         try:
             import seqeyes
             from pypulseq import Sequence
 
-            seqeyes.patch_pypulseq()
+            seqeyes.set()
             assert hasattr(Sequence, "plot")
             assert callable(Sequence.plot)
 
@@ -111,11 +111,11 @@ class TestPatchPypulseq:
         except ImportError:
             pytest.skip("pypulseq not installed")
 
-    def test_patch_pypulseq_idempotent(self):
+    def test_set_idempotent(self):
         try:
             import seqeyes
-            seqeyes.patch_pypulseq()
-            seqeyes.patch_pypulseq()  # should not crash
+            seqeyes.set()
+            seqeyes.set()  # should not crash
         except ImportError:
             pytest.skip("pypulseq not installed")
 

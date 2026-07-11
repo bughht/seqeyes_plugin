@@ -133,7 +133,7 @@ def _build_html(
 class SeqEyesViewer:
     """Interactive Pulseq sequence viewer for Jupyter notebook output.
 
-    Normally you don't create this directly — call ``seqeyes.patch_pypulseq()``
+    Normally you don't create this directly — call ``seqeyes.set()``
     once, then use ``seq.plot(...)`` on any ``pypulseq.Sequence``.
 
     Parameters
