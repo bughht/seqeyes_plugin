@@ -14,20 +14,23 @@ function draw(){
   drawBlocks(vs,ve,s);
   drawDerivedChannels(vs,ve,s);
   drawAxes(w,h,vs,ve,s);
-  drawCursor(w,h,s);
-  drawKs();  // sync k-space ADC points with current time window
   lastDrawDurationMs=performance.now()-drawStarted;
+  drawCursorOverlay();
 }
 
 /* ── Vertical cursor ──────────────────────────────────────────────────── */
-function drawCursor(w,h,s){
+function drawCursorOverlay(){
+  viewerCursorDrawCount++;
+  var dpr=window.devicePixelRatio||1,w=moc.width/dpr,h=moc.height/dpr;
+  moctx.clearRect(0,0,w,h);
   if(!cursorActive)return;var cx=t2x(cursorT);
   if(cx<M.l||cx>w-M.r)return;
-  ctx.strokeStyle=s.getPropertyValue('--cr').trim();ctx.lineWidth=0.8;ctx.setLineDash([4,3]);
-  ctx.beginPath();ctx.moveTo(cx,M.t);ctx.lineTo(cx,h-M.b);ctx.stroke();ctx.setLineDash([]);
-  ctx.fillStyle=s.getPropertyValue('--cr').trim();ctx.font='10px monospace';ctx.textAlign='center';
-  var label=fmtT(timeConv(cursorT)),tw=ctx.measureText(label).width;
-  ctx.fillText(label,Math.max(M.l+tw/2+4,Math.min(cx,w-M.r-tw/2-4)),M.t-1);
+  var color=getComputedStyle(document.body).getPropertyValue('--cr').trim();
+  moctx.strokeStyle=color;moctx.lineWidth=0.8;moctx.setLineDash([4,3]);
+  moctx.beginPath();moctx.moveTo(cx,M.t);moctx.lineTo(cx,h-M.b);moctx.stroke();moctx.setLineDash([]);
+  moctx.fillStyle=color;moctx.font='10px monospace';moctx.textAlign='center';
+  var label=fmtT(timeConv(cursorT)),tw=moctx.measureText(label).width;
+  moctx.fillText(label,Math.max(M.l+tw/2+4,Math.min(cx,w-M.r-tw/2-4)),M.t-1);
 }
 
 /* ── Zero lines & grid ────────────────────────────────────────────────── */
@@ -220,113 +223,139 @@ function drawBipolarSeries(series,vi,ci,c,ch,vs,ve){
    Block waveform rendering
    ═══════════════════════════════════════════════════════════════════════ */
 function drawBlocks(vs,ve,s){
-  var ch=cH(),vc=visChannels();
-  for(var bi=0;bi<BL.length;bi++){
-    var b=BL[bi];if(b.s+b.d<vs||b.s>ve)continue;
-
-    // Map channel indices -> visual rows
-    var viRF=-1,viPh=-1,viGx=-1,viGy=-1,viGz=-1,viADC=-1,viTrig=-1;
-    for(var vi=0;vi<vc.length;vi++){
-      if(vc[vi]===0)viRF=vi;if(vc[vi]===1)viPh=vi;
-      if(vc[vi]===2)viGx=vi;if(vc[vi]===3)viGy=vi;if(vc[vi]===4)viGz=vi;
-      if(vc[vi]===5)viADC=vi;if(vc[vi]===6)viTrig=vi;
-    }
-
-    // -- RF magnitude --
-    if(b.rf&&viRF>=0){
-      var y=cy(viRF),rc=s.getPropertyValue('--rf').trim(),rff=s.getPropertyValue('--rff').trim();
-      var rfx0=t2x(b.rf.s),rfx1=t2x(b.rf.s+b.rf.d);
-      rowClip(viRF,ch,function(){
-        ctx.fillStyle=rff;ctx.fillRect(rfx0,y-ch*.45,rfx1-rfx0,ch*.9);
-        if(b.rf.t&&b.rf.t.length>1){
-          ctx.strokeStyle=rc;ctx.lineWidth=1.1;ctx.beginPath();
-          for(var i=0,f=1,sc2=ch*.9/channelRange(0);i<b.rf.t.length;i++){
-            var sx=t2x(b.rf.t[i]),sy=y+ch*.45-b.rf.m[i]*sc2;
-            if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
-          }ctx.stroke();
-        }
-      });
-    }
-
-    // -- RF phase --
-    if(b.rf&&b.rf.p&&viPh>=0){
-      var py=cy(viPh);
-      rowClip(viPh,ch,function(){
-        ctx.strokeStyle=s.getPropertyValue('--rf').trim();ctx.lineWidth=0.8;ctx.beginPath();
-        for(var i=0,f=1,psc=ch*.9/channelRange(1);i<b.rf.t.length;i++){
-          var sx=t2x(b.rf.t[i]),sy=py+ch*.45-b.rf.p[i]*psc;
-          if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
-        }ctx.stroke();ctx.setLineDash([]);
-      });
-    }
-
-    // -- ADC phase curve on φ axis (evolves linearly:  φ(t) = po + 2π·fo·Δt) --
-    if(b.adc&&viPh>=0&&b.adc.n>1){
-      var apy3=cy(viPh);
-      var t0=b.adc.s+b.adc.d, fo2=b.adc.fo||0, po2=b.adc.po||0;
-      var nAdc=b.adc.n, dw2=b.adc.dw, te2=t0+nAdc*dw2;
-      if(te2>vs&&t0<ve){
-        rowClip(viPh,ch,function(){
-          ctx.strokeStyle=s.getPropertyValue('--adc').trim();ctx.lineWidth=0.8;
-          ctx.beginPath();
-          var psc2=ch*.9/channelRange(1);
-          // Subsample large readouts to ≤ 200 points for performance
-          var step=Math.max(1,Math.ceil(nAdc/200));
-          for(var s2=0,f2=1;s2<=nAdc;s2+=step){
-            var tA=(s2<nAdc)?t0+(s2+0.5)*dw2:te2;
-            var dtA=tA-t0;
-            var phA=((po2+6.283185*fo2*dtA)%6.28318+6.28318)%6.28318;
-            var sxA=t2x(tA),syA=apy3+ch*.45-phA*psc2;
-            var clipL2=M.l,clipR2=mc.width/(window.devicePixelRatio||1)-M.r;
-            if(sxA<clipL2||sxA>clipR2){f2=1;continue}
-            if(f2){ctx.moveTo(sxA,syA);f2=0}else ctx.lineTo(sxA,syA);
-          }ctx.stroke();ctx.setLineDash([]);
-        });
-      }
-    }
-
-    // -- Gradients --
-    if(viGx>=0)drawG(b.gx,viGx,2,s.getPropertyValue('--gx').trim(),ch,s,gMax[2]);
-    if(viGy>=0)drawG(b.gy,viGy,3,s.getPropertyValue('--gy').trim(),ch,s,gMax[3]);
-    if(viGz>=0)drawG(b.gz,viGz,4,s.getPropertyValue('--gz').trim(),ch,s,gMax[4]);
-
-    // -- ADC --
-    if(b.adc&&viADC>=0){
-      var ay=cy(viADC),af=s.getPropertyValue('--adf').trim(),ac=s.getPropertyValue('--adc').trim();
-      var as=b.adc.s+b.adc.d,ae=as+b.adc.n*b.adc.dw;
-      if(ae>vs&&as<ve){
-        var ax0=t2x(Math.max(as,vs)),ax1=t2x(Math.min(ae,ve));
-        ctx.fillStyle=af;ctx.fillRect(ax0,ay-ch*.28,ax1-ax0,ch*.56);
-        ctx.strokeStyle=ac;ctx.lineWidth=1;ctx.strokeRect(ax0,ay-ch*.28,ax1-ax0,ch*.56);
-        if(ax1-ax0>30){ctx.fillStyle=s.getPropertyValue('--fg').trim();ctx.font='9px monospace';ctx.textAlign='center';ctx.fillText(b.adc.n+'pts',(ax0+ax1)/2,ay+3);}
-      }
-    }
-
-    // -- Triggers --
-    if(b.trg&&viTrig>=0){
-      var ty=cy(viTrig),tc=s.getPropertyValue('--tr').trim();
-      for(var tj=0;tj<b.trg.length;tj++){
-        var tg=b.trg[tj],ts=tg.s+tg.d,te=ts+tg.dr;if(te<vs||ts>ve)continue;
-        var txm=t2x((ts+te)/2);
-        ctx.fillStyle=tc;ctx.beginPath();ctx.moveTo(txm,ty-ch*.05);ctx.lineTo(txm-5,ty+ch*.05);ctx.lineTo(txm+5,ty+ch*.05);ctx.closePath();ctx.fill();
-        ctx.fillStyle=tc;ctx.font='8px monospace';ctx.textAlign='center';ctx.fillText('ch'+tg.c,txm,ty+ch*.28);
-      }
-    }
-  }
+  var range=visibleBlockRange(vs,ve);if(range.start>=range.end)return;
+  var ch=cH(),vc=visChannels(),rows=[-1,-1,-1,-1,-1,-1,-1];
+  for(var vi=0;vi<vc.length;vi++)if(vc[vi]>=0&&vc[vi]<=6)rows[vc[vi]]=vi;
+  var colors={
+    rf:s.getPropertyValue('--rf').trim(),rff:s.getPropertyValue('--rff').trim(),
+    gx:s.getPropertyValue('--gx').trim(),gy:s.getPropertyValue('--gy').trim(),gz:s.getPropertyValue('--gz').trim(),
+    adc:s.getPropertyValue('--adc').trim(),adf:s.getPropertyValue('--adf').trim(),
+    tr:s.getPropertyValue('--tr').trim(),fg:s.getPropertyValue('--fg').trim()
+  };
+  if(rows[0]>=0)drawRfBlocks(range.start,range.end,rows[0],ch,colors,vs,ve);
+  if(rows[1]>=0)drawPhaseBlocks(range.start,range.end,rows[1],ch,colors,vs,ve);
+  if(rows[2]>=0)drawGradientBlocks(range.start,range.end,'gx',rows[2],2,ch,colors.gx,vs,ve);
+  if(rows[3]>=0)drawGradientBlocks(range.start,range.end,'gy',rows[3],3,ch,colors.gy,vs,ve);
+  if(rows[4]>=0)drawGradientBlocks(range.start,range.end,'gz',rows[4],4,ch,colors.gz,vs,ve);
+  if(rows[5]>=0)drawAdcBlocks(range.start,range.end,rows[5],ch,colors,vs,ve);
+  if(rows[6]>=0)drawTriggerBlocks(range.start,range.end,rows[6],ch,colors,vs,ve);
 }
 
-/* ── Single gradient channel ──────────────────────────────────────────── */
-function drawG(g,vi,ci,c,ch,s,globMax){
-  if(!g||g.ty==='none')return;var y=cy(vi);
-  if(g.t&&g.t.length>1){
-    rowClip(vi,ch,function(){
-      var maxA=channelRange(ci);var sc2=ch*.4/maxA;
-      ctx.strokeStyle=c;ctx.lineWidth=1;ctx.beginPath();
-      var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r;
-      for(var i=0,f=1;i<g.t.length;i++){
-        var sx=t2x(g.t[i]);if(sx<clipL||sx>clipR){f=1;continue}
-        var sy=y-g.w[i]*sc2;if(f){ctx.moveTo(sx,sy);f=0}else ctx.lineTo(sx,sy);
-      }ctx.stroke();
-    });
-  }
+function visibleBlockRange(vs,ve){
+  var lo=0,hi=BL.length,mid;
+  while(lo<hi){mid=(lo+hi)>>1;if(BL[mid].s+BL[mid].d<vs)lo=mid+1;else hi=mid;}
+  var start=lo;hi=BL.length;
+  while(lo<hi){mid=(lo+hi)>>1;if(BL[mid].s<=ve)lo=mid+1;else hi=mid;}
+  return{start:Math.max(0,start-1),end:Math.min(BL.length,lo+1)};
+}
+
+function drawRfBlocks(start,end,vi,ch,colors,vs,ve){
+  var y=cy(vi),scale=ch*.9/channelRange(0);
+  rowClip(vi,ch,function(){
+    ctx.strokeStyle=colors.rf;ctx.lineWidth=1.1;ctx.beginPath();var hasPath=false;
+    for(var bi=start;bi<end;bi++){
+      var rf=BL[bi].rf;if(!rf||rf.s+rf.d<vs||rf.s>ve)continue;
+      var x0=t2x(rf.s),x1=t2x(rf.s+rf.d);
+      ctx.fillStyle=colors.rff;ctx.fillRect(x0,y-ch*.45,x1-x0,ch*.9);
+      if(!rf.t||!rf.m||rf.t.length<2)continue;
+      var n=Math.min(rf.t.length,rf.m.length);
+      for(var i=0;i<n;i++){
+        var sx=t2x(rf.t[i]),sy=y+ch*.45-rf.m[i]*scale;
+        if(i===0)ctx.moveTo(sx,sy);else ctx.lineTo(sx,sy);
+      }
+      hasPath=true;
+    }
+    if(hasPath)ctx.stroke();
+  });
+}
+
+function drawPhaseBlocks(start,end,vi,ch,colors,vs,ve){
+  var y=cy(vi),scale=ch*.9/channelRange(1);
+  rowClip(vi,ch,function(){
+    ctx.strokeStyle=colors.rf;ctx.lineWidth=.8;ctx.beginPath();var hasRf=false;
+    for(var bi=start;bi<end;bi++){
+      var rf=BL[bi].rf;if(!rf||!rf.p||!rf.t||rf.s+rf.d<vs||rf.s>ve)continue;
+      var n=Math.min(rf.t.length,rf.p.length);
+      for(var i=0;i<n;i++){
+        var sx=t2x(rf.t[i]),sy=y+ch*.45-rf.p[i]*scale;
+        if(i===0)ctx.moveTo(sx,sy);else ctx.lineTo(sx,sy);
+      }
+      hasRf=hasRf||n>1;
+    }
+    if(hasRf)ctx.stroke();
+
+    ctx.strokeStyle=colors.adc;ctx.lineWidth=.8;ctx.beginPath();var hasAdc=false;
+    var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r;
+    for(var bj=start;bj<end;bj++){
+      var adc=BL[bj].adc;if(!adc||adc.n<=1)continue;
+      var t0=adc.s+adc.d,nAdc=adc.n,te=t0+nAdc*adc.dw;
+      if(te<=vs||t0>=ve)continue;
+      var step=Math.max(1,Math.ceil(nAdc/200)),first=true,fo=adc.fo||0,po=adc.po||0;
+      for(var sample=0;sample<=nAdc;sample+=step){
+        var t=(sample<nAdc)?t0+(sample+.5)*adc.dw:te;
+        var phase=((po+6.283185*fo*(t-t0))%6.28318+6.28318)%6.28318;
+        var x=t2x(t);if(x<clipL||x>clipR){first=true;continue;}
+        var py=y+ch*.45-phase*scale;
+        if(first){ctx.moveTo(x,py);first=false;}else ctx.lineTo(x,py);
+        hasAdc=true;
+      }
+    }
+    if(hasAdc)ctx.stroke();ctx.setLineDash([]);
+  });
+}
+
+function drawGradientBlocks(start,end,key,vi,ci,ch,color,vs,ve){
+  var y=cy(vi),scale=ch*.4/channelRange(ci);
+  rowClip(vi,ch,function(){
+    ctx.strokeStyle=color;ctx.lineWidth=1;ctx.beginPath();var hasPath=false;
+    for(var bi=start;bi<end;bi++){
+      var g=BL[bi][key];if(!g||g.ty==='none'||!g.t||!g.w||g.t.length<2)continue;
+      var n=Math.min(g.t.length,g.w.length);
+      if(n<2)continue;
+      if(g.t[n-1]<vs||g.t[0]>ve)continue;
+      for(var i=0;i<n;i++){
+        var sx=t2x(g.t[i]),sy=y-g.w[i]*scale;
+        if(i===0)ctx.moveTo(sx,sy);else ctx.lineTo(sx,sy);
+      }
+      hasPath=true;
+    }
+    if(hasPath)ctx.stroke();
+  });
+}
+
+function drawAdcBlocks(start,end,vi,ch,colors,vs,ve){
+  var y=cy(vi),labels=[];
+  rowClip(vi,ch,function(){
+    ctx.beginPath();var hasRect=false;
+    for(var bi=start;bi<end;bi++){
+      var adc=BL[bi].adc;if(!adc)continue;
+      var eventStart=adc.s+adc.d,eventEnd=eventStart+adc.n*adc.dw;
+      if(eventEnd<=vs||eventStart>=ve)continue;
+      var x0=t2x(Math.max(eventStart,vs)),x1=t2x(Math.min(eventEnd,ve));
+      ctx.rect(x0,y-ch*.28,x1-x0,ch*.56);hasRect=true;
+      if(x1-x0>30)labels.push({text:adc.n+'pts',x:(x0+x1)/2});
+    }
+    if(hasRect){ctx.fillStyle=colors.adf;ctx.fill();ctx.strokeStyle=colors.adc;ctx.lineWidth=1;ctx.stroke();}
+    ctx.fillStyle=colors.fg;ctx.font='9px monospace';ctx.textAlign='center';
+    for(var li=0;li<labels.length;li++)ctx.fillText(labels[li].text,labels[li].x,y+3);
+  });
+}
+
+function drawTriggerBlocks(start,end,vi,ch,colors,vs,ve){
+  var y=cy(vi),labels=[];
+  rowClip(vi,ch,function(){
+    ctx.fillStyle=colors.tr;ctx.beginPath();var hasTrigger=false;
+    for(var bi=start;bi<end;bi++){
+      var triggers=BL[bi].trg;if(!triggers)continue;
+      for(var ti=0;ti<triggers.length;ti++){
+        var tg=triggers[ti],eventStart=tg.s+tg.d,eventEnd=eventStart+tg.dr;
+        if(eventEnd<vs||eventStart>ve)continue;
+        var x=t2x((eventStart+eventEnd)/2);
+        ctx.moveTo(x,y-ch*.05);ctx.lineTo(x-5,y+ch*.05);ctx.lineTo(x+5,y+ch*.05);ctx.closePath();
+        labels.push({text:'ch'+tg.c,x:x});hasTrigger=true;
+      }
+    }
+    if(hasTrigger)ctx.fill();ctx.font='8px monospace';ctx.textAlign='center';
+    for(var li=0;li<labels.length;li++)ctx.fillText(labels[li].text,labels[li].x,y+ch*.28);
+  });
 }

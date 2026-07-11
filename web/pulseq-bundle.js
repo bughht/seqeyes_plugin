@@ -36,7 +36,7 @@ var Pulseq = (() => {
   });
 
   // package.json
-  var version = "0.1.17";
+  var version = "0.2.0";
 
   // src/pulseq/decompressor.ts
   function decompressShape(compressed, numSamples) {
@@ -2190,11 +2190,7 @@ var Pulseq = (() => {
     if (intervals.length === 0) return 0;
     intervals.sort((a, b) => a - b);
     const median = intervals[Math.floor(intervals.length / 2)];
-    const niceMs = niceRound(median * 1e3, 10);
-    return niceMs * 1e-3;
-  }
-  function niceRound(value, base) {
-    return Math.round(value / base) * base;
+    return Math.round(median * 1e6) / 1e6;
   }
 
   // src/pulseq/kspaceExportArtifacts.ts

@@ -282,12 +282,8 @@ function estimateTRFromExcitations(excTimesSec: number[]): number {
     intervals.sort((a, b) => a - b);
     const median = intervals[Math.floor(intervals.length / 2)];
 
-    // Round to a "nice" value (nearest ms or 0.1 ms)
-    const niceMs = niceRound(median * 1e3, 10);
-    return niceMs * 1e-3;
-}
-
-/** Round a value to the nearest "nice" step. */
-function niceRound(value: number, base: number): number {
-    return Math.round(value / base) * base;
+    // Remove cumulative floating-point noise without discarding short-TR
+    // precision. Pulseq RF and block timing is represented at microsecond or
+    // finer resolution, so a 1 us quantisation keeps values such as 2.42 ms.
+    return Math.round(median * 1e6) / 1e6;
 }

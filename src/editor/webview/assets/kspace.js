@@ -1,4 +1,5 @@
 var kOpen=false, kView="3d";
+var kSpaceTrajectoryDrawCount=0,kSpaceOverlayDrawCount=0;
 var kCx=0, kCy=0, kCz=0, kScl=1;    // view center & zoom
 var kAutoFit=true;
 var kRotX=-0.5, kRotY=0.7;           // default 3D perspective
@@ -23,7 +24,7 @@ function startKSpaceAnim() {
     if (Math.abs(_tCy   - kCy)   > 0.001){ kCy   += (_tCy   - kCy)   * _kEasing; changed = true; }
     if (Math.abs(_tCz   - kCz)   > 0.001){ kCz   += (_tCz   - kCz)   * _kEasing; changed = true; }
     if (changed) {
-      drawKs();
+      drawKsFast();
       _kAnimId = requestAnimationFrame(tick);
     } else {
       // Snap to exact targets
@@ -565,7 +566,6 @@ function drawKs_core(W,H,dpr){
     _kBrng=Math.max(xmax-xmin,ymax-ymin,zmax-zmin,1e-6);
     _kBoundsDirty=false;
   }
-  var rng3=_kBrng;
   if(!isFinite(_kBxmin)){ctx.fillStyle="#f00";ctx.font="11px monospace";ctx.fillText("ALL NaN",10,20);return;}
 
   // ── Auto-fit (initial open only) ──
@@ -605,10 +605,28 @@ function drawKs_core(W,H,dpr){
     gl.enableVertexAttribArray(glAttribTime);
     gl.vertexAttribPointer(glAttribTime,1,gl.FLOAT,false,16,12);
 
+    kSpaceTrajectoryDrawCount++;
     gl.drawArrays(gl.POINTS,0,glN);
   }
 
-  // Canvas 2D axes
+  drawKsOverlay(W,H,dpr,cs);
+}
+
+/** Redraw only the lightweight 2D axes/cursor layer. The WebGL trajectory
+ * remains untouched when waveform hover changes cursorT. */
+function drawKsOverlayFast(){
+  if(!kOpen||!kAdc||!kAdcTime||!kAdc[0]||kAdc[0].length===0)return;
+  var dpr=window.devicePixelRatio||1;
+  var W=kCanvas.width/dpr,H=kCanvas.height/dpr;
+  if(W<=0||H<=0)return;
+  drawKsOverlay(W,H,dpr,getComputedStyle(document.body));
+}
+
+function drawKsOverlay(W,H,dpr,cs){
+  kSpaceOverlayDrawCount++;
+  var ctx=kCtx;ctx.clearRect(0,0,W,H);
+  if(!kOpen||!isFinite(_kBxmin))return;
+  var rng3=_kBrng;
   var cz=Math.cos(kRotY),sz=Math.sin(kRotY),cxR=Math.cos(kRotX),sxR=Math.sin(kRotX);
   var invDpr=1/dpr;
   function proj(px,py,pz){
@@ -643,7 +661,6 @@ function drawKs_core(W,H,dpr){
   var oo=proj(0,0,0);
   ctx.fillStyle=cs.getPropertyValue("--fg").trim();ctx.beginPath();ctx.arc(oo.x,oo.y,4,0,6.283);ctx.fill();
   drawKCursorMarker(ctx,proj,cs,W,H);
-
 }
 
 /* ── Parse CSS hex colour to [r,g,b] 0‑1 ────────────────────────────── */
