@@ -45,6 +45,7 @@ for (const entry of entries) {
   for (const prefix of forbiddenPrefixes) {
     assert(!entry.startsWith(prefix), `VSIX should not include ${prefix}: ${entry}`);
   }
+  assert(!entry.endsWith('.mltbx'), `VSIX should not include MATLAB toolbox artifacts: ${entry}`);
 }
 
 for (const entry of forbiddenEntries) {

@@ -109,6 +109,7 @@ function [newPath, tempDir] = buildPreloadedHTML(templatePath, seqFilePath)
     mkdir(tempDir);
     [tmplDir, ~, ~] = fileparts(templatePath);
     copyfile(fullfile(tmplDir, 'pulseq-bundle.js'), fullfile(tempDir, 'pulseq-bundle.js'));
+    copyfile(fullfile(tmplDir, 'derived-series.js'), fullfile(tempDir, 'derived-series.js'));
     % Copy logo assets if they exist (silently skip if missing)
     if isfile(fullfile(tmplDir, 'logo.png'))
         copyfile(fullfile(tmplDir, 'logo.png'), fullfile(tempDir, 'logo.png'));

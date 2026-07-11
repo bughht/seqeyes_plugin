@@ -61,7 +61,7 @@ Open `.seq` files directly inside MATLAB — double‑click in the Current Folde
 Download `seqeyes-*.mltbx` from [GitHub Releases](https://github.com/bughht/seqeyes_plugin/releases) and double‑click to install, or run:
 
 ```matlab
-matlab.addons.toolbox.installToolbox('seqeyes-0.1.7.mltbx')
+matlab.addons.toolbox.installToolbox('seqeyes-<version>.mltbx')
 ```
 
 ### Usage
