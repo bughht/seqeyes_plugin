@@ -29,4 +29,4 @@ from seqeyes._plot import set, reset
 from seqeyes._renderer import SeqEyesViewer
 
 __all__ = ["set", "reset", "SeqEyesViewer"]
-__version__ = "0.2.0"
+__version__ = "0.2.1"
