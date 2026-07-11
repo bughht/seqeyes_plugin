@@ -576,7 +576,7 @@ function drawKs_core(W,H,dpr){
   }
 
   // ── Time window ──
-  var mw2=mc.width/(window.devicePixelRatio||1),vs=ox,ve=ox+(mw2-M.l-M.r)/sc;
+  var visibleRange=visibleDuration(),vs=ox,ve=ox+visibleRange;
 
   // ═══════════════════════════════════════════════════════════════════
   // WebGL scatter  (GPU — renders millions of points at 60 fps)

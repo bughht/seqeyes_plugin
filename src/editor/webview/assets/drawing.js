@@ -7,7 +7,7 @@ function draw(){
   var s=getComputedStyle(document.body);
   ctx.clearRect(0,0,w,h);
   ctx.fillStyle=s.getPropertyValue('--bg').trim();ctx.fillRect(0,0,w,h);
-  var vs=ox,ve=ox+(w-M.l-M.r)/sc;
+  var visibleRange=visibleDuration();var vs=ox,ve=ox+visibleRange;
   drawGrid(w,h,vs,ve,s);
   drawZeroLines(w,h,s);
   if(showBB)drawBlockBounds(w,h,s);
