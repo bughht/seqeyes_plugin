@@ -17,6 +17,8 @@ mc.addEventListener('wheel',function(e){e.preventDefault();
   if(changed)scheduleViewerDraw(true);},{passive:false});
 mc.addEventListener('mousedown',function(e){if(e.button===0){dr=true;dsx=e.clientX;dso=ox;cc.classList.add('pan')}});
 window.addEventListener('mousemove',function(e){
+  // Skip waveform redraw while user is dragging/rotating k‑space
+  if(typeof kDragging!=='undefined'&&kDragging)return;
   var r=mc.getBoundingClientRect(),mx2=e.clientX-r.left,my=e.clientY-r.top;cursorT=x2t(mx2);cursorActive=mx2>=M.l&&mx2<=r.width-M.r&&my>=M.t&&my<=r.height-M.b;
   var kInfo=(typeof formatKCursorReadout==='function')?formatKCursorReadout():'';
   curEl.textContent=fmtT(timeConv(cursorT))+' '+timeUnitStr()+(kInfo?' | '+kInfo:'');
