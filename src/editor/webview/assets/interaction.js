@@ -234,7 +234,7 @@ function scrollMinimapToMouse(e){
   var mx=e.clientX-r.left;  // CSS pixels — e.clientX and r.left are both CSS
   var W=mmCanvas.width/dpr;  // physical → CSS pixels
   var frac=Math.max(0,Math.min(1,mx/W));
-  var vsWidth=(mc.width/dpr-M.l-M.r)/sc;
+  var vsWidth=visibleDuration();
   // Align viewport CENTER to mouse, not left edge
   var viewCenter=frac*TD;
   ox=viewCenter-vsWidth/2;

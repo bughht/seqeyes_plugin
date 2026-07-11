@@ -8,8 +8,11 @@ dist/
 *.mltbx
 *.asc
 .vscode-test/
+.vscode/
 test-results/
 playwright-report/
 performance-results/
 matlab/pulseq-bundle.js
 .DS_Store
+__pycache__/
+.pytest_cache/

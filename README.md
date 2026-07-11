@@ -73,6 +73,41 @@ open('spiral_inout.seq')      % or double‑click in Current Folder
 
 All the same features as the browser & VS Code versions — 7 channels, k‑space viewer, themes, tooltips — rendered inside a native MATLAB figure. Requires R2022a+.
 
+## 🐍 Python Package
+
+Interactive Pulseq sequence viewer for Jupyter notebooks and Python scripts — a drop‑in replacement for `pypulseq.Sequence.plot()`. Renders directly in notebook cell output or opens in your default browser.
+
+### Install
+
+```bash
+pip install seqeyes-python
+```
+
+For pypulseq integration:
+
+```bash
+pip install seqeyes-python[pypulseq]
+```
+
+### Usage
+
+```python
+import seqeyes
+
+# Enable SeqEyes (once per session) — seq.plot() is now interactive
+seqeyes.set(theme="dark", time_disp="ms")
+
+# Build your sequence with pypulseq as usual
+seq.plot()                          # interactive viewer in Jupyter
+seq.plot(show_blocks=True)          # per‑call overrides
+seq.plot(time_range=(0, 0.05))      # zoom to first 50 ms
+
+# Restore matplotlib at any time
+seqeyes.reset()
+```
+
+All the same features as the other versions — interactive waveforms, k‑space viewer, themes, tooltips — rendered directly in Jupyter or your browser. Requires Python ≥ 3.9.
+
 ## Features
 
 - **Custom editor for `.seq` files** — opens automatically on double‑click

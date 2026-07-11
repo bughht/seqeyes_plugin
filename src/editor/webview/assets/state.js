@@ -495,7 +495,8 @@ function drawMinimap(){
 
   // ── Viewport highlight ──
   var mcW=mc.width/dpr;
-  var vx0=ox*scM, vx1=(ox+(mcW-M.l-M.r)/sc)*scM;
+  var visibleDur = plotWidth() / Math.max(sc, 1e-12);
+  var vx0=ox*scM, vx1=(ox+visibleDur)*scM;
   vx0=Math.max(0,vx0);vx1=Math.min(W,vx1);
   var vw=Math.max(2,vx1-vx0);
   // Subtle wash
