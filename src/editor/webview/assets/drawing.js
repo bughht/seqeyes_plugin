@@ -10,7 +10,7 @@ function draw(){
   var visibleRange=visibleDuration();var vs=ox,ve=ox+visibleRange;
   drawGrid(w,h,vs,ve,s);
   drawZeroLines(w,h,s);
-  if(showBB)drawBlockBounds(w,h,s);
+  if(showBB)drawBlockBounds(w,h,vs,ve,s);
   drawBlocks(vs,ve,s);
   drawDerivedChannels(vs,ve,s);
   drawAxes(w,h,vs,ve,s);
@@ -39,9 +39,10 @@ function drawZeroLines(w,h,s){
   var vc=visChannels();for(var vi=0;vi<vc.length;vi++){var i=vc[vi];if((i>=2&&i<=4)||(i>=8&&i<=10)){ctx.beginPath();ctx.moveTo(M.l,cy(vi));ctx.lineTo(w-M.r,cy(vi));ctx.stroke();}}
   ctx.setLineDash([]);
 }
-function drawBlockBounds(w,h,s){
+function drawBlockBounds(w,h,vs,ve,s){
   ctx.strokeStyle=s.getPropertyValue('--ax').trim();ctx.lineWidth=0.6;ctx.setLineDash([3,6]);
-  for(var i=0;i<BL.length;i++){
+  var range=visibleBlockRange(vs,ve);
+  for(var i=range.start;i<range.end;i++){
     var x=t2x(BL[i].s);if(x<M.l||x>w-M.r)continue;
     ctx.beginPath();ctx.moveTo(x,M.t);ctx.lineTo(x,h-M.b);ctx.stroke();
     ctx.fillStyle=s.getPropertyValue('--ax').trim();ctx.font='9px monospace';ctx.textAlign='center';
@@ -232,13 +233,80 @@ function drawBlocks(vs,ve,s){
     adc:s.getPropertyValue('--adc').trim(),adf:s.getPropertyValue('--adf').trim(),
     tr:s.getPropertyValue('--tr').trim(),fg:s.getPropertyValue('--fg').trim()
   };
-  if(rows[0]>=0)drawRfBlocks(range.start,range.end,rows[0],ch,colors,vs,ve);
-  if(rows[1]>=0)drawPhaseBlocks(range.start,range.end,rows[1],ch,colors,vs,ve);
-  if(rows[2]>=0)drawGradientBlocks(range.start,range.end,'gx',rows[2],2,ch,colors.gx,vs,ve);
-  if(rows[3]>=0)drawGradientBlocks(range.start,range.end,'gy',rows[3],3,ch,colors.gy,vs,ve);
-  if(rows[4]>=0)drawGradientBlocks(range.start,range.end,'gz',rows[4],4,ch,colors.gz,vs,ve);
-  if(rows[5]>=0)drawAdcBlocks(range.start,range.end,rows[5],ch,colors,vs,ve);
-  if(rows[6]>=0)drawTriggerBlocks(range.start,range.end,rows[6],ch,colors,vs,ve);
+  var pixelBudget=Math.max(1,Math.floor(plotWidth()));
+  var overview=selectWaveformOverview(waveformOverview,range.start,range.end,pixelBudget);
+  function useOverview(key){return !!overview&&waveformVisiblePointCount(waveformOverview,key,range.start,range.end)>pixelBudget;}
+  if(rows[0]>=0){if(useOverview('rf'))drawRfOverview(overview,rows[0],ch,colors,vs,ve);else drawRfBlocks(range.start,range.end,rows[0],ch,colors,vs,ve);}
+  if(rows[1]>=0){if(useOverview('phase'))drawPhaseSampled(range.start,range.end,rows[1],ch,colors,vs,ve,pixelBudget);else drawPhaseBlocks(range.start,range.end,rows[1],ch,colors,vs,ve);}
+  if(rows[2]>=0){if(useOverview('gx'))drawGradientOverview(overview,'gx',rows[2],2,ch,colors.gx,vs,ve);else drawGradientBlocks(range.start,range.end,'gx',rows[2],2,ch,colors.gx,vs,ve);}
+  if(rows[3]>=0){if(useOverview('gy'))drawGradientOverview(overview,'gy',rows[3],3,ch,colors.gy,vs,ve);else drawGradientBlocks(range.start,range.end,'gy',rows[3],3,ch,colors.gy,vs,ve);}
+  if(rows[4]>=0){if(useOverview('gz'))drawGradientOverview(overview,'gz',rows[4],4,ch,colors.gz,vs,ve);else drawGradientBlocks(range.start,range.end,'gz',rows[4],4,ch,colors.gz,vs,ve);}
+  if(rows[5]>=0){if(useOverview('adc'))drawAdcOverview(overview,rows[5],ch,colors,vs,ve);else drawAdcBlocks(range.start,range.end,rows[5],ch,colors,vs,ve);}
+  if(rows[6]>=0&&range.end-range.start<=pixelBudget)drawTriggerBlocks(range.start,range.end,rows[6],ch,colors,vs,ve);
+}
+
+function drawRfOverview(summary,vi,ch,colors,vs,ve){
+  var level=summary.level,y=cy(vi),scale=ch*.9/channelRange(0);
+  rowClip(vi,ch,function(){
+    ctx.strokeStyle=colors.rf;ctx.lineWidth=1;ctx.beginPath();
+    for(var i=summary.first;i<summary.last;i++){
+      if(level.t1[i]<vs||level.t0[i]>ve||level.rfMin[i]===Infinity)continue;
+      var x=t2x(.5*(level.t0[i]+level.t1[i])),y0=y+ch*.45-level.rfMin[i]*scale,y1=y+ch*.45-level.rfMax[i]*scale;
+      if(Math.abs(y1-y0)<1){y0-=.5;y1+=.5;}ctx.moveTo(x,y0);ctx.lineTo(x,y1);
+    }
+    ctx.stroke();
+  });
+}
+
+function drawPhaseSampled(start,end,vi,ch,colors,vs,ve,maxPoints){
+  var prefix=waveformOverview.pointPrefix.phase,first=prefix[start],last=prefix[end],count=last-first;
+  if(count<=0)return;
+  var y=cy(vi),scale=ch*.9/channelRange(1),sampleCount=Math.min(maxPoints,count),sampleStep=count/sampleCount;
+  rowClip(vi,ch,function(){
+    for(var sampleIndex=0;sampleIndex<sampleCount;sampleIndex++){
+      var ordinal=Math.min(last-1,Math.floor(first+(sampleIndex+.5)*sampleStep)),lo=start,hi=end;
+      while(lo<hi){var mid=(lo+hi)>>1;if(prefix[mid+1]<=ordinal)lo=mid+1;else hi=mid;}
+      if(lo>=end)continue;
+      var block=BL[lo],rf=block.rf,rfCount=rf&&rf.t&&rf.p?Math.min(rf.t.length,rf.p.length):0;
+      var local=ordinal-prefix[lo],time=NaN,value=NaN,isAdc=false;
+      if(local<rfCount){time=rf.t[local];value=rf.p[local];}
+      else if(block.adc&&block.adc.n>1){
+        var adc=block.adc,adcStep=Math.max(1,Math.ceil(adc.n/200)),adcSample=(local-rfCount)*adcStep;
+        var adcStart=adc.s+adc.d,adcEnd=adcStart+adc.n*adc.dw;
+        time=adcSample<adc.n?adcStart+(adcSample+.5)*adc.dw:adcEnd;
+        value=((adc.po||0)+6.283185*(adc.fo||0)*(time-adcStart))%6.28318;value=(value+6.28318)%6.28318;isAdc=true;
+      }
+      if(!isFinite(time)||!isFinite(value)||time<vs||time>ve)continue;
+      ctx.fillStyle=isAdc?colors.adc:colors.rf;
+      ctx.fillRect(t2x(time)-.5,y+ch*.45-value*scale-.5,1,1);
+    }
+  });
+}
+
+function drawGradientOverview(summary,key,vi,ci,ch,color,vs,ve){
+  var level=summary.level,minValues=level[key+'Min'],maxValues=level[key+'Max'],y=cy(vi),scale=ch*.4/channelRange(ci);
+  rowClip(vi,ch,function(){
+    ctx.strokeStyle=color;ctx.lineWidth=1;ctx.beginPath();
+    for(var i=summary.first;i<summary.last;i++){
+      if(level.t1[i]<vs||level.t0[i]>ve||minValues[i]===Infinity)continue;
+      var x=t2x(.5*(level.t0[i]+level.t1[i])),y0=y-minValues[i]*scale,y1=y-maxValues[i]*scale;
+      if(Math.abs(y1-y0)<1){y0-=.5;y1+=.5;}ctx.moveTo(x,y0);ctx.lineTo(x,y1);
+    }
+    ctx.stroke();
+  });
+}
+
+function drawAdcOverview(summary,vi,ch,colors,vs,ve){
+  var level=summary.level,y=cy(vi);
+  rowClip(vi,ch,function(){
+    ctx.fillStyle=colors.adf;ctx.strokeStyle=colors.adc;ctx.lineWidth=1;ctx.beginPath();var hasRect=false;
+    for(var i=summary.first;i<summary.last;i++){
+      if(level.adcStart[i]===Infinity||level.adcEnd[i]<vs||level.adcStart[i]>ve)continue;
+      var x0=t2x(Math.max(vs,level.adcStart[i])),x1=t2x(Math.min(ve,level.adcEnd[i]));
+      ctx.rect(x0,y-ch*.28,Math.max(1,x1-x0),ch*.56);hasRect=true;
+    }
+    if(hasRect){ctx.fill();ctx.stroke();}
+  });
 }
 
 function visibleBlockRange(vs,ve){

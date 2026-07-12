@@ -132,42 +132,27 @@ function normalizeReferenceMode(mode: M1ReferenceMode | undefined): M1ReferenceM
 }
 
 function collectGradientSeries(blocks: DecodedBlock[], channel: 'gx' | 'gy' | 'gz'): GradientSeries {
-    const time: number[] = [];
-    const value: number[] = [];
+    const series: GradientSeries = { time: [], value: [] };
     for (const block of blocks) {
         const grad = block[channel] as DecodedGradWaveform | undefined;
         if (!grad?.timePoints || !grad.waveform) continue;
         const n = Math.min(grad.timePoints.length, grad.waveform.length);
         for (let i = 0; i < n; i++) {
-            time.push(grad.timePoints[i]);
-            value.push(grad.waveform[i]);
+            appendGradientPoint(series, grad.timePoints[i], grad.waveform[i]);
         }
     }
-    return sanitizeGradientSeries(time, value);
+    return series;
 }
 
-function sanitizeGradientSeries(time: number[], value: number[]): GradientSeries {
-    const pairs: Array<[number, number]> = [];
-    const n = Math.min(time.length, value.length);
-    for (let i = 0; i < n; i++) {
-        const t = time[i];
-        const v = value[i];
-        if (Number.isFinite(t) && Number.isFinite(v)) pairs.push([t, v]);
+function appendGradientPoint(series: GradientSeries, t: number, value: number): void {
+    if (!Number.isFinite(t) || !Number.isFinite(value)) return;
+    const last = series.time.length - 1;
+    if (last >= 0 && Math.abs(t - series.time[last]) <= TIME_EPS) {
+        series.value[last] = 0.5 * (series.value[last] + value);
+    } else if (last < 0 || t > series.time[last]) {
+        series.time.push(t);
+        series.value.push(value);
     }
-    pairs.sort((a, b) => a[0] - b[0]);
-
-    const outT: number[] = [];
-    const outV: number[] = [];
-    for (const [t, v] of pairs) {
-        const last = outT.length - 1;
-        if (last >= 0 && Math.abs(t - outT[last]) <= TIME_EPS) {
-            outV[last] = 0.5 * (outV[last] + v);
-            continue;
-        }
-        outT.push(t);
-        outV.push(v);
-    }
-    return { time: outT, value: outV };
 }
 
 function collectRfEvents(blocks: DecodedBlock[], warnings: string[]): RfEvent[] {
@@ -237,6 +222,30 @@ function walkM1(
     let currentT = tReset;
     let unsignedM0 = 0;
     let unsignedM1 = 0;
+    let gradientIndex = -1;
+
+    const seekGradient = (t: number): void => {
+        while (gradientIndex + 1 < gradient.time.length
+            && gradient.time[gradientIndex + 1] <= t + TIME_EPS) {
+            gradientIndex++;
+        }
+    };
+
+    const sampleGradient = (t: number): number => {
+        const n = gradient.time.length;
+        if (n === 0 || t < gradient.time[0] - TIME_EPS || t > gradient.time[n - 1] + TIME_EPS) return 0;
+        seekGradient(t);
+        if (gradientIndex < 0) return 0;
+        if (gradientIndex >= n - 1 || Math.abs(t - gradient.time[gradientIndex]) <= TIME_EPS) {
+            return gradient.value[gradientIndex];
+        }
+        const t0 = gradient.time[gradientIndex];
+        const t1 = gradient.time[gradientIndex + 1];
+        if (!(t1 > t0)) return gradient.value[gradientIndex];
+        const alpha = (t - t0) / (t1 - t0);
+        return gradient.value[gradientIndex]
+            + alpha * (gradient.value[gradientIndex + 1] - gradient.value[gradientIndex]);
+    };
 
     const reportedM1At = (t: number): number => {
         if (referenceMode === 'observationTime') return sign * (unsignedM1 - (t - tReset) * unsignedM0);
@@ -246,10 +255,13 @@ function walkM1(
     const advanceTo = (targetT: number): void => {
         if (!(targetT > currentT + TIME_EPS)) return;
         while (currentT < targetT - TIME_EPS) {
-            let nextT = nextGradientBreakpoint(gradient.time, currentT, targetT);
+            seekGradient(currentT);
+            let nextT = gradientIndex + 1 < gradient.time.length
+                ? Math.min(targetT, gradient.time[gradientIndex + 1])
+                : targetT;
             if (!(nextT > currentT)) nextT = targetT;
-            const ga = sampleGradientAt(gradient, currentT);
-            const gb = sampleGradientAt(gradient, nextT);
+            const ga = sampleGradient(currentT);
+            const gb = sampleGradient(nextT);
             const [m0Seg, m1Seg] = integrateLinearSegment(currentT, nextT, tReset, ga, gb);
             unsignedM0 += m0Seg;
             unsignedM1 += m1Seg;
@@ -292,38 +304,6 @@ function walkM1(
         }
     }
     return { t: outT, m1: outM1 };
-}
-
-function sampleGradientAt(gradient: GradientSeries, t: number): number {
-    const n = gradient.time.length;
-    if (n <= 0 || t < gradient.time[0] || t > gradient.time[n - 1]) return 0;
-    if (n === 1 || t <= gradient.time[0]) return gradient.value[0];
-    if (t >= gradient.time[n - 1]) return gradient.value[n - 1];
-    let lo = 0;
-    let hi = n - 1;
-    while (hi - lo > 1) {
-        const mid = (lo + hi) >> 1;
-        if (gradient.time[mid] <= t) lo = mid;
-        else hi = mid;
-    }
-    const t0 = gradient.time[lo];
-    const t1 = gradient.time[hi];
-    if (!(t1 > t0)) return gradient.value[lo];
-    const alpha = (t - t0) / (t1 - t0);
-    return gradient.value[lo] + alpha * (gradient.value[hi] - gradient.value[lo]);
-}
-
-function nextGradientBreakpoint(times: number[], t: number, target: number): number {
-    if (times.length <= 1 || t >= times[times.length - 1]) return target;
-    let lo = 0;
-    let hi = times.length;
-    const threshold = t + TIME_EPS;
-    while (lo < hi) {
-        const mid = (lo + hi) >> 1;
-        if (times[mid] <= threshold) lo = mid + 1;
-        else hi = mid;
-    }
-    return lo < times.length ? Math.min(target, times[lo]) : target;
 }
 
 function integrateLinearSegment(a: number, b: number, tRef: number, ga: number, gb: number): [number, number] {

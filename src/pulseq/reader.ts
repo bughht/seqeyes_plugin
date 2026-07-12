@@ -28,25 +28,29 @@ import {
 
 /** Parse a .seq file from its text content. */
 export function parseSequenceText(text: string): PulseqSequence {
-    const lines = text.split(/\r?\n/);
     const seq = createEmptySequence();
     const seenSections = new Set<string>();
+    const shapeParser = new ShapeSectionParser(seq);
 
     let sectionName: string | null = null;
     let sectionLines: string[] = [];
 
-    for (const line of lines) {
+    forEachLine(text, line => {
         const m = line.match(/^\[(\w+)\]$/);
         if (m) {
-            if (sectionName) dispatchSection(seq, sectionName, sectionLines);
+            if (sectionName === 'SHAPES') shapeParser.finish();
+            else if (sectionName) dispatchSection(seq, sectionName, sectionLines);
             sectionName = m[1];
             seenSections.add(sectionName);
             sectionLines = [];
+        } else if (sectionName === 'SHAPES') {
+            shapeParser.consume(line);
         } else {
             sectionLines.push(line);
         }
-    }
-    if (sectionName) dispatchSection(seq, sectionName, sectionLines);
+    });
+    if (sectionName === 'SHAPES') shapeParser.finish();
+    else if (sectionName) dispatchSection(seq, sectionName, sectionLines);
 
     // Compute versionCombined AFTER parsing [VERSION]
     seq.versionCombined = makeVersionCombined(
@@ -58,9 +62,25 @@ export function parseSequenceText(text: string): PulseqSequence {
     return seq;
 }
 
+function forEachLine(text: string, visit: (line: string) => void): void {
+    let start = 0;
+    while (start <= text.length) {
+        let end = text.indexOf('\n', start);
+        if (end < 0) end = text.length;
+        const contentEnd = end > start && text.charCodeAt(end - 1) === 13 ? end - 1 : end;
+        visit(text.slice(start, contentEnd));
+        if (end === text.length) break;
+        start = end + 1;
+    }
+}
+
 // ─── Section dispatcher ───────────────────────────────────────────────────
 
 function dispatchSection(seq: PulseqSequence, name: string, lines: string[]): void {
+    if (name === 'SHAPES') {
+        parseShapes(seq, lines);
+        return;
+    }
     const valid = lines.filter(l => { const t = l.trim(); return t && !t.startsWith('#'); });
     switch (name) {
         case 'VERSION':     parseVersion(seq, valid);     break;
@@ -71,7 +91,6 @@ function dispatchSection(seq: PulseqSequence, name: string, lines: string[]): vo
         case 'TRAP':        parseTrapGrads(seq, valid);   break;
         case 'ADC':         parseADC(seq, valid);         break;
         case 'EXTENSIONS':  parseExtensions(seq, valid);  break;
-        case 'SHAPES':      parseShapes(seq, lines);      break;
         // [SIGNATURE] — intentionally ignored
     }
 }
@@ -588,53 +607,82 @@ function parseRFShimSpecs(seq: PulseqSequence, lines: string[]): void {
 // ─── Shapes ───────────────────────────────────────────────────────────────
 
 function parseShapes(seq: PulseqSequence, lines: string[]): void {
-    let i = 0;
-    while (i < lines.length) {
-        const t = lines[i].trim();
-        if (!t || t.startsWith('#') || t.startsWith('[')) { i++; continue; }
-
-        const m = t.match(/^shape_id\s+(\d+)/);
-        if (!m) { i++; continue; }
-        const shapeId = +m[1];
-        i++;
-
-        // Find num_samples
-        let numSamples = 0;
-        while (i < lines.length) {
-            const l = lines[i].trim();
-            if (!l || l.startsWith('#')) { i++; continue; }
-            const nm = l.match(/^num_samples\s+(\d+)/);
-            if (nm) { numSamples = +nm[1]; i++; break; }
-            if (l.match(/^shape_id\s+\d+/) || l.startsWith('[')) break;
-            i++;
-        }
-        if (numSamples <= 0) continue;
-
-        // Read sample values
-        const vals: number[] = [];
-        while (i < lines.length && vals.length < numSamples) {
-            const l = lines[i].trim();
-            if (l.match(/^shape_id\s+\d+/) || l.startsWith('[')) break;
-            if (!l || l.startsWith('#')) { i++; continue; }
-            for (const n of l.split(/\s+/).map(Number).filter(x => !isNaN(x))) {
-                if (vals.length < numSamples) vals.push(n);
-            }
-            i++;
-        }
-        if (vals.length === 0) continue;
-
-        storeShape(seq, shapeId, numSamples, vals);
-    }
+    const parser = new ShapeSectionParser(seq);
+    for (const line of lines) parser.consume(line);
+    parser.finish();
 }
 
-function storeShape(seq: PulseqSequence, id: number, num: number, raw: number[]): void {
-    // SeqEyes: decompress if run‑length encoded, otherwise use raw values as‑is.
-    // NO normalisation, NO clamping — amplitude shapes are already [0,1],
-    // time shapes are in grad‑raster units (can be large integers).
-    const decompressed = raw.length === num
-        ? new Float64Array(raw)
-        : decompressShape(raw, num);
-    seq.shapes.set(id, { numSamples: num, samples: decompressed });
+class ShapeSectionParser {
+    private shapeId = 0;
+    private numSamples = 0;
+    private raw = new Float64Array();
+    private rawCount = 0;
+
+    constructor(private readonly seq: PulseqSequence) { }
+
+    consume(line: string): void {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) return;
+
+        const shapeMatch = /^shape_id\s+(\d+)/.exec(trimmed);
+        if (shapeMatch) {
+            this.storeCurrent();
+            this.shapeId = Number(shapeMatch[1]);
+            return;
+        }
+
+        const countMatch = /^num_samples\s+(\d+)/.exec(trimmed);
+        if (countMatch) {
+            this.numSamples = Number(countMatch[1]);
+            this.raw = new Float64Array(Math.min(this.numSamples, 1024));
+            this.rawCount = 0;
+            return;
+        }
+        if (this.shapeId <= 0 || this.numSamples <= 0 || this.rawCount >= this.numSamples) return;
+
+        if (!/\s/.test(trimmed)) {
+            this.appendRawValue(trimmed);
+            return;
+        }
+        for (const field of trimmed.split(/\s+/)) {
+            this.appendRawValue(field);
+            if (this.rawCount >= this.numSamples) break;
+        }
+    }
+
+    finish(): void {
+        this.storeCurrent();
+    }
+
+    private ensureRawCapacity(): void {
+        if (this.rawCount < this.raw.length) return;
+        const nextLength = Math.min(this.numSamples, Math.max(1, this.raw.length * 2));
+        const expanded = new Float64Array(nextLength);
+        expanded.set(this.raw);
+        this.raw = expanded;
+    }
+
+    private appendRawValue(field: string): void {
+        const value = Number(field);
+        if (!Number.isFinite(value)) return;
+        this.ensureRawCapacity();
+        this.raw[this.rawCount++] = value;
+    }
+
+    private storeCurrent(): void {
+        if (this.shapeId > 0 && this.numSamples > 0 && this.rawCount > 0) {
+            // Uncompressed shapes reuse the preallocated buffer. Compressed shapes
+            // only expose their populated prefix to the existing decompressor.
+            const samples = this.rawCount === this.numSamples
+                ? this.raw
+                : decompressShape(this.raw.subarray(0, this.rawCount), this.numSamples);
+            this.seq.shapes.set(this.shapeId, { numSamples: this.numSamples, samples });
+        }
+        this.shapeId = 0;
+        this.numSamples = 0;
+        this.raw = new Float64Array();
+        this.rawCount = 0;
+    }
 }
 
 // ─── Raster times from definitions ────────────────────────────────────────

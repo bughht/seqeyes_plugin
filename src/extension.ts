@@ -28,8 +28,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }),
         vscode.commands.registerCommand('seqeyes.openSequenceViewer', async (uri?: vscode.Uri) => {
             if (!uri) {
-                const editor = vscode.window.activeTextEditor;
-                if (editor?.document.fileName.endsWith('.seq')) uri = editor.document.uri;
+                uri = getActiveSequenceUri();
             }
             if (uri) {
                 await vscode.commands.executeCommand('vscode.openWith', uri, 'seqeyes.sequenceViewer');
@@ -68,4 +67,21 @@ export function activate(context: vscode.ExtensionContext): void {
 /** Called when the extension is deactivated. */
 export function deactivate(): void {
     console.log('SeqEyes Plugin deactivated');
+}
+
+function getActiveSequenceUri(): vscode.Uri | undefined {
+    const editor = vscode.window.activeTextEditor;
+    if (editor?.document.fileName.endsWith('.seq')) {
+        return editor.document.uri;
+    }
+
+    const input = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+    if (input instanceof vscode.TabInputText && input.uri.path.endsWith('.seq')) {
+        return input.uri;
+    }
+    if (input instanceof vscode.TabInputCustom && input.uri.path.endsWith('.seq')) {
+        return input.uri;
+    }
+
+    return undefined;
 }

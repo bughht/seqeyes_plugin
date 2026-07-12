@@ -151,3 +151,111 @@ function forEachDerivedPoint(series,viewStart,viewEnd,maxPoints,visit){
   emitRange(Math.max(i0,lastBucket*size),i1);
   return emitted;
 }
+
+/* Block-indexed min/max summaries for RF, gradients, and ADC occupancy. */
+function createWaveformOverview(blocks){
+  if(!blocks||!blocks.length)return null;
+  var level=buildWaveformOverviewLevel(blocks,8),levels=[level];
+  while(level.count>1){level=mergeWaveformOverviewLevel(level);levels.push(level);}
+  return{levels:levels,blockCount:blocks.length,pointPrefix:createWaveformPointPrefixes(blocks)};
+}
+
+function createEmptyWaveformOverviewLevel(count,bucketSize){
+  var level={count:count,bucketSize:bucketSize,t0:new Float64Array(count),t1:new Float64Array(count),
+    rfMin:new Float64Array(count),rfMax:new Float64Array(count),gxMin:new Float64Array(count),gxMax:new Float64Array(count),
+    gyMin:new Float64Array(count),gyMax:new Float64Array(count),gzMin:new Float64Array(count),gzMax:new Float64Array(count),
+    adcStart:new Float64Array(count),adcEnd:new Float64Array(count)};
+  var mins=[level.rfMin,level.gxMin,level.gyMin,level.gzMin,level.adcStart];
+  var maxs=[level.rfMax,level.gxMax,level.gyMax,level.gzMax,level.adcEnd];
+  for(var m=0;m<mins.length;m++)mins[m].fill(Infinity);
+  for(var x=0;x<maxs.length;x++)maxs[x].fill(-Infinity);
+  return level;
+}
+
+function createWaveformPointPrefixes(blocks){
+  var keys=['rf','phase','gx','gy','gz','adc'],prefix={};
+  for(var ki=0;ki<keys.length;ki++)prefix[keys[ki]]=new Float64Array(blocks.length+1);
+  for(var i=0;i<blocks.length;i++){
+    var block=blocks[i],rf=block.rf,adc=block.adc;
+    prefix.rf[i+1]=prefix.rf[i]+(rf&&rf.t&&rf.m?Math.min(rf.t.length,rf.m.length):0);
+    var rfPhase=rf&&rf.t&&rf.p?Math.min(rf.t.length,rf.p.length):0,adcPhase=0;
+    if(adc&&adc.n>1){var step=Math.max(1,Math.ceil(adc.n/200));adcPhase=Math.floor(adc.n/step)+1;}
+    prefix.phase[i+1]=prefix.phase[i]+rfPhase+adcPhase;
+    prefix.gx[i+1]=prefix.gx[i]+overviewGradientPointCount(block.gx);
+    prefix.gy[i+1]=prefix.gy[i]+overviewGradientPointCount(block.gy);
+    prefix.gz[i+1]=prefix.gz[i]+overviewGradientPointCount(block.gz);
+    prefix.adc[i+1]=prefix.adc[i]+(adc?1:0);
+  }
+  return prefix;
+}
+
+function overviewGradientPointCount(gradient){
+  return gradient&&gradient.ty!=='none'&&gradient.t&&gradient.w?Math.min(gradient.t.length,gradient.w.length):0;
+}
+
+function includeOverviewValues(values,minArray,maxArray,bucket){
+  if(!values)return;
+  for(var i=0;i<values.length;i++){
+    var value=values[i];if(!isFinite(value))continue;
+    if(value<minArray[bucket])minArray[bucket]=value;
+    if(value>maxArray[bucket])maxArray[bucket]=value;
+  }
+}
+
+function buildWaveformOverviewLevel(blocks,bucketSize){
+  var count=Math.ceil(blocks.length/bucketSize),level=createEmptyWaveformOverviewLevel(count,bucketSize);
+  for(var bucket=0;bucket<count;bucket++){
+    var start=bucket*bucketSize,end=Math.min(blocks.length,start+bucketSize);
+    level.t0[bucket]=blocks[start].s;level.t1[bucket]=blocks[end-1].s+blocks[end-1].d;
+    for(var bi=start;bi<end;bi++){
+      var block=blocks[bi],rf=block.rf;
+      if(rf){
+        includeOverviewValues(rf.m,level.rfMin,level.rfMax,bucket);if(level.rfMin[bucket]===Infinity)includeOverviewValues([rf.a||0],level.rfMin,level.rfMax,bucket);
+      }
+      var gx=block.gx,gy=block.gy,gz=block.gz;
+      if(gx&&gx.ty!=='none')includeOverviewValues(gx.w,level.gxMin,level.gxMax,bucket);
+      if(gy&&gy.ty!=='none')includeOverviewValues(gy.w,level.gyMin,level.gyMax,bucket);
+      if(gz&&gz.ty!=='none')includeOverviewValues(gz.w,level.gzMin,level.gzMax,bucket);
+      if(block.adc){
+        var adcStart=block.adc.s+block.adc.d,adcEnd=adcStart+block.adc.n*block.adc.dw;
+        if(adcStart<level.adcStart[bucket])level.adcStart[bucket]=adcStart;
+        if(adcEnd>level.adcEnd[bucket])level.adcEnd[bucket]=adcEnd;
+      }
+    }
+  }
+  return level;
+}
+
+function mergeWaveformOverviewLevel(child){
+  var count=Math.ceil(child.count/4),level=createEmptyWaveformOverviewLevel(count,child.bucketSize*4);
+  var channels=[['rfMin','rfMax'],['gxMin','gxMax'],['gyMin','gyMax'],['gzMin','gzMax'],['adcStart','adcEnd']];
+  for(var bucket=0;bucket<count;bucket++){
+    var start=bucket*4,end=Math.min(child.count,start+4);
+    level.t0[bucket]=child.t0[start];level.t1[bucket]=child.t1[end-1];
+    for(var ci=0;ci<channels.length;ci++){
+      var minKey=channels[ci][0],maxKey=channels[ci][1];
+      for(var i=start;i<end;i++){
+        if(child[minKey][i]<level[minKey][bucket])level[minKey][bucket]=child[minKey][i];
+        if(child[maxKey][i]>level[maxKey][bucket])level[maxKey][bucket]=child[maxKey][i];
+      }
+    }
+  }
+  return level;
+}
+
+function waveformVisiblePointCount(overview,key,startBlock,endBlock){
+  if(!overview||!overview.pointPrefix||!overview.pointPrefix[key])return 0;
+  var prefix=overview.pointPrefix[key],start=Math.max(0,Math.min(startBlock,prefix.length-1)),end=Math.max(start,Math.min(endBlock,prefix.length-1));
+  return prefix[end]-prefix[start];
+}
+
+function selectWaveformOverview(overview,startBlock,endBlock,maxBuckets){
+  if(!overview||endBlock<=startBlock)return null;
+  var selected=overview.levels[overview.levels.length-1];
+  for(var i=0;i<overview.levels.length;i++){
+    var candidate=overview.levels[i];
+    var count=Math.ceil(endBlock/candidate.bucketSize)-Math.floor(startBlock/candidate.bucketSize);
+    if(count<=maxBuckets){selected=candidate;break;}
+  }
+  return{level:selected,first:Math.floor(startBlock/selected.bucketSize),last:Math.min(selected.count,Math.ceil(endBlock/selected.bucketSize))};
+}
