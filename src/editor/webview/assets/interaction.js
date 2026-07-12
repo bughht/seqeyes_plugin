@@ -2,7 +2,7 @@
    Mouse interaction
    ═══════════════════════════════════════════════════════════════════════ */
 
-var _touchTooltipTimer=null,_pointerFrame=0,_pendingPointer=null;
+var _touchTooltipTimer=null,_pointerFrame=0,_pendingPointer=null,mmDrag=false;
 
 mc.addEventListener('wheel',function(e){e.preventDefault();
   var changed=false;
@@ -137,7 +137,7 @@ function placeTooltip(cx,cy){
 function showTooltipAt(cx,cy,ct){
   var ch=cH(),vc=visChannels(),vi2=Math.floor((cy-mc.getBoundingClientRect().top-M.t)/ch);
   if(vi2>=0&&vi2<vc.length){
-    var found=null;for(var i=0;i<BL.length;i++){if(ct>=BL[i].s&&ct<=BL[i].s+BL[i].d){found=BL[i];break}}
+    var found=findBlockAtTime(ct);
     var lines=[];
     if(found){
       var blockDt=Math.max(0,Math.min(found.d,ct-found.s));
@@ -162,6 +162,15 @@ function showTooltipAt(cx,cy,ct){
     }
   }
   tt.style.display='none';
+}
+
+function findBlockAtTime(t){
+  var lo=0,hi=BL.length;
+  while(lo<hi){var mid=(lo+hi)>>1;if(BL[mid].s+BL[mid].d<t)lo=mid+1;else hi=mid;}
+  for(var i=lo;i<Math.min(BL.length,lo+2);i++){
+    if(t>=BL[i].s&&t<=BL[i].s+BL[i].d)return BL[i];
+  }
+  return null;
 }
 
 /* ── Toolbar buttons ──────────────────────────────────────────────────── */

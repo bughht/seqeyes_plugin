@@ -1,5 +1,5 @@
 /**
- * Custom Text Editor Provider for Pulseq .seq files.
+ * Custom readonly editor provider for Pulseq .seq files.
  *
  * Registered as `seqeyes.sequenceViewer` — opens automatically when the user
  * opens a `.seq` file.  The provider:
@@ -84,9 +84,17 @@ export async function exportKspaceToDirectoryForTest(
     return await writeKspaceArtifacts(sourceUri, saveUri, packageVersion, defaultStem);
 }
 
+class SeqDocument implements vscode.CustomDocument {
+    constructor(public readonly uri: vscode.Uri) { }
+
+    dispose(): void {
+        // This viewer is read-only and does not hold native resources.
+    }
+}
+
 // ─── Provider class ───────────────────────────────────────────────────────
 
-export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
+export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<SeqDocument> {
 
     /** Register the provider with VS Code. */
     static register(ctx: vscode.ExtensionContext): vscode.Disposable {
@@ -98,10 +106,18 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
 
     constructor(private readonly _ctx: vscode.ExtensionContext) { }
 
-    // ── resolveCustomTextEditor ──────────────────────────────────────
+    openCustomDocument(
+        uri: vscode.Uri,
+        _openContext: vscode.CustomDocumentOpenContext,
+        _token: vscode.CancellationToken,
+    ): SeqDocument {
+        return new SeqDocument(uri);
+    }
 
-    async resolveCustomTextEditor(
-        doc: vscode.TextDocument,
+    // ── resolveCustomEditor ──────────────────────────────────────────
+
+    async resolveCustomEditor(
+        doc: SeqDocument,
         panel: vscode.WebviewPanel,
         _token: vscode.CancellationToken,
     ): Promise<void> {
@@ -123,10 +139,9 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
                 };
 
                 postProgress('start', 0, 'Reading file\u2026');
-                const text = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
-
-                postProgress('parse', 5, 'Parsing Pulseq sequence\u2026');
-                const seq = parseSequenceText(text);
+                const seq = await readAndParseSequence(uri, () => {
+                    postProgress('parse', 5, 'Parsing Pulseq sequence\u2026');
+                });
 
                 postProgress('timing', 10, 'Detecting TR/TE timing\u2026');
                 const timing = detectSequenceTiming(seq);
@@ -218,9 +233,8 @@ export class SeqEditorProvider implements vscode.CustomTextEditorProvider {
             }
         };
 
-        // ── Initial load: validate, set full UI, show progress, then send data ──
+        // ── Initial load: set full UI, show progress, then send data ──
         try {
-            parseSequenceText(Buffer.from(await vscode.workspace.fs.readFile(doc.uri)).toString('utf8'));
             panel.webview.html = getWebviewContent(0);
             // Give the webview a moment to parse its new HTML, then start progress
             panel.webview.postMessage({ type: 'progress', phase: 'start', percent: 0, text: 'Preparing\u2026' });
@@ -489,6 +503,13 @@ function serializeBlocks(blocks: DecodedBlock[]): object[] {
         }
         return o;
     });
+}
+
+async function readAndParseSequence(uri: vscode.Uri, didRead: () => void) {
+    const fileBytes = await vscode.workspace.fs.readFile(uri);
+    didRead();
+    const text = Buffer.from(fileBytes.buffer, fileBytes.byteOffset, fileBytes.byteLength).toString('utf8');
+    return parseSequenceText(text);
 }
 
 function serializeGrad(g: DecodedGradWaveform): Record<string, unknown> {

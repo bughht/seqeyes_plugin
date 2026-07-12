@@ -7,7 +7,7 @@ var cc=document.getElementById('cc'),mc=document.getElementById('mc'),ctx=mc.get
  tuSel=document.getElementById('tu'),guSel=document.getElementById('gu');
 var exportBtn=document.getElementById('exportKspaceBtn');
 var pnsBtn=document.getElementById('pnsBtn');
-var BL=[],TD=0,GR=1e-5,RR=1e-6,AR=1e-7,BR=1e-5; // blocks, duration, rasters [s]
+var BL=[],waveformOverview=null,TD=0,GR=1e-5,RR=1e-6,AR=1e-7,BR=1e-5; // blocks, duration, rasters [s]
 var M={t:8,r:30,b:22,l:92};                // margins
 var CH=['RF','\u03c6','Gx','Gy','Gz','ADC','Trig','PNS','M1x','M1y','M1z'];
 var chColors=['var(--rf)','var(--rf)','var(--gx)','var(--gy)','var(--gz)','var(--adc)','var(--tr)','var(--fg)','var(--gx)','var(--gy)','var(--gz)'];
@@ -206,6 +206,7 @@ window.addEventListener('message',function(e){
   }
   if(m.type==='sequenceData'){
     BL=m.blocks||[];TD=m.totalDuration||0;GR=m.gradRaster||1e-5;
+    waveformOverview=createWaveformOverview(BL);
     RR=m.rfRaster||RR;AR=m.adcRaster||AR;BR=m.blockRaster||BR;
     blockPos=m.blockPositions||[];
     mmCache=null;  // invalidate minimap cache on new data
@@ -488,7 +489,8 @@ function drawMinimap(){
     mmCtx.strokeStyle=s.getPropertyValue('--fg').trim();
     mmCtx.globalAlpha=0.10;mmCtx.lineWidth=0.4;
     mmCtx.beginPath();
-    for(var tr=0;tr<=seqTiming.trCount;tr++){
+    var trStep=Math.max(1,Math.ceil(seqTiming.trCount/Math.max(1,W)));
+    for(var tr=0;tr<=seqTiming.trCount;tr+=trStep){
       var tx=tr*seqTiming.trTimeSec*scM;
       if(tx<=W){mmCtx.moveTo(tx,0);mmCtx.lineTo(tx,H);}
     }

@@ -130,18 +130,6 @@ export function calculatePns(
     const nSamples = Math.floor(ntMax - ntMin + 1.0);
     if (nSamples < 2) return invalidPns('Too few samples for PNS computation.');
 
-    const tAxis = new Float64Array(nSamples);
-    const gxTpm = new Float64Array(nSamples);
-    const gyTpm = new Float64Array(nSamples);
-    const gzTpm = new Float64Array(nSamples);
-    for (let i = 0; i < nSamples; i++) {
-        const tSec = (ntMin + i) * dtSec;
-        tAxis[i] = tSec;
-        gxTpm[i] = interpLinearZero(waves[0], tSec) / gammaHzPerT;
-        gyTpm[i] = interpLinearZero(waves[1], tSec) / gammaHzPerT;
-        gzTpm[i] = interpLinearZero(waves[2], tSec) / gammaHzPerT;
-    }
-
     const longestTauMs = Math.max(
         hardware.x.tau1Ms, hardware.x.tau2Ms, hardware.x.tau3Ms,
         hardware.y.tau1Ms, hardware.y.tau2Ms, hardware.y.tau3Ms,
@@ -151,13 +139,9 @@ export function calculatePns(
     const preCount = Math.max(0, Math.round(zptSec / (4.0 * dtSec)));
     const postCount = Math.max(0, Math.round(zptSec / dtSec));
 
-    const gxPadded = padSamples(gxTpm, preCount, postCount);
-    const gyPadded = padSamples(gyTpm, preCount, postCount);
-    const gzPadded = padSamples(gzTpm, preCount, postCount);
-
-    const stimX = safePnsModel(diff(gxPadded, dtSec), dtSec, hardware.x);
-    const stimY = safePnsModel(diff(gyPadded, dtSec), dtSec, hardware.y);
-    const stimZ = safePnsModel(diff(gzPadded, dtSec), dtSec, hardware.z);
+    const stimX = calculatePnsAxis(waves[0], ntMin, nSamples, preCount, postCount, dtSec, gammaHzPerT, hardware.x);
+    const stimY = calculatePnsAxis(waves[1], ntMin, nSamples, preCount, postCount, dtSec, gammaHzPerT, hardware.y);
+    const stimZ = calculatePnsAxis(waves[2], ntMin, nSamples, preCount, postCount, dtSec, gammaHzPerT, hardware.z);
 
     const hasAnyNonTrap = blocks.some(block => (
         block.gx?.type === 'arb' || block.gy?.type === 'arb' || block.gz?.type === 'arb'
@@ -165,61 +149,81 @@ export function calculatePns(
     const hasAnyLabelExt = blocks.some(block => !!(block.labelSets?.length || block.labelIncs?.length));
     const shift = hasAnyNonTrap || hasAnyLabelExt ? 1 : 0;
 
-    const selectedX: number[] = [];
-    const selectedY: number[] = [];
-    const selectedZ: number[] = [];
-    const selectedT: number[] = [];
+    let selectedCount = 0;
     for (let origIdx = 0; origIdx < nSamples; origIdx++) {
         const paddedIdx = preCount + origIdx;
         let stimIdx = paddedIdx - shift;
-        if (shift > 0 && hasAnyLabelExt && origIdx === tAxis.length - 1) {
+        if (shift > 0 && hasAnyLabelExt && origIdx === nSamples - 1) {
             stimIdx = Math.min(paddedIdx, stimX.length - 1);
         }
         if (stimIdx < 0 || stimIdx >= stimX.length || stimIdx >= stimY.length || stimIdx >= stimZ.length) continue;
-        selectedX.push(stimX[stimIdx]);
-        selectedY.push(stimY[stimIdx]);
-        selectedZ.push(stimZ[stimIdx]);
-        selectedT.push(tAxis[origIdx]);
+        selectedCount++;
     }
 
-    const timeSec = new Float64Array(selectedX.length);
-    const pnsX = new Float64Array(selectedX.length);
-    const pnsY = new Float64Array(selectedX.length);
-    const pnsZ = new Float64Array(selectedX.length);
-    const pnsNorm = new Float64Array(selectedX.length);
+    const timeSec = new Float64Array(selectedCount);
+    const pnsX = new Float64Array(selectedCount);
+    const pnsY = new Float64Array(selectedCount);
+    const pnsZ = new Float64Array(selectedCount);
+    const pnsNorm = new Float64Array(selectedCount);
     let ok = true;
-    for (let i = 0; i < selectedX.length; i++) {
-        const xNorm = 0.01 * selectedX[i];
-        const yNorm = 0.01 * selectedY[i];
-        const zNorm = 0.01 * selectedZ[i];
+    let selectedIndex = 0;
+    for (let origIdx = 0; origIdx < nSamples; origIdx++) {
+        const paddedIdx = preCount + origIdx;
+        let stimIdx = paddedIdx - shift;
+        if (shift > 0 && hasAnyLabelExt && origIdx === nSamples - 1) {
+            stimIdx = Math.min(paddedIdx, stimX.length - 1);
+        }
+        if (stimIdx < 0 || stimIdx >= stimX.length || stimIdx >= stimY.length || stimIdx >= stimZ.length) continue;
+        const xNorm = 0.01 * stimX[stimIdx];
+        const yNorm = 0.01 * stimY[stimIdx];
+        const zNorm = 0.01 * stimZ[stimIdx];
         const norm = Math.sqrt(xNorm * xNorm + yNorm * yNorm + zNorm * zNorm);
-        timeSec[i] = selectedT[i];
-        pnsX[i] = xNorm;
-        pnsY[i] = yNorm;
-        pnsZ[i] = zNorm;
-        pnsNorm[i] = norm;
+        timeSec[selectedIndex] = (ntMin + origIdx) * dtSec;
+        pnsX[selectedIndex] = xNorm;
+        pnsY[selectedIndex] = yNorm;
+        pnsZ[selectedIndex] = zNorm;
+        pnsNorm[selectedIndex] = norm;
         if (norm >= 1.0) ok = false;
+        selectedIndex++;
     }
 
     return { valid: true, ok, timeSec, pnsX, pnsY, pnsZ, pnsNorm };
 }
 
 export function safePnsModel(dgdt: Float64Array, dtSec: number, hw: PnsAxisHardware): Float64Array {
-    const absDgdt = new Float64Array(dgdt.length);
-    for (let i = 0; i < dgdt.length; i++) absDgdt[i] = Math.abs(dgdt[i]);
+    return runPnsModel(dgdt.length, index => dgdt[index], dtSec, hw);
+}
+
+function runPnsModel(
+    length: number,
+    derivativeAt: (index: number) => number,
+    dtSec: number,
+    hw: PnsAxisHardware,
+): Float64Array {
     const dtMs = dtSec * 1000.0;
-    const lp1 = lowpassTau(dgdt, hw.tau1Ms, dtMs);
-    const lp2 = lowpassTau(absDgdt, hw.tau2Ms, dtMs);
-    const lp3 = lowpassTau(dgdt, hw.tau3Ms, dtMs);
-    const stim = new Float64Array(dgdt.length);
+    const alpha1 = lowpassAlpha(hw.tau1Ms, dtMs);
+    const alpha2 = lowpassAlpha(hw.tau2Ms, dtMs);
+    const alpha3 = lowpassAlpha(hw.tau3Ms, dtMs);
+    const stim = new Float64Array(length);
     const denom = hw.stimLimit > 0 ? hw.stimLimit : 1;
-    for (let i = 0; i < dgdt.length; i++) {
-        const s1 = hw.a1 * Math.abs(lp1[i]);
-        const s2 = hw.a2 * lp2[i];
-        const s3 = hw.a3 * Math.abs(lp3[i]);
+    let lp1 = 0;
+    let lp2 = 0;
+    let lp3 = 0;
+    for (let i = 0; i < length; i++) {
+        const derivative = derivativeAt(i);
+        lp1 = alpha1 * derivative + (1.0 - alpha1) * lp1;
+        lp2 = alpha2 * Math.abs(derivative) + (1.0 - alpha2) * lp2;
+        lp3 = alpha3 * derivative + (1.0 - alpha3) * lp3;
+        const s1 = hw.a1 * Math.abs(lp1);
+        const s2 = hw.a2 * lp2;
+        const s3 = hw.a3 * Math.abs(lp3);
         stim[i] = ((s1 + s2 + s3) / denom) * hw.gScale * 100.0;
     }
     return stim;
+}
+
+function lowpassAlpha(tauMs: number, dtMs: number): number {
+    return tauMs <= 0 || dtMs <= 0 ? 1 : dtMs / (tauMs + dtMs);
 }
 
 function invalidPns(error: string): PnsResult {
@@ -341,82 +345,69 @@ function hasValidWeights(hw: PnsAxisHardware): boolean {
     return Math.abs(hw.a1 + hw.a2 + hw.a3 - 1.0) <= 1e-2 && hw.stimLimit > 0;
 }
 
-function lowpassTau(input: Float64Array, tauMs: number, dtMs: number): Float64Array {
-    const out = new Float64Array(input.length);
-    if (!input.length) return out;
-    if (tauMs <= 0 || dtMs <= 0) {
-        out.set(input);
-        return out;
-    }
-    const alpha = dtMs / (tauMs + dtMs);
-    out[0] = alpha * input[0];
-    for (let i = 1; i < input.length; i++) out[i] = alpha * input[i] + (1.0 - alpha) * out[i - 1];
-    return out;
-}
-
 function collectGradientSeries(blocks: DecodedBlock[], channel: 'gx' | 'gy' | 'gz'): GradientSeries {
-    const time: number[] = [];
-    const value: number[] = [];
+    const series: GradientSeries = { time: [], value: [] };
     for (const block of blocks) {
         const grad = block[channel] as DecodedGradWaveform | undefined;
         if (!grad?.timePoints || !grad.waveform) continue;
         const n = Math.min(grad.timePoints.length, grad.waveform.length);
         for (let i = 0; i < n; i++) {
-            time.push(grad.timePoints[i]);
-            value.push(grad.waveform[i]);
+            appendGradientPoint(series, grad.timePoints[i], grad.waveform[i]);
         }
     }
-    return sanitizeGradientSeries(time, value);
+    return series;
 }
 
-function sanitizeGradientSeries(time: number[], value: number[]): GradientSeries {
-    const pairs: Array<[number, number]> = [];
-    const n = Math.min(time.length, value.length);
-    for (let i = 0; i < n; i++) {
-        if (Number.isFinite(time[i]) && Number.isFinite(value[i])) pairs.push([time[i], value[i]]);
+function appendGradientPoint(series: GradientSeries, t: number, value: number): void {
+    if (!Number.isFinite(t) || !Number.isFinite(value)) return;
+    const last = series.time.length - 1;
+    if (last >= 0 && Math.abs(t - series.time[last]) <= TIME_EPS) {
+        series.value[last] = 0.5 * (series.value[last] + value);
+    } else if (last < 0 || t > series.time[last]) {
+        series.time.push(t);
+        series.value.push(value);
     }
-    pairs.sort((a, b) => a[0] - b[0]);
-    const outT: number[] = [];
-    const outV: number[] = [];
-    for (const [t, v] of pairs) {
-        const last = outT.length - 1;
-        if (last >= 0 && Math.abs(t - outT[last]) <= TIME_EPS) {
-            outV[last] = 0.5 * (outV[last] + v);
-            continue;
-        }
-        outT.push(t);
-        outV.push(v);
-    }
-    return { time: outT, value: outV };
 }
 
-function interpLinearZero(series: GradientSeries, t: number): number {
-    const n = series.time.length;
-    if (!n || t < series.time[0] || t > series.time[n - 1]) return 0;
-    if (n === 1 || t <= series.time[0]) return series.value[0];
-    if (t >= series.time[n - 1]) return series.value[n - 1];
-    let lo = 0;
-    let hi = n - 1;
-    while (hi - lo > 1) {
-        const mid = (lo + hi) >> 1;
-        if (series.time[mid] <= t) lo = mid;
-        else hi = mid;
-    }
-    const t0 = series.time[lo];
-    const t1 = series.time[hi];
-    if (!(t1 > t0)) return series.value[lo];
-    const alpha = (t - t0) / (t1 - t0);
-    return series.value[lo] + alpha * (series.value[hi] - series.value[lo]);
+function calculatePnsAxis(
+    series: GradientSeries,
+    ntMin: number,
+    nSamples: number,
+    preCount: number,
+    postCount: number,
+    dtSec: number,
+    gammaHzPerT: number,
+    hardware: PnsAxisHardware,
+): Float64Array {
+    const sampleGradient = createGradientSampler(series);
+    const totalSamples = preCount + nSamples + postCount;
+    const paddedValue = (index: number): number => {
+        if (index < preCount || index >= preCount + nSamples) return 0;
+        const rasterIndex = index - preCount;
+        return sampleGradient((ntMin + rasterIndex) * dtSec) / gammaHzPerT;
+    };
+
+    let previous = paddedValue(0);
+    return runPnsModel(Math.max(0, totalSamples - 1), index => {
+        const current = paddedValue(index + 1);
+        const derivative = (current - previous) / dtSec;
+        previous = current;
+        return derivative;
+    }, dtSec, hardware);
 }
 
-function padSamples(input: Float64Array, preCount: number, postCount: number): Float64Array {
-    const out = new Float64Array(preCount + input.length + postCount);
-    out.set(input, preCount);
-    return out;
-}
-
-function diff(input: Float64Array, dtSec: number): Float64Array {
-    const out = new Float64Array(Math.max(0, input.length - 1));
-    for (let i = 0; i < out.length; i++) out[i] = (input[i + 1] - input[i]) / dtSec;
-    return out;
+function createGradientSampler(series: GradientSeries): (t: number) => number {
+    let index = -1;
+    return (t: number): number => {
+        const n = series.time.length;
+        if (n === 0 || t < series.time[0] || t > series.time[n - 1]) return 0;
+        while (index + 1 < n && series.time[index + 1] <= t + TIME_EPS) index++;
+        if (index < 0) return 0;
+        if (index >= n - 1 || t <= series.time[index] + TIME_EPS) return series.value[index];
+        const t0 = series.time[index];
+        const t1 = series.time[index + 1];
+        if (!(t1 > t0)) return series.value[index];
+        const alpha = (t - t0) / (t1 - t0);
+        return series.value[index] + alpha * (series.value[index + 1] - series.value[index]);
+    };
 }
