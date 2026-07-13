@@ -56,13 +56,25 @@ Or press **F5** to launch Extension Development Host.
 
 Open in-memory Pulseq sequences or `.seq` files directly inside MATLAB — call `seqeyes(seq)`, double-click in the Current Folder browser, or open an empty viewer with `seqeyes()`.
 
-### Install
+### Setup
 
-Download `seqeyes-*.mltbx` from [GitHub Releases](https://github.com/bughht/seqeyes_plugin/releases) and double‑click to install, or run:
+Choose one of these two MATLAB setup paths.
+
+**Option 1: Install the toolbox.** Download `seqeyes-*.mltbx` from [GitHub Releases](https://github.com/bughht/seqeyes_plugin/releases) and double-click to install, or run:
 
 ```matlab
 matlab.addons.toolbox.installToolbox('seqeyes-<version>.mltbx')
 ```
+
+The installed toolbox is self-contained for MATLAB: it includes `seqeyes.m` and the bundled web viewer assets, so you do not need to keep a GitHub checkout after installing it.
+
+**Option 2: Use the source checkout.** Clone or download this repository, then add its `matlab` folder to the MATLAB path:
+
+```matlab
+addpath(genpath('/path/to/seqeyes_plugin/matlab'))
+```
+
+This source setup does not require installing the `.mltbx`; `seqeyes(seq)` uses the web assets from the checkout.
 
 ### Usage
 
@@ -113,6 +125,7 @@ All the same features as the other versions — interactive waveforms, k‑space
 
 - **Custom editor for `.seq` files** — opens automatically on double‑click
 - **📂 Open button** — switch between sequences without closing the editor
+- **Browser URL import** — open raw `.seq` files from web links in the standalone web app
 - **7 primary channels**: RF · φ · Gx · Gy · Gz · ADC · Trigger
 - **Optional M1 channels**: calculate M1x, M1y, and M1z on demand
 - **Optional SAFE PNS prediction**: load a user-provided Siemens ASC profile to display PNS X/Y/Z/Norm
@@ -134,6 +147,7 @@ All the same features as the other versions — interactive waveforms, k‑space
 |--------|-----|
 | Open a `.seq` file | Double‑click in Explorer, or click **📂 Open** in toolbar |
 | Switch to another sequence | **📂 Open** button (top‑left) |
+| Open a browser web link | In the standalone web app, click **🌐 URL** and paste a `.seq` link |
 | Zoom waveform | Scroll wheel or toolbar `+` / `−` |
 | Zoom waveform y‑axis | `Ctrl` + scroll wheel over a waveform row |
 | Fine wheel zoom | Hold `Alt` while scrolling; `Ctrl` + `Alt` + scroll gives finer y‑axis zoom where supported by the browser/OS |

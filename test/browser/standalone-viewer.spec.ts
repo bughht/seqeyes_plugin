@@ -169,6 +169,84 @@ test('downloads ktraj_adc text and matching metadata from the web export button'
   }
 });
 
+test('loads a sequence from a web URL and converts GitHub blob links to raw files', async ({ page }) => {
+  const sequenceText = readFileSync(fixtures.gre, 'utf8');
+  const fetchedUrls: string[] = [];
+  await page.route('https://raw.githubusercontent.com/bughht/seqeyes_plugin/main/test/seqeyes_demo_seq_files/writeEpi.seq', async (route) => {
+    fetchedUrls.push(route.request().url());
+    await route.fulfill({
+      status: 200,
+      headers: {
+        'access-control-allow-origin': '*',
+        'content-length': String(Buffer.byteLength(sequenceText)),
+        'content-type': 'text/plain; charset=utf-8',
+      },
+      body: sequenceText,
+    });
+  });
+
+  await page.goto('/?debug=1');
+  await expect(page.locator('#splashOpen')).toContainText('Open .seq file');
+  await expect(page.locator('#dropZone')).toHaveText('Or drag & drop a .seq file here');
+  await expect(page.locator('#splashOpenUrl')).toBeVisible();
+
+  await openSequenceFromUrl(page, 'https://github.com/bughht/seqeyes_plugin/blob/main/test/seqeyes_demo_seq_files/writeEpi.seq');
+
+  await expect(page.locator('#exportKspaceBtn')).toBeEnabled({ timeout: 60_000 });
+  await expect(page.locator('#splash')).toBeHidden({ timeout: 10_000 });
+  await expect(page.locator('#openUrlBtn')).toBeVisible();
+  await expect.poll(async () => (await debugState(page)).blocks, { timeout: 20_000 }).toBeGreaterThan(0);
+  expect(fetchedUrls).toEqual(['https://raw.githubusercontent.com/bughht/seqeyes_plugin/main/test/seqeyes_demo_seq_files/writeEpi.seq']);
+});
+
+test('rejects non-seq web URLs before fetching', async ({ page }) => {
+  let fetchAttempts = 0;
+  await page.route('https://example.com/**', async (route) => {
+    fetchAttempts++;
+    await route.fulfill({ status: 200, body: 'unexpected' });
+  });
+
+  await page.goto('/?debug=1');
+  await openSequenceFromUrl(page, 'https://example.com/not-a-sequence.txt');
+
+  await expect(page.locator('#urlStatus')).toContainText('must end with .seq');
+  await expect(page.locator('#splash')).toBeVisible();
+  expect(fetchAttempts).toBe(0);
+});
+
+test('rejects HTML and binary-looking responses from seq URLs', async ({ page }) => {
+  await page.route('https://example.com/html.seq', async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: {
+        'access-control-allow-origin': '*',
+        'content-type': 'text/html; charset=utf-8',
+      },
+      body: '<!doctype html><html><body>not raw seq</body></html>',
+    });
+  });
+  await page.route('https://example.com/binary.seq', async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: {
+        'access-control-allow-origin': '*',
+        'content-type': 'application/octet-stream',
+      },
+      body: Buffer.from([0, 1, 2, 3]),
+    });
+  });
+
+  await page.goto('/?debug=1');
+  await openSequenceFromUrl(page, 'https://example.com/html.seq');
+  await expect(page.locator('#urlStatus')).toContainText('HTML');
+  await expect(page.locator('#exportKspaceBtn')).toBeDisabled();
+
+  await page.locator('#urlInput').fill('https://example.com/binary.seq');
+  await page.locator('#urlLoad').click();
+  await expect(page.locator('#urlStatus')).toContainText('binary');
+  await expect(page.locator('#exportKspaceBtn')).toBeDisabled();
+});
+
 test('reloads sequence state without leaking previous viewer data', async ({ page }) => {
   await loadViewer(page, fixtures.spiral);
   const coldSpiral = stableState(await debugState(page));
@@ -267,12 +345,23 @@ async function openSequence(page: Page, sequencePath: string): Promise<void> {
   await expect.poll(async () => (await debugState(page)).blocks, { timeout: 20_000 }).toBeGreaterThan(0);
 }
 
+async function openSequenceFromUrl(page: Page, url: string): Promise<void> {
+  await page.locator('#splashOpenUrl').click();
+  await expect(page.locator('#urlOverlay')).toBeVisible();
+  await page.locator('#urlInput').fill(url);
+  await page.locator('#urlLoad').click();
+}
+
 async function openKspace(page: Page): Promise<void> {
   const right = page.locator('#right');
   const state = await debugState(page);
   if (!state.kOpen) await page.locator('#kbtn').click();
   await expect(right).toHaveClass(/open/);
   await expect.poll(async () => (await debugState(page)).kOpen).toBe(true);
+  await expect.poll(async () => {
+    const box = await page.locator('#kc').boundingBox();
+    return box ? Math.min(box.width, box.height) : 0;
+  }, { timeout: 10_000 }).toBeGreaterThan(100);
 }
 
 async function debugState(page: Page): Promise<DebugState> {
