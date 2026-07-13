@@ -50,10 +50,23 @@ canvas{display:block}
 #splash{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:var(--bg);z-index:200;flex-direction:column;gap:16px}
 #splash h1{font-size:28px;color:var(--fg);letter-spacing:1px}
 #splash p{color:var(--lb);font-size:14px}
+#splash .actions{display:flex;gap:10px;align-items:center;justify-content:center;flex-wrap:wrap}
 #splash button{padding:10px 24px;background:var(--adc);color:#fff;border:none;border-radius:6px;font-size:15px;cursor:pointer;transition:opacity .2s}
 #splash button:hover{opacity:.85}
 #splash .drop{width:300px;height:100px;border:2px dashed var(--gr);border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--lb);transition:border-color .2s,background .2s}
 #splash .drop.dragover{border-color:var(--adc);background:var(--adf)}
+.web-url-only{display:none}
+#urlOverlay{position:fixed;inset:0;background:rgba(0,0,0,.40);z-index:520;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px)}
+#urlCard{background:var(--bg);border:1px solid var(--gr);border-radius:8px;padding:18px 20px;width:min(520px,calc(100vw - 32px));box-shadow:0 8px 32px rgba(0,0,0,.22)}
+#urlCard label{display:block;color:var(--fg);font-size:12px;margin-bottom:8px}
+#urlInput{width:100%;background:var(--trbg);border:1px solid var(--gr);color:var(--fg);border-radius:5px;padding:9px 10px;font:12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;outline:none}
+#urlInput:focus{border-color:var(--adc)}
+#urlActions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
+#urlActions button{background:var(--gr);border:1px solid var(--ax);color:var(--fg);padding:6px 12px;border-radius:4px;cursor:pointer;font-size:12px}
+#urlActions #urlLoad{background:var(--adc);border-color:var(--adc);color:#fff}
+#urlActions button:disabled{opacity:.45;cursor:not-allowed}
+#urlStatus{min-height:16px;margin-top:9px;color:var(--lb);font-size:11px;line-height:1.35}
+#urlStatus.err{color:var(--cr)}
 /* Minimap */
 #mmap{height:22px;border-bottom:1px solid var(--gr);background:var(--trbg);flex-shrink:0;cursor:pointer;position:relative}
 #mmap canvas{display:block;width:100%;height:100%}
@@ -75,11 +88,19 @@ canvas{display:block}
   <img src="logo.svg" alt="SeqEyes-Online" style="width:200px;height:200px;border-radius:12px;box-shadow:0 4px 16px rgba(0,0,0,.15)">
   <h1>SeqEyes</h1>
   <p>Pulseq MRI Sequence Viewer</p>
-  <button id="splashOpen">Open .seq File</button>
-  <div class="drop" id="dropZone">Or drag &amp; drop a <code>.seq</code> file here</div>
+  <div class="actions"><button id="splashOpen">📂 Open .seq file</button><button id="splashOpenUrl" class="web-url-only">Open from web</button></div>
+  <div class="drop" id="dropZone">Or drag &amp; drop a .seq file here</div>
   <p style="font-size:11px;color:var(--lb);margin-top:8px">
     Try with example files from <a href="https://github.com/pulseq/pulseq" target="_blank" style="color:var(--adc)">pulseq/pulseq</a>
   </p>
+</div>
+<div id="urlOverlay" style="display:none" aria-hidden="true">
+  <div id="urlCard" role="dialog" aria-modal="true" aria-labelledby="urlLabel">
+    <label id="urlLabel" for="urlInput">Sequence URL</label>
+    <input id="urlInput" type="url" spellcheck="false" autocomplete="off" placeholder="https://.../sequence.seq">
+    <div id="urlActions"><button id="urlCancel" type="button">Cancel</button><button id="urlLoad" type="button">Load</button></div>
+    <div id="urlStatus"></div>
+  </div>
 </div>
 <input type="file" id="fileInput" accept=".seq" style="display:none">
 <input type="file" id="ascInput" accept=".asc" style="display:none">
@@ -89,7 +110,8 @@ canvas{display:block}
      ═══════════════════════════════════════════════════════════════ -->
 <div id="tb">
 <img src="logo.png" alt="SeqEyes" style="width:18px;height:18px;border-radius:3px;vertical-align:middle" title="SeqEyes">
-<button id="openBtn" title="Open another .seq file">Open</button>
+<button id="openBtn" title="Open another local .seq file">📂 Open</button>
+<button id="openUrlBtn" class="web-url-only" title="Open a .seq file from a web link">🌐 URL</button>
 <button id="exportKspaceBtn" title="Export ADC k-space trajectory and metadata" disabled>Export</button><div class="sep"></div>
 <button id="pnsBtn" title="Select or replace the ASC profile used for PNS prediction">Select PNS ASC file</button><div class="sep"></div>
 <button id="zi" title="Zoom In (scroll wheel)">+</button>
@@ -164,6 +186,8 @@ var seqTiming=null,blockPos=[];
 var mmCanvas=document.getElementById('mmc'),mmCtx=mmCanvas.getContext('2d');
 var mmCache=null,mmCacheW=0,mmCacheDpr=0,mmDrag=false;
 var currentSequenceText='',currentSequenceName='',exportBusy=false;
+var MAX_URL_SEQ_BYTES=100*1024*1024;
+var URL_FETCH_TIMEOUT_MS=20000;
 
 /* ── Shared touch utilities ──────────────────────────────────────────── */
 function isTouchDevice(){return('ontouchstart' in window)||(navigator.maxTouchPoints>0);}
@@ -497,8 +521,7 @@ function serializeGrad(g){
    File loading (standalone — calls Pulseq bundle directly)
    ═══════════════════════════════════════════════════════════════════════ */
 function loadSequenceText(text,fileName){
-  currentSequenceText='';
-  currentSequenceName='';
+  var hadSequence=!!currentSequenceText;
   setExportButtonEnabled(false);
   try{
     showProgress('start',0,'Parsing sequence...');
@@ -545,8 +568,12 @@ function loadSequenceText(text,fileName){
     setExportButtonEnabled(true);
     document.title='SeqEyes: '+name.replace(/\.seq$/i,'');
     if(splash)splash.style.display='none';
+    return true;
   }catch(err){
     alert('Error loading sequence: '+(err.message||String(err)));
+    showProgress('done',100,'Ready');
+    setExportButtonEnabled(hadSequence);
+    return false;
   }
 }
 
@@ -679,11 +706,164 @@ function handleFile(file){
   reader.readAsText(file);
 }
 
+function isWebUrlOpenAvailable(){
+  return (location.protocol==='http:'||location.protocol==='https:') &&
+    typeof acquireVsCodeApi==='undefined' &&
+    !window._SEQEYES_HOST;
+}
+
+function setUrlStatus(message,isError){
+  var status=document.getElementById('urlStatus');
+  if(!status)return;
+  status.textContent=message||'';
+  status.classList.toggle('err',!!isError);
+}
+
+function configureUrlOpenUi(){
+  var available=isWebUrlOpenAvailable();
+  var buttons=document.querySelectorAll('.web-url-only');
+  for(var i=0;i<buttons.length;i++)buttons[i].style.display=available?'inline-flex':'none';
+}
+
+function openUrlDialog(){
+  if(!isWebUrlOpenAvailable())return;
+  var overlay=document.getElementById('urlOverlay');
+  var input=document.getElementById('urlInput');
+  if(!overlay||!input)return;
+  setUrlStatus('',false);
+  overlay.style.display='flex';
+  overlay.setAttribute('aria-hidden','false');
+  input.focus();
+  input.select();
+}
+
+function closeUrlDialog(){
+  var overlay=document.getElementById('urlOverlay');
+  if(!overlay)return;
+  overlay.style.display='none';
+  overlay.setAttribute('aria-hidden','true');
+  setUrlStatus('',false);
+}
+
+function isLocalHttpHost(hostname){
+  return hostname==='localhost'||hostname==='127.0.0.1'||hostname==='[::1]';
+}
+
+function inferSeqFileName(url){
+  var part=(url.pathname.split('/').filter(Boolean).pop()||'sequence.seq');
+  try{part=decodeURIComponent(part);}catch(_){}
+  return part.replace(/[\\/:*?"<>|]+/g,'_')||'sequence.seq';
+}
+
+function normalizeGithubBlobUrl(url){
+  if(url.hostname.toLowerCase()!=='github.com')return url;
+  var parts=url.pathname.split('/').filter(Boolean);
+  if(parts.length<5||parts[2]!=='blob')return url;
+  var raw=new URL('https://raw.githubusercontent.com/');
+  raw.pathname='/' + [parts[0],parts[1],parts[3]].concat(parts.slice(4)).join('/');
+  return raw;
+}
+
+function validateSeqUrlCandidate(input){
+  var raw=(input||'').trim();
+  if(!raw)throw new Error('Paste a .seq URL.');
+  var url;
+  try{url=new URL(raw);}catch(_){throw new Error('Enter a complete URL starting with https://.');}
+  var protocol=url.protocol.toLowerCase();
+  if(protocol!=='https:'&&!(protocol==='http:'&&isLocalHttpHost(url.hostname))){
+    throw new Error('Only https:// links are allowed.');
+  }
+  if(!/\.seq$/i.test(url.pathname)){
+    throw new Error('The URL path must end with .seq.');
+  }
+  var fetchUrl=normalizeGithubBlobUrl(url);
+  if(!/\.seq$/i.test(fetchUrl.pathname)){
+    throw new Error('The URL path must end with .seq.');
+  }
+  return {fetchUrl:fetchUrl,fileName:inferSeqFileName(url),displayUrl:url.href};
+}
+
+function validateSeqTextCandidate(text){
+  if(!text||!text.trim())throw new Error('The downloaded file is empty.');
+  if(text.indexOf('\0')!==-1)throw new Error('The downloaded file looks binary, not a text .seq file.');
+  var control=0,limit=Math.min(text.length,200000);
+  for(var i=0;i<limit;i++){
+    var c=text.charCodeAt(i);
+    if(c<32&&c!==9&&c!==10&&c!==13)control++;
+  }
+  if(limit>0&&control/limit>0.01)throw new Error('The downloaded file contains too many control characters.');
+  var head=text.trimStart().slice(0,256).toLowerCase();
+  if(head.indexOf('<!doctype html')===0||head.indexOf('<html')===0){
+    throw new Error('The link returned HTML, not a raw .seq file.');
+  }
+  if(!/\[VERSION\]/i.test(text)||!/\[BLOCKS\]/i.test(text)){
+    throw new Error('The file does not look like a Pulseq .seq file.');
+  }
+}
+
+async function fetchSeqFromUrl(fetchUrl){
+  if(typeof fetch!=='function')throw new Error('This browser cannot fetch web links.');
+  var controller=new AbortController();
+  var timer=setTimeout(function(){controller.abort();},URL_FETCH_TIMEOUT_MS);
+  try{
+    var response=await fetch(fetchUrl.href,{credentials:'omit',redirect:'follow',signal:controller.signal});
+    if(!response.ok)throw new Error('Fetch failed with HTTP '+response.status+'.');
+    var length=response.headers.get('content-length');
+    if(length&&Number(length)>MAX_URL_SEQ_BYTES)throw new Error('The .seq file is larger than 100 MB.');
+    var buffer=await response.arrayBuffer();
+    if(buffer.byteLength>MAX_URL_SEQ_BYTES)throw new Error('The .seq file is larger than 100 MB.');
+    return new TextDecoder('utf-8').decode(buffer);
+  }catch(err){
+    if(err&&err.name==='AbortError')throw new Error('Timed out while fetching the .seq file.');
+    if(err instanceof TypeError){
+      throw new Error('Could not fetch this link. The server may block browser access. Try a raw GitHub link or download the .seq file locally.');
+    }
+    throw err;
+  }finally{
+    clearTimeout(timer);
+  }
+}
+
+async function openSequenceFromUrl(inputUrl){
+  var loadBtn=document.getElementById('urlLoad');
+  if(loadBtn)loadBtn.disabled=true;
+  try{
+    var candidate=validateSeqUrlCandidate(inputUrl);
+    setUrlStatus('Fetching...',false);
+    showProgress('start',0,'Fetching sequence...');
+    var text=await fetchSeqFromUrl(candidate.fetchUrl);
+    validateSeqTextCandidate(text);
+    setUrlStatus('Loading...',false);
+    var loaded=loadSequenceText(text,candidate.fileName);
+    if(loaded)closeUrlDialog();
+    else setUrlStatus('The file could not be parsed as a Pulseq .seq file.',true);
+  }catch(err){
+    setUrlStatus(err.message||String(err),true);
+    showProgress('done',100,'Ready');
+  }finally{
+    if(loadBtn)loadBtn.disabled=false;
+  }
+}
+
 /* ── Splash screen handlers ───────────────────────────────────────────── */
 document.getElementById('splashOpen').onclick=function(){document.getElementById('fileInput').click();};
 document.getElementById('openBtn').onclick=function(){document.getElementById('fileInput').click();};
+document.getElementById('splashOpenUrl').onclick=function(){openUrlDialog();};
+document.getElementById('openUrlBtn').onclick=function(){openUrlDialog();};
 document.getElementById('exportKspaceBtn').onclick=function(){void exportCurrentKspace();};
 document.getElementById('pnsBtn').onclick=function(){requestPnsAsc();};
+document.getElementById('urlCancel').onclick=function(){closeUrlDialog();};
+document.getElementById('urlLoad').onclick=function(){
+  void openSequenceFromUrl(document.getElementById('urlInput').value);
+};
+document.getElementById('urlInput').addEventListener('keydown',function(e){
+  if(e.key==='Enter')void openSequenceFromUrl(this.value);
+  if(e.key==='Escape')closeUrlDialog();
+});
+document.getElementById('urlOverlay').addEventListener('click',function(e){
+  if(e.target===this)closeUrlDialog();
+});
+configureUrlOpenUi();
 
 /* ── File input ──────────────────────────────────────────────────────── */
 document.getElementById('fileInput').onchange=function(){
@@ -730,10 +910,12 @@ if(dropZone){
   });
 }
 
-// Auto-load a file if URL has ?file= parameter (for linking from GitHub repos)
+// Auto-load a URL if requested by the standalone browser page.
 (function(){
-  var m=location.search.match(/[?&]file=([^&]+)/);
-  if(m)loadSequenceText(decodeURIComponent(m[1]),''); // placeholder: fetch isn't possible from file: protocol
+  if(!isWebUrlOpenAvailable())return;
+  var params=new URLSearchParams(location.search);
+  var requested=params.get('url')||params.get('file');
+  if(requested)void openSequenceFromUrl(requested);
 })();
 
 /* ═══════════════════════════════════════════════════════════════════════
