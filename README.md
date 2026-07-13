@@ -64,6 +64,8 @@ Download `seqeyes-*.mltbx` from [GitHub Releases](https://github.com/bughht/seqe
 matlab.addons.toolbox.installToolbox('seqeyes-<version>.mltbx')
 ```
 
+The installed toolbox is self-contained for MATLAB: it includes `seqeyes.m` and the bundled web viewer assets, so you do not need to keep a GitHub checkout after installing it. If you are developing from source instead, you may skip toolbox installation and put the checkout's `matlab` folder on the MATLAB path; in that case `seqeyes(seq)` uses the web assets from the checkout.
+
 ### Usage
 
 ```matlab

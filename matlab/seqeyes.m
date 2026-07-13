@@ -65,12 +65,15 @@ function seqeyes(source)
         end
     end
 
+    % Always use a MATLAB-stamped temp HTML copy so the web UI can hide
+    % browser-only controls such as URL fetching inside uihtml.
     if hasSequence
-        % Embed .seq data directly into a temp HTML file (bypasses bridge)
-        [htmlPath, tempDir] = buildPreloadedHTML(htmlPath, fullPath);
-        cleanupObjects{end+1} = onCleanup(@() safeRemoveDir(tempDir));
-        fig.UserData.cleanup = cleanupObjects;
+        [htmlPath, tempDir] = buildMatlabHTML(htmlPath, fullPath);
+    else
+        [htmlPath, tempDir] = buildMatlabHTML(htmlPath, '');
     end
+    cleanupObjects{end+1} = onCleanup(@() safeRemoveDir(tempDir));
+    fig.UserData.cleanup = cleanupObjects;
 
     % ── Create uihtml component ────────────────────────────────────────
     h = uihtml(g, 'HTMLSource', htmlPath);
@@ -181,17 +184,21 @@ function safeRemoveDir(folderPath)
     end
 end
 
-function [newPath, tempDir] = buildPreloadedHTML(templatePath, seqFilePath)
-% BUILDPRELOADEDHTML  Inject .seq content into a copy of the template HTML.
+function [newPath, tempDir] = buildMatlabHTML(templatePath, seqFilePath)
+% BUILDMATLABHTML  Inject MATLAB host metadata and optional .seq content.
     template = fileread(templatePath);
-    [~, name, ext] = fileparts(seqFilePath);
-    fileName = [name ext];
-    seqText = fileread(seqFilePath);
 
-    inject = sprintf(['<script>window._SEQEYES_PRELOAD={text:%s,fileName:%s};' ...
-                      'window._seqeyesLoadFile=function(t,n){' ...
-                      'loadSequenceText(t,n);};</script>'], ...
-                      jsonencode(seqText), jsonencode(fileName));
+    inject = '<script>window._SEQEYES_HOST="matlab";';
+    if ~isempty(seqFilePath)
+        [~, name, ext] = fileparts(seqFilePath);
+        fileName = [name ext];
+        seqText = fileread(seqFilePath);
+        inject = sprintf(['%swindow._SEQEYES_PRELOAD={text:%s,fileName:%s};' ...
+                          'window._seqeyesLoadFile=function(t,n){' ...
+                          'loadSequenceText(t,n);};'], ...
+                          inject, jsonencode(seqText), jsonencode(fileName));
+    end
+    inject = [inject '</script>'];
 
     % Insert right before the first <script> tag
     template = strrep(template, '<script src="pulseq-bundle.js">', ...
