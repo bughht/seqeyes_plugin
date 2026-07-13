@@ -125,6 +125,7 @@ All the same features as the other versions — interactive waveforms, k‑space
 
 - **Custom editor for `.seq` files** — opens automatically on double‑click
 - **📂 Open button** — switch between sequences without closing the editor
+- **Browser URL import** — open raw `.seq` files from web links in the standalone web app
 - **7 primary channels**: RF · φ · Gx · Gy · Gz · ADC · Trigger
 - **Optional M1 channels**: calculate M1x, M1y, and M1z on demand
 - **Optional SAFE PNS prediction**: load a user-provided Siemens ASC profile to display PNS X/Y/Z/Norm
@@ -146,6 +147,7 @@ All the same features as the other versions — interactive waveforms, k‑space
 |--------|-----|
 | Open a `.seq` file | Double‑click in Explorer, or click **📂 Open** in toolbar |
 | Switch to another sequence | **📂 Open** button (top‑left) |
+| Open a browser web link | In the standalone web app, click **🌐 URL** and paste a `.seq` link |
 | Zoom waveform | Scroll wheel or toolbar `+` / `−` |
 | Zoom waveform y‑axis | `Ctrl` + scroll wheel over a waveform row |
 | Fine wheel zoom | Hold `Alt` while scrolling; `Ctrl` + `Alt` + scroll gives finer y‑axis zoom where supported by the browser/OS |
