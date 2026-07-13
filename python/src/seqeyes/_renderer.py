@@ -26,6 +26,7 @@ _BUNDLE_CANDIDATES = [
     Path(__file__).resolve().parent.parent.parent.parent / "web" / "pulseq-bundle.js",
     Path.cwd() / "web" / "pulseq-bundle.js",
 ]
+_VALID_GRAD_UNITS = {"Hz/m", "mT/m", "G/cm"}
 
 
 def _find_bundle() -> str:
@@ -53,6 +54,11 @@ def _read_viewer_template() -> str:
     )
 
 
+def _normalize_grad_disp(unit: str) -> str:
+    """Return a viewer-supported gradient unit."""
+    return unit if unit in _VALID_GRAD_UNITS else "Hz/m"
+
+
 def _build_html(
     seq_text: str,
     *,
@@ -62,7 +68,7 @@ def _build_html(
     show_blocks: bool = False,
     time_range: tuple = (0, float("inf")),
     time_disp: str = "s",
-    grad_disp: str = "kHz/m",
+    grad_disp: str = "Hz/m",
 ) -> str:
     """Assemble the complete viewer HTML.
 
@@ -83,10 +89,10 @@ def _build_html(
     time_disp : str
         Initial time display unit (``"s"``, ``"ms"``, ``"us"``).
     grad_disp : str
-        Initial gradient display unit (``"Hz/m"``, ``"kHz/m"``,
-        ``"mT/m"``, ``"G/cm"``).
+        Initial gradient display unit (``"Hz/m"``, ``"mT/m"``, ``"G/cm"``).
     """
     template = _read_viewer_template()
+    grad_disp = _normalize_grad_disp(grad_disp)
     seq_b64 = base64.b64encode(seq_text.encode("utf-8")).decode("ascii")
 
     # 1. Inject the pulseq-bundle.js
@@ -150,7 +156,7 @@ class SeqEyesViewer:
     time_disp : str
         Time axis unit — ``"s"``, ``"ms"``, or ``"us"``.
     grad_disp : str
-        Gradient axis unit — ``"Hz/m"``, ``"kHz/m"``, ``"mT/m"``, ``"G/cm"``.
+        Gradient axis unit — ``"Hz/m"``, ``"mT/m"``, or ``"G/cm"``.
     theme : str or None
         Colour theme.
     width : str
@@ -167,7 +173,7 @@ class SeqEyesViewer:
         show_blocks: bool = False,
         time_range: tuple = (0, float("inf")),
         time_disp: str = "s",
-        grad_disp: str = "kHz/m",
+        grad_disp: str = "Hz/m",
         theme: Optional[str] = None,
         width: str = "100%",
         height: str = "550px",
@@ -177,7 +183,7 @@ class SeqEyesViewer:
         self._show_blocks = show_blocks
         self._time_range = time_range
         self._time_disp = time_disp
-        self._grad_disp = grad_disp
+        self._grad_disp = _normalize_grad_disp(grad_disp)
         self._theme = theme
         self._width = width
         self._height = height

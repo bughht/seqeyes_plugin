@@ -85,6 +85,17 @@ class TestSeqEyesViewer:
         assert '"ms"' in raw
         assert '"mT/m"' in raw
 
+    def test_viewer_default_gradient_unit_is_hz_per_m(self):
+        v = SeqEyesViewer(SAMPLE_SEQ_TEXT)
+        raw = v.to_html(inject_bundle=False)
+        assert 'window.SEQEYES_GRAD_DISP = "Hz/m";' in raw
+
+    def test_viewer_normalizes_unsupported_gradient_unit(self):
+        v = SeqEyesViewer(SAMPLE_SEQ_TEXT, grad_disp="kHz/m")
+        raw = v.to_html(inject_bundle=False)
+        assert 'window.SEQEYES_GRAD_DISP = "Hz/m";' in raw
+        assert "kHz/m" not in raw
+
 
 class TestSetAndReset:
     """Tests for set() and reset()."""
@@ -129,6 +140,26 @@ class TestSetAndReset:
             # After reset, calling set again should work
             seqeyes.set(theme="dark")
             seqeyes.reset()
+        except ImportError:
+            pytest.skip("pypulseq not installed")
+
+    def test_reset_removes_seqeyes_repr_html(self):
+        """reset() should restore bare Sequence display, not only plot()."""
+        try:
+            import seqeyes
+            from pypulseq import Sequence
+
+            had_original = hasattr(Sequence, "_repr_html_")
+            original_repr = getattr(Sequence, "_repr_html_", None)
+
+            seqeyes.set()
+            assert hasattr(Sequence, "_repr_html_")
+
+            seqeyes.reset()
+            if had_original:
+                assert getattr(Sequence, "_repr_html_", None) is original_repr
+            else:
+                assert not hasattr(Sequence, "_repr_html_")
         except ImportError:
             pytest.skip("pypulseq not installed")
 

@@ -10,7 +10,7 @@ import numpy as np
 import pypulseq as pp
 
 # ── Enable SeqEyes (once per session) ─────────────────────────────────
-seqeyes.set(time_disp="ms", grad_disp="kHz/m")
+seqeyes.set(time_disp="ms", grad_disp="Hz/m")
 print(f"SeqEyes {seqeyes.__version__} — seq.plot() is now interactive!")
 
 
