@@ -1,14 +1,19 @@
 function gettingStarted
 % GETTINGSTARTED  Quick-start guide for SeqEyes MATLAB Toolbox.
 %
-%   SeqEyes is an interactive viewer for Pulseq (.seq) MRI sequence files.
+%   SeqEyes is an interactive viewer for Pulseq MRI sequence objects and
+%   Pulseq (.seq) files.
 %   It visualises RF pulses, gradient waveforms, ADC readouts, triggers,
 %   and includes a GPU-accelerated 3D k-space viewer.
 %
 % ── Quick Start ───────────────────────────────────────────────────────
 %
-%   >> seqeyes('spiral_inout.seq')    % open a .seq file
+%   >> seqeyes(seq)                   % open an in-memory mr.Sequence
+%   >> seqeyes('spiral_inout.seq')    % open a saved .seq file
 %   >> seqeyes()                      % open empty viewer, then drag & drop
+%
+%   seqeyes(seq) writes a temporary .seq file internally. It does not edit
+%   Pulseq files or classes.
 %
 % ── Auto-Open ─────────────────────────────────────────────────────────
 %

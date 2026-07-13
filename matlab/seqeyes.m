@@ -1,6 +1,7 @@
-function seqeyes(filename)
+function seqeyes(source)
 % SEQEYES  Open a Pulseq .seq file in the SeqEyes MRI sequence viewer.
 %
+%   seqeyes(seq)         — opens an in-memory mr.Sequence object
 %   seqeyes('file.seq')  — opens the specified .seq file in an interactive viewer
 %   seqeyes()            — opens an empty viewer (drag & drop or use File > Open)
 %
@@ -38,29 +39,37 @@ function seqeyes(filename)
                    'Icon', iconPath, ...
                    'AutoResizeChildren', 'off', ...
                    'HandleVisibility', 'on');
+    fig.UserData = struct();
 
     screenSize = get(groot, 'ScreenSize');
     fig.Position = [screenSize(1:2) + [80 80], screenSize(3:4) - [160 160]];
 
     g = uigridlayout(fig, [1, 1], 'Padding', [0 0 0 0]);
 
-    % ── If a file is given, embed its content into the HTML ────────────
-    hasFile = (nargin >= 1 && ~isempty(filename));
-    if hasFile
-        % Resolve to absolute path
-        fullPath = resolveFilePath(filename);
-        if isempty(fullPath) || ~isfile(fullPath)
-            warning('SeqEyes:FileNotFound', ...
-                    'File not found: %s.  Opening empty viewer.', filename);
-            hasFile = false;
+    % ── If input is given, embed its .seq content into the HTML ─────────
+    cleanupObjects = {};
+    hasSequence = (nargin >= 1 && ~isempty(source));
+    if hasSequence
+        try
+            [fullPath, sourceCleanup] = prepareSequenceSource(source);
+            cleanupObjects = [cleanupObjects sourceCleanup]; %#ok<AGROW>
+        catch err
+            if isTextScalar(source)
+                warning('SeqEyes:FileNotFound', ...
+                        'File not found: %s. Opening empty viewer.', char(source));
+                hasSequence = false;
+            else
+                delete(fig);
+                rethrow(err);
+            end
         end
     end
 
-    if hasFile
+    if hasSequence
         % Embed .seq data directly into a temp HTML file (bypasses bridge)
         [htmlPath, tempDir] = buildPreloadedHTML(htmlPath, fullPath);
-        cleanupObj = onCleanup(@() rmdir(tempDir, 's'));
-        fig.UserData.cleanup = cleanupObj;
+        cleanupObjects{end+1} = onCleanup(@() safeRemoveDir(tempDir));
+        fig.UserData.cleanup = cleanupObjects;
     end
 
     % ── Create uihtml component ────────────────────────────────────────
@@ -73,6 +82,79 @@ function seqeyes(filename)
 end
 
 % =========================================================================
+function [fullPath, cleanupObjects] = prepareSequenceSource(source)
+% PREPARESEQUENCESOURCE  Resolve a file path or write an in-memory sequence.
+    cleanupObjects = {};
+
+    if isTextScalar(source)
+        fullPath = resolveFilePath(char(source));
+        if isempty(fullPath) || ~isfile(fullPath)
+            error('SeqEyes:FileNotFound', 'File not found: %s', char(source));
+        end
+        return;
+    end
+
+    if isSequenceLike(source)
+        [fullPath, cleanupObj] = writeSequenceTempFile(source);
+        cleanupObjects{end+1} = cleanupObj;
+        return;
+    end
+
+    error('SeqEyes:InvalidInput', ...
+          'Input must be a .seq file path or an mr.Sequence-like object with a write() method.');
+end
+
+function tf = isTextScalar(value)
+% ISTEXTSCALAR  True for char vectors or scalar strings.
+    tf = ischar(value) || (isstring(value) && isscalar(value));
+end
+
+function tf = isSequenceLike(value)
+% ISSEQUENCELIKE  True for mr.Sequence or compatible objects with write().
+    if ~isobject(value)
+        tf = false;
+        return;
+    end
+
+    if isa(value, 'mr.Sequence')
+        tf = true;
+        return;
+    end
+
+    try
+        tf = ismethod(value, 'write');
+    catch
+        try
+            tf = any(strcmp(methods(value), 'write'));
+        catch
+            tf = false;
+        end
+    end
+end
+
+function [seqFilePath, cleanupObj] = writeSequenceTempFile(seqObj)
+% WRITESEQUENCETEMPFILE  Serialize an in-memory sequence to a temporary file.
+    tempDir = tempname;
+    mkdir(tempDir);
+    seqFilePath = fullfile(tempDir, 'seqeyes_sequence.seq');
+
+    try
+        seqObj.write(seqFilePath);
+    catch err
+        safeRemoveDir(tempDir);
+        error('SeqEyes:SequenceWriteFailed', ...
+              'Could not write sequence object to a temporary .seq file: %s', err.message);
+    end
+
+    if ~isfile(seqFilePath)
+        safeRemoveDir(tempDir);
+        error('SeqEyes:SequenceWriteFailed', ...
+              'Sequence write() completed but did not create a .seq file.');
+    end
+
+    cleanupObj = onCleanup(@() safeRemoveDir(tempDir));
+end
+
 function fullPath = resolveFilePath(filename)
 % RESOLVEFILEPATH  Resolve relative paths to absolute, preserve absolute paths.
     if isfile(filename)
@@ -85,6 +167,17 @@ function fullPath = resolveFilePath(filename)
     end
     if ~isfile(fullPath)
         fullPath = '';
+    end
+end
+
+function safeRemoveDir(folderPath)
+% SAFEREMOVEDIR  Best-effort cleanup for temporary viewer folders.
+    if exist(folderPath, 'dir')
+        try
+            rmdir(folderPath, 's');
+        catch
+            % Temporary cleanup should never interrupt figure shutdown.
+        end
     end
 end
 

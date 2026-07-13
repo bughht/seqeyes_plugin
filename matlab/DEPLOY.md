@@ -30,6 +30,10 @@ cd('e:\MGH\seqeyes_plugin');
 addpath(genpath('matlab'));
 
 % Test the viewer
+% If a Pulseq mr.Sequence object named seq is available:
+seqeyes(seq);
+
+% Test a saved file
 seqeyes('test\seq\spiral_inout.seq');
 
 % Test auto-open handler

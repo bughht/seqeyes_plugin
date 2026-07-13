@@ -54,7 +54,7 @@ Or press **F5** to launch Extension Development Host.
 
 ## 🧪 MATLAB Toolbox
 
-Open `.seq` files directly inside MATLAB — double‑click in the Current Folder browser or call `seqeyes()`.
+Open in-memory Pulseq sequences or `.seq` files directly inside MATLAB — call `seqeyes(seq)`, double-click in the Current Folder browser, or open an empty viewer with `seqeyes()`.
 
 ### Install
 
@@ -67,11 +67,12 @@ matlab.addons.toolbox.installToolbox('seqeyes-<version>.mltbx')
 ### Usage
 
 ```matlab
-seqeyes('spiral_inout.seq')   % open a sequence
-open('spiral_inout.seq')      % or double‑click in Current Folder
+seqeyes(seq)                  % open an in-memory mr.Sequence object
+seqeyes('spiral_inout.seq')   % open a saved .seq file
+open('spiral_inout.seq')      % or double-click in Current Folder
 ```
 
-All the same features as the browser & VS Code versions — 7 channels, k‑space viewer, themes, tooltips — rendered inside a native MATLAB figure. Requires R2022a+.
+No manual `.seq` export is needed for `mr.Sequence` objects; SeqEyes writes a temporary file internally and does not modify Pulseq files or classes. All the same features as the browser & VS Code versions — 7 channels, k-space viewer, themes, tooltips — rendered inside a native MATLAB figure. Requires R2022a+.
 
 ## 🐍 Python Package
 

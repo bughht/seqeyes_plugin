@@ -16,6 +16,7 @@ pannable timeline with colour themes and a minimap. A GPU-accelerated 3D k-space
 with camera presets is also included.
 
 Features:
+  • Open in-memory mr.Sequence objects with seqeyes(seq)
   • Double-click .seq files to open automatically
   • Zoom, pan, and hover tooltips
   • 7-channel view: RF, φ, Gx, Gy, Gz, ADC, Trig
