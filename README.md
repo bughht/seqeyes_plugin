@@ -56,15 +56,25 @@ Or press **F5** to launch Extension Development Host.
 
 Open in-memory Pulseq sequences or `.seq` files directly inside MATLAB — call `seqeyes(seq)`, double-click in the Current Folder browser, or open an empty viewer with `seqeyes()`.
 
-### Install
+### Setup
 
-Download `seqeyes-*.mltbx` from [GitHub Releases](https://github.com/bughht/seqeyes_plugin/releases) and double‑click to install, or run:
+Choose one of these two MATLAB setup paths.
+
+**Option 1: Install the toolbox.** Download `seqeyes-*.mltbx` from [GitHub Releases](https://github.com/bughht/seqeyes_plugin/releases) and double-click to install, or run:
 
 ```matlab
 matlab.addons.toolbox.installToolbox('seqeyes-<version>.mltbx')
 ```
 
-The installed toolbox is self-contained for MATLAB: it includes `seqeyes.m` and the bundled web viewer assets, so you do not need to keep a GitHub checkout after installing it. If you are developing from source instead, you may skip toolbox installation and put the checkout's `matlab` folder on the MATLAB path; in that case `seqeyes(seq)` uses the web assets from the checkout.
+The installed toolbox is self-contained for MATLAB: it includes `seqeyes.m` and the bundled web viewer assets, so you do not need to keep a GitHub checkout after installing it.
+
+**Option 2: Use the source checkout.** Clone or download this repository, then add its `matlab` folder to the MATLAB path:
+
+```matlab
+addpath(genpath('/path/to/seqeyes_plugin/matlab'))
+```
+
+This source setup does not require installing the `.mltbx`; `seqeyes(seq)` uses the web assets from the checkout.
 
 ### Usage
 
