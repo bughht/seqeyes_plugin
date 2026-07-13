@@ -4,6 +4,7 @@ var Pulseq = (() => {
   var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
   var __getOwnPropNames = Object.getOwnPropertyNames;
   var __hasOwnProp = Object.prototype.hasOwnProperty;
+  var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
   var __export = (target, all) => {
     for (var name in all)
       __defProp(target, name, { get: all[name], enumerable: true });
@@ -17,6 +18,7 @@ var Pulseq = (() => {
     return to;
   };
   var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+  var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 
   // web/pulseq-browser.ts
   var pulseq_browser_exports = {};
@@ -36,7 +38,7 @@ var Pulseq = (() => {
   });
 
   // package.json
-  var version = "0.2.0";
+  var version = "0.2.2";
 
   // src/pulseq/decompressor.ts
   function decompressShape(compressed, numSamples) {
@@ -103,23 +105,27 @@ var Pulseq = (() => {
 
   // src/pulseq/reader.ts
   function parseSequenceText(text) {
-    const lines = text.split(/\r?\n/);
     const seq = createEmptySequence();
     const seenSections = /* @__PURE__ */ new Set();
+    const shapeParser = new ShapeSectionParser(seq);
     let sectionName = null;
     let sectionLines = [];
-    for (const line of lines) {
+    forEachLine(text, (line) => {
       const m = line.match(/^\[(\w+)\]$/);
       if (m) {
-        if (sectionName) dispatchSection(seq, sectionName, sectionLines);
+        if (sectionName === "SHAPES") shapeParser.finish();
+        else if (sectionName) dispatchSection(seq, sectionName, sectionLines);
         sectionName = m[1];
         seenSections.add(sectionName);
         sectionLines = [];
+      } else if (sectionName === "SHAPES") {
+        shapeParser.consume(line);
       } else {
         sectionLines.push(line);
       }
-    }
-    if (sectionName) dispatchSection(seq, sectionName, sectionLines);
+    });
+    if (sectionName === "SHAPES") shapeParser.finish();
+    else if (sectionName) dispatchSection(seq, sectionName, sectionLines);
     seq.versionCombined = makeVersionCombined(
       seq.version.major,
       seq.version.minor,
@@ -129,7 +135,22 @@ var Pulseq = (() => {
     validateSequence(seq, seenSections);
     return seq;
   }
+  function forEachLine(text, visit) {
+    let start = 0;
+    while (start <= text.length) {
+      let end = text.indexOf("\n", start);
+      if (end < 0) end = text.length;
+      const contentEnd = end > start && text.charCodeAt(end - 1) === 13 ? end - 1 : end;
+      visit(text.slice(start, contentEnd));
+      if (end === text.length) break;
+      start = end + 1;
+    }
+  }
   function dispatchSection(seq, name, lines) {
+    if (name === "SHAPES") {
+      parseShapes(seq, lines);
+      return;
+    }
     const valid = lines.filter((l) => {
       const t = l.trim();
       return t && !t.startsWith("#");
@@ -158,9 +179,6 @@ var Pulseq = (() => {
         break;
       case "EXTENSIONS":
         parseExtensions(seq, valid);
-        break;
-      case "SHAPES":
-        parseShapes(seq, lines);
         break;
     }
   }
@@ -656,58 +674,71 @@ var Pulseq = (() => {
     }
   }
   function parseShapes(seq, lines) {
-    let i = 0;
-    while (i < lines.length) {
-      const t = lines[i].trim();
-      if (!t || t.startsWith("#") || t.startsWith("[")) {
-        i++;
-        continue;
-      }
-      const m = t.match(/^shape_id\s+(\d+)/);
-      if (!m) {
-        i++;
-        continue;
-      }
-      const shapeId = +m[1];
-      i++;
-      let numSamples = 0;
-      while (i < lines.length) {
-        const l = lines[i].trim();
-        if (!l || l.startsWith("#")) {
-          i++;
-          continue;
-        }
-        const nm = l.match(/^num_samples\s+(\d+)/);
-        if (nm) {
-          numSamples = +nm[1];
-          i++;
-          break;
-        }
-        if (l.match(/^shape_id\s+\d+/) || l.startsWith("[")) break;
-        i++;
-      }
-      if (numSamples <= 0) continue;
-      const vals = [];
-      while (i < lines.length && vals.length < numSamples) {
-        const l = lines[i].trim();
-        if (l.match(/^shape_id\s+\d+/) || l.startsWith("[")) break;
-        if (!l || l.startsWith("#")) {
-          i++;
-          continue;
-        }
-        for (const n of l.split(/\s+/).map(Number).filter((x) => !isNaN(x))) {
-          if (vals.length < numSamples) vals.push(n);
-        }
-        i++;
-      }
-      if (vals.length === 0) continue;
-      storeShape(seq, shapeId, numSamples, vals);
+    const parser = new ShapeSectionParser(seq);
+    for (const line of lines) parser.consume(line);
+    parser.finish();
+  }
+  var ShapeSectionParser = class {
+    constructor(seq) {
+      __publicField(this, "seq", seq);
+      __publicField(this, "shapeId", 0);
+      __publicField(this, "numSamples", 0);
+      __publicField(this, "raw", new Float64Array());
+      __publicField(this, "rawCount", 0);
     }
-  }
-  function storeShape(seq, id, num, raw) {
-    const decompressed = raw.length === num ? new Float64Array(raw) : decompressShape(raw, num);
-    seq.shapes.set(id, { numSamples: num, samples: decompressed });
-  }
+    consume(line) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) return;
+      const shapeMatch = /^shape_id\s+(\d+)/.exec(trimmed);
+      if (shapeMatch) {
+        this.storeCurrent();
+        this.shapeId = Number(shapeMatch[1]);
+        return;
+      }
+      const countMatch = /^num_samples\s+(\d+)/.exec(trimmed);
+      if (countMatch) {
+        this.numSamples = Number(countMatch[1]);
+        this.raw = new Float64Array(Math.min(this.numSamples, 1024));
+        this.rawCount = 0;
+        return;
+      }
+      if (this.shapeId <= 0 || this.numSamples <= 0 || this.rawCount >= this.numSamples) return;
+      if (!/\s/.test(trimmed)) {
+        this.appendRawValue(trimmed);
+        return;
+      }
+      for (const field of trimmed.split(/\s+/)) {
+        this.appendRawValue(field);
+        if (this.rawCount >= this.numSamples) break;
+      }
+    }
+    finish() {
+      this.storeCurrent();
+    }
+    ensureRawCapacity() {
+      if (this.rawCount < this.raw.length) return;
+      const nextLength = Math.min(this.numSamples, Math.max(1, this.raw.length * 2));
+      const expanded = new Float64Array(nextLength);
+      expanded.set(this.raw);
+      this.raw = expanded;
+    }
+    appendRawValue(field) {
+      const value = Number(field);
+      if (!Number.isFinite(value)) return;
+      this.ensureRawCapacity();
+      this.raw[this.rawCount++] = value;
+    }
+    storeCurrent() {
+      if (this.shapeId > 0 && this.numSamples > 0 && this.rawCount > 0) {
+        const samples = this.rawCount === this.numSamples ? this.raw : decompressShape(this.raw.subarray(0, this.rawCount), this.numSamples);
+        this.seq.shapes.set(this.shapeId, { numSamples: this.numSamples, samples });
+      }
+      this.shapeId = 0;
+      this.numSamples = 0;
+      this.raw = new Float64Array();
+      this.rawCount = 0;
+    }
+  };
   function extractRasterTimes(seq) {
     const set = (key, field) => {
       const v = seq.definitions.get(key);
@@ -1499,40 +1530,26 @@ var Pulseq = (() => {
     return mode === "observationTime" ? "observationTime" : "rfCenter";
   }
   function collectGradientSeries(blocks, channel) {
-    const time = [];
-    const value = [];
+    const series = { time: [], value: [] };
     for (const block of blocks) {
       const grad = block[channel];
       if (!grad?.timePoints || !grad.waveform) continue;
       const n = Math.min(grad.timePoints.length, grad.waveform.length);
       for (let i = 0; i < n; i++) {
-        time.push(grad.timePoints[i]);
-        value.push(grad.waveform[i]);
+        appendGradientPoint(series, grad.timePoints[i], grad.waveform[i]);
       }
     }
-    return sanitizeGradientSeries(time, value);
+    return series;
   }
-  function sanitizeGradientSeries(time, value) {
-    const pairs = [];
-    const n = Math.min(time.length, value.length);
-    for (let i = 0; i < n; i++) {
-      const t = time[i];
-      const v = value[i];
-      if (Number.isFinite(t) && Number.isFinite(v)) pairs.push([t, v]);
+  function appendGradientPoint(series, t, value) {
+    if (!Number.isFinite(t) || !Number.isFinite(value)) return;
+    const last = series.time.length - 1;
+    if (last >= 0 && Math.abs(t - series.time[last]) <= TIME_EPS) {
+      series.value[last] = 0.5 * (series.value[last] + value);
+    } else if (last < 0 || t > series.time[last]) {
+      series.time.push(t);
+      series.value.push(value);
     }
-    pairs.sort((a, b) => a[0] - b[0]);
-    const outT = [];
-    const outV = [];
-    for (const [t, v] of pairs) {
-      const last = outT.length - 1;
-      if (last >= 0 && Math.abs(t - outT[last]) <= TIME_EPS) {
-        outV[last] = 0.5 * (outV[last] + v);
-        continue;
-      }
-      outT.push(t);
-      outV.push(v);
-    }
-    return { time: outT, value: outV };
   }
   function collectRfEvents(blocks, warnings) {
     const events = [];
@@ -1589,6 +1606,26 @@ var Pulseq = (() => {
     let currentT = tReset;
     let unsignedM0 = 0;
     let unsignedM1 = 0;
+    let gradientIndex = -1;
+    const seekGradient = (t) => {
+      while (gradientIndex + 1 < gradient.time.length && gradient.time[gradientIndex + 1] <= t + TIME_EPS) {
+        gradientIndex++;
+      }
+    };
+    const sampleGradient = (t) => {
+      const n = gradient.time.length;
+      if (n === 0 || t < gradient.time[0] - TIME_EPS || t > gradient.time[n - 1] + TIME_EPS) return 0;
+      seekGradient(t);
+      if (gradientIndex < 0) return 0;
+      if (gradientIndex >= n - 1 || Math.abs(t - gradient.time[gradientIndex]) <= TIME_EPS) {
+        return gradient.value[gradientIndex];
+      }
+      const t0 = gradient.time[gradientIndex];
+      const t1 = gradient.time[gradientIndex + 1];
+      if (!(t1 > t0)) return gradient.value[gradientIndex];
+      const alpha = (t - t0) / (t1 - t0);
+      return gradient.value[gradientIndex] + alpha * (gradient.value[gradientIndex + 1] - gradient.value[gradientIndex]);
+    };
     const reportedM1At = (t) => {
       if (referenceMode === "observationTime") return sign * (unsignedM1 - (t - tReset) * unsignedM0);
       return sign * unsignedM1;
@@ -1596,10 +1633,11 @@ var Pulseq = (() => {
     const advanceTo = (targetT) => {
       if (!(targetT > currentT + TIME_EPS)) return;
       while (currentT < targetT - TIME_EPS) {
-        let nextT = nextGradientBreakpoint(gradient.time, currentT, targetT);
+        seekGradient(currentT);
+        let nextT = gradientIndex + 1 < gradient.time.length ? Math.min(targetT, gradient.time[gradientIndex + 1]) : targetT;
         if (!(nextT > currentT)) nextT = targetT;
-        const ga = sampleGradientAt(gradient, currentT);
-        const gb = sampleGradientAt(gradient, nextT);
+        const ga = sampleGradient(currentT);
+        const gb = sampleGradient(nextT);
         const [m0Seg, m1Seg] = integrateLinearSegment(currentT, nextT, tReset, ga, gb);
         unsignedM0 += m0Seg;
         unsignedM1 += m1Seg;
@@ -1640,36 +1678,6 @@ var Pulseq = (() => {
       }
     }
     return { t: outT, m1: outM1 };
-  }
-  function sampleGradientAt(gradient, t) {
-    const n = gradient.time.length;
-    if (n <= 0 || t < gradient.time[0] || t > gradient.time[n - 1]) return 0;
-    if (n === 1 || t <= gradient.time[0]) return gradient.value[0];
-    if (t >= gradient.time[n - 1]) return gradient.value[n - 1];
-    let lo = 0;
-    let hi = n - 1;
-    while (hi - lo > 1) {
-      const mid = lo + hi >> 1;
-      if (gradient.time[mid] <= t) lo = mid;
-      else hi = mid;
-    }
-    const t0 = gradient.time[lo];
-    const t1 = gradient.time[hi];
-    if (!(t1 > t0)) return gradient.value[lo];
-    const alpha = (t - t0) / (t1 - t0);
-    return gradient.value[lo] + alpha * (gradient.value[hi] - gradient.value[lo]);
-  }
-  function nextGradientBreakpoint(times, t, target) {
-    if (times.length <= 1 || t >= times[times.length - 1]) return target;
-    let lo = 0;
-    let hi = times.length;
-    const threshold = t + TIME_EPS;
-    while (lo < hi) {
-      const mid = lo + hi >> 1;
-      if (times[mid] <= threshold) lo = mid + 1;
-      else hi = mid;
-    }
-    return lo < times.length ? Math.min(target, times[lo]) : target;
   }
   function integrateLinearSegment(a, b, tRef, ga, gb) {
     const h = b - a;
@@ -1757,17 +1765,6 @@ var Pulseq = (() => {
     if (ntMax < ntMin) return invalidPns("Unable to build regular PNS raster.");
     const nSamples = Math.floor(ntMax - ntMin + 1);
     if (nSamples < 2) return invalidPns("Too few samples for PNS computation.");
-    const tAxis = new Float64Array(nSamples);
-    const gxTpm = new Float64Array(nSamples);
-    const gyTpm = new Float64Array(nSamples);
-    const gzTpm = new Float64Array(nSamples);
-    for (let i = 0; i < nSamples; i++) {
-      const tSec = (ntMin + i) * dtSec;
-      tAxis[i] = tSec;
-      gxTpm[i] = interpLinearZero(waves[0], tSec) / gammaHzPerT;
-      gyTpm[i] = interpLinearZero(waves[1], tSec) / gammaHzPerT;
-      gzTpm[i] = interpLinearZero(waves[2], tSec) / gammaHzPerT;
-    }
     const longestTauMs = Math.max(
       hardware.x.tau1Ms,
       hardware.x.tau2Ms,
@@ -1782,67 +1779,77 @@ var Pulseq = (() => {
     const zptSec = longestTauMs * 4 / 1e3;
     const preCount = Math.max(0, Math.round(zptSec / (4 * dtSec)));
     const postCount = Math.max(0, Math.round(zptSec / dtSec));
-    const gxPadded = padSamples(gxTpm, preCount, postCount);
-    const gyPadded = padSamples(gyTpm, preCount, postCount);
-    const gzPadded = padSamples(gzTpm, preCount, postCount);
-    const stimX = safePnsModel(diff(gxPadded, dtSec), dtSec, hardware.x);
-    const stimY = safePnsModel(diff(gyPadded, dtSec), dtSec, hardware.y);
-    const stimZ = safePnsModel(diff(gzPadded, dtSec), dtSec, hardware.z);
+    const stimX = calculatePnsAxis(waves[0], ntMin, nSamples, preCount, postCount, dtSec, gammaHzPerT, hardware.x);
+    const stimY = calculatePnsAxis(waves[1], ntMin, nSamples, preCount, postCount, dtSec, gammaHzPerT, hardware.y);
+    const stimZ = calculatePnsAxis(waves[2], ntMin, nSamples, preCount, postCount, dtSec, gammaHzPerT, hardware.z);
     const hasAnyNonTrap = blocks.some((block) => block.gx?.type === "arb" || block.gy?.type === "arb" || block.gz?.type === "arb");
     const hasAnyLabelExt = blocks.some((block) => !!(block.labelSets?.length || block.labelIncs?.length));
     const shift = hasAnyNonTrap || hasAnyLabelExt ? 1 : 0;
-    const selectedX = [];
-    const selectedY = [];
-    const selectedZ = [];
-    const selectedT = [];
+    let selectedCount = 0;
     for (let origIdx = 0; origIdx < nSamples; origIdx++) {
       const paddedIdx = preCount + origIdx;
       let stimIdx = paddedIdx - shift;
-      if (shift > 0 && hasAnyLabelExt && origIdx === tAxis.length - 1) {
+      if (shift > 0 && hasAnyLabelExt && origIdx === nSamples - 1) {
         stimIdx = Math.min(paddedIdx, stimX.length - 1);
       }
       if (stimIdx < 0 || stimIdx >= stimX.length || stimIdx >= stimY.length || stimIdx >= stimZ.length) continue;
-      selectedX.push(stimX[stimIdx]);
-      selectedY.push(stimY[stimIdx]);
-      selectedZ.push(stimZ[stimIdx]);
-      selectedT.push(tAxis[origIdx]);
+      selectedCount++;
     }
-    const timeSec = new Float64Array(selectedX.length);
-    const pnsX = new Float64Array(selectedX.length);
-    const pnsY = new Float64Array(selectedX.length);
-    const pnsZ = new Float64Array(selectedX.length);
-    const pnsNorm = new Float64Array(selectedX.length);
+    const timeSec = new Float64Array(selectedCount);
+    const pnsX = new Float64Array(selectedCount);
+    const pnsY = new Float64Array(selectedCount);
+    const pnsZ = new Float64Array(selectedCount);
+    const pnsNorm = new Float64Array(selectedCount);
     let ok = true;
-    for (let i = 0; i < selectedX.length; i++) {
-      const xNorm = 0.01 * selectedX[i];
-      const yNorm = 0.01 * selectedY[i];
-      const zNorm = 0.01 * selectedZ[i];
+    let selectedIndex = 0;
+    for (let origIdx = 0; origIdx < nSamples; origIdx++) {
+      const paddedIdx = preCount + origIdx;
+      let stimIdx = paddedIdx - shift;
+      if (shift > 0 && hasAnyLabelExt && origIdx === nSamples - 1) {
+        stimIdx = Math.min(paddedIdx, stimX.length - 1);
+      }
+      if (stimIdx < 0 || stimIdx >= stimX.length || stimIdx >= stimY.length || stimIdx >= stimZ.length) continue;
+      const xNorm = 0.01 * stimX[stimIdx];
+      const yNorm = 0.01 * stimY[stimIdx];
+      const zNorm = 0.01 * stimZ[stimIdx];
       const norm = Math.sqrt(xNorm * xNorm + yNorm * yNorm + zNorm * zNorm);
-      timeSec[i] = selectedT[i];
-      pnsX[i] = xNorm;
-      pnsY[i] = yNorm;
-      pnsZ[i] = zNorm;
-      pnsNorm[i] = norm;
+      timeSec[selectedIndex] = (ntMin + origIdx) * dtSec;
+      pnsX[selectedIndex] = xNorm;
+      pnsY[selectedIndex] = yNorm;
+      pnsZ[selectedIndex] = zNorm;
+      pnsNorm[selectedIndex] = norm;
       if (norm >= 1) ok = false;
+      selectedIndex++;
     }
     return { valid: true, ok, timeSec, pnsX, pnsY, pnsZ, pnsNorm };
   }
   function safePnsModel(dgdt, dtSec, hw) {
-    const absDgdt = new Float64Array(dgdt.length);
-    for (let i = 0; i < dgdt.length; i++) absDgdt[i] = Math.abs(dgdt[i]);
+    return runPnsModel(dgdt.length, (index) => dgdt[index], dtSec, hw);
+  }
+  function runPnsModel(length, derivativeAt, dtSec, hw) {
     const dtMs = dtSec * 1e3;
-    const lp1 = lowpassTau(dgdt, hw.tau1Ms, dtMs);
-    const lp2 = lowpassTau(absDgdt, hw.tau2Ms, dtMs);
-    const lp3 = lowpassTau(dgdt, hw.tau3Ms, dtMs);
-    const stim = new Float64Array(dgdt.length);
+    const alpha1 = lowpassAlpha(hw.tau1Ms, dtMs);
+    const alpha2 = lowpassAlpha(hw.tau2Ms, dtMs);
+    const alpha3 = lowpassAlpha(hw.tau3Ms, dtMs);
+    const stim = new Float64Array(length);
     const denom = hw.stimLimit > 0 ? hw.stimLimit : 1;
-    for (let i = 0; i < dgdt.length; i++) {
-      const s1 = hw.a1 * Math.abs(lp1[i]);
-      const s2 = hw.a2 * lp2[i];
-      const s3 = hw.a3 * Math.abs(lp3[i]);
+    let lp1 = 0;
+    let lp2 = 0;
+    let lp3 = 0;
+    for (let i = 0; i < length; i++) {
+      const derivative = derivativeAt(i);
+      lp1 = alpha1 * derivative + (1 - alpha1) * lp1;
+      lp2 = alpha2 * Math.abs(derivative) + (1 - alpha2) * lp2;
+      lp3 = alpha3 * derivative + (1 - alpha3) * lp3;
+      const s1 = hw.a1 * Math.abs(lp1);
+      const s2 = hw.a2 * lp2;
+      const s3 = hw.a3 * Math.abs(lp3);
       stim[i] = (s1 + s2 + s3) / denom * hw.gScale * 100;
     }
     return stim;
+  }
+  function lowpassAlpha(tauMs, dtMs) {
+    return tauMs <= 0 || dtMs <= 0 ? 1 : dtMs / (tauMs + dtMs);
   }
   function invalidPns(error) {
     return {
@@ -1939,79 +1946,58 @@ var Pulseq = (() => {
   function hasValidWeights(hw) {
     return Math.abs(hw.a1 + hw.a2 + hw.a3 - 1) <= 0.01 && hw.stimLimit > 0;
   }
-  function lowpassTau(input, tauMs, dtMs) {
-    const out = new Float64Array(input.length);
-    if (!input.length) return out;
-    if (tauMs <= 0 || dtMs <= 0) {
-      out.set(input);
-      return out;
-    }
-    const alpha = dtMs / (tauMs + dtMs);
-    out[0] = alpha * input[0];
-    for (let i = 1; i < input.length; i++) out[i] = alpha * input[i] + (1 - alpha) * out[i - 1];
-    return out;
-  }
   function collectGradientSeries2(blocks, channel) {
-    const time = [];
-    const value = [];
+    const series = { time: [], value: [] };
     for (const block of blocks) {
       const grad = block[channel];
       if (!grad?.timePoints || !grad.waveform) continue;
       const n = Math.min(grad.timePoints.length, grad.waveform.length);
       for (let i = 0; i < n; i++) {
-        time.push(grad.timePoints[i]);
-        value.push(grad.waveform[i]);
+        appendGradientPoint2(series, grad.timePoints[i], grad.waveform[i]);
       }
     }
-    return sanitizeGradientSeries2(time, value);
+    return series;
   }
-  function sanitizeGradientSeries2(time, value) {
-    const pairs = [];
-    const n = Math.min(time.length, value.length);
-    for (let i = 0; i < n; i++) {
-      if (Number.isFinite(time[i]) && Number.isFinite(value[i])) pairs.push([time[i], value[i]]);
+  function appendGradientPoint2(series, t, value) {
+    if (!Number.isFinite(t) || !Number.isFinite(value)) return;
+    const last = series.time.length - 1;
+    if (last >= 0 && Math.abs(t - series.time[last]) <= TIME_EPS2) {
+      series.value[last] = 0.5 * (series.value[last] + value);
+    } else if (last < 0 || t > series.time[last]) {
+      series.time.push(t);
+      series.value.push(value);
     }
-    pairs.sort((a, b) => a[0] - b[0]);
-    const outT = [];
-    const outV = [];
-    for (const [t, v] of pairs) {
-      const last = outT.length - 1;
-      if (last >= 0 && Math.abs(t - outT[last]) <= TIME_EPS2) {
-        outV[last] = 0.5 * (outV[last] + v);
-        continue;
-      }
-      outT.push(t);
-      outV.push(v);
-    }
-    return { time: outT, value: outV };
   }
-  function interpLinearZero(series, t) {
-    const n = series.time.length;
-    if (!n || t < series.time[0] || t > series.time[n - 1]) return 0;
-    if (n === 1 || t <= series.time[0]) return series.value[0];
-    if (t >= series.time[n - 1]) return series.value[n - 1];
-    let lo = 0;
-    let hi = n - 1;
-    while (hi - lo > 1) {
-      const mid = lo + hi >> 1;
-      if (series.time[mid] <= t) lo = mid;
-      else hi = mid;
-    }
-    const t0 = series.time[lo];
-    const t1 = series.time[hi];
-    if (!(t1 > t0)) return series.value[lo];
-    const alpha = (t - t0) / (t1 - t0);
-    return series.value[lo] + alpha * (series.value[hi] - series.value[lo]);
+  function calculatePnsAxis(series, ntMin, nSamples, preCount, postCount, dtSec, gammaHzPerT, hardware) {
+    const sampleGradient = createGradientSampler(series);
+    const totalSamples = preCount + nSamples + postCount;
+    const paddedValue = (index) => {
+      if (index < preCount || index >= preCount + nSamples) return 0;
+      const rasterIndex = index - preCount;
+      return sampleGradient((ntMin + rasterIndex) * dtSec) / gammaHzPerT;
+    };
+    let previous = paddedValue(0);
+    return runPnsModel(Math.max(0, totalSamples - 1), (index) => {
+      const current = paddedValue(index + 1);
+      const derivative = (current - previous) / dtSec;
+      previous = current;
+      return derivative;
+    }, dtSec, hardware);
   }
-  function padSamples(input, preCount, postCount) {
-    const out = new Float64Array(preCount + input.length + postCount);
-    out.set(input, preCount);
-    return out;
-  }
-  function diff(input, dtSec) {
-    const out = new Float64Array(Math.max(0, input.length - 1));
-    for (let i = 0; i < out.length; i++) out[i] = (input[i + 1] - input[i]) / dtSec;
-    return out;
+  function createGradientSampler(series) {
+    let index = -1;
+    return (t) => {
+      const n = series.time.length;
+      if (n === 0 || t < series.time[0] || t > series.time[n - 1]) return 0;
+      while (index + 1 < n && series.time[index + 1] <= t + TIME_EPS2) index++;
+      if (index < 0) return 0;
+      if (index >= n - 1 || t <= series.time[index] + TIME_EPS2) return series.value[index];
+      const t0 = series.time[index];
+      const t1 = series.time[index + 1];
+      if (!(t1 > t0)) return series.value[index];
+      const alpha = (t - t0) / (t1 - t0);
+      return series.value[index] + alpha * (series.value[index + 1] - series.value[index]);
+    };
   }
 
   // src/pulseq/trdetect.ts
