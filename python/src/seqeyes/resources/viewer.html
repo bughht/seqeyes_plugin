@@ -163,6 +163,7 @@ function scheduleViewerDraw(includeMinimap){
 // ── Unit conversion ──
 function gradConv(v){if(gradUnit==='mT/m')return v/GAMMA;if(gradUnit==='G/cm')return v/(GAMMA*10);return v;}
 function gradUnitStr(){return gradUnit;}
+function normalizeGradUnit(unit){return(unit==='mT/m'||unit==='G/cm'||unit==='Hz/m')?unit:'Hz/m';}
 function timeConv(t){if(timeUnit==='ms')return t*1e3;if(timeUnit==='us')return t*1e6;return t;}
 function timeUnitStr(){return timeUnit;}
 
@@ -1519,7 +1520,7 @@ function loadSequenceText(rawText) {
       // ── Apply display options from Python host ──
       if (window.SEQEYES_SHOW_BLOCKS) { showBB = true; document.getElementById('bbc').checked = true; }
       if (window.SEQEYES_TIME_DISP) { timeUnit = window.SEQEYES_TIME_DISP; tuSel.value = timeUnit; }
-      if (window.SEQEYES_GRAD_DISP) { gradUnit = window.SEQEYES_GRAD_DISP; guSel.value = gradUnit; }
+      if (window.SEQEYES_GRAD_DISP) { gradUnit = normalizeGradUnit(window.SEQEYES_GRAD_DISP); guSel.value = gradUnit; }
       // Apply time_range if specified
       if (window.SEQEYES_TIME_RANGE && window.SEQEYES_TIME_RANGE.length === 2) {
         var tr0 = window.SEQEYES_TIME_RANGE[0], tr1 = window.SEQEYES_TIME_RANGE[1];

@@ -57,7 +57,7 @@ try:
     import seqeyes
 
     # Test set()
-    seqeyes.set(theme="dracula", time_disp="ms", grad_disp="kHz/m")
+    seqeyes.set(theme="dracula", time_disp="ms", grad_disp="Hz/m")
     seqeyes.set(show_blocks=True)  # update a single key
     print("OK seqeyes.set() works")
 

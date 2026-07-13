@@ -20,6 +20,9 @@ from typing import Any, Optional, Tuple, Union
 
 _defaults: dict[str, Any] = {}
 _original_plot = None
+_original_repr_html = None
+_had_original_repr_html = False
+_patched_repr_html = None
 _patched = False
 
 
@@ -53,7 +56,7 @@ def reset() -> None:
 
     Call ``seqeyes.set()`` again to re‑enable at any time.
     """
-    global _patched
+    global _patched, _patched_repr_html
     _defaults.clear()
     _patched = False
 
@@ -64,6 +67,12 @@ def reset() -> None:
 
     if _original_plot is not None:
         _Seq.plot = _original_plot  # type: ignore[attr-defined]
+    if _patched_repr_html is not None and getattr(_Seq, "_repr_html_", None) is _patched_repr_html:
+        if _had_original_repr_html:
+            _Seq._repr_html_ = _original_repr_html  # type: ignore[attr-defined]
+        else:
+            delattr(_Seq, "_repr_html_")
+    _patched_repr_html = None
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────
@@ -87,7 +96,7 @@ def _store_defaults(
 
 
 def _ensure_patched() -> None:
-    global _patched, _original_plot
+    global _patched, _original_plot, _original_repr_html, _had_original_repr_html, _patched_repr_html
 
     if _patched:
         return
@@ -100,6 +109,9 @@ def _ensure_patched() -> None:
 
     if _original_plot is None:
         _original_plot = getattr(_Seq, "plot", None)
+    if _patched_repr_html is None:
+        _had_original_repr_html = hasattr(_Seq, "_repr_html_")
+        _original_repr_html = getattr(_Seq, "_repr_html_", None)
 
     # ── Replacement .plot() ──────────────────────────────────────────
     def _seqeyes_plot(
@@ -108,7 +120,7 @@ def _ensure_patched() -> None:
         show_blocks: bool = False,
         time_range: Any = (0, float("inf")),
         time_disp: str = "s",
-        grad_disp: str = "kHz/m",
+        grad_disp: str = "Hz/m",
         **kwargs: Any,
     ) -> None:
         # Merge globals — per‑call args take precedence
@@ -147,6 +159,7 @@ def _ensure_patched() -> None:
         return SeqEyesViewer(_seq_to_text(self))._repr_html_()
 
     _Seq._repr_html_ = _seq_repr_html_  # type: ignore[attr-defined]
+    _patched_repr_html = _seq_repr_html_
 
 
 def _in_jupyter() -> bool:
