@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { cpus } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 
 import { decodeAllBlocks, getTotalDuration } from '../../src/pulseq/decoder';
 import { calculateKspace } from '../../src/pulseq/kspace';
-import { parseSequenceText } from '../../src/pulseq/reader';
+import { parseSequenceBytes } from '../../src/pulseq/sequenceReader';
 import { detectSequenceTiming } from '../../src/pulseq/trdetect';
 
 interface Timings {
@@ -21,6 +21,7 @@ interface Timings {
 
 interface Counts {
   fileBytes: number;
+  shapeSampleCount: number;
   blockCount: number;
   decodedBlockCount: number;
   adcSampleCount: number;
@@ -67,6 +68,22 @@ const cases = [
     id: 'spi_demo',
     path: join(repoRoot, 'test', 'seqeyes_demo_seq_files', 'spi.seq'),
   },
+  {
+    id: 'official_gre_text',
+    path: join(repoRoot, 'test', 'pulseq', 'binary', 'gre.seq'),
+  },
+  {
+    id: 'official_gre_binary',
+    path: join(repoRoot, 'test', 'pulseq', 'binary', 'gre.bseq'),
+  },
+  {
+    id: 'official_epi_rs_text',
+    path: join(repoRoot, 'test', 'pulseq', 'binary', 'epi_rs.seq'),
+  },
+  {
+    id: 'official_epi_rs_binary',
+    path: join(repoRoot, 'test', 'pulseq', 'binary', 'epi_rs.bseq'),
+  },
 ];
 
 describe('Node performance guard', () => {
@@ -97,11 +114,11 @@ describe('Node performance guard', () => {
 });
 
 function measureCase(id: string, filePath: string): CaseReport {
-  const sequenceText = readFileSync(filePath, 'utf8');
-  runPipeline(sequenceText);
+  const sequenceBytes = readFileSync(filePath);
+  runPipeline(sequenceBytes, filePath);
 
   const runs: Array<Timings & { counts: Counts }> = [];
-  for (let i = 0; i < iterations; i++) runs.push(runPipeline(sequenceText, filePath));
+  for (let i = 0; i < iterations; i++) runs.push(runPipeline(sequenceBytes, filePath));
 
   const timings = runs.map(({ counts: _counts, ...rest }) => rest);
   const counts = runs[runs.length - 1].counts;
@@ -126,11 +143,9 @@ function measureCase(id: string, filePath: string): CaseReport {
   };
 }
 
-function runPipeline(sequenceText: string, filePath = ''): Timings & { counts: Counts } {
-  const fileBytes = filePath ? statSync(filePath).size : Buffer.byteLength(sequenceText);
-
+function runPipeline(sequenceBytes: Uint8Array, filePath: string): Timings & { counts: Counts } {
   const parseStart = performance.now();
-  const seq = parseSequenceText(sequenceText);
+  const seq = parseSequenceBytes(sequenceBytes, filePath);
   const parseMs = performance.now() - parseStart;
 
   const timingStart = performance.now();
@@ -171,7 +186,8 @@ function runPipeline(sequenceText: string, filePath = ''): Timings & { counts: C
     kspaceInteractiveMs,
     kspaceExportMs,
     counts: {
-      fileBytes,
+      fileBytes: sequenceBytes.byteLength,
+      shapeSampleCount: [...seq.shapes.values()].reduce((sum, shape) => sum + shape.numSamples, 0),
       blockCount: seq.blocks.length,
       decodedBlockCount: decoded.length,
       adcSampleCount: exported.t_adc.length,
@@ -184,6 +200,7 @@ function runPipeline(sequenceText: string, filePath = ''): Timings & { counts: C
 
 function assertCaseReport(item: CaseReport): void {
   expect(item.counts.fileBytes).toBeGreaterThan(0);
+  expect(item.counts.shapeSampleCount).toBeGreaterThanOrEqual(0);
   expect(item.counts.blockCount).toBeGreaterThan(0);
   expect(item.counts.decodedBlockCount).toBe(item.counts.blockCount);
   expect(item.counts.adcSampleCount).toBeGreaterThan(0);

@@ -105,10 +105,10 @@ function readPackageVersion(): string {
 
 function usage(): string {
     return [
-        'Usage: node out/cli/exportKspace.js <input.seq> <out-dir> [options]',
+        'Usage: node out/cli/exportKspace.js <input.seq|input.bseq> <out-dir> [options]',
         '',
         'Options:',
-        '  --input <file>             Pulseq .seq input file, alternative to positional input',
+        '  --input <file>             Pulseq .seq or .bseq input, alternative to positional input',
         '  --out-dir <dir>            Output directory, alternative to positional output',
         '  --full                     Also write full ktraj.txt in addition to ktraj_adc.txt',
         '  --seqeyes-grid             Use all gradient support points; default for parity export',

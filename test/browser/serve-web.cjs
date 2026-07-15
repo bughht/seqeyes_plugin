@@ -14,6 +14,7 @@ const mimeTypes = new Map([
   ['.svg', 'image/svg+xml'],
   ['.txt', 'text/plain; charset=utf-8'],
   ['.json', 'application/json; charset=utf-8'],
+  ['.bseq', 'application/octet-stream'],
 ]);
 
 function resolveRequestPath(urlPath) {

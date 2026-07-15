@@ -1,6 +1,7 @@
 import { decodeAllBlocks, getTotalDuration } from './decoder';
 import { calculateKspace, type KSpaceData, type KSpaceOptions } from './kspace';
 import { parseSequenceText } from './reader';
+import { parseSequenceBytes } from './sequenceReader';
 import type { PulseqSequence } from './types';
 
 export interface KspaceExportOptions {
@@ -64,6 +65,23 @@ export function exportKspaceArtifacts(
     options: KspaceExportOptions = {},
 ): KspaceExportArtifacts {
     const seq = parseSequenceText(sequenceText);
+    return exportKspaceArtifactsFromSequence(seq, sequenceName, options);
+}
+
+export function exportKspaceArtifactsFromBytes(
+    sequenceBytes: Uint8Array,
+    sequenceName: string,
+    options: KspaceExportOptions = {},
+): KspaceExportArtifacts {
+    const seq = parseSequenceBytes(sequenceBytes, sequenceName);
+    return exportKspaceArtifactsFromSequence(seq, sequenceName, options);
+}
+
+export function exportKspaceArtifactsFromSequence(
+    seq: PulseqSequence,
+    sequenceName: string,
+    options: KspaceExportOptions = {},
+): KspaceExportArtifacts {
     const decoded = decodeAllBlocks(seq);
     const totalDuration = getTotalDuration(seq);
     const gradientSupport = options.gradientSupport ?? 'all';

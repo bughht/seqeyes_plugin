@@ -9,7 +9,9 @@ async function run() {
 
   const epiUri = vscode.Uri.file(path.join(workspacePath, 'writeEpi.seq'));
   const spiralUri = vscode.Uri.file(path.join(workspacePath, 'spiral_inout.seq'));
+  const binaryUri = vscode.Uri.file(path.join(workspacePath, 'gre.bseq'));
   const invalidUri = vscode.Uri.file(path.join(workspacePath, 'invalid.seq'));
+  const invalidBinaryUri = vscode.Uri.file(path.join(workspacePath, 'invalid.bseq'));
   const exportDir = vscode.Uri.file(path.join(workspacePath, 'exports'));
 
   await step('activate extension', async () => {
@@ -51,10 +53,32 @@ async function run() {
     assert.equal(metadata.sequenceName, 'spiral_inout.seq');
   });
 
+  await step('open and export an official binary Pulseq fixture', async () => {
+    await vscode.commands.executeCommand('vscode.openWith', binaryUri, 'seqeyes.sequenceViewer');
+    const load = await waitForLoad(binaryUri);
+    assertLoadState(load, 'gre.bseq');
+    assert.equal(load.blockCount, 320);
+    assert.equal(load.adcCount, 4096);
+
+    const result = await vscode.commands.executeCommand('seqeyes.test.exportKspace', binaryUri, exportDir);
+    assert.ok(result.ktrajAdcUri.endsWith('gre_ktraj_adc.txt'));
+    assert.ok(result.metadataUri.endsWith('gre_metadata.json'));
+    assert.equal(result.adcSampleCount, 4096);
+    const metadata = JSON.parse(await readText(vscode.Uri.parse(result.metadataUri)));
+    assert.equal(metadata.sequenceName, 'gre.bseq');
+    assert.equal(metadata.adcSampleCount, 4096);
+  });
+
   await step('invalid fixture reports parse error without crashing host', async () => {
     await vscode.commands.executeCommand('vscode.openWith', invalidUri, 'seqeyes.sequenceViewer');
     const error = await waitForError(invalidUri);
     assert.match(error.message, /VERSION|Pulseq|section|sequence|parse|required/i);
+  });
+
+  await step('invalid binary fixture reports its missing header', async () => {
+    await vscode.commands.executeCommand('vscode.openWith', invalidBinaryUri, 'seqeyes.sequenceViewer');
+    const error = await waitForError(invalidBinaryUri);
+    assert.match(error.message, /binary header|bseq|Pulseq/i);
   });
 
   await vscode.commands.executeCommand('workbench.action.closeAllEditors');

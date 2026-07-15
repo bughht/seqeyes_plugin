@@ -4,6 +4,7 @@ import { basename, join } from 'node:path';
 
 import {
     exportKspaceArtifacts as buildKspaceExportArtifacts,
+    exportKspaceArtifactsFromBytes as buildKspaceExportArtifactsFromBytes,
     type KspaceExportArtifacts,
     type KspaceExportMetadata,
     type KspaceExportOptions,
@@ -36,13 +37,24 @@ export function exportKspaceArtifacts(
     });
 }
 
+export function exportKspaceArtifactsFromBytes(
+    sequenceBytes: Uint8Array,
+    sequenceName: string,
+    options: KspaceExportOptions = {},
+): KspaceExportArtifacts {
+    return buildKspaceExportArtifactsFromBytes(sequenceBytes, sequenceName, {
+        ...options,
+        sequenceSha256: options.sequenceSha256 ?? sha256Hex(sequenceBytes),
+    });
+}
+
 export function exportKspaceFiles(
     inputPath: string,
     outputDir: string,
     options: KspaceExportOptions = {},
 ): KspaceExportFiles {
-    const sequenceText = readFileSync(inputPath, 'utf8');
-    const artifacts = exportKspaceArtifacts(sequenceText, basename(inputPath), options);
+    const sequenceBytes = readFileSync(inputPath);
+    const artifacts = exportKspaceArtifactsFromBytes(sequenceBytes, basename(inputPath), options);
     mkdirSync(outputDir, { recursive: true });
 
     const ktrajAdcPath = join(outputDir, 'ktraj_adc.txt');
@@ -65,6 +77,6 @@ export function exportKspaceFiles(
     };
 }
 
-function sha256Hex(text: string): string {
-    return createHash('sha256').update(text).digest('hex');
+function sha256Hex(source: string | Uint8Array): string {
+    return createHash('sha256').update(source).digest('hex');
 }

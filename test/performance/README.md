@@ -23,3 +23,8 @@ Artifacts:
 - `performance-results/performance-browser.json`
 
 The normal `npm run check` gate does not run these performance guards.
+
+The Node report includes the official Pulseq `gre` and `epi_rs` `.seq`/`.bseq`
+pairs. This makes binary file size and parse timing visible beside the equivalent
+text inputs without imposing a brittle speed-ratio threshold on shared CI
+runners.

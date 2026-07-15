@@ -88,8 +88,8 @@ canvas{display:block}
   <img src="logo.svg" alt="SeqEyes-Online" style="width:200px;height:200px;border-radius:12px;box-shadow:0 4px 16px rgba(0,0,0,.15)">
   <h1>SeqEyes</h1>
   <p>Pulseq MRI Sequence Viewer</p>
-  <div class="actions"><button id="splashOpen">📂 Open .seq file</button><button id="splashOpenUrl" class="web-url-only">🌐 Open from web</button></div>
-  <div class="drop" id="dropZone">Or drag &amp; drop a .seq file here</div>
+  <div class="actions"><button id="splashOpen">📂 Open .seq or .bseq file</button><button id="splashOpenUrl" class="web-url-only">🌐 Open from web</button></div>
+  <div class="drop" id="dropZone">Or drag &amp; drop a .seq or .bseq file here</div>
   <p style="font-size:11px;color:var(--lb);margin-top:8px">
     Try with example files from <a href="https://github.com/pulseq/pulseq" target="_blank" style="color:var(--adc)">pulseq/pulseq</a>
   </p>
@@ -97,12 +97,12 @@ canvas{display:block}
 <div id="urlOverlay" style="display:none" aria-hidden="true">
   <div id="urlCard" role="dialog" aria-modal="true" aria-labelledby="urlLabel">
     <label id="urlLabel" for="urlInput">Sequence URL</label>
-    <input id="urlInput" type="url" spellcheck="false" autocomplete="off" placeholder="https://.../sequence.seq">
+    <input id="urlInput" type="url" spellcheck="false" autocomplete="off" placeholder="https://.../sequence.seq or sequence.bseq">
     <div id="urlActions"><button id="urlCancel" type="button">Cancel</button><button id="urlLoad" type="button">Load</button></div>
     <div id="urlStatus"></div>
   </div>
 </div>
-<input type="file" id="fileInput" accept=".seq" style="display:none">
+<input type="file" id="fileInput" accept=".seq,.bseq" style="display:none">
 <input type="file" id="ascInput" accept=".asc" style="display:none">
 
 <!-- ═══════════════════════════════════════════════════════════════
@@ -110,8 +110,8 @@ canvas{display:block}
      ═══════════════════════════════════════════════════════════════ -->
 <div id="tb">
 <img src="logo.png" alt="SeqEyes" style="width:18px;height:18px;border-radius:3px;vertical-align:middle" title="SeqEyes">
-<button id="openBtn" title="Open another local .seq file">📂 Open</button>
-<button id="openUrlBtn" class="web-url-only" title="Open a .seq file from a web link">🌐 URL</button>
+<button id="openBtn" title="Open another local .seq or .bseq file">📂 Open</button>
+<button id="openUrlBtn" class="web-url-only" title="Open a .seq or .bseq file from a web link">🌐 URL</button>
 <button id="exportKspaceBtn" title="Export ADC k-space trajectory and metadata" disabled>Export</button><div class="sep"></div>
 <button id="pnsBtn" title="Select or replace the ASC profile used for PNS prediction">Select PNS ASC file</button><div class="sep"></div>
 <button id="zi" title="Zoom In (scroll wheel)">+</button>
@@ -185,7 +185,7 @@ function scheduleViewerDraw(includeMinimap){
 var seqTiming=null,blockPos=[];
 var mmCanvas=document.getElementById('mmc'),mmCtx=mmCanvas.getContext('2d');
 var mmCache=null,mmCacheW=0,mmCacheDpr=0,mmDrag=false;
-var currentSequenceText='',currentSequenceName='',exportBusy=false;
+var currentSequence=null,currentSequenceBytes=null,currentSequenceName='',exportBusy=false;
 var MAX_URL_SEQ_BYTES=100*1024*1024;
 var URL_FETCH_TIMEOUT_MS=20000;
 
@@ -520,12 +520,12 @@ function serializeGrad(g){
 /* ═══════════════════════════════════════════════════════════════════════
    File loading (standalone — calls Pulseq bundle directly)
    ═══════════════════════════════════════════════════════════════════════ */
-function loadSequenceText(text,fileName){
-  var hadSequence=!!currentSequenceText;
+function loadSequenceSource(sourceBytes,fileName,parseSource){
+  var hadSequence=!!currentSequence;
   setExportButtonEnabled(false);
   try{
     showProgress('start',0,'Parsing sequence...');
-    var seq=Pulseq.parseSequenceText(text);
+    var seq=parseSource();
 
     showProgress('timing',10,'Detecting TR/TE...');
     var timing=Pulseq.detectSequenceTiming(seq);
@@ -563,10 +563,11 @@ function loadSequenceText(text,fileName){
     if(seqTiming&&seqTiming.trTimeSec>0){fitToFirstTR();}else{fit();}
     draw();drawKs();drawMinimap();
     var name=seq.definitionsRaw.get('Name')||fileName||'SeqEyes';
-    currentSequenceText=text;
+    currentSequence=seq;
+    currentSequenceBytes=sourceBytes;
     currentSequenceName=fileName||name||'sequence.seq';
     setExportButtonEnabled(true);
-    document.title='SeqEyes: '+name.replace(/\.seq$/i,'');
+    document.title='SeqEyes: '+name.replace(/\.(?:seq|bseq)$/i,'');
     if(splash)splash.style.display='none';
     return true;
   }catch(err){
@@ -575,6 +576,16 @@ function loadSequenceText(text,fileName){
     setExportButtonEnabled(hadSequence);
     return false;
   }
+}
+
+function loadSequenceBytes(bytes,fileName){
+  var source=bytes instanceof Uint8Array?bytes:new Uint8Array(bytes);
+  return loadSequenceSource(source,fileName,function(){return Pulseq.parseSequenceBytes(source,fileName||'');});
+}
+
+function loadSequenceText(text,fileName){
+  var source=new TextEncoder().encode(text);
+  return loadSequenceSource(source,fileName,function(){return Pulseq.parseSequenceText(text);});
 }
 
 // Expose globally so MATLAB can call it via executeJS()
@@ -595,10 +606,9 @@ function waitForPaint(){
   return new Promise(function(resolve){requestAnimationFrame(function(){setTimeout(resolve,0);});});
 }
 
-async function sha256Hex(text){
-  if(!window.crypto||!window.crypto.subtle||typeof TextEncoder==='undefined')return 'unknown';
+async function sha256Hex(bytes){
+  if(!window.crypto||!window.crypto.subtle||!bytes)return 'unknown';
   try{
-    var bytes=new TextEncoder().encode(text);
     var hash=await window.crypto.subtle.digest('SHA-256',bytes);
     var arr=Array.from(new Uint8Array(hash));
     return arr.map(function(b){return b.toString(16).padStart(2,'0');}).join('');
@@ -608,7 +618,7 @@ async function sha256Hex(text){
 }
 
 function sanitizeFileStem(name){
-  var cleaned=(name||'sequence').replace(/\.seq$/i,'').replace(/[^A-Za-z0-9._-]+/g,'_').replace(/^_+|_+$/g,'');
+  var cleaned=(name||'sequence').replace(/\.(?:seq|bseq)$/i,'').replace(/[^A-Za-z0-9._-]+/g,'_').replace(/^_+|_+$/g,'');
   return cleaned||'sequence';
 }
 
@@ -625,15 +635,15 @@ function downloadTextFile(fileName,text,mimeType){
 }
 
 async function exportCurrentKspace(){
-  if(!currentSequenceText){alert('Open a .seq file before exporting k-space.');return;}
+  if(!currentSequence||!currentSequenceBytes){alert('Open a Pulseq sequence before exporting k-space.');return;}
   if(exportBusy)return;
   exportBusy=true;
   setExportButtonEnabled(true);
   try{
     showProgress('export',10,'Exporting ADC k-space trajectory...');
     await waitForPaint();
-    var sha=await sha256Hex(currentSequenceText);
-    var artifacts=Pulseq.exportKspaceArtifacts(currentSequenceText,currentSequenceName||'sequence.seq',{
+    var sha=await sha256Hex(currentSequenceBytes);
+    var artifacts=Pulseq.exportKspaceArtifactsFromSequence(currentSequence,currentSequenceName||'sequence.seq',{
       packageVersion:Pulseq.PACKAGE_VERSION||'web',
       sequenceSha256:sha
     });
@@ -646,7 +656,7 @@ async function exportCurrentKspace(){
     showProgress('done',100,'Ready');
   }finally{
     exportBusy=false;
-    setExportButtonEnabled(!!currentSequenceText);
+    setExportButtonEnabled(!!currentSequence);
   }
 }
 
@@ -672,7 +682,7 @@ function showM1Result(result){
 function requestM1(channel){
   if(m1Busy)return;
   if(m1Data){chVis[channel]=!chVis[channel];buildLegend();draw();return;}
-  if(!decodedBlocks){alert('Open a .seq file before calculating M1.');return;}
+  if(!decodedBlocks){alert('Open a Pulseq sequence before calculating M1.');return;}
   m1RequestedChannel=channel;m1Busy=true;buildLegend();
   try{showM1Result(Pulseq.calculateM1(decodedBlocks,GR,{referenceMode:m1ReferenceMode}));}
   catch(err){m1Busy=false;alert('M1 calculation failed: '+(err.message||String(err)));}
@@ -695,15 +705,22 @@ function showPnsResult(result){
 
 function requestPnsAsc(){
   if(pnsBusy)return;
-  if(!decodedBlocks){alert('Open a .seq file before calculating PNS.');return;}
+  if(!decodedBlocks){alert('Open a Pulseq sequence before calculating PNS.');return;}
   document.getElementById('ascInput').click();
 }
 
-function handleFile(file){
+async function handleFile(file){
   if(!file)return;
-  var reader=new FileReader();
-  reader.onload=function(){loadSequenceText(reader.result,file.name);};
-  reader.readAsText(file);
+  if(!/\.(?:seq|bseq)$/i.test(file.name||'')){
+    alert('Unsupported file type. Select a .seq or .bseq Pulseq sequence.');
+    return;
+  }
+  try{
+    var buffer=await file.arrayBuffer();
+    loadSequenceBytes(new Uint8Array(buffer),file.name);
+  }catch(err){
+    alert('Error reading sequence: '+(err.message||String(err)));
+  }
 }
 
 function isWebUrlOpenAvailable(){
@@ -766,19 +783,19 @@ function normalizeGithubBlobUrl(url){
 
 function validateSeqUrlCandidate(input){
   var raw=(input||'').trim();
-  if(!raw)throw new Error('Paste a .seq URL.');
+  if(!raw)throw new Error('Paste a .seq or .bseq URL.');
   var url;
   try{url=new URL(raw);}catch(_){throw new Error('Enter a complete URL starting with https://.');}
   var protocol=url.protocol.toLowerCase();
   if(protocol!=='https:'&&!(protocol==='http:'&&isLocalHttpHost(url.hostname))){
     throw new Error('Only https:// links are allowed.');
   }
-  if(!/\.seq$/i.test(url.pathname)){
-    throw new Error('The URL path must end with .seq.');
+  if(!/\.(?:seq|bseq)$/i.test(url.pathname)){
+    throw new Error('The URL path must end with .seq or .bseq.');
   }
   var fetchUrl=normalizeGithubBlobUrl(url);
-  if(!/\.seq$/i.test(fetchUrl.pathname)){
-    throw new Error('The URL path must end with .seq.');
+  if(!/\.(?:seq|bseq)$/i.test(fetchUrl.pathname)){
+    throw new Error('The URL path must end with .seq or .bseq.');
   }
   return {fetchUrl:fetchUrl,fileName:inferSeqFileName(url),displayUrl:url.href};
 }
@@ -801,6 +818,18 @@ function validateSeqTextCandidate(text){
   }
 }
 
+function validateSequenceBytesCandidate(bytes,fileName){
+  if(!bytes||!bytes.byteLength)throw new Error('The downloaded file is empty.');
+  var binaryName=/\.bseq$/i.test(fileName||'');
+  var binaryMagic=Pulseq.hasPulseqBinaryMagic(bytes);
+  if(binaryName&&!binaryMagic)throw new Error('The downloaded .bseq file is missing the Pulseq binary header.');
+  if(binaryMagic)return;
+  var text;
+  try{text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);}
+  catch(_){throw new Error('The downloaded .seq file is not valid UTF-8 text.');}
+  validateSeqTextCandidate(text);
+}
+
 async function fetchSeqFromUrl(fetchUrl){
   if(typeof fetch!=='function')throw new Error('This browser cannot fetch web links.');
   var controller=new AbortController();
@@ -809,14 +838,14 @@ async function fetchSeqFromUrl(fetchUrl){
     var response=await fetch(fetchUrl.href,{credentials:'omit',redirect:'follow',signal:controller.signal});
     if(!response.ok)throw new Error('Fetch failed with HTTP '+response.status+'.');
     var length=response.headers.get('content-length');
-    if(length&&Number(length)>MAX_URL_SEQ_BYTES)throw new Error('The .seq file is larger than 100 MB.');
+    if(length&&Number(length)>MAX_URL_SEQ_BYTES)throw new Error('The sequence file is larger than 100 MB.');
     var buffer=await response.arrayBuffer();
-    if(buffer.byteLength>MAX_URL_SEQ_BYTES)throw new Error('The .seq file is larger than 100 MB.');
-    return new TextDecoder('utf-8').decode(buffer);
+    if(buffer.byteLength>MAX_URL_SEQ_BYTES)throw new Error('The sequence file is larger than 100 MB.');
+    return new Uint8Array(buffer);
   }catch(err){
-    if(err&&err.name==='AbortError')throw new Error('Timed out while fetching the .seq file.');
+    if(err&&err.name==='AbortError')throw new Error('Timed out while fetching the sequence file.');
     if(err instanceof TypeError){
-      throw new Error('Could not fetch this link. The server may block browser access. Try a raw GitHub link or download the .seq file locally.');
+      throw new Error('Could not fetch this link. The server may block browser access. Try a raw GitHub link or download the sequence file locally.');
     }
     throw err;
   }finally{
@@ -831,12 +860,12 @@ async function openSequenceFromUrl(inputUrl){
     var candidate=validateSeqUrlCandidate(inputUrl);
     setUrlStatus('Fetching...',false);
     showProgress('start',0,'Fetching sequence...');
-    var text=await fetchSeqFromUrl(candidate.fetchUrl);
-    validateSeqTextCandidate(text);
+    var bytes=await fetchSeqFromUrl(candidate.fetchUrl);
+    validateSequenceBytesCandidate(bytes,candidate.fileName);
     setUrlStatus('Loading...',false);
-    var loaded=loadSequenceText(text,candidate.fileName);
+    var loaded=loadSequenceBytes(bytes,candidate.fileName);
     if(loaded)closeUrlDialog();
-    else setUrlStatus('The file could not be parsed as a Pulseq .seq file.',true);
+    else setUrlStatus('The file could not be parsed as a Pulseq sequence.',true);
   }catch(err){
     setUrlStatus(err.message||String(err),true);
     showProgress('done',100,'Ready');

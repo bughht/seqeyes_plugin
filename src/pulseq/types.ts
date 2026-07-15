@@ -15,6 +15,13 @@
 
 export interface VersionInfo { major: number; minor: number; revision: number; }
 
+/** Optional signature trailer parsed from a binary Pulseq file. */
+export interface BinarySignatureInfo {
+    type: string;
+    hash: string;
+    originalSize: number;
+}
+
 /**
  * Unified version integer for clean threshold comparisons.
  * Computed as: major*1_000_000 + minor*1_000 + revision.
@@ -321,6 +328,8 @@ export interface PulseqSequence {
         rfRaster: number;
         adcRaster: number;
     };
+    /** Binary signature metadata. Parsing does not imply digest verification. */
+    binarySignature?: BinarySignatureInfo;
     /** Parsed timing metadata (from [DEFINITIONS]). */
     timing?: SequenceTiming;
 }

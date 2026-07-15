@@ -1,7 +1,7 @@
 {
   "name": "seqeyes-web",
   "displayName": "SeqEyes",
-  "description": "Visualize Pulseq MRI sequences inside VS Code — inspect sequence diagrams, k-space trajectorieswith interactive user interface.",
+  "description": "Visualize Pulseq .seq and .bseq MRI sequences inside VS Code with interactive diagrams and k-space trajectories.",
   "version": "0.2.5",
   "publisher": "SeqEyesDeveloper",
   "license": "MIT",
@@ -38,6 +38,9 @@
         "selector": [
           {
             "filenamePattern": "*.seq"
+          },
+          {
+            "filenamePattern": "*.bseq"
           }
         ]
       }
@@ -57,14 +60,14 @@
       "explorer/context": [
         {
           "command": "seqeyes.openSequenceViewer",
-          "when": "resourceExtname == .seq",
+          "when": "resourceExtname == .seq || resourceExtname == .bseq",
           "group": "navigation"
         }
       ],
       "editor/title": [
         {
           "command": "seqeyes.openSequenceViewer",
-          "when": "resourceExtname == .seq",
+          "when": "resourceExtname == .seq || resourceExtname == .bseq",
           "group": "navigation"
         }
       ]

@@ -13,6 +13,7 @@ import {
 import { exportKspaceArtifacts as exportBrowserSafeKspaceArtifacts } from '../../src/pulseq/kspaceExportArtifacts';
 
 const fixturePath = join(__dirname, '..', 'seq', 'spiral_inout.seq');
+const binaryFixturePath = join(__dirname, 'binary', 'gre.bseq');
 
 function tinyAdcSequence(): string {
   return `
@@ -120,6 +121,25 @@ describe('k-space export helper', () => {
       expect(readFileSync(result.ktrajPath!, 'utf8').length).toBeGreaterThan(0);
       expect(metadata.calculation.gradientSupport).toBe('all');
       expect(metadata.files).toEqual({ ktrajAdc: 'ktraj_adc.txt', ktraj: 'ktraj.txt' });
+    } finally {
+      rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('exports a bseq file through the byte-aware CLI core', () => {
+    const workDir = mkdtempSync(join(tmpdir(), 'seqeyes-binary-kspace-export-'));
+    try {
+      const result = exportKspaceFiles(binaryFixturePath, workDir, { packageVersion: 'test-version' });
+      const metadata = JSON.parse(readFileSync(result.metadataPath, 'utf8')) as {
+        sequenceName: string;
+        sequenceSha256: string;
+        adcSampleCount: number;
+      };
+
+      expect(metadata.sequenceName).toBe('gre.bseq');
+      expect(metadata.sequenceSha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(metadata.adcSampleCount).toBe(4096);
+      expect(readFileSync(result.ktrajAdcPath, 'utf8').trim().split('\n')).toHaveLength(4096);
     } finally {
       rmSync(workDir, { recursive: true, force: true });
     }

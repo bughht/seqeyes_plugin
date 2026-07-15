@@ -2,7 +2,7 @@
  * SeqEyes Plugin — VS Code Extension Entry Point
  *
  * Registers:
- *   • Custom editor for .seq files  (seqeyes.sequenceViewer)
+ *   • Custom editor for .seq/.bseq files (seqeyes.sequenceViewer)
  *   • Hello World command           (seqeyes.helloWorld)
  *   • Open Sequence Viewer command  (seqeyes.openSequenceViewer)
  *   • Status‑bar indicator          (pulse icon)
@@ -18,7 +18,7 @@ import {
 
 /** Called when the extension is activated. */
 export function activate(context: vscode.ExtensionContext): void {
-    // ── Custom editor for .seq files ──
+    // ── Custom editor for Pulseq sequence files ──
     context.subscriptions.push(SeqEditorProvider.register(context));
 
     // ── Commands ──
@@ -33,7 +33,7 @@ export function activate(context: vscode.ExtensionContext): void {
             if (uri) {
                 await vscode.commands.executeCommand('vscode.openWith', uri, 'seqeyes.sequenceViewer');
             } else {
-                vscode.window.showWarningMessage('No .seq file selected.');
+                vscode.window.showWarningMessage('No .seq or .bseq file selected.');
             }
         }),
     );
@@ -71,17 +71,21 @@ export function deactivate(): void {
 
 function getActiveSequenceUri(): vscode.Uri | undefined {
     const editor = vscode.window.activeTextEditor;
-    if (editor?.document.fileName.endsWith('.seq')) {
+    if (editor && isSequencePath(editor.document.fileName)) {
         return editor.document.uri;
     }
 
     const input = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
-    if (input instanceof vscode.TabInputText && input.uri.path.endsWith('.seq')) {
+    if (input instanceof vscode.TabInputText && isSequencePath(input.uri.path)) {
         return input.uri;
     }
-    if (input instanceof vscode.TabInputCustom && input.uri.path.endsWith('.seq')) {
+    if (input instanceof vscode.TabInputCustom && isSequencePath(input.uri.path)) {
         return input.uri;
     }
 
     return undefined;
+}
+
+function isSequencePath(path: string): boolean {
+    return /\.(?:seq|bseq)$/i.test(path);
 }

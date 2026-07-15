@@ -1,9 +1,9 @@
 /**
- * Custom readonly editor provider for Pulseq .seq files.
+ * Custom readonly editor provider for Pulseq .seq and .bseq files.
  *
  * Registered as `seqeyes.sequenceViewer` — opens automatically when the user
- * opens a `.seq` file.  The provider:
- *   1. Reads the .seq file text
+ * opens a supported Pulseq sequence. The provider:
+ *   1. Reads the source bytes
  *   2. Parses it via the Pulseq reader
  *   3. Detects TE/TR timing (from definitions or RF‑pulse estimation)
  *   4. Decodes all waveforms via the decoder
@@ -13,13 +13,13 @@
  */
 
 import * as vscode from 'vscode';
-import { parseSequenceText } from '../pulseq/reader';
+import { parseSequenceBytes } from '../pulseq/sequenceReader';
 import { decodeAllBlocks } from '../pulseq/decoder';
 import { calculateKspace, type KSpaceData } from '../pulseq/kspace';
 import { calculateM1, type M1Data } from '../pulseq/m1';
 import { calculatePns, parsePnsHardwareAsc, type PnsHardware, type PnsResult } from '../pulseq/pns';
 import { downsampleM4 } from '../pulseq/displayDownsampling';
-import { exportKspaceArtifacts } from '../pulseq/kspaceExport';
+import { exportKspaceArtifactsFromBytes } from '../pulseq/kspaceExport';
 import { detectSequenceTiming } from '../pulseq/trdetect';
 import { getWebviewContent } from './webviewContent';
 import type { DecodedBlock, DecodedGradWaveform } from '../pulseq/types';
@@ -79,7 +79,7 @@ export async function exportKspaceToDirectoryForTest(
     packageVersion: string,
 ): Promise<SeqEyesDiagnosticExportResult> {
     const sequenceName = uriFileName(sourceUri);
-    const defaultStem = sanitizeFileStem(sequenceName.replace(/\.seq$/i, '') || 'sequence');
+    const defaultStem = sanitizeFileStem(sequenceName.replace(/\.(?:seq|bseq)$/i, '') || 'sequence');
     const saveUri = vscode.Uri.joinPath(outputDir, `${defaultStem}_ktraj_adc.txt`);
     return await writeKspaceArtifacts(sourceUri, saveUri, packageVersion, defaultStem);
 }
@@ -213,7 +213,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
 
                 postProgress('done', 100, 'Ready');
                 const name = seq.definitionsRaw.get('Name') || uri.path.split(/[\\/]/).pop() || 'SeqEyes Viewer';
-                panel.title = `SeqEyes: ${name.replace(/\.seq$/i, '')}`;
+                panel.title = `SeqEyes: ${name.replace(/\.(?:seq|bseq)$/i, '')}`;
                 diagnosticState.lastLoad = {
                     activeUri: uri.toString(),
                     sequenceName: name,
@@ -252,7 +252,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
             } else if (msg.command === 'openFile') {
                 const uris = await vscode.window.showOpenDialog({
                     canSelectMany: false,
-                    filters: { 'Pulseq Sequences': ['seq'] },
+                    filters: { 'Pulseq Sequences': ['seq', 'bseq'] },
                     title: 'Open Pulseq Sequence',
                 });
                 if (uris && uris.length > 0) {
@@ -333,7 +333,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
     private async _exportKspace(uri: vscode.Uri): Promise<void> {
         try {
             const sequenceName = uriFileName(uri);
-            const defaultStem = sanitizeFileStem(sequenceName.replace(/\.seq$/i, '') || 'sequence');
+            const defaultStem = sanitizeFileStem(sequenceName.replace(/\.(?:seq|bseq)$/i, '') || 'sequence');
             const saveUri = await vscode.window.showSaveDialog({
                 defaultUri: siblingUri(uri, `${defaultStem}_ktraj_adc.txt`),
                 filters: { 'Text': ['txt'] },
@@ -441,9 +441,9 @@ async function writeKspaceArtifacts(
     packageVersion: string,
     metadataFallbackStem = 'sequence',
 ): Promise<SeqEyesDiagnosticExportResult> {
-    const sequenceText = Buffer.from(await vscode.workspace.fs.readFile(sourceUri)).toString('utf8');
+    const sequenceBytes = await vscode.workspace.fs.readFile(sourceUri);
     const sequenceName = uriFileName(sourceUri);
-    const artifacts = exportKspaceArtifacts(sequenceText, sequenceName, { packageVersion });
+    const artifacts = exportKspaceArtifactsFromBytes(sequenceBytes, sequenceName, { packageVersion });
     await vscode.workspace.fs.writeFile(ktrajAdcUri, Buffer.from(artifacts.ktrajAdcText, 'utf8'));
 
     const outputStem = sanitizeFileStem(uriFileName(ktrajAdcUri).replace(/\.[^.]*$/i, '').replace(/_?ktraj_adc$/i, ''));
@@ -508,8 +508,7 @@ function serializeBlocks(blocks: DecodedBlock[]): object[] {
 async function readAndParseSequence(uri: vscode.Uri, didRead: () => void) {
     const fileBytes = await vscode.workspace.fs.readFile(uri);
     didRead();
-    const text = Buffer.from(fileBytes.buffer, fileBytes.byteOffset, fileBytes.byteLength).toString('utf8');
-    return parseSequenceText(text);
+    return parseSequenceBytes(fileBytes, uriFileName(uri));
 }
 
 function serializeGrad(g: DecodedGradWaveform): Record<string, unknown> {

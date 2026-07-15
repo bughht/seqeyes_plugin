@@ -12,6 +12,7 @@ node_modules/**
 test/**
 test-results/**
 playwright-report/**
+performance-results/**
 matlab/**
 web/**
 images/*.svg

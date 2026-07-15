@@ -1,6 +1,6 @@
 # SeqEyes Online — Pulseq MRI Sequence Viewer
 
-**Visualize [Pulseq](https://github.com/pulseq/pulseq) MRI sequences — in your browser, MATLAB, or VS Code.** Inspect RF pulses, gradients, ADC readouts, and triggers with interactive zoom & pan. Includes a GPU‑accelerated 3D k‑space viewer with camera presets. Inspired by [SeqEyes](https://github.com/xingwangyong/seqeyes).
+**Visualize [Pulseq](https://github.com/pulseq/pulseq) MRI sequences — in your browser, MATLAB, or VS Code.** Open text `.seq` files everywhere, or official binary `.bseq` files in the web and VS Code viewers, then inspect RF pulses, gradients, ADC readouts, and triggers with interactive zoom & pan. Includes a GPU‑accelerated 3D k‑space viewer with camera presets. Inspired by [SeqEyes](https://github.com/xingwangyong/seqeyes).
 
 <p align="center">
   <a href="https://bughht.github.io/seqeyes_plugin/"><strong>🌐 Try it Online — No Install Required</strong></a>
@@ -20,17 +20,17 @@
 
 **[→ bughht.github.io/seqeyes_plugin](https://bughht.github.io/seqeyes_plugin/)**
 
-No download, no extension, no setup. Just drag & drop a `.seq` file and explore:
+No download, no extension, no setup. Just drag & drop a `.seq` or `.bseq` file and explore:
 
-- **Drag & drop** a `.seq` file onto the page (or click **📂 Open**)
+- **Drag & drop** a `.seq` or `.bseq` file onto the page (or click **📂 Open**)
 - **All the same features** as the VS Code extension — sequence channels, optional M1/PNS, k‑space viewer, 6 themes, tooltips
 - **GPU‑accelerated** 3D k‑space rendered in your browser via WebGL
 - **Zero‑dependency parsing** — the Pulseq engine runs entirely in the browser
-- **Works offline** — no server calls, your data stays local
+- **Local files stay local** — parsing and calculation run in browser memory without uploading sequence data
 
 ## VS Code Extension
 
-Deep integration with VS Code — `.seq` files open automatically in the custom editor.
+Deep integration with VS Code — `.seq` and `.bseq` files open automatically in the custom editor.
 
 ### Install
 
@@ -123,9 +123,9 @@ All the same features as the other versions — interactive waveforms, k‑space
 
 ## Features
 
-- **Custom editor for `.seq` files** — opens automatically on double‑click
+- **Custom editor for `.seq` and `.bseq` files** — opens automatically on double‑click
 - **📂 Open button** — switch between sequences without closing the editor
-- **Browser URL import** — open raw `.seq` files from web links in the standalone web app
+- **Browser URL import** — open raw `.seq` or `.bseq` files from web links in the standalone web app; fetched bytes stay in browser memory
 - **7 primary channels**: RF · φ · Gx · Gy · Gz · ADC · Trigger
 - **Optional M1 channels**: calculate M1x, M1y, and M1z on demand
 - **Optional SAFE PNS prediction**: load a user-provided Siemens ASC profile to display PNS X/Y/Z/Norm
@@ -138,16 +138,17 @@ All the same features as the other versions — interactive waveforms, k‑space
 - **Unit switchers** for time (s / ms / µs) and gradient (Hz/m / mT/m / G/cm)
 - **K‑space unit toggle** (1/m ↔ rad/m) with auto‑updating axis ticks
 - **Block boundary lines** — toggle in toolbar
-- **Optimized for large files** — binary k‑space encoding, memory‑safe parser
-- **Pulseq v1.2.0 – v1.5.1** support
+- **Optimized for large files** — binary k‑space encoding, bounds-checked parsers, and no text conversion for `.bseq`
+- **Pulseq format support** — text `.seq` v1.2.0–v1.5.x and official binary `.bseq` v1.5.2 reading
+- **Current `.bseq` hosts** — standalone web, VS Code, and the k-space export CLI; direct MATLAB/Python `.bseq` path APIs are not yet exposed
 
 ## Usage
 
 | Action | How |
 |--------|-----|
-| Open a `.seq` file | Double‑click in Explorer, or click **📂 Open** in toolbar |
+| Open a `.seq` or `.bseq` file | Double‑click in Explorer, or click **📂 Open** in toolbar |
 | Switch to another sequence | **📂 Open** button (top‑left) |
-| Open a browser web link | In the standalone web app, click **🌐 URL** and paste a `.seq` link |
+| Open a browser web link | In the standalone web app, click **🌐 URL** and paste a raw `.seq` or `.bseq` link |
 | Zoom waveform | Scroll wheel or toolbar `+` / `−` |
 | Zoom waveform y‑axis | `Ctrl` + scroll wheel over a waveform row |
 | Fine wheel zoom | Hold `Alt` while scrolling; `Ctrl` + `Alt` + scroll gives finer y‑axis zoom where supported by the browser/OS |
@@ -176,3 +177,8 @@ MIT © [Bughht](https://github.com/bughht)
 SAFE PNS prediction components are distributed under the BSD 3-Clause License.
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). PNS output is an advisory
 prediction, not a clinical, scanner-vendor, or regulatory safety certification.
+
+The `.bseq` reader behavior and committed parser fixtures are derived from the
+MIT-licensed [pulseq/pulseq](https://github.com/pulseq/pulseq) reference
+implementation. SeqEyes currently reads `.bseq`; it does not write or convert
+binary sequence files.

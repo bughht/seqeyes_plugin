@@ -21,8 +21,17 @@ import type {
     PulseqSequence, LabelSetSpec, LabelIncSpec,
 } from './types';
 import {
-    ExtType, makeVersionCombined, VER_PRE_14, VER_V15, VER_V15001,
+    makeVersionCombined, VER_PRE_14, VER_V15,
 } from './types';
+import {
+    createEmptySequence,
+    decodeLabel,
+    extensionNameToType,
+    extractRasterTimes,
+    parseError,
+    resetUnknownLabels,
+    validateSequence,
+} from './readerShared';
 
 // ─── Public API ───────────────────────────────────────────────────────────
 
@@ -95,32 +104,6 @@ function dispatchSection(seq: PulseqSequence, name: string, lines: string[]): vo
     }
 }
 
-function createEmptySequence(): PulseqSequence {
-    return {
-        version: { major: 1, minor: 0, revision: 0 },
-        versionCombined: 0,
-        definitions: new Map(),
-        definitionsRaw: new Map(),
-        blocks: [],
-        rfs: new Map(),
-        arbitraryGrads: new Map(),
-        trapGrads: new Map(),
-        adcs: new Map(),
-        extensions: new Map(),
-        extensionNames: new Map(),
-        extensionTypes: new Map(),
-        triggers: [],
-        ncos: [],
-        rotations: [],
-        labelSets: [],
-        labelIncs: [],
-        softDelays: [],
-        rfShims: [],
-        shapes: new Map(),
-        rasterTimes: { blockDurationRaster: 1e-5, gradientRaster: 1e-5, rfRaster: 1e-6, adcRaster: 1e-7 },
-    };
-}
-
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
 /**
@@ -134,10 +117,6 @@ function ver(seq: PulseqSequence): number {
     if (seq.versionCombined > 0) return seq.versionCombined;
     // Fallback: compute on‑the‑fly (in case sections are parsed out of order)
     return makeVersionCombined(seq.version.major, seq.version.minor, seq.version.revision);
-}
-
-function parseError(message: string): never {
-    throw new Error(`Pulseq parse error: ${message}`);
 }
 
 function requireFieldCount(section: string, line: string, count: number, allowed: number | number[]): void {
@@ -386,8 +365,7 @@ function parseADC(seq: PulseqSequence, lines: string[]): void {
  */
 function parseExtensions(seq: PulseqSequence, valid: string[]): void {
     const vc = ver(seq);
-    _unknownLabelCounter = 0;
-    _unknownLabels.clear();
+    resetUnknownLabels();
     let i = 0;
 
     // Phase 1 — linked‑list entries (before first "extension …" line)
@@ -437,19 +415,6 @@ function parseExtensions(seq: PulseqSequence, valid: string[]): void {
                 // Unknown extension — silently ignored (SeqEyes behaviour)
                 break;
         }
-    }
-}
-
-function extensionNameToType(name: string): ExtType {
-    switch (name.toUpperCase()) {
-        case 'TRIGGERS': return ExtType.EXT_TRIGGER;
-        case 'ROTATIONS': return ExtType.EXT_ROTATION;
-        case 'LABELSET': return ExtType.EXT_LABELSET;
-        case 'LABELINC': return ExtType.EXT_LABELINC;
-        case 'DELAYS': return ExtType.EXT_DELAY;
-        case 'RF_SHIMS': return ExtType.EXT_RF_SHIM;
-        case 'NCO': return ExtType.EXT_NCO;
-        default: return ExtType.EXT_UNKNOWN;
     }
 }
 
@@ -510,51 +475,6 @@ function parseRotationSpecs(seq: PulseqSequence, lines: string[], vc: number): v
             });
         }
     }
-}
-
-/**
- * Label name → (labelId, flagId) decoding.
- * SeqEyes maps label string names to Mdh_Label enum values.
- * Unknown labels get dynamically assigned IDs starting at 1000.
- */
-const KNOWN_LABELS: Record<string, { labelId: number; flagId: number }> = {
-    'SLC':  { labelId: 0,  flagId: 0 },
-    'SEG':  { labelId: 1,  flagId: 0 },
-    'REP':  { labelId: 2,  flagId: 0 },
-    'AVG':  { labelId: 3,  flagId: 0 },
-    'ECO':  { labelId: 4,  flagId: 0 },
-    'PHS':  { labelId: 5,  flagId: 0 },
-    'SET':  { labelId: 6,  flagId: 0 },
-    'ACQ':  { labelId: 7,  flagId: 0 },
-    'LIN':  { labelId: 8,  flagId: 0 },
-    'PAR':  { labelId: 9,  flagId: 0 },
-    'ONCE': { labelId: 10, flagId: 0 },
-    'NAV':  { labelId: 0,  flagId: 1 },
-    'REV':  { labelId: 0,  flagId: 2 },
-    'SMS':  { labelId: 0,  flagId: 4 },
-    'REF':  { labelId: 0,  flagId: 8 },
-    'IMA':  { labelId: 0,  flagId: 16 },
-    'OFF':  { labelId: 0,  flagId: 32 },
-    'NOISE':{ labelId: 0,  flagId: 64 },
-    'PMC':  { labelId: 0,  flagId: 128 },
-    'NOPOS':{ labelId: 0,  flagId: 256 },
-    'NOROT':{ labelId: 0,  flagId: 512 },
-    'NOSCL':{ labelId: 0,  flagId: 1024 },
-};
-
-let _unknownLabelCounter = 0;
-const _unknownLabels = new Map<string, number>();
-
-function decodeLabel(name: string): { labelId: number; flagId: number } {
-    const known = KNOWN_LABELS[name];
-    if (known) return known;
-    // Dynamic assignment for unknown labels (e.g., TRID) — SeqEyes uses 1000+
-    let id = _unknownLabels.get(name);
-    if (id === undefined) {
-        id = 1000 + _unknownLabelCounter++;
-        _unknownLabels.set(name, id);
-    }
-    return { labelId: id, flagId: 0 };
 }
 
 function parseLabelSpecs(seq: PulseqSequence, lines: string[], isSet: boolean): void {
@@ -682,93 +602,5 @@ class ShapeSectionParser {
         this.numSamples = 0;
         this.raw = new Float64Array();
         this.rawCount = 0;
-    }
-}
-
-// ─── Raster times from definitions ────────────────────────────────────────
-
-function extractRasterTimes(seq: PulseqSequence): void {
-    const set = (key: string, field: keyof typeof seq.rasterTimes) => {
-        const v = seq.definitions.get(key);
-        if (v?.length) (seq.rasterTimes as any)[field] = v[0];
-    };
-    set('BlockDurationRaster', 'blockDurationRaster');
-    set('GradientRasterTime', 'gradientRaster');
-    set('RadiofrequencyRasterTime', 'rfRaster');
-    set('AdcRasterTime', 'adcRaster');
-}
-
-function validateSequence(seq: PulseqSequence, seenSections: Set<string>): void {
-    if (!seenSections.has('VERSION')) parseError('Required [VERSION] section is missing');
-    if (seq.version.major !== 1 || seq.version.minor > 5) {
-        parseError(`Unsupported Pulseq version ${seq.version.major}.${seq.version.minor}.${seq.version.revision}`);
-    }
-
-    const vc = ver(seq);
-    if (vc >= VER_PRE_14) {
-        requireNumericDefinition(seq, 'AdcRasterTime');
-        requireNumericDefinition(seq, 'GradientRasterTime');
-        requireNumericDefinition(seq, 'RadiofrequencyRasterTime');
-        requireNumericDefinition(seq, 'BlockDurationRaster');
-    }
-
-    if (vc >= VER_V15001) {
-        const required = seq.definitionsRaw.get('RequiredExtensions')?.split(/\s+/).filter(Boolean) ?? [];
-        for (const name of required) {
-            if (extensionNameToType(name) === ExtType.EXT_UNKNOWN) {
-                parseError(`Unknown required extension '${name}'`);
-            }
-        }
-    }
-
-    if (!seenSections.has('BLOCKS')) parseError('Required [BLOCKS] section is missing');
-
-    for (const block of seq.blocks) {
-        if (block.rfId > 0 && !seq.rfs.has(block.rfId)) {
-            parseError(`Block ${block.num} references undefined RF event ${block.rfId}`);
-        }
-        for (const [channel, gradId] of [['GX', block.gxId], ['GY', block.gyId], ['GZ', block.gzId]] as const) {
-            if (gradId > 0 && !seq.arbitraryGrads.has(gradId) && !seq.trapGrads.has(gradId)) {
-                parseError(`Block ${block.num} references undefined ${channel} gradient event ${gradId}`);
-            }
-        }
-        if (block.adcId > 0 && !seq.adcs.has(block.adcId)) {
-            parseError(`Block ${block.num} references undefined ADC event ${block.adcId}`);
-        }
-        if (block.extId > 0 && !seq.extensions.has(block.extId)) {
-            parseError(`Block ${block.num} references undefined extension list ${block.extId}`);
-        }
-    }
-
-    for (const ext of seq.extensions.values()) {
-        if (ext.nextId > 0 && !seq.extensions.has(ext.nextId)) {
-            parseError(`Extension list ${ext.id} references undefined next extension ${ext.nextId}`);
-        }
-        const type = seq.extensionTypes.get(ext.type) ?? ExtType.EXT_UNKNOWN;
-        if (type === ExtType.EXT_UNKNOWN) continue;
-        if (!extensionPayloadExists(seq, type, ext.ref)) {
-            const name = seq.extensionNames.get(ext.type) ?? `type ${ext.type}`;
-            parseError(`Extension list ${ext.id} references undefined ${name} payload ${ext.ref}`);
-        }
-    }
-}
-
-function requireNumericDefinition(seq: PulseqSequence, name: string): void {
-    const value = seq.definitions.get(name);
-    if (!value || value.length === 0 || !Number.isFinite(value[0])) {
-        parseError(`Required definition ${name} is not present in the file`);
-    }
-}
-
-function extensionPayloadExists(seq: PulseqSequence, type: ExtType, ref: number): boolean {
-    switch (type) {
-        case ExtType.EXT_TRIGGER: return seq.triggers.some(v => v.id === ref);
-        case ExtType.EXT_ROTATION: return seq.rotations.some(v => v.id === ref);
-        case ExtType.EXT_LABELSET: return seq.labelSets.some(v => v.id === ref);
-        case ExtType.EXT_LABELINC: return seq.labelIncs.some(v => v.id === ref);
-        case ExtType.EXT_DELAY: return seq.softDelays.some(v => v.id === ref);
-        case ExtType.EXT_RF_SHIM: return seq.rfShims.some(v => v.id === ref);
-        case ExtType.EXT_NCO: return seq.ncos.some(v => v.id === ref);
-        default: return false;
     }
 }

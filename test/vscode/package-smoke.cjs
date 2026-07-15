@@ -28,6 +28,7 @@ const forbiddenPrefixes = [
   'extension/.vscode/',
   'extension/.vscode-test/',
   'extension/node_modules/',
+  'extension/performance-results/',
   'extension/matlab/',
   'extension/web/',
 ];
@@ -51,6 +52,13 @@ for (const entry of entries) {
 for (const entry of forbiddenEntries) {
   assert(!entrySet.has(entry), `VSIX should not include development file: ${entry}`);
 }
+
+const packageJson = JSON.parse(fs.readFileSync(path.resolve('package.json'), 'utf8'));
+const selectors = packageJson.contributes.customEditors
+  .find((editor) => editor.viewType === 'seqeyes.sequenceViewer')
+  ?.selector.map((selector) => selector.filenamePattern);
+assert(selectors?.includes('*.seq'), 'VSIX custom editor should register *.seq');
+assert(selectors?.includes('*.bseq'), 'VSIX custom editor should register *.bseq');
 
 console.log(`VSIX package smoke passed for ${path.basename(packagePath)} (${entries.length} entries)`);
 

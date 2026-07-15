@@ -37,6 +37,7 @@ const fixtures = {
   gre: resolve('test/kspace_baselines/v151_gre/seq/writeGradientEcho.seq'),
   spiral: resolve('test/kspace_baselines/v151_spiral/seq/writeSpiral.seq'),
   rotExt: resolve('test/seqeyes_demo_seq_files/writeRadialGradientEcho_rotExt.seq'),
+  binaryGre: resolve('test/pulseq/binary/gre.bseq'),
 };
 
 const consoleFailures = new WeakMap<Page, string[]>();
@@ -83,6 +84,41 @@ test('renders spiral and rotation-extension fixtures without blank canvases', as
   const state = await debugState(page);
   expect(state.blocks).toBeGreaterThan(0);
   expect(state.adcCount).toBeGreaterThan(0);
+});
+
+test('loads a dropped official bseq fixture and exports it', async ({ page }) => {
+  await page.goto('/?debug=1');
+  await dropSequence(page, fixtures.binaryGre);
+  await expectCanvasVaried(page.locator('#mc'));
+  await openKspace(page);
+  await expectCanvasVaried(page.locator('#kc'));
+
+  const state = await debugState(page);
+  expect(state.blocks).toBe(320);
+  expect(state.adcCount).toBe(4096);
+  expect(state.title).toContain('gre');
+
+  const downloads: Download[] = [];
+  page.on('download', (download) => downloads.push(download));
+  await page.locator('#exportKspaceBtn').click();
+  await expect.poll(() => downloads.length, { timeout: 20_000 }).toBe(2);
+
+  const metadataDownload = downloads.find((download) => download.suggestedFilename().endsWith('_metadata.json'));
+  expect(metadataDownload).toBeDefined();
+  const metadataPath = await metadataDownload!.path();
+  expect(metadataPath).not.toBeNull();
+  const metadata = JSON.parse(readFileSync(metadataPath!, 'utf8')) as { sequenceName: string; adcSampleCount: number };
+  expect(metadata.sequenceName).toBe('gre.bseq');
+  expect(metadata.adcSampleCount).toBe(4096);
+});
+
+test('keeps URL import hidden in embedded-host mode', async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as Window & { _SEQEYES_HOST?: string })._SEQEYES_HOST = 'matlab';
+  });
+  await page.goto('/?debug=1');
+  await expect(page.locator('#splashOpenUrl')).toBeHidden();
+  await expect(page.locator('#openUrlBtn')).toBeHidden();
 });
 
 test('keeps theme, zoom clamp, hover readout, and k-space drag interactive', async ({ page }) => {
@@ -186,8 +222,8 @@ test('loads a sequence from a web URL and converts GitHub blob links to raw file
   });
 
   await page.goto('/?debug=1');
-  await expect(page.locator('#splashOpen')).toContainText('Open .seq file');
-  await expect(page.locator('#dropZone')).toHaveText('Or drag & drop a .seq file here');
+  await expect(page.locator('#splashOpen')).toContainText('Open .seq or .bseq file');
+  await expect(page.locator('#dropZone')).toHaveText('Or drag & drop a .seq or .bseq file here');
   await expect(page.locator('#splashOpenUrl')).toBeVisible();
 
   await openSequenceFromUrl(page, 'https://github.com/bughht/seqeyes_plugin/blob/main/test/seqeyes_demo_seq_files/writeEpi.seq');
@@ -197,6 +233,31 @@ test('loads a sequence from a web URL and converts GitHub blob links to raw file
   await expect(page.locator('#openUrlBtn')).toBeVisible();
   await expect.poll(async () => (await debugState(page)).blocks, { timeout: 20_000 }).toBeGreaterThan(0);
   expect(fetchedUrls).toEqual(['https://raw.githubusercontent.com/bughht/seqeyes_plugin/main/test/seqeyes_demo_seq_files/writeEpi.seq']);
+});
+
+test('loads a bseq from a GitHub-style web URL as binary bytes', async ({ page }) => {
+  const binary = readFileSync(fixtures.binaryGre);
+  const rawUrl = 'https://raw.githubusercontent.com/pulseq/pulseq/master/tests/legacy/approved/gre.bseq';
+  const fetchedUrls: string[] = [];
+  await page.route(rawUrl, async (route) => {
+    fetchedUrls.push(route.request().url());
+    await route.fulfill({
+      status: 200,
+      headers: {
+        'access-control-allow-origin': '*',
+        'content-length': String(binary.byteLength),
+        'content-type': 'application/octet-stream',
+      },
+      body: binary,
+    });
+  });
+
+  await page.goto('/?debug=1');
+  await openSequenceFromUrl(page, 'https://github.com/pulseq/pulseq/blob/master/tests/legacy/approved/gre.bseq');
+  await expect(page.locator('#exportKspaceBtn')).toBeEnabled({ timeout: 60_000 });
+  await expect.poll(async () => (await debugState(page)).blocks, { timeout: 20_000 }).toBe(320);
+  expect((await debugState(page)).adcCount).toBe(4096);
+  expect(fetchedUrls).toEqual([rawUrl]);
 });
 
 test('rejects non-seq web URLs before fetching', async ({ page }) => {
@@ -209,7 +270,7 @@ test('rejects non-seq web URLs before fetching', async ({ page }) => {
   await page.goto('/?debug=1');
   await openSequenceFromUrl(page, 'https://example.com/not-a-sequence.txt');
 
-  await expect(page.locator('#urlStatus')).toContainText('must end with .seq');
+  await expect(page.locator('#urlStatus')).toContainText('must end with .seq or .bseq');
   await expect(page.locator('#splash')).toBeVisible();
   expect(fetchAttempts).toBe(0);
 });
@@ -244,6 +305,21 @@ test('rejects HTML and binary-looking responses from seq URLs', async ({ page })
   await page.locator('#urlInput').fill('https://example.com/binary.seq');
   await page.locator('#urlLoad').click();
   await expect(page.locator('#urlStatus')).toContainText('binary');
+  await expect(page.locator('#exportKspaceBtn')).toBeDisabled();
+});
+
+test('rejects a bseq URL whose response lacks the Pulseq binary header', async ({ page }) => {
+  await page.route('https://example.com/fake.bseq', async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { 'access-control-allow-origin': '*', 'content-type': 'application/octet-stream' },
+      body: Buffer.from('not a binary Pulseq sequence'),
+    });
+  });
+
+  await page.goto('/?debug=1');
+  await openSequenceFromUrl(page, 'https://example.com/fake.bseq');
+  await expect(page.locator('#urlStatus')).toContainText('missing the Pulseq binary header');
   await expect(page.locator('#exportKspaceBtn')).toBeDisabled();
 });
 
@@ -339,6 +415,24 @@ async function loadViewer(page: Page, sequencePath: string): Promise<void> {
 
 async function openSequence(page: Page, sequencePath: string): Promise<void> {
   await page.locator('#fileInput').setInputFiles(sequencePath);
+  await expectSequenceLoaded(page);
+}
+
+async function dropSequence(page: Page, sequencePath: string): Promise<void> {
+  const data = readFileSync(sequencePath).toString('base64');
+  const name = sequencePath.split('/').pop() || 'sequence.bseq';
+  await page.locator('#dropZone').evaluate((dropZone, source) => {
+    const binary = atob(source.data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([bytes], source.name, { type: 'application/octet-stream' }));
+    dropZone.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+  }, { data, name });
+  await expectSequenceLoaded(page);
+}
+
+async function expectSequenceLoaded(page: Page): Promise<void> {
   await expect(page.locator('#exportKspaceBtn')).toBeEnabled({ timeout: 60_000 });
   await expect(page.locator('#splash')).toBeHidden({ timeout: 10_000 });
   await expect(page.locator('#poverlay')).toBeHidden({ timeout: 10_000 });
