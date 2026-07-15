@@ -27,7 +27,9 @@ var Pulseq = (() => {
     PACKAGE_VERSION: () => PACKAGE_VERSION,
     calculateKspace: () => calculateKspace,
     calculateM1: () => calculateM1,
+    calculateM1Coarse: () => calculateM1Coarse,
     calculatePns: () => calculatePns,
+    calculatePnsCoarse: () => calculatePnsCoarse,
     decodeAllBlocks: () => decodeAllBlocks,
     detectSequenceTiming: () => detectSequenceTiming,
     estimateDerivedCost: () => estimateDerivedCost,
@@ -43,7 +45,9 @@ var Pulseq = (() => {
     parseSequenceBinary: () => parseSequenceBinary,
     parseSequenceBytes: () => parseSequenceBytes,
     parseSequenceText: () => parseSequenceText,
-    safePnsModel: () => safePnsModel
+    safePnsModel: () => safePnsModel,
+    selectM1WindowBlocks: () => selectM1WindowBlocks,
+    selectPnsWindowBlocks: () => selectPnsWindowBlocks
   });
 
   // package.json
@@ -2024,8 +2028,140 @@ var Pulseq = (() => {
     return [gx, gy, gz];
   }
 
-  // src/pulseq/m1.ts
+  // src/pulseq/boundedSeries.ts
+  var BoundedSeriesBuilder = class {
+    constructor(startSec, endSec, maxPoints) {
+      __publicField(this, "startSec", startSec);
+      __publicField(this, "endSec", endSec);
+      __publicField(this, "buckets");
+      __publicField(this, "bucketCount");
+      __publicField(this, "span");
+      this.bucketCount = Math.max(1, Math.floor(Math.max(4, maxPoints) / 4));
+      this.buckets = new Array(this.bucketCount);
+      this.span = Math.max(0, endSec - startSec);
+    }
+    add(tSec, value) {
+      if (!Number.isFinite(tSec) || !Number.isFinite(value)) return;
+      const normalized = this.span > 0 ? (tSec - this.startSec) / this.span : 0;
+      const index = Math.max(0, Math.min(
+        this.bucketCount - 1,
+        Math.floor(normalized * this.bucketCount)
+      ));
+      const bucket = this.buckets[index];
+      if (!bucket) {
+        this.buckets[index] = {
+          firstT: tSec,
+          firstV: value,
+          minV: value,
+          maxV: value,
+          lastT: tSec,
+          lastV: value
+        };
+        return;
+      }
+      if (value < bucket.minV) {
+        bucket.minV = value;
+      }
+      if (value > bucket.maxV) {
+        bucket.maxV = value;
+      }
+      bucket.lastT = tSec;
+      bucket.lastV = value;
+    }
+    finish() {
+      const startTime = [];
+      const endTime = [];
+      const min = [];
+      const max = [];
+      const first = [];
+      const last = [];
+      for (const bucket of this.buckets) {
+        if (!bucket) continue;
+        startTime.push(bucket.firstT);
+        endTime.push(bucket.lastT);
+        min.push(bucket.minV);
+        max.push(bucket.maxV);
+        first.push(bucket.firstV);
+        last.push(bucket.lastV);
+      }
+      return {
+        startTime: new Float64Array(startTime),
+        endTime: new Float64Array(endTime),
+        min: new Float64Array(min),
+        max: new Float64Array(max),
+        first: new Float64Array(first),
+        last: new Float64Array(last)
+      };
+    }
+  };
+
+  // src/pulseq/gradientSampler.ts
   var TIME_EPS = 1e-15;
+  function decodedGradientTimeRange(blocks) {
+    let first = Number.POSITIVE_INFINITY;
+    let last = Number.NEGATIVE_INFINITY;
+    for (const block of blocks) {
+      for (const gradient of [block.gx, block.gy, block.gz]) {
+        if (!gradient?.timePoints.length) continue;
+        const gradientFirst = gradient.timePoints[0];
+        const gradientLast = gradient.timePoints[gradient.timePoints.length - 1];
+        if (Number.isFinite(gradientFirst)) first = Math.min(first, gradientFirst);
+        if (Number.isFinite(gradientLast)) last = Math.max(last, gradientLast);
+      }
+    }
+    return Number.isFinite(first) && Number.isFinite(last) && last >= first ? { first, last } : void 0;
+  }
+  function createDecodedGradientSampler(blocks, channel) {
+    const events = [];
+    for (const block of blocks) {
+      const gradient = block[channel];
+      if (!gradient?.timePoints.length || !gradient.waveform.length) continue;
+      const n = Math.min(gradient.timePoints.length, gradient.waveform.length);
+      if (n < 1) continue;
+      events.push({
+        gradient,
+        first: gradient.timePoints[0],
+        last: gradient.timePoints[n - 1]
+      });
+    }
+    events.sort((a, b) => a.first - b.first);
+    let eventIndex = 0;
+    let pointIndex = 0;
+    let previousTime = Number.NEGATIVE_INFINITY;
+    return (timeSec) => {
+      if (timeSec < previousTime - TIME_EPS) {
+        eventIndex = 0;
+        pointIndex = 0;
+      }
+      previousTime = timeSec;
+      while (eventIndex < events.length && events[eventIndex].last < timeSec - TIME_EPS) {
+        eventIndex++;
+        pointIndex = 0;
+      }
+      if (eventIndex >= events.length) return 0;
+      const event = events[eventIndex];
+      if (timeSec < event.first - TIME_EPS || timeSec > event.last + TIME_EPS) return 0;
+      const times = event.gradient.timePoints;
+      const values = event.gradient.waveform;
+      const n = Math.min(times.length, values.length);
+      if (Math.abs(timeSec - event.last) <= TIME_EPS && eventIndex + 1 < events.length) {
+        const next = events[eventIndex + 1];
+        if (Math.abs(next.first - timeSec) <= TIME_EPS && next.gradient.waveform.length) {
+          return 0.5 * (values[n - 1] + next.gradient.waveform[0]);
+        }
+      }
+      while (pointIndex + 1 < n && times[pointIndex + 1] <= timeSec + TIME_EPS) pointIndex++;
+      if (pointIndex >= n - 1 || timeSec <= times[pointIndex] + TIME_EPS) return values[pointIndex];
+      const t0 = times[pointIndex];
+      const t1 = times[pointIndex + 1];
+      if (!(t1 > t0)) return values[pointIndex];
+      const alpha = (timeSec - t0) / (t1 - t0);
+      return values[pointIndex] + alpha * (values[pointIndex + 1] - values[pointIndex]);
+    };
+  }
+
+  // src/pulseq/m1.ts
+  var TIME_EPS2 = 1e-15;
   function calculateM1(blocks, gradientRaster, options = {}) {
     const referenceMode = normalizeReferenceMode(options.referenceMode);
     if (!blocks.length) {
@@ -2048,22 +2184,7 @@ var Pulseq = (() => {
     const excitationTimes = rfEvents.filter((rf) => rf.use === "e").map((rf) => rf.tSec);
     const refocusingTimes = rfEvents.filter((rf) => rf.use === "r").map((rf) => rf.tSec);
     const events = buildWalkerEvents(rfEvents);
-    let recentExcCount = 0;
-    let lastExcT = -1e9;
-    for (const rf of rfEvents) {
-      if (rf.use === "e") {
-        if (rf.tSec - lastExcT < 0.1) recentExcCount++;
-        lastExcT = rf.tSec;
-      }
-    }
-    if (recentExcCount > 8) {
-      warnings.push(
-        `Sequence shows ${recentExcCount} closely-spaced (<100 ms) excitation events. This pattern is consistent with a steady-state sequence for which the simplified reset/flip bookkeeping does NOT model coherent pathway interference. Treat the M1 curve as advisory only.`
-      );
-    }
-    if (!excitationTimes.length) {
-      warnings.push(`No excitation RF events found in sequence. M1 will be integrated from t=${tMin.toFixed(6)} s with no signal basis.`);
-    }
+    appendM1AdvisoryWarnings(rfEvents, tMin, warnings);
     const rasterSec = gradientRaster > 0 ? gradientRaster : 1e-5;
     if (rasterSec <= 0) {
       return invalidM1("gradientRaster must be positive.", referenceMode);
@@ -2083,6 +2204,143 @@ var Pulseq = (() => {
       m1x: new Float64Array(x.m1),
       m1y: new Float64Array(y.m1),
       m1z: new Float64Array(z.m1),
+      warnings,
+      excitationTimesSec: new Float64Array(excitationTimes),
+      refocusingTimesSec: new Float64Array(refocusingTimes)
+    };
+  }
+  function appendM1AdvisoryWarnings(rfEvents, tMin, warnings) {
+    let recentExcCount = 0;
+    let lastExcT = -1e9;
+    let excitationCount = 0;
+    for (const rf of rfEvents) {
+      if (rf.use === "e") {
+        excitationCount++;
+        if (rf.tSec - lastExcT < 0.1) recentExcCount++;
+        lastExcT = rf.tSec;
+      }
+    }
+    if (recentExcCount > 8) {
+      warnings.push(
+        `Sequence shows ${recentExcCount} closely-spaced (<100 ms) excitation events. This pattern is consistent with a steady-state sequence for which the simplified reset/flip bookkeeping does NOT model coherent pathway interference. Treat the M1 curve as advisory only.`
+      );
+    }
+    if (!excitationCount) {
+      warnings.push(`No excitation RF events found in sequence. M1 will be integrated from t=${tMin.toFixed(6)} s with no signal basis.`);
+    }
+  }
+  function calculateM1Coarse(blocks, gradientRaster, options = {}) {
+    const referenceMode = normalizeReferenceMode(options.referenceMode);
+    const emptySeries = () => ({
+      startTime: new Float64Array(),
+      endTime: new Float64Array(),
+      min: new Float64Array(),
+      max: new Float64Array(),
+      first: new Float64Array(),
+      last: new Float64Array()
+    });
+    const invalid = (error) => ({
+      valid: false,
+      ok: false,
+      coarse: true,
+      referenceMode,
+      error,
+      startSec: 0,
+      endSec: 0,
+      x: emptySeries(),
+      y: emptySeries(),
+      z: emptySeries(),
+      warnings: [],
+      excitationTimesSec: new Float64Array(),
+      refocusingTimesSec: new Float64Array()
+    });
+    if (!blocks.length) return invalid("Empty or invalid block list.");
+    if (!(gradientRaster > 0)) return invalid("gradientRaster must be positive.");
+    const range = decodedGradientTimeRange(blocks);
+    if (!range) return invalid("No gradient waveform available for M1.");
+    const warnings = [];
+    const rfEvents = collectRfEvents(blocks, warnings);
+    appendM1AdvisoryWarnings(rfEvents, range.first, warnings);
+    const excitationTimes = rfEvents.filter((rf) => rf.use === "e").map((rf) => rf.tSec);
+    const refocusingTimes = rfEvents.filter((rf) => rf.use === "r").map((rf) => rf.tSec);
+    const events = buildWalkerEvents(rfEvents);
+    const startSec = Math.min(range.first, events[0]?.tSec ?? range.first);
+    const endSec = Math.max(range.last, events[events.length - 1]?.tSec ?? range.last);
+    const maxPoints = Math.max(1024, Math.min(12e4, options.maxPoints ?? 3e4));
+    const maxBuckets = Math.floor(maxPoints / 4);
+    const builders = [
+      new BoundedSeriesBuilder(startSec, endSec, maxPoints),
+      new BoundedSeriesBuilder(startSec, endSec, maxPoints),
+      new BoundedSeriesBuilder(startSec, endSec, maxPoints)
+    ];
+    const samplers = [
+      createDecodedGradientSampler(blocks, "gx"),
+      createDecodedGradientSampler(blocks, "gy"),
+      createDecodedGradientSampler(blocks, "gz")
+    ];
+    const unsignedM0 = [0, 0, 0];
+    const unsignedM1 = [0, 0, 0];
+    let sign = 1;
+    let tReset = excitationTimes.length ? excitationTimes[0] : range.first;
+    if (range.first < tReset) tReset = range.first;
+    let currentT = tReset;
+    const reported = (axis, tSec) => referenceMode === "observationTime" ? sign * (unsignedM1[axis] - (tSec - tReset) * unsignedM0[axis]) : sign * unsignedM1[axis];
+    const advanceTo = (targetT) => {
+      if (!(targetT > currentT + TIME_EPS2)) return;
+      for (let axis = 0; axis < 3; axis++) {
+        const ga = samplers[axis](currentT);
+        const gb = samplers[axis](targetT);
+        const integrated = integrateLinearSegment(currentT, targetT, tReset, ga, gb);
+        unsignedM0[axis] += integrated[0];
+        unsignedM1[axis] += integrated[1];
+      }
+      currentT = targetT;
+    };
+    const addReported = (tSec) => {
+      for (let axis = 0; axis < 3; axis++) builders[axis].add(tSec, reported(axis, tSec));
+    };
+    const regularCount = Math.floor((range.last - range.first) / gradientRaster) + 1;
+    const regularLast = range.first + Math.max(0, regularCount - 1) * gradientRaster;
+    const hasFinalSample = regularLast < range.last - TIME_EPS2;
+    const totalSamples = regularCount + (hasFinalSample ? 1 : 0);
+    let eventIndex = 0;
+    let sampleIndex = 0;
+    while (eventIndex < events.length || sampleIndex < totalSamples) {
+      const eventTime = eventIndex < events.length ? events[eventIndex].tSec : Number.POSITIVE_INFINITY;
+      const sampleTime = sampleIndex < totalSamples ? sampleIndex < regularCount ? range.first + sampleIndex * gradientRaster : range.last : Number.POSITIVE_INFINITY;
+      if (eventTime <= sampleTime) {
+        advanceTo(eventTime);
+        if (events[eventIndex].kind === "reset") {
+          sign = 1;
+          tReset = eventTime;
+          currentT = eventTime;
+          unsignedM0.fill(0);
+          unsignedM1.fill(0);
+          for (const builder of builders) builder.add(eventTime, 0);
+        } else {
+          addReported(eventTime);
+          sign = -sign;
+        }
+        eventIndex++;
+      } else {
+        advanceTo(sampleTime);
+        addReported(sampleTime);
+        sampleIndex++;
+      }
+    }
+    warnings.push(
+      `Showing a bounded full-sequence M1 envelope (at most ${maxBuckets.toLocaleString()} buckets per axis). Zoom to 100 TRs or fewer for an automatic detailed calculation.`
+    );
+    return {
+      valid: true,
+      ok: true,
+      coarse: true,
+      referenceMode,
+      startSec,
+      endSec,
+      x: builders[0].finish(),
+      y: builders[1].finish(),
+      z: builders[2].finish(),
       warnings,
       excitationTimesSec: new Float64Array(excitationTimes),
       refocusingTimesSec: new Float64Array(refocusingTimes)
@@ -2121,7 +2379,7 @@ var Pulseq = (() => {
   function appendGradientPoint(series, t, value) {
     if (!Number.isFinite(t) || !Number.isFinite(value)) return;
     const last = series.time.length - 1;
-    if (last >= 0 && Math.abs(t - series.time[last]) <= TIME_EPS) {
+    if (last >= 0 && Math.abs(t - series.time[last]) <= TIME_EPS2) {
       series.value[last] = 0.5 * (series.value[last] + value);
     } else if (last < 0 || t > series.time[last]) {
       series.time.push(t);
@@ -2171,7 +2429,7 @@ var Pulseq = (() => {
     const samples = [];
     const nSamples = Math.floor((tMax - tMin) / rasterSec) + 1;
     for (let i = 0; i < nSamples; i++) samples.push(tMin + i * rasterSec);
-    if (!samples.length || samples[samples.length - 1] < tMax - TIME_EPS) samples.push(tMax);
+    if (!samples.length || samples[samples.length - 1] < tMax - TIME_EPS2) samples.push(tMax);
     return samples;
   }
   function walkM1(gradient, samples, events, excitationTimes, tMin, referenceMode) {
@@ -2185,16 +2443,16 @@ var Pulseq = (() => {
     let unsignedM1 = 0;
     let gradientIndex = -1;
     const seekGradient = (t) => {
-      while (gradientIndex + 1 < gradient.time.length && gradient.time[gradientIndex + 1] <= t + TIME_EPS) {
+      while (gradientIndex + 1 < gradient.time.length && gradient.time[gradientIndex + 1] <= t + TIME_EPS2) {
         gradientIndex++;
       }
     };
     const sampleGradient = (t) => {
       const n = gradient.time.length;
-      if (n === 0 || t < gradient.time[0] - TIME_EPS || t > gradient.time[n - 1] + TIME_EPS) return 0;
+      if (n === 0 || t < gradient.time[0] - TIME_EPS2 || t > gradient.time[n - 1] + TIME_EPS2) return 0;
       seekGradient(t);
       if (gradientIndex < 0) return 0;
-      if (gradientIndex >= n - 1 || Math.abs(t - gradient.time[gradientIndex]) <= TIME_EPS) {
+      if (gradientIndex >= n - 1 || Math.abs(t - gradient.time[gradientIndex]) <= TIME_EPS2) {
         return gradient.value[gradientIndex];
       }
       const t0 = gradient.time[gradientIndex];
@@ -2208,8 +2466,8 @@ var Pulseq = (() => {
       return sign * unsignedM1;
     };
     const advanceTo = (targetT) => {
-      if (!(targetT > currentT + TIME_EPS)) return;
-      while (currentT < targetT - TIME_EPS) {
+      if (!(targetT > currentT + TIME_EPS2)) return;
+      while (currentT < targetT - TIME_EPS2) {
         seekGradient(currentT);
         let nextT = gradientIndex + 1 < gradient.time.length ? Math.min(targetT, gradient.time[gradientIndex + 1]) : targetT;
         if (!(nextT > currentT)) nextT = targetT;
@@ -2229,7 +2487,7 @@ var Pulseq = (() => {
       if (nextEvtT <= nextSampT) {
         advanceTo(nextEvtT);
         if (events[ei].kind === "reset") {
-          if (!outT.length || outT[outT.length - 1] < nextEvtT - TIME_EPS) {
+          if (!outT.length || outT[outT.length - 1] < nextEvtT - TIME_EPS2) {
             outT.push(nextEvtT);
             outM1.push(0);
           } else {
@@ -2268,7 +2526,7 @@ var Pulseq = (() => {
 
   // src/pulseq/pns.ts
   var GAMMA_HZ_PER_T = 42576e3;
-  var TIME_EPS2 = 1e-15;
+  var TIME_EPS3 = 1e-15;
   function parsePnsHardwareAsc(text) {
     const asc = parseAscText(text);
     const prefix = resolvePnsPrefix(asc);
@@ -2399,6 +2657,148 @@ var Pulseq = (() => {
       selectedIndex++;
     }
     return { valid: true, ok, timeSec, pnsX, pnsY, pnsZ, pnsNorm };
+  }
+  function calculatePnsCoarse(blocks, gradientRaster, hardware, options = {}) {
+    const emptySeries = () => ({
+      startTime: new Float64Array(),
+      endTime: new Float64Array(),
+      min: new Float64Array(),
+      max: new Float64Array(),
+      first: new Float64Array(),
+      last: new Float64Array()
+    });
+    const invalid = (error) => ({
+      valid: false,
+      ok: false,
+      coarse: true,
+      error,
+      startSec: 0,
+      endSec: 0,
+      x: emptySeries(),
+      y: emptySeries(),
+      z: emptySeries(),
+      norm: emptySeries(),
+      warnings: []
+    });
+    const gammaHzPerT = options.gammaHzPerT ?? GAMMA_HZ_PER_T;
+    if (!hardware.valid) return invalid("PNS hardware is not initialized.");
+    if (!blocks.length) return invalid("No sequence loaded.");
+    if (!(gradientRaster > 0) || !(gammaHzPerT > 0)) return invalid("Missing GradientRasterTime or gamma.");
+    const range = decodedGradientTimeRange(blocks);
+    if (!range || !(range.last > range.first)) return invalid("No gradient waveform available for PNS.");
+    const dtSec = gradientRaster;
+    let ntMin = Math.floor(range.first / dtSec + Number.EPSILON) + 0.5;
+    const ntMax = Math.ceil(range.last / dtSec - Number.EPSILON) - 0.5;
+    if (ntMin < 0.5) ntMin = 0.5;
+    if (ntMax < ntMin) return invalid("Unable to build regular PNS raster.");
+    const nSamples = Math.floor(ntMax - ntMin + 1);
+    if (nSamples < 2) return invalid("Too few samples for PNS computation.");
+    const longestTauMs = Math.max(
+      hardware.x.tau1Ms,
+      hardware.x.tau2Ms,
+      hardware.x.tau3Ms,
+      hardware.y.tau1Ms,
+      hardware.y.tau2Ms,
+      hardware.y.tau3Ms,
+      hardware.z.tau1Ms,
+      hardware.z.tau2Ms,
+      hardware.z.tau3Ms
+    );
+    const zptSec = longestTauMs * 4 / 1e3;
+    const preCount = Math.max(0, Math.round(zptSec / (4 * dtSec)));
+    const postCount = Math.max(0, Math.round(zptSec / dtSec));
+    const totalSamples = preCount + nSamples + postCount;
+    const hasAnyNonTrap = blocks.some((block) => block.gx?.type === "arb" || block.gy?.type === "arb" || block.gz?.type === "arb");
+    const hasAnyLabelExt = blocks.some((block) => !!(block.labelSets?.length || block.labelIncs?.length));
+    const shift = hasAnyNonTrap || hasAnyLabelExt ? 1 : 0;
+    const stimLength = Math.max(0, totalSamples - 1);
+    const desiredStimIndex = (origIndex) => {
+      const paddedIndex = preCount + origIndex;
+      if (shift > 0 && hasAnyLabelExt && origIndex === nSamples - 1) {
+        return Math.min(paddedIndex, stimLength - 1);
+      }
+      return paddedIndex - shift;
+    };
+    const startSec = ntMin * dtSec;
+    const endSec = (ntMin + nSamples - 1) * dtSec;
+    const maxPoints = Math.max(1024, Math.min(12e4, options.maxPoints ?? 3e4));
+    const maxBuckets = Math.floor(maxPoints / 4);
+    const builders = [
+      new BoundedSeriesBuilder(startSec, endSec, maxPoints),
+      new BoundedSeriesBuilder(startSec, endSec, maxPoints),
+      new BoundedSeriesBuilder(startSec, endSec, maxPoints),
+      new BoundedSeriesBuilder(startSec, endSec, maxPoints)
+    ];
+    const samplers = [
+      createDecodedGradientSampler(blocks, "gx"),
+      createDecodedGradientSampler(blocks, "gy"),
+      createDecodedGradientSampler(blocks, "gz")
+    ];
+    const hardwareAxes = [hardware.x, hardware.y, hardware.z];
+    const filterStates = hardwareAxes.map((axis) => createPnsFilterState(axis, dtSec));
+    const paddedValue = (axis, index) => {
+      if (index < preCount || index >= preCount + nSamples) return 0;
+      const rasterIndex = index - preCount;
+      return samplers[axis]((ntMin + rasterIndex) * dtSec) / gammaHzPerT;
+    };
+    const previous = [paddedValue(0, 0), paddedValue(1, 0), paddedValue(2, 0)];
+    let outputIndex = 0;
+    let ok = true;
+    for (let stimIndex = 0; stimIndex < stimLength; stimIndex++) {
+      const normalized = [0, 0, 0];
+      for (let axis = 0; axis < 3; axis++) {
+        const current = paddedValue(axis, stimIndex + 1);
+        const derivative = (current - previous[axis]) / dtSec;
+        previous[axis] = current;
+        normalized[axis] = updatePnsFilter(filterStates[axis], derivative);
+      }
+      while (outputIndex < nSamples && desiredStimIndex(outputIndex) < stimIndex) outputIndex++;
+      if (outputIndex < nSamples && desiredStimIndex(outputIndex) === stimIndex) {
+        const timeSec = (ntMin + outputIndex) * dtSec;
+        const norm = Math.hypot(normalized[0], normalized[1], normalized[2]);
+        builders[0].add(timeSec, normalized[0]);
+        builders[1].add(timeSec, normalized[1]);
+        builders[2].add(timeSec, normalized[2]);
+        builders[3].add(timeSec, norm);
+        if (norm >= 1) ok = false;
+        outputIndex++;
+      }
+    }
+    const warnings = [
+      `Showing a bounded full-sequence PNS envelope (at most ${maxBuckets.toLocaleString()} buckets per curve). Zoom to 100 TRs or fewer for an automatic detailed calculation.`
+    ];
+    return {
+      valid: true,
+      ok,
+      coarse: true,
+      startSec,
+      endSec,
+      x: builders[0].finish(),
+      y: builders[1].finish(),
+      z: builders[2].finish(),
+      norm: builders[3].finish(),
+      warnings
+    };
+  }
+  function createPnsFilterState(hardware, dtSec) {
+    const dtMs = dtSec * 1e3;
+    return {
+      alpha1: lowpassAlpha(hardware.tau1Ms, dtMs),
+      alpha2: lowpassAlpha(hardware.tau2Ms, dtMs),
+      alpha3: lowpassAlpha(hardware.tau3Ms, dtMs),
+      lp1: 0,
+      lp2: 0,
+      lp3: 0,
+      hardware
+    };
+  }
+  function updatePnsFilter(state, derivative) {
+    state.lp1 = state.alpha1 * derivative + (1 - state.alpha1) * state.lp1;
+    state.lp2 = state.alpha2 * Math.abs(derivative) + (1 - state.alpha2) * state.lp2;
+    state.lp3 = state.alpha3 * derivative + (1 - state.alpha3) * state.lp3;
+    const hw = state.hardware;
+    const numerator = hw.a1 * Math.abs(state.lp1) + hw.a2 * state.lp2 + hw.a3 * Math.abs(state.lp3);
+    return numerator / (hw.stimLimit > 0 ? hw.stimLimit : 1) * hw.gScale;
   }
   function safePnsModel(dgdt, dtSec, hw) {
     return runPnsModel(dgdt.length, (index) => dgdt[index], dtSec, hw);
@@ -2538,7 +2938,7 @@ var Pulseq = (() => {
   function appendGradientPoint2(series, t, value) {
     if (!Number.isFinite(t) || !Number.isFinite(value)) return;
     const last = series.time.length - 1;
-    if (last >= 0 && Math.abs(t - series.time[last]) <= TIME_EPS2) {
+    if (last >= 0 && Math.abs(t - series.time[last]) <= TIME_EPS3) {
       series.value[last] = 0.5 * (series.value[last] + value);
     } else if (last < 0 || t > series.time[last]) {
       series.time.push(t);
@@ -2566,15 +2966,69 @@ var Pulseq = (() => {
     return (t) => {
       const n = series.time.length;
       if (n === 0 || t < series.time[0] || t > series.time[n - 1]) return 0;
-      while (index + 1 < n && series.time[index + 1] <= t + TIME_EPS2) index++;
+      while (index + 1 < n && series.time[index + 1] <= t + TIME_EPS3) index++;
       if (index < 0) return 0;
-      if (index >= n - 1 || t <= series.time[index] + TIME_EPS2) return series.value[index];
+      if (index >= n - 1 || t <= series.time[index] + TIME_EPS3) return series.value[index];
       const t0 = series.time[index];
       const t1 = series.time[index + 1];
       if (!(t1 > t0)) return series.value[index];
       const alpha = (t - t0) / (t1 - t0);
       return series.value[index] + alpha * (series.value[index + 1] - series.value[index]);
     };
+  }
+
+  // src/pulseq/derivedWindow.ts
+  function selectM1WindowBlocks(blocks, startSec, endSec) {
+    const displayStartSec = finiteMin(startSec, endSec);
+    const displayEndSec = finiteMax(startSec, endSec, displayStartSec);
+    let calculationStartSec = displayStartSec;
+    for (const block of blocks) {
+      const center = block.rf?.centerTime;
+      if (center === void 0 || center > displayStartSec) continue;
+      const use = (block.rf?.use || "").toLowerCase();
+      if (use === "e") calculationStartSec = Math.min(center, block.startTime);
+    }
+    return {
+      blocks: overlappingBlocks(blocks, calculationStartSec, displayEndSec),
+      calculationStartSec,
+      displayStartSec,
+      displayEndSec
+    };
+  }
+  function selectPnsWindowBlocks(blocks, startSec, endSec, hardware) {
+    const displayStartSec = finiteMin(startSec, endSec);
+    const displayEndSec = finiteMax(startSec, endSec, displayStartSec);
+    const longestTauMs = Math.max(
+      hardware.x.tau1Ms,
+      hardware.x.tau2Ms,
+      hardware.x.tau3Ms,
+      hardware.y.tau1Ms,
+      hardware.y.tau2Ms,
+      hardware.y.tau3Ms,
+      hardware.z.tau1Ms,
+      hardware.z.tau2Ms,
+      hardware.z.tau3Ms
+    );
+    const calculationStartSec = Math.max(0, displayStartSec - longestTauMs * 4 / 1e3);
+    return {
+      blocks: overlappingBlocks(blocks, calculationStartSec, displayEndSec),
+      calculationStartSec,
+      displayStartSec,
+      displayEndSec
+    };
+  }
+  function overlappingBlocks(blocks, startSec, endSec) {
+    return blocks.filter((block) => block.startTime + block.duration >= startSec && block.startTime <= endSec);
+  }
+  function finiteMin(a, b) {
+    const aa = Number.isFinite(a) ? a : 0;
+    const bb = Number.isFinite(b) ? b : aa;
+    return Math.max(0, Math.min(aa, bb));
+  }
+  function finiteMax(a, b, fallback) {
+    const aa = Number.isFinite(a) ? a : fallback;
+    const bb = Number.isFinite(b) ? b : aa;
+    return Math.max(fallback, Math.max(aa, bb));
   }
 
   // src/pulseq/computeBudget.ts

@@ -16,8 +16,16 @@ import * as vscode from 'vscode';
 import { parseSequenceBytes } from '../pulseq/sequenceReader';
 import { decodeAllBlocks } from '../pulseq/decoder';
 import { calculateKspace, type KSpaceData } from '../pulseq/kspace';
-import { calculateM1, type M1Data } from '../pulseq/m1';
-import { calculatePns, parsePnsHardwareAsc, type PnsHardware, type PnsResult } from '../pulseq/pns';
+import { calculateM1, calculateM1Coarse, type CoarseM1Data, type M1Data } from '../pulseq/m1';
+import {
+    calculatePns,
+    calculatePnsCoarse,
+    parsePnsHardwareAsc,
+    type CoarsePnsResult,
+    type PnsHardware,
+    type PnsResult,
+} from '../pulseq/pns';
+import { selectM1WindowBlocks, selectPnsWindowBlocks } from '../pulseq/derivedWindow';
 import {
     estimateDerivedCost,
     estimateKspaceCost,
@@ -133,14 +141,25 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
         let activeBlocks: DecodedBlock[] = [];
         let activeGradientRaster = 0;
         let activePnsHardware: PnsHardware | undefined;
-        let activePnsResult: PnsResult | undefined;
 
-        const derivedBudgetWarning = (label: 'M1' | 'PNS'): string | undefined => {
+        const derivedNeedsCoarseFallback = (): boolean => {
             const estimate = estimateDerivedCost(activeBlocks, activeGradientRaster);
-            if (estimate.rasterSamples <= INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples) return undefined;
-            return `${label} was not calculated because the full sequence requires about `
-                + `${formatSampleCount(estimate.rasterSamples)} native-raster samples. `
-                + 'Zoom in to inspect waveform detail; a view-scoped calculation fallback is planned.';
+            return estimate.rasterSamples > INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples;
+        };
+
+        const calculatePnsForDisplay = (hardware: PnsHardware): PnsResult | CoarsePnsResult => {
+            if (derivedNeedsCoarseFallback()) {
+                return calculatePnsCoarse(activeBlocks, activeGradientRaster, hardware);
+            }
+            try {
+                return calculatePns(activeBlocks, activeGradientRaster, hardware);
+            } catch (err) {
+                const coarse = calculatePnsCoarse(activeBlocks, activeGradientRaster, hardware);
+                coarse.warnings.unshift(
+                    `Exact PNS calculation failed (${err instanceof Error ? err.message : String(err)}); using the bounded fallback.`,
+                );
+                return coarse;
+            }
         };
 
         // ── Core: parse, decode, compute k‑space, send ──
@@ -165,7 +184,6 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                 const blocks = decodeAllBlocks(seq);
                 activeBlocks = blocks;
                 activeGradientRaster = seq.rasterTimes.gradientRaster;
-                activePnsResult = undefined;
                 const totalDur = blocks.length > 0
                     ? blocks[blocks.length - 1].startTime + blocks[blocks.length - 1].duration
                     : 0;
@@ -319,18 +337,47 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     return;
                 }
                 const referenceMode = msg.referenceMode === 'observationTime' ? 'observationTime' : 'rfCenter';
-                const warning = derivedBudgetWarning('M1');
-                if (warning) {
-                    panel.webview.postMessage({ type: 'm1Error', message: warning });
+                try {
+                    const m1 = derivedNeedsCoarseFallback()
+                        ? calculateM1Coarse(activeBlocks, activeGradientRaster, { referenceMode })
+                        : calculateM1(activeBlocks, activeGradientRaster, { referenceMode });
+                    panel.webview.postMessage({ type: 'm1Data', m1: serializeM1(m1) });
+                } catch (err) {
+                    try {
+                        const coarse = calculateM1Coarse(activeBlocks, activeGradientRaster, { referenceMode });
+                        coarse.warnings.unshift(`Exact M1 calculation failed (${err instanceof Error ? err.message : String(err)}); using the bounded fallback.`);
+                        panel.webview.postMessage({ type: 'm1Data', m1: serializeM1(coarse) });
+                    } catch (fallbackError) {
+                        panel.webview.postMessage({
+                            type: 'm1Error',
+                            message: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+                        });
+                    }
+                }
+            } else if (msg.command === 'calculateM1Window') {
+                const referenceMode = msg.referenceMode === 'observationTime' ? 'observationTime' : 'rfCenter';
+                const selected = selectM1WindowBlocks(activeBlocks, Number(msg.startSec), Number(msg.endSec));
+                const estimate = estimateDerivedCost(selected.blocks, activeGradientRaster);
+                if (!selected.blocks.length || estimate.rasterSamples > INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples) {
+                    panel.webview.postMessage({
+                        type: 'm1WindowData',
+                        requestId: msg.requestId,
+                        m1: { valid: false, error: 'The requested M1 detail window is still too large. Zoom in further.' },
+                    });
                     return;
                 }
                 try {
-                    const m1 = calculateM1(activeBlocks, activeGradientRaster, { referenceMode });
-                    panel.webview.postMessage({ type: 'm1Data', m1: serializeM1(m1) });
+                    const m1 = calculateM1(selected.blocks, activeGradientRaster, { referenceMode });
+                    panel.webview.postMessage({
+                        type: 'm1WindowData',
+                        requestId: msg.requestId,
+                        m1: serializeM1Window(m1, selected.displayStartSec, selected.displayEndSec, Number(msg.maxPoints)),
+                    });
                 } catch (err) {
                     panel.webview.postMessage({
-                        type: 'm1Error',
-                        message: err instanceof Error ? err.message : String(err),
+                        type: 'm1WindowData',
+                        requestId: msg.requestId,
+                        m1: { valid: false, error: err instanceof Error ? err.message : String(err) },
                     });
                 }
             } else if (msg.command === 'openPnsAsc') {
@@ -345,13 +392,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                 });
                 if (!uris || uris.length === 0) {
                     if (activePnsHardware) {
-                        const warning = derivedBudgetWarning('PNS');
-                        if (warning) {
-                            panel.webview.postMessage({ type: 'pnsError', message: warning });
-                            return;
-                        }
-                        const pns = calculatePns(activeBlocks, activeGradientRaster, activePnsHardware);
-                        activePnsResult = pns;
+                        const pns = calculatePnsForDisplay(activePnsHardware);
                         panel.webview.postMessage({ type: 'pnsData', pns: serializePns(pns) });
                     } else {
                         panel.webview.postMessage({ type: 'pnsSelectionCancelled' });
@@ -362,13 +403,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     const ascText = await readAscProfileText(uris[0]);
                     const hardware = parsePnsHardwareAsc(ascText);
                     activePnsHardware = hardware;
-                    const warning = derivedBudgetWarning('PNS');
-                    if (warning) {
-                        panel.webview.postMessage({ type: 'pnsError', message: warning });
-                        return;
-                    }
-                    const pns = calculatePns(activeBlocks, activeGradientRaster, hardware);
-                    activePnsResult = pns;
+                    const pns = calculatePnsForDisplay(hardware);
                     panel.webview.postMessage({ type: 'pnsData', pns: serializePns(pns) });
                 } catch (err) {
                     panel.webview.postMessage({
@@ -377,24 +412,48 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     });
                 }
             } else if (msg.command === 'calculatePnsWindow') {
-                if (!activePnsResult?.valid) {
+                if (!activePnsHardware) {
                     panel.webview.postMessage({
                         type: 'pnsWindowData',
                         requestId: msg.requestId,
-                        pns: { valid: false, error: 'Calculate PNS before requesting a high-resolution PNS window.' },
+                        pns: { valid: false, error: 'Load PNS hardware before requesting a detailed PNS window.' },
                     });
                     return;
                 }
-                panel.webview.postMessage({
-                    type: 'pnsWindowData',
-                    requestId: msg.requestId,
-                    pns: serializePnsWindow(
-                        activePnsResult,
-                        Number(msg.startSec),
-                        Number(msg.endSec),
-                        Number(msg.maxPoints),
-                    ),
-                });
+                const selected = selectPnsWindowBlocks(
+                    activeBlocks,
+                    Number(msg.startSec),
+                    Number(msg.endSec),
+                    activePnsHardware,
+                );
+                const estimate = estimateDerivedCost(selected.blocks, activeGradientRaster);
+                if (!selected.blocks.length || estimate.rasterSamples > INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples) {
+                    panel.webview.postMessage({
+                        type: 'pnsWindowData',
+                        requestId: msg.requestId,
+                        pns: { valid: false, error: 'The requested PNS detail window is still too large. Zoom in further.' },
+                    });
+                    return;
+                }
+                try {
+                    const pns = calculatePns(selected.blocks, activeGradientRaster, activePnsHardware);
+                    panel.webview.postMessage({
+                        type: 'pnsWindowData',
+                        requestId: msg.requestId,
+                        pns: serializePnsWindow(
+                            pns,
+                            selected.displayStartSec,
+                            selected.displayEndSec,
+                            Number(msg.maxPoints),
+                        ),
+                    });
+                } catch (err) {
+                    panel.webview.postMessage({
+                        type: 'pnsWindowData',
+                        requestId: msg.requestId,
+                        pns: { valid: false, error: err instanceof Error ? err.message : String(err) },
+                    });
+                }
             }
         });
     }
@@ -581,10 +640,11 @@ async function readAndParseSequence(uri: vscode.Uri, didRead: () => void) {
 }
 
 function serializeGrad(g: DecodedGradWaveform): Record<string, unknown> {
+    const display = downsampleM4(g.timePoints, g.waveform, MAX_DISPLAY_PTS);
     return {
         s: g.startTime, d: g.duration,
-        t: downsample(g.timePoints, MAX_DISPLAY_PTS),
-        w: downsample(g.waveform, MAX_DISPLAY_PTS),
+        t: display.time,
+        w: display.values,
         a: g.amplitude, ty: g.type, ch: g.channel,
     };
 }
@@ -608,7 +668,32 @@ function serializeKSpace(ks: KSpaceData): Record<string, unknown> {
     };
 }
 
-function serializeM1(m1: M1Data): Record<string, unknown> {
+function serializeM1(m1: M1Data | CoarseM1Data): Record<string, unknown> {
+    if ('coarse' in m1) {
+        const envelope = (series: CoarseM1Data['x'], prefix: string): Record<string, number[]> => ({
+            [`${prefix}0`]: Array.from(series.startTime),
+            [`${prefix}1`]: Array.from(series.endTime),
+            [`${prefix}min`]: Array.from(series.min),
+            [`${prefix}max`]: Array.from(series.max),
+            [`${prefix}first`]: Array.from(series.first),
+            [`${prefix}last`]: Array.from(series.last),
+        });
+        return {
+            valid: m1.valid,
+            ok: m1.ok,
+            coarse: true,
+            referenceMode: m1.referenceMode,
+            error: m1.error,
+            warnings: m1.warnings,
+            startSec: m1.startSec,
+            endSec: m1.endSec,
+            ...envelope(m1.x, 'x'),
+            ...envelope(m1.y, 'y'),
+            ...envelope(m1.z, 'z'),
+            excitationTimesSec: Array.from(m1.excitationTimesSec),
+            refocusingTimesSec: Array.from(m1.refocusingTimesSec),
+        };
+    }
     const MAX_M1_PTS = 30000;
     const x = downsampleM4(m1.tSec, m1.m1x, MAX_M1_PTS);
     const y = downsampleM4(m1.tSec, m1.m1y, MAX_M1_PTS);
@@ -616,6 +701,7 @@ function serializeM1(m1: M1Data): Record<string, unknown> {
     return {
         valid: m1.valid,
         ok: m1.ok,
+        coarse: false,
         referenceMode: m1.referenceMode,
         error: m1.error,
         warnings: m1.warnings,
@@ -630,7 +716,69 @@ function serializeM1(m1: M1Data): Record<string, unknown> {
     };
 }
 
-function serializePns(pns: PnsResult): Record<string, unknown> {
+function serializeM1Window(
+    m1: M1Data,
+    startSec: number,
+    endSec: number,
+    maxPoints: number,
+): Record<string, unknown> {
+    if (m1.tSec.length === 0) {
+        return { valid: false, ok: m1.ok, error: 'No M1 samples are available.', startSec, endSec };
+    }
+    const maxWindowPoints = Number.isFinite(maxPoints)
+        ? Math.max(1024, Math.min(200_000, Math.floor(maxPoints)))
+        : 120_000;
+    const start = Math.max(0, Math.min(startSec, endSec));
+    const end = Math.max(start, Math.max(startSec, endSec));
+    const i0 = Math.max(0, lowerBoundNumeric(m1.tSec, start) - 1);
+    const i1 = Math.min(m1.tSec.length, upperBoundNumeric(m1.tSec, end) + 1);
+    if (i1 <= i0) return { valid: false, ok: m1.ok, error: 'No M1 samples in requested time window.', startSec: start, endSec: end };
+    const t = m1.tSec.subarray(i0, i1);
+    const x = downsampleM4(t, m1.m1x.subarray(i0, i1), maxWindowPoints);
+    const y = downsampleM4(t, m1.m1y.subarray(i0, i1), maxWindowPoints);
+    const z = downsampleM4(t, m1.m1z.subarray(i0, i1), maxWindowPoints);
+    return {
+        valid: m1.valid,
+        ok: m1.ok,
+        coarse: false,
+        referenceMode: m1.referenceMode,
+        warnings: m1.warnings,
+        startSec: start,
+        endSec: end,
+        tx: x.time,
+        x: x.values,
+        ty: y.time,
+        y: y.values,
+        tz: z.time,
+        z: z.values,
+    };
+}
+
+function serializePns(pns: PnsResult | CoarsePnsResult): Record<string, unknown> {
+    if ('coarse' in pns) {
+        const percent = (values: Float64Array): number[] => Array.from(values, value => value * 100);
+        const envelope = (series: CoarsePnsResult['x'], prefix: string): Record<string, number[]> => ({
+            [`${prefix}0`]: Array.from(series.startTime),
+            [`${prefix}1`]: Array.from(series.endTime),
+            [`${prefix}min`]: percent(series.min),
+            [`${prefix}max`]: percent(series.max),
+            [`${prefix}first`]: percent(series.first),
+            [`${prefix}last`]: percent(series.last),
+        });
+        return {
+            valid: pns.valid,
+            ok: pns.ok,
+            coarse: true,
+            error: pns.error,
+            warnings: pns.warnings,
+            startSec: pns.startSec,
+            endSec: pns.endSec,
+            ...envelope(pns.x, 'x'),
+            ...envelope(pns.y, 'y'),
+            ...envelope(pns.z, 'z'),
+            ...envelope(pns.norm, 'n'),
+        };
+    }
     const MAX_PNS_PTS = 30000;
     const x = downsampleM4(pns.timeSec, pns.pnsX, MAX_PNS_PTS);
     const y = downsampleM4(pns.timeSec, pns.pnsY, MAX_PNS_PTS);
@@ -639,6 +787,7 @@ function serializePns(pns: PnsResult): Record<string, unknown> {
     return {
         valid: pns.valid,
         ok: pns.ok,
+        coarse: false,
         error: pns.error,
         tx: x.time,
         x: x.values.map(value => value * 100.0),

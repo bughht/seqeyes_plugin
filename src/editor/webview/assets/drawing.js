@@ -137,19 +137,52 @@ function drawDerivedChannels(vs,ve,s){
     drawPercentSeries(pnsDrawData.n,viP,7,s.getPropertyValue('--fg').trim(),ch,vs,ve);
     ctx.setLineDash([]);
   }
-  if(m1Data){
-    if(viM1x>=0)drawBipolarSeries(m1Data.x,viM1x,8,s.getPropertyValue('--gx').trim(),ch,vs,ve);
-    if(viM1y>=0)drawBipolarSeries(m1Data.y,viM1y,9,s.getPropertyValue('--gy').trim(),ch,vs,ve);
-    if(viM1z>=0)drawBipolarSeries(m1Data.z,viM1z,10,s.getPropertyValue('--gz').trim(),ch,vs,ve);
+  var m1DrawData=m1SeriesForView(vs,ve);
+  if(m1DrawData){
+    if(viM1x>=0)drawBipolarSeries(m1DrawData.x,viM1x,8,s.getPropertyValue('--gx').trim(),ch,vs,ve);
+    if(viM1y>=0)drawBipolarSeries(m1DrawData.y,viM1y,9,s.getPropertyValue('--gy').trim(),ch,vs,ve);
+    if(viM1z>=0)drawBipolarSeries(m1DrawData.z,viM1z,10,s.getPropertyValue('--gz').trim(),ch,vs,ve);
+  }
+}
+
+function groupEnvelopeRanges(ranges,maxGapPx){
+  var groups=[],group=[];
+  for(var i=0;i<ranges.length;i++){
+    if(group.length&&ranges[i][0]-group[group.length-1][1]>maxGapPx){groups.push(group);group=[];}
+    group.push(ranges[i]);
+  }
+  if(group.length)groups.push(group);return groups;
+}
+
+function drawStepEnvelopeGroups(groups,color,fillAlpha){
+  for(var groupIndex=0;groupIndex<groups.length;groupIndex++){
+    var ranges=groups[groupIndex];if(!ranges.length)continue;
+    ctx.fillStyle=color;ctx.globalAlpha=fillAlpha;ctx.beginPath();ctx.moveTo(ranges[0][0],ranges[0][2]);
+    for(var upperIndex=0;upperIndex<ranges.length;upperIndex++){ctx.lineTo(ranges[upperIndex][0],ranges[upperIndex][2]);ctx.lineTo(ranges[upperIndex][1],ranges[upperIndex][2]);}
+    for(var lowerIndex=ranges.length-1;lowerIndex>=0;lowerIndex--){ctx.lineTo(ranges[lowerIndex][1],ranges[lowerIndex][3]);ctx.lineTo(ranges[lowerIndex][0],ranges[lowerIndex][3]);}
+    ctx.closePath();ctx.fill();
+    ctx.strokeStyle=color;ctx.lineWidth=.8;ctx.globalAlpha=.72;ctx.beginPath();ctx.moveTo(ranges[0][0],ranges[0][2]);
+    for(var upper=0;upper<ranges.length;upper++){ctx.lineTo(ranges[upper][0],ranges[upper][2]);ctx.lineTo(ranges[upper][1],ranges[upper][2]);}ctx.stroke();
+    ctx.globalAlpha=.38;ctx.beginPath();ctx.moveTo(ranges[0][0],ranges[0][3]);
+    for(var lower=0;lower<ranges.length;lower++){ctx.lineTo(ranges[lower][0],ranges[lower][3]);ctx.lineTo(ranges[lower][1],ranges[lower][3]);}ctx.stroke();ctx.globalAlpha=1;
   }
 }
 
 function drawPercentSeries(series,vi,ci,c,ch,vs,ve){
-  if(!series||series.n<2)return;
+  if(!series||series.n<(series.kind==='envelope'?1:2))return;
   rowClip(vi,ch,function(){
     var maxA=channelRange(ci),base=M.t+(vi+1)*ch-ch*.08,scale=ch*.84/maxA;
     var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r;
     var plotW=Math.max(1,clipR-clipL);
+    if(series.kind==='envelope'){
+      derivedEnvelopeCurveCount++;
+      var ranges=[];
+      var count=forEachEnvelopeRange(series,vs,ve,Math.max(32,Math.ceil(plotW)),function(t0,t1,minValue,maxValue){
+        var x0=t2x(t0),x1=t2x(t1),upper=base-maxValue*scale,lower=base-minValue*scale;
+        if(isFinite(x0)&&isFinite(x1)&&isFinite(upper)&&isFinite(lower)&&x1>=clipL&&x0<=clipR)ranges.push([Math.max(clipL,x0),Math.min(clipR,x1),upper,lower]);
+      });
+      derivedRenderPointCount+=count*4;drawStepEnvelopeGroups(groupEnvelopeRanges(ranges,1),c,.12);return;
+    }
     var rawLimit=Math.max(64,Math.ceil(plotW*2));
     var fineLimit=Math.max(128,Math.ceil(plotW*8));
     var windowRange=derivedSeriesWindow(series,vs,ve);
@@ -183,10 +216,19 @@ function shouldUseFinePnsRendering(count,plotW,vs,ve){
 }
 
 function drawBipolarSeries(series,vi,ci,c,ch,vs,ve){
-  if(!series||series.n<2)return;
+  if(!series||series.n<(series.kind==='envelope'?1:2))return;
   rowClip(vi,ch,function(){
     var maxA=channelRange(ci),y=cy(vi),scale=ch*.4/maxA;
     var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r;
+    if(series.kind==='envelope'){
+      derivedEnvelopeCurveCount++;
+      var envelopeRanges=[];
+      var envelopeCount=forEachEnvelopeRange(series,vs,ve,Math.max(32,Math.ceil(clipR-clipL)),function(t0,t1,minValue,maxValue){
+        var x0=t2x(t0),x1=t2x(t1),upper=y-maxValue*scale,lower=y-minValue*scale;
+        if(isFinite(x0)&&isFinite(x1)&&isFinite(upper)&&isFinite(lower)&&x1>=clipL&&x0<=clipR)envelopeRanges.push([Math.max(clipL,x0),Math.min(clipR,x1),upper,lower]);
+      });
+      derivedRenderPointCount+=envelopeCount*4;drawStepEnvelopeGroups(groupEnvelopeRanges(envelopeRanges,1),c,.14);return;
+    }
     var rawLimit=Math.max(128,Math.ceil((clipR-clipL)*8));
     if(derivedSeriesWindow(series,vs,ve).count<=rawLimit){
       derivedRawCurveCount++;
@@ -236,7 +278,8 @@ function drawBlocks(vs,ve,s){
   var pixelBudget=Math.max(1,Math.floor(plotWidth()));
   var overview=selectWaveformOverview(waveformOverview,range.start,range.end,pixelBudget);
   function useOverview(key){return !!overview&&waveformVisiblePointCount(waveformOverview,key,range.start,range.end)>pixelBudget;}
-  var overviewUse={rf:useOverview('rf'),phase:useOverview('phase'),gx:useOverview('gx'),gy:useOverview('gy'),gz:useOverview('gz'),adc:useOverview('adc')};
+  function useGradientOverview(key){return !!overview&&waveformVisibleGradientPointCount(BL,key,range.start,range.end,vs,ve)>pixelBudget*8;}
+  var overviewUse={rf:useOverview('rf'),phase:useOverview('phase'),gx:useGradientOverview('gx'),gy:useGradientOverview('gy'),gz:useGradientOverview('gz'),adc:useOverview('adc')};
   var dense=overviewUse.rf||overviewUse.phase||overviewUse.gx||overviewUse.gy||overviewUse.gz||overviewUse.adc;
   waveformOverviewActive=dense;
   setViewerNotice('dense',dense?'Dense overview mode is active. Zoom in for full waveform detail.':null);
@@ -255,7 +298,7 @@ function drawRfOverview(summary,vi,ch,colors,vs,ve){
     ctx.strokeStyle=colors.rf;ctx.lineWidth=1;ctx.beginPath();
     for(var i=summary.first;i<summary.last;i++){
       if(level.t1[i]<vs||level.t0[i]>ve||level.rfMin[i]===Infinity)continue;
-      var x=t2x(.5*(level.t0[i]+level.t1[i])),y0=y+ch*.45-level.rfMin[i]*scale,y1=y+ch*.45-level.rfMax[i]*scale;
+      var x=t2x(.5*(Math.max(vs,level.t0[i])+Math.min(ve,level.t1[i]))),y0=y+ch*.45-level.rfMin[i]*scale,y1=y+ch*.45-level.rfMax[i]*scale;
       if(Math.abs(y1-y0)<1){y0-=.5;y1+=.5;}ctx.moveTo(x,y0);ctx.lineTo(x,y1);
     }
     ctx.stroke();
@@ -288,15 +331,15 @@ function drawPhaseSampled(start,end,vi,ch,colors,vs,ve,maxPoints){
 }
 
 function drawGradientOverview(summary,key,vi,ci,ch,color,vs,ve){
-  var level=summary.level,minValues=level[key+'Min'],maxValues=level[key+'Max'],y=cy(vi),scale=ch*.4/channelRange(ci);
+  var level=summary.level,minValues=level[key+'Min'],maxValues=level[key+'Max'],startValues=level[key+'Start'],endValues=level[key+'End'],y=cy(vi),scale=ch*.4/channelRange(ci);
   rowClip(vi,ch,function(){
-    ctx.strokeStyle=color;ctx.lineWidth=1;ctx.beginPath();
+    var ranges=[];
     for(var i=summary.first;i<summary.last;i++){
-      if(level.t1[i]<vs||level.t0[i]>ve||minValues[i]===Infinity)continue;
-      var x=t2x(.5*(level.t0[i]+level.t1[i])),y0=y-minValues[i]*scale,y1=y-maxValues[i]*scale;
-      if(Math.abs(y1-y0)<1){y0-=.5;y1+=.5;}ctx.moveTo(x,y0);ctx.lineTo(x,y1);
+      if(endValues[i]<vs||startValues[i]>ve||minValues[i]===Infinity)continue;
+      var x0=t2x(Math.max(vs,startValues[i])),x1=t2x(Math.min(ve,endValues[i]));
+      ranges.push([x0,x1,y-maxValues[i]*scale,y-minValues[i]*scale]);
     }
-    ctx.stroke();
+    drawStepEnvelopeGroups(groupEnvelopeRanges(ranges,1),color,.14);
   });
 }
 

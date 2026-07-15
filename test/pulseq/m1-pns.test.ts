@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { calculateM1 } from '../../src/pulseq/m1';
-import { calculatePns, parsePnsHardwareAsc, safePnsModel } from '../../src/pulseq/pns';
+import { calculateM1, calculateM1Coarse } from '../../src/pulseq/m1';
+import { calculatePns, calculatePnsCoarse, parsePnsHardwareAsc, safePnsModel } from '../../src/pulseq/pns';
+import { selectM1WindowBlocks, selectPnsWindowBlocks } from '../../src/pulseq/derivedWindow';
 import type { DecodedBlock, DecodedGradWaveform } from '../../src/pulseq/types';
 
 describe('M1 calculation', () => {
@@ -61,6 +62,20 @@ describe('M1 calculation', () => {
     expect(result.m1x[refocusIndex]).toBeGreaterThan(0);
     expect(result.m1x[result.m1x.length - 1]).toBeLessThan(0);
   });
+
+  it('streams a bounded full-sequence M1 envelope without losing extrema', () => {
+    const blocks = [block(1, 0, 0.2, grad('gx', [0, 0.2], [100, 100]))];
+    const exact = calculateM1(blocks, 0.01);
+    const coarse = calculateM1Coarse(blocks, 0.01, { maxPoints: 1024 });
+
+    expect(coarse.valid).toBe(true);
+    expect(coarse.coarse).toBe(true);
+    expect(coarse.x.startTime.length).toBeLessThanOrEqual(256);
+    expect(Math.max(...Array.from(coarse.x.max))).toBeCloseTo(
+      Math.max(...Array.from(exact.m1x)),
+      10,
+    );
+  });
 });
 
 describe('PNS calculation', () => {
@@ -105,6 +120,39 @@ describe('PNS calculation', () => {
     expect(result.timeSec.length).toBeGreaterThan(0);
     expect(result.pnsNorm.length).toBe(result.timeSec.length);
     expect(Math.max(...Array.from(result.pnsNorm))).toBeGreaterThanOrEqual(0);
+  });
+
+  it('streams bounded PNS envelopes with the same peak as the exact path', () => {
+    const hardware = parsePnsHardwareAsc(syntheticAsc());
+    const blocks = [block(1, 0, 0.0002, grad('gx', [0, 0.0001, 0.0002], [0, 1000, 0]))];
+    const exact = calculatePns(blocks, 1e-5, hardware);
+    const coarse = calculatePnsCoarse(blocks, 1e-5, hardware, { maxPoints: 1024 });
+
+    expect(coarse.valid).toBe(true);
+    expect(coarse.norm.startTime.length).toBeLessThanOrEqual(256);
+    expect(Math.max(...Array.from(coarse.norm.max))).toBeCloseTo(
+      Math.max(...Array.from(exact.pnsNorm)),
+      10,
+    );
+  });
+});
+
+describe('detailed derived windows', () => {
+  it('anchors M1 at the preceding excitation and gives PNS filter warm-up history', () => {
+    const hardware = parsePnsHardwareAsc(syntheticAsc());
+    const blocks = [
+      { ...block(1, 0, 0.1), rf: rf(1, 0.05, 'e') },
+      { ...block(2, 0.1, 0.1), rf: rf(2, 0.15, 'e') },
+      block(3, 0.2, 0.1),
+    ];
+
+    const m1Window = selectM1WindowBlocks(blocks, 0.16, 0.25);
+    const pnsWindow = selectPnsWindowBlocks(blocks, 0.16, 0.25, hardware);
+
+    expect(m1Window.calculationStartSec).toBeCloseTo(0.1, 12);
+    expect(m1Window.blocks.map(candidate => candidate.index)).toEqual([2, 3]);
+    expect(pnsWindow.calculationStartSec).toBeLessThan(0.16);
+    expect(pnsWindow.blocks.at(-1)?.index).toBe(3);
   });
 });
 

@@ -1,4 +1,6 @@
 import type { DecodedBlock, DecodedGradWaveform } from './types';
+import { BoundedSeriesBuilder, type BoundedSeries } from './boundedSeries';
+import { createDecodedGradientSampler, decodedGradientTimeRange } from './gradientSampler';
 
 export interface M1Data {
     valid: boolean;
@@ -18,6 +20,22 @@ export type M1ReferenceMode = 'rfCenter' | 'observationTime';
 
 export interface M1Options {
     referenceMode?: M1ReferenceMode;
+}
+
+export interface CoarseM1Data {
+    valid: boolean;
+    ok: boolean;
+    coarse: true;
+    referenceMode: M1ReferenceMode;
+    error?: string;
+    startSec: number;
+    endSec: number;
+    x: BoundedSeries;
+    y: BoundedSeries;
+    z: BoundedSeries;
+    warnings: string[];
+    excitationTimesSec: Float64Array;
+    refocusingTimesSec: Float64Array;
 }
 
 interface RfEvent {
@@ -65,24 +83,7 @@ export function calculateM1(blocks: DecodedBlock[], gradientRaster: number, opti
     const refocusingTimes = rfEvents.filter(rf => rf.use === 'r').map(rf => rf.tSec);
     const events = buildWalkerEvents(rfEvents);
 
-    let recentExcCount = 0;
-    let lastExcT = -1e9;
-    for (const rf of rfEvents) {
-        if (rf.use === 'e') {
-            if (rf.tSec - lastExcT < 0.100) recentExcCount++;
-            lastExcT = rf.tSec;
-        }
-    }
-    if (recentExcCount > 8) {
-        warnings.push(
-            `Sequence shows ${recentExcCount} closely-spaced (<100 ms) excitation events. `
-            + 'This pattern is consistent with a steady-state sequence for which the simplified '
-            + 'reset/flip bookkeeping does NOT model coherent pathway interference. Treat the M1 curve as advisory only.',
-        );
-    }
-    if (!excitationTimes.length) {
-        warnings.push(`No excitation RF events found in sequence. M1 will be integrated from t=${tMin.toFixed(6)} s with no signal basis.`);
-    }
+    appendM1AdvisoryWarnings(rfEvents, tMin, warnings);
 
     const rasterSec = gradientRaster > 0 ? gradientRaster : 10e-6;
     if (rasterSec <= 0) {
@@ -105,6 +106,165 @@ export function calculateM1(blocks: DecodedBlock[], gradientRaster: number, opti
         m1x: new Float64Array(x.m1),
         m1y: new Float64Array(y.m1),
         m1z: new Float64Array(z.m1),
+        warnings,
+        excitationTimesSec: new Float64Array(excitationTimes),
+        refocusingTimesSec: new Float64Array(refocusingTimes),
+    };
+}
+
+function appendM1AdvisoryWarnings(rfEvents: RfEvent[], tMin: number, warnings: string[]): void {
+    let recentExcCount = 0;
+    let lastExcT = -1e9;
+    let excitationCount = 0;
+    for (const rf of rfEvents) {
+        if (rf.use === 'e') {
+            excitationCount++;
+            if (rf.tSec - lastExcT < 0.100) recentExcCount++;
+            lastExcT = rf.tSec;
+        }
+    }
+    if (recentExcCount > 8) {
+        warnings.push(
+            `Sequence shows ${recentExcCount} closely-spaced (<100 ms) excitation events. `
+            + 'This pattern is consistent with a steady-state sequence for which the simplified '
+            + 'reset/flip bookkeeping does NOT model coherent pathway interference. Treat the M1 curve as advisory only.',
+        );
+    }
+    if (!excitationCount) {
+        warnings.push(`No excitation RF events found in sequence. M1 will be integrated from t=${tMin.toFixed(6)} s with no signal basis.`);
+    }
+}
+
+/**
+ * Full-sequence M1 calculation with bounded output and no native-raster arrays.
+ * The integration still advances on the gradient raster; only storage is coarse.
+ */
+export function calculateM1Coarse(
+    blocks: DecodedBlock[],
+    gradientRaster: number,
+    options: M1Options & { maxPoints?: number } = {},
+): CoarseM1Data {
+    const referenceMode = normalizeReferenceMode(options.referenceMode);
+    const emptySeries = (): BoundedSeries => ({
+        startTime: new Float64Array(),
+        endTime: new Float64Array(),
+        min: new Float64Array(),
+        max: new Float64Array(),
+        first: new Float64Array(),
+        last: new Float64Array(),
+    });
+    const invalid = (error: string): CoarseM1Data => ({
+        valid: false,
+        ok: false,
+        coarse: true,
+        referenceMode,
+        error,
+        startSec: 0,
+        endSec: 0,
+        x: emptySeries(),
+        y: emptySeries(),
+        z: emptySeries(),
+        warnings: [],
+        excitationTimesSec: new Float64Array(),
+        refocusingTimesSec: new Float64Array(),
+    });
+    if (!blocks.length) return invalid('Empty or invalid block list.');
+    if (!(gradientRaster > 0)) return invalid('gradientRaster must be positive.');
+    const range = decodedGradientTimeRange(blocks);
+    if (!range) return invalid('No gradient waveform available for M1.');
+
+    const warnings: string[] = [];
+    const rfEvents = collectRfEvents(blocks, warnings);
+    appendM1AdvisoryWarnings(rfEvents, range.first, warnings);
+    const excitationTimes = rfEvents.filter(rf => rf.use === 'e').map(rf => rf.tSec);
+    const refocusingTimes = rfEvents.filter(rf => rf.use === 'r').map(rf => rf.tSec);
+    const events = buildWalkerEvents(rfEvents);
+    const startSec = Math.min(range.first, events[0]?.tSec ?? range.first);
+    const endSec = Math.max(range.last, events[events.length - 1]?.tSec ?? range.last);
+    const maxPoints = Math.max(1024, Math.min(120_000, options.maxPoints ?? 30_000));
+    const maxBuckets = Math.floor(maxPoints / 4);
+    const builders = [
+        new BoundedSeriesBuilder(startSec, endSec, maxPoints),
+        new BoundedSeriesBuilder(startSec, endSec, maxPoints),
+        new BoundedSeriesBuilder(startSec, endSec, maxPoints),
+    ];
+    const samplers = [
+        createDecodedGradientSampler(blocks, 'gx'),
+        createDecodedGradientSampler(blocks, 'gy'),
+        createDecodedGradientSampler(blocks, 'gz'),
+    ];
+    const unsignedM0 = [0, 0, 0];
+    const unsignedM1 = [0, 0, 0];
+    let sign = 1;
+    let tReset = excitationTimes.length ? excitationTimes[0] : range.first;
+    if (range.first < tReset) tReset = range.first;
+    let currentT = tReset;
+
+    const reported = (axis: number, tSec: number): number => (
+        referenceMode === 'observationTime'
+            ? sign * (unsignedM1[axis] - (tSec - tReset) * unsignedM0[axis])
+            : sign * unsignedM1[axis]
+    );
+    const advanceTo = (targetT: number): void => {
+        if (!(targetT > currentT + TIME_EPS)) return;
+        for (let axis = 0; axis < 3; axis++) {
+            const ga = samplers[axis](currentT);
+            const gb = samplers[axis](targetT);
+            const integrated = integrateLinearSegment(currentT, targetT, tReset, ga, gb);
+            unsignedM0[axis] += integrated[0];
+            unsignedM1[axis] += integrated[1];
+        }
+        currentT = targetT;
+    };
+    const addReported = (tSec: number): void => {
+        for (let axis = 0; axis < 3; axis++) builders[axis].add(tSec, reported(axis, tSec));
+    };
+
+    const regularCount = Math.floor((range.last - range.first) / gradientRaster) + 1;
+    const regularLast = range.first + Math.max(0, regularCount - 1) * gradientRaster;
+    const hasFinalSample = regularLast < range.last - TIME_EPS;
+    const totalSamples = regularCount + (hasFinalSample ? 1 : 0);
+    let eventIndex = 0;
+    let sampleIndex = 0;
+    while (eventIndex < events.length || sampleIndex < totalSamples) {
+        const eventTime = eventIndex < events.length ? events[eventIndex].tSec : Number.POSITIVE_INFINITY;
+        const sampleTime = sampleIndex < totalSamples
+            ? (sampleIndex < regularCount ? range.first + sampleIndex * gradientRaster : range.last)
+            : Number.POSITIVE_INFINITY;
+        if (eventTime <= sampleTime) {
+            advanceTo(eventTime);
+            if (events[eventIndex].kind === 'reset') {
+                sign = 1;
+                tReset = eventTime;
+                currentT = eventTime;
+                unsignedM0.fill(0);
+                unsignedM1.fill(0);
+                for (const builder of builders) builder.add(eventTime, 0);
+            } else {
+                addReported(eventTime);
+                sign = -sign;
+            }
+            eventIndex++;
+        } else {
+            advanceTo(sampleTime);
+            addReported(sampleTime);
+            sampleIndex++;
+        }
+    }
+    warnings.push(
+        `Showing a bounded full-sequence M1 envelope (at most ${maxBuckets.toLocaleString()} buckets per axis). `
+        + 'Zoom to 100 TRs or fewer for an automatic detailed calculation.',
+    );
+    return {
+        valid: true,
+        ok: true,
+        coarse: true,
+        referenceMode,
+        startSec,
+        endSec,
+        x: builders[0].finish(),
+        y: builders[1].finish(),
+        z: builders[2].finish(),
         warnings,
         excitationTimesSec: new Float64Array(excitationTimes),
         refocusingTimesSec: new Float64Array(refocusingTimes),

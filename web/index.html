@@ -179,7 +179,7 @@ var GAMMA=42576;
 var ampZoom=[1,1,1,1,1,1,1];
 ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
-var decodedBlocks=null,waveformOverview=null,m1Data=null,pnsData=null,pnsHardware=null,m1Busy=false,pnsBusy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null;
+var decodedBlocks=null,waveformOverview=null,m1Data=null,m1WindowData=null,m1WindowPending=null,m1WindowTimer=0,pnsData=null,pnsWindowData=null,pnsWindowPending=null,pnsWindowTimer=0,pnsHardware=null,m1Busy=false,pnsBusy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null;
 var viewerNotices={};
 var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,waveformOverviewActive=false,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
 var viewerDrawFrame=0,viewerDrawMinimap=false;
@@ -232,7 +232,7 @@ function setM1ReferenceMode(mode){
   var restore=[!!chVis[8],!!chVis[9],!!chVis[10]];
   var shouldRecalc=!!m1Data&&(chVis[8]||chVis[9]||chVis[10]);
   m1ReferenceMode=next;writeM1ReferenceMode(next);
-  m1Data=null;chVis[8]=false;chVis[9]=false;chVis[10]=false;
+  m1Data=null;m1WindowData=null;m1WindowPending=null;chVis[8]=false;chVis[9]=false;chVis[10]=false;
   computeGlobalMax();buildLegend();draw();
   if(shouldRecalc){
     m1RestoreChannels=restore;
@@ -504,6 +504,18 @@ function downsample(arr,maxPts){
   for(var i=0;i<maxPts;i++)out[i]=arr[Math.floor(i*step)];return out;
 }
 
+function downsampleWaveform(time,values,maxPts){
+  var n=Math.min(time?time.length:0,values?values.length:0);if(n<=maxPts)return{time:Array.from(time||[]),values:Array.from(values||[])};
+  var bucketCount=Math.max(1,Math.floor(maxPts/4)),outT=[],outV=[];
+  for(var bucket=0;bucket<bucketCount;bucket++){
+    var start=Math.floor(bucket*n/bucketCount),end=Math.max(start+1,Math.floor((bucket+1)*n/bucketCount)),minIndex=start,maxIndex=start;
+    end=Math.min(n,end);for(var i=start+1;i<end;i++){if(values[i]<values[minIndex])minIndex=i;if(values[i]>values[maxIndex])maxIndex=i;}
+    var indices=[start,minIndex,maxIndex,end-1].sort(function(a,b){return a-b;}),previous=-1;
+    for(var j=0;j<indices.length;j++){var index=indices[j];if(index===previous)continue;outT.push(time[index]);outV.push(values[index]);previous=index;}
+  }
+  return{time:outT,values:outV};
+}
+
 /* ═══════════════════════════════════════════════════════════════════════
    Serialisation — mirrors seqEditorProvider.ts serializeBlocks
    ═══════════════════════════════════════════════════════════════════════ */
@@ -531,7 +543,8 @@ function serializeBlocks(blocks){
   });
 }
 function serializeGrad(g){
-  return {s:g.startTime,d:g.duration,t:downsample(g.timePoints,MAX_PTS),w:downsample(g.waveform,MAX_PTS),a:g.amplitude,ty:g.type,ch:g.channel};
+  var display=downsampleWaveform(g.timePoints,g.waveform,MAX_PTS);
+  return {s:g.startTime,d:g.duration,t:display.time,w:display.values,a:g.amplitude,ty:g.type,ch:g.channel};
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -556,7 +569,7 @@ function loadSequenceSource(sourceBytes,fileName,parseSource){
     GR=seq.rasterTimes.gradientRaster;RR=seq.rasterTimes.rfRaster;AR=seq.rasterTimes.adcRaster;BR=seq.rasterTimes.blockDurationRaster;
     BL=serializeBlocks(blocks);
     waveformOverview=createWaveformOverview(BL);
-    m1Data=null;pnsData=null;chVis[7]=false;chVis[8]=false;chVis[9]=false;chVis[10]=false;buildLegend();
+    m1Data=null;m1WindowData=null;m1WindowPending=null;pnsData=null;pnsWindowData=null;pnsWindowPending=null;chVis[7]=false;chVis[8]=false;chVis[9]=false;chVis[10]=false;buildLegend();
 
     // Build block positions for minimap
     var cum=0;blockPos=[];
@@ -697,6 +710,10 @@ async function exportCurrentKspace(){
   }
 }
 
+function createCoreEnvelopeSeries(series,scale){
+  return createEnvelopeSeries(series.startTime,series.endTime,series.min,series.max,series.first,series.last,scale);
+}
+
 function showM1Result(result){
   m1Busy=false;
   if(!result||!result.valid){setViewerNotice('m1','M1 calculation failed: '+((result&&result.error)||'unknown error')+' Zoom in to inspect waveform detail.');return;}
@@ -704,24 +721,27 @@ function showM1Result(result){
   m1Data={
     valid:result.valid,
     ok:result.ok,
+    coarse:!!result.coarse,
+    startSec:isFinite(result.startSec)?result.startSec:null,
+    endSec:isFinite(result.endSec)?result.endSec:null,
     referenceMode:result.referenceMode||m1ReferenceMode,
     warnings:result.warnings||[],
-    x:createDerivedSeries(result.tSec,result.m1x,1),
-    y:createDerivedSeries(result.tSec,result.m1y,1),
-    z:createDerivedSeries(result.tSec,result.m1z,1)
+    x:result.coarse?createCoreEnvelopeSeries(result.x,1):createDerivedSeries(result.tSec,result.m1x,1),
+    y:result.coarse?createCoreEnvelopeSeries(result.y,1):createDerivedSeries(result.tSec,result.m1y,1),
+    z:result.coarse?createCoreEnvelopeSeries(result.z,1):createDerivedSeries(result.tSec,result.m1z,1)
   };
+  m1WindowData=null;m1WindowPending=null;
   if(m1RestoreChannels){
     chVis[8]=!!m1RestoreChannels[0];chVis[9]=!!m1RestoreChannels[1];chVis[10]=!!m1RestoreChannels[2];m1RestoreChannels=null;
   }else chVis[m1RequestedChannel]=true;
   computeGlobalMax();buildLegend();draw();
   if(m1Data.warnings&&m1Data.warnings.length)console.warn('[SeqEyes M1]',m1Data.warnings.join('\n'));
+  setViewerNotice('m1Coarse',m1Data.coarse?'Large sequence: showing bounded full-sequence M1. Zoom to 100 TRs or fewer for automatic detail.':null);
 }
 
-function derivedBudgetWarning(label){
+function derivedNeedsCoarseFallback(){
   var estimate=Pulseq.estimateDerivedCost(decodedBlocks||[],GR);
-  if(estimate.rasterSamples<=Pulseq.INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples)return '';
-  return label+' was not calculated because the full sequence requires about '+
-    Pulseq.formatSampleCount(estimate.rasterSamples)+' native-raster samples. Zoom in to inspect waveform detail; a view-scoped calculation fallback is planned.';
+  return estimate.rasterSamples>Pulseq.INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples;
 }
 
 function requestM1(channel){
@@ -729,10 +749,16 @@ function requestM1(channel){
   if(m1Data){chVis[channel]=!chVis[channel];buildLegend();draw();return;}
   if(!decodedBlocks){alert('Open a Pulseq sequence before calculating M1.');return;}
   m1RequestedChannel=channel;m1Busy=true;buildLegend();
-  var warning=derivedBudgetWarning('M1');
-  if(warning){m1Busy=false;setViewerNotice('m1',warning);buildLegend();return;}
-  try{showM1Result(Pulseq.calculateM1(decodedBlocks,GR,{referenceMode:m1ReferenceMode}));}
-  catch(err){m1Busy=false;setViewerNotice('m1','M1 calculation failed: '+(err.message||String(err))+' Zoom in to inspect waveform detail.');}
+  var coarse=derivedNeedsCoarseFallback();
+  if(coarse)setViewerNotice('m1','Large sequence: calculating a bounded full-sequence M1 envelope...');
+  setTimeout(function(){
+    try{
+      showM1Result(coarse?Pulseq.calculateM1Coarse(decodedBlocks,GR,{referenceMode:m1ReferenceMode}):Pulseq.calculateM1(decodedBlocks,GR,{referenceMode:m1ReferenceMode}));
+    }catch(err){
+      try{showM1Result(Pulseq.calculateM1Coarse(decodedBlocks,GR,{referenceMode:m1ReferenceMode}));}
+      catch(fallbackErr){m1Busy=false;setViewerNotice('m1','M1 calculation failed: '+(fallbackErr.message||String(fallbackErr))+' Zoom in further.');}
+    }
+  },0);
 }
 
 function showPnsResult(result){
@@ -742,20 +768,139 @@ function showPnsResult(result){
   pnsData={
     valid:result.valid,
     ok:result.ok,
-    x:createDerivedSeries(result.timeSec,result.pnsX,100),
-    y:createDerivedSeries(result.timeSec,result.pnsY,100),
-    z:createDerivedSeries(result.timeSec,result.pnsZ,100),
-    n:createDerivedSeries(result.timeSec,result.pnsNorm,100)
+    coarse:!!result.coarse,
+    startSec:isFinite(result.startSec)?result.startSec:null,
+    endSec:isFinite(result.endSec)?result.endSec:null,
+    x:result.coarse?createCoreEnvelopeSeries(result.x,100):createDerivedSeries(result.timeSec,result.pnsX,100),
+    y:result.coarse?createCoreEnvelopeSeries(result.y,100):createDerivedSeries(result.timeSec,result.pnsY,100),
+    z:result.coarse?createCoreEnvelopeSeries(result.z,100):createDerivedSeries(result.timeSec,result.pnsZ,100),
+    n:result.coarse?createCoreEnvelopeSeries(result.norm,100):createDerivedSeries(result.timeSec,result.pnsNorm,100)
   };
+  pnsWindowData=null;pnsWindowPending=null;
   chVis[7]=true;computeGlobalMax();buildLegend();draw();
   setViewerNotice('pnsThreshold',result.ok?null:'PNS warning: predicted level reaches or exceeds 100%.');
+  setViewerNotice('pnsCoarse',pnsData.coarse?'Large sequence: showing bounded full-sequence PNS. Zoom to 100 TRs or fewer for automatic detail.':null);
+}
+
+function calculatePnsWithFallback(){
+  var coarse=derivedNeedsCoarseFallback();
+  if(coarse)setViewerNotice('pns','Large sequence: calculating a bounded full-sequence PNS envelope...');
+  setTimeout(function(){
+    try{showPnsResult(coarse?Pulseq.calculatePnsCoarse(decodedBlocks,GR,pnsHardware):Pulseq.calculatePns(decodedBlocks,GR,pnsHardware));}
+    catch(err){
+      try{showPnsResult(Pulseq.calculatePnsCoarse(decodedBlocks,GR,pnsHardware));}
+      catch(fallbackErr){pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;setViewerNotice('pns','PNS calculation failed: '+(fallbackErr.message||String(fallbackErr))+' Zoom in further.');}
+    }
+  },0);
+}
+
+function derivedWindowCovers(data,vs,ve){
+  return !!(data&&data.startSec!==null&&data.endSec!==null&&data.startSec<=vs+1e-12&&data.endSec>=ve-1e-12);
+}
+
+function shouldCalculateDetailedWindow(data,vs,ve){
+  if(!data||!data.coarse||!seqTiming||!(seqTiming.trTimeSec>0))return false;
+  return ve-vs<=seqTiming.trTimeSec*100.5;
+}
+
+function windowedM4Series(time,values,startSec,endSec,scale,maxPoints){
+  var n=Math.min(time.length,values.length),lo=0,hi=n;
+  while(lo<hi){var mid=(lo+hi)>>1;if(time[mid]<startSec)lo=mid+1;else hi=mid;}
+  var i0=Math.max(0,lo-1);lo=i0;hi=n;
+  while(lo<hi){var mid2=(lo+hi)>>1;if(time[mid2]<=endSec)lo=mid2+1;else hi=mid2;}
+  var i1=Math.min(n,lo+1),count=Math.max(0,i1-i0),outT=[],outV=[];
+  if(count<=maxPoints){
+    for(var i=i0;i<i1;i++){outT.push(time[i]);outV.push(values[i]*scale);}
+  }else{
+    var bucketCount=Math.max(1,Math.floor(maxPoints/4));
+    for(var bucket=0;bucket<bucketCount;bucket++){
+      var bs=i0+Math.floor(bucket*count/bucketCount),be=Math.min(i1,i0+Math.max(1,Math.floor((bucket+1)*count/bucketCount)));
+      var minI=bs,maxI=bs;
+      for(var j=bs+1;j<be;j++){if(values[j]<values[minI])minI=j;if(values[j]>values[maxI])maxI=j;}
+      var indices=[bs,minI,maxI,be-1].sort(function(a,b){return a-b;}),previous=-1;
+      for(var k=0;k<indices.length;k++){var index=indices[k];if(index===previous)continue;outT.push(time[index]);outV.push(values[index]*scale);previous=index;}
+    }
+  }
+  return createDerivedSeries(outT,outV,1);
+}
+
+function scheduleM1Window(vs,ve){
+  if(!(chVis[8]||chVis[9]||chVis[10])||!shouldCalculateDetailedWindow(m1Data,vs,ve)||derivedWindowCovers(m1WindowData,vs,ve)||m1WindowPending)return;
+  clearTimeout(m1WindowTimer);
+  var duration=Math.max(ve-vs,GR),pad=Math.max(duration*.5,seqTiming.trTimeSec),start=Math.max(0,vs-pad),end=Math.min(TD||ve,ve+pad),source=m1Data;
+  m1WindowPending={startSec:start,endSec:end};
+  m1WindowTimer=setTimeout(function(){
+    var completed=false;
+    try{
+      var selected=Pulseq.selectM1WindowBlocks(decodedBlocks,start,end),estimate=Pulseq.estimateDerivedCost(selected.blocks,GR);
+      if(!selected.blocks.length||estimate.rasterSamples>Pulseq.INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples)throw new Error('detail window is still too large; zoom in further');
+      var result=Pulseq.calculateM1(selected.blocks,GR,{referenceMode:m1ReferenceMode});
+      if(!result.valid)throw new Error(result.error||'calculation failed');
+      if(m1Data!==source)return;
+      m1WindowData={
+        coarse:false,startSec:start,endSec:end,referenceMode:result.referenceMode,warnings:result.warnings||[],
+        x:windowedM4Series(result.tSec,result.m1x,start,end,1,120000),
+        y:windowedM4Series(result.tSec,result.m1y,start,end,1,120000),
+        z:windowedM4Series(result.tSec,result.m1z,start,end,1,120000)
+      };
+      completed=true;
+      setViewerNotice('m1Detail',null);
+    }catch(err){setViewerNotice('m1Detail','M1 detail was not calculated: '+(err.message||String(err))+'.');}
+    finally{m1WindowPending=null;if(completed)draw();}
+  },180);
+}
+
+function m1SeriesForView(vs,ve){
+  if(!m1Data)return null;
+  if(shouldCalculateDetailedWindow(m1Data,vs,ve)){
+    scheduleM1Window(vs,ve);
+    if(derivedWindowCovers(m1WindowData,vs,ve)){setViewerNotice('m1Coarse','Large sequence: full sequence uses bounded M1; the current view is detailed.');return m1WindowData;}
+  }
+  if(m1Data.coarse)setViewerNotice('m1Coarse','Large sequence: showing bounded full-sequence M1. Zoom to 100 TRs or fewer for automatic detail.');
+  return m1Data;
+}
+
+function schedulePnsWindow(vs,ve){
+  if(!chVis[7]||!pnsHardware||!shouldCalculateDetailedWindow(pnsData,vs,ve)||derivedWindowCovers(pnsWindowData,vs,ve)||pnsWindowPending)return;
+  clearTimeout(pnsWindowTimer);
+  var duration=Math.max(ve-vs,GR),pad=Math.max(duration*.5,seqTiming.trTimeSec),start=Math.max(0,vs-pad),end=Math.min(TD||ve,ve+pad),source=pnsData;
+  pnsWindowPending={startSec:start,endSec:end};
+  pnsWindowTimer=setTimeout(function(){
+    var completed=false;
+    try{
+      var selected=Pulseq.selectPnsWindowBlocks(decodedBlocks,start,end,pnsHardware),estimate=Pulseq.estimateDerivedCost(selected.blocks,GR);
+      if(!selected.blocks.length||estimate.rasterSamples>Pulseq.INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples)throw new Error('detail window is still too large; zoom in further');
+      var result=Pulseq.calculatePns(selected.blocks,GR,pnsHardware);
+      if(!result.valid)throw new Error(result.error||'calculation failed');
+      if(pnsData!==source)return;
+      pnsWindowData={
+        coarse:false,startSec:start,endSec:end,
+        x:windowedM4Series(result.timeSec,result.pnsX,start,end,100,120000),
+        y:windowedM4Series(result.timeSec,result.pnsY,start,end,100,120000),
+        z:windowedM4Series(result.timeSec,result.pnsZ,start,end,100,120000),
+        n:windowedM4Series(result.timeSec,result.pnsNorm,start,end,100,120000)
+      };
+      completed=true;
+      setViewerNotice('pnsDetail',null);
+      setViewerNotice('pnsThreshold',result.ok?null:'PNS warning: predicted level reaches or exceeds 100% in the detailed view.');
+    }catch(err){setViewerNotice('pnsDetail','PNS detail was not calculated: '+(err.message||String(err))+'.');}
+    finally{pnsWindowPending=null;if(completed)draw();}
+  },180);
+}
+
+function pnsSeriesForView(vs,ve){
+  if(!pnsData)return null;
+  if(shouldCalculateDetailedWindow(pnsData,vs,ve)){
+    schedulePnsWindow(vs,ve);
+    if(derivedWindowCovers(pnsWindowData,vs,ve)){setViewerNotice('pnsCoarse','Large sequence: full sequence uses bounded PNS; the current view is detailed.');return pnsWindowData;}
+  }
+  if(pnsData.coarse)setViewerNotice('pnsCoarse','Large sequence: showing bounded full-sequence PNS. Zoom to 100 TRs or fewer for automatic detail.');
+  return pnsData;
 }
 
 function requestPnsAsc(){
   if(pnsBusy)return;
   if(!decodedBlocks){alert('Open a Pulseq sequence before calculating PNS.');return;}
-  var warning=derivedBudgetWarning('PNS');
-  if(warning){setViewerNotice('pns',warning);return;}
   document.getElementById('ascInput').click();
 }
 
@@ -985,7 +1130,7 @@ document.getElementById('ascInput').onchange=function(){
     reader.onload=function(){
       try{
         pnsHardware=Pulseq.parsePnsHardwareAsc(reader.result);
-        showPnsResult(Pulseq.calculatePns(decodedBlocks,GR,pnsHardware));
+        calculatePnsWithFallback();
       }catch(err){
         pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
         setViewerNotice('pns','PNS calculation failed: '+(err.message||String(err))+' Zoom in to inspect waveform detail.');
@@ -1001,9 +1146,7 @@ document.getElementById('ascInput').onchange=function(){
 };
 document.getElementById('ascInput').addEventListener('cancel',function(){
   if(!pnsHardware)return;
-  var warning=derivedBudgetWarning('PNS');
-  if(warning){setViewerNotice('pns',warning);return;}
-  showPnsResult(Pulseq.calculatePns(decodedBlocks,GR,pnsHardware));
+  pnsBusy=true;if(pnsBtn)pnsBtn.disabled=true;calculatePnsWithFallback();
 });
 
 /* ── Drag & drop ──────────────────────────────────────────────────────── */
@@ -1149,25 +1292,59 @@ function drawDerivedChannels(vs,ve,s){
   for(var vi=0;vi<vc.length;vi++){
     if(vc[vi]===7)viP=vi;if(vc[vi]===8)viM1x=vi;if(vc[vi]===9)viM1y=vi;if(vc[vi]===10)viM1z=vi;
   }
-  if(pnsData&&viP>=0){
-    drawPercentSeries(pnsData.x,viP,7,s.getPropertyValue('--gx').trim(),ch,vs,ve);
-    drawPercentSeries(pnsData.y,viP,7,s.getPropertyValue('--gy').trim(),ch,vs,ve);
-    drawPercentSeries(pnsData.z,viP,7,s.getPropertyValue('--gz').trim(),ch,vs,ve);
-    ctx.setLineDash([5,3]);drawPercentSeries(pnsData.n,viP,7,s.getPropertyValue('--fg').trim(),ch,vs,ve);ctx.setLineDash([]);
+  var pnsDrawData=pnsSeriesForView(vs,ve);
+  if(pnsDrawData&&viP>=0){
+    drawPercentSeries(pnsDrawData.x,viP,7,s.getPropertyValue('--gx').trim(),ch,vs,ve);
+    drawPercentSeries(pnsDrawData.y,viP,7,s.getPropertyValue('--gy').trim(),ch,vs,ve);
+    drawPercentSeries(pnsDrawData.z,viP,7,s.getPropertyValue('--gz').trim(),ch,vs,ve);
+    ctx.setLineDash([5,3]);drawPercentSeries(pnsDrawData.n,viP,7,s.getPropertyValue('--fg').trim(),ch,vs,ve);ctx.setLineDash([]);
   }
-  if(m1Data){
-    if(viM1x>=0)drawBipolarSeries(m1Data.x,viM1x,8,s.getPropertyValue('--gx').trim(),ch,vs,ve);
-    if(viM1y>=0)drawBipolarSeries(m1Data.y,viM1y,9,s.getPropertyValue('--gy').trim(),ch,vs,ve);
-    if(viM1z>=0)drawBipolarSeries(m1Data.z,viM1z,10,s.getPropertyValue('--gz').trim(),ch,vs,ve);
+  var m1DrawData=m1SeriesForView(vs,ve);
+  if(m1DrawData){
+    if(viM1x>=0)drawBipolarSeries(m1DrawData.x,viM1x,8,s.getPropertyValue('--gx').trim(),ch,vs,ve);
+    if(viM1y>=0)drawBipolarSeries(m1DrawData.y,viM1y,9,s.getPropertyValue('--gy').trim(),ch,vs,ve);
+    if(viM1z>=0)drawBipolarSeries(m1DrawData.z,viM1z,10,s.getPropertyValue('--gz').trim(),ch,vs,ve);
+  }
+}
+
+function groupEnvelopeRanges(ranges,maxGapPx){
+  var groups=[],group=[];
+  for(var i=0;i<ranges.length;i++){
+    if(group.length&&ranges[i][0]-group[group.length-1][1]>maxGapPx){groups.push(group);group=[];}
+    group.push(ranges[i]);
+  }
+  if(group.length)groups.push(group);return groups;
+}
+
+function drawStepEnvelopeGroups(groups,color,fillAlpha){
+  for(var groupIndex=0;groupIndex<groups.length;groupIndex++){
+    var ranges=groups[groupIndex];if(!ranges.length)continue;
+    ctx.fillStyle=color;ctx.globalAlpha=fillAlpha;ctx.beginPath();ctx.moveTo(ranges[0][0],ranges[0][2]);
+    for(var upperIndex=0;upperIndex<ranges.length;upperIndex++){ctx.lineTo(ranges[upperIndex][0],ranges[upperIndex][2]);ctx.lineTo(ranges[upperIndex][1],ranges[upperIndex][2]);}
+    for(var lowerIndex=ranges.length-1;lowerIndex>=0;lowerIndex--){ctx.lineTo(ranges[lowerIndex][1],ranges[lowerIndex][3]);ctx.lineTo(ranges[lowerIndex][0],ranges[lowerIndex][3]);}
+    ctx.closePath();ctx.fill();
+    ctx.strokeStyle=color;ctx.lineWidth=.8;ctx.globalAlpha=.72;ctx.beginPath();ctx.moveTo(ranges[0][0],ranges[0][2]);
+    for(var upper=0;upper<ranges.length;upper++){ctx.lineTo(ranges[upper][0],ranges[upper][2]);ctx.lineTo(ranges[upper][1],ranges[upper][2]);}ctx.stroke();
+    ctx.globalAlpha=.38;ctx.beginPath();ctx.moveTo(ranges[0][0],ranges[0][3]);
+    for(var lower=0;lower<ranges.length;lower++){ctx.lineTo(ranges[lower][0],ranges[lower][3]);ctx.lineTo(ranges[lower][1],ranges[lower][3]);}ctx.stroke();ctx.globalAlpha=1;
   }
 }
 
 function drawPercentSeries(series,vi,ci,c,ch,vs,ve){
-  if(!series||series.n<2)return;
+  if(!series||series.n<(series.kind==='envelope'?1:2))return;
   rowClip(vi,ch,function(){
     var maxA=channelRange(ci),base=M.t+(vi+1)*ch-ch*.08,scale=ch*.84/maxA;
     var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r;
     var plotW=Math.max(1,clipR-clipL);
+    if(series.kind==='envelope'){
+      derivedEnvelopeCurveCount++;
+      var ranges=[];
+      var count=forEachEnvelopeRange(series,vs,ve,Math.max(32,Math.ceil(plotW)),function(t0,t1,minValue,maxValue){
+        var x0=t2x(t0),x1=t2x(t1),upper=base-maxValue*scale,lower=base-minValue*scale;
+        if(isFinite(x0)&&isFinite(x1)&&isFinite(upper)&&isFinite(lower)&&x1>=clipL&&x0<=clipR)ranges.push([Math.max(clipL,x0),Math.min(clipR,x1),upper,lower]);
+      });
+      derivedRenderPointCount+=count*4;drawStepEnvelopeGroups(groupEnvelopeRanges(ranges,1),c,.12);return;
+    }
     var rawLimit=Math.max(64,Math.ceil(plotW*2));
     var fineLimit=Math.max(128,Math.ceil(plotW*8));
     var windowRange=derivedSeriesWindow(series,vs,ve);
@@ -1201,10 +1378,19 @@ function shouldUseFinePnsRendering(count,plotW,vs,ve){
 }
 
 function drawBipolarSeries(series,vi,ci,c,ch,vs,ve){
-  if(!series||series.n<2)return;
+  if(!series||series.n<(series.kind==='envelope'?1:2))return;
   rowClip(vi,ch,function(){
     var maxA=channelRange(ci),y=cy(vi),scale=ch*.4/maxA;
     var clipL=M.l,clipR=mc.width/(window.devicePixelRatio||1)-M.r;
+    if(series.kind==='envelope'){
+      derivedEnvelopeCurveCount++;
+      var envelopeRanges=[];
+      var envelopeCount=forEachEnvelopeRange(series,vs,ve,Math.max(32,Math.ceil(clipR-clipL)),function(t0,t1,minValue,maxValue){
+        var x0=t2x(t0),x1=t2x(t1),upper=y-maxValue*scale,lower=y-minValue*scale;
+        if(isFinite(x0)&&isFinite(x1)&&isFinite(upper)&&isFinite(lower)&&x1>=clipL&&x0<=clipR)envelopeRanges.push([Math.max(clipL,x0),Math.min(clipR,x1),upper,lower]);
+      });
+      derivedRenderPointCount+=envelopeCount*4;drawStepEnvelopeGroups(groupEnvelopeRanges(envelopeRanges,1),c,.14);return;
+    }
     var rawLimit=Math.max(128,Math.ceil((clipR-clipL)*8));
     if(derivedSeriesWindow(series,vs,ve).count<=rawLimit){
       derivedRawCurveCount++;
@@ -1251,7 +1437,8 @@ function drawBlocks(vs,ve,s){
   var pixelBudget=Math.max(1,Math.floor(plotWidth()));
   var overview=selectWaveformOverview(waveformOverview,range.start,range.end,pixelBudget);
   function useOverview(key){return !!overview&&waveformVisiblePointCount(waveformOverview,key,range.start,range.end)>pixelBudget;}
-  var overviewUse={rf:useOverview('rf'),phase:useOverview('phase'),gx:useOverview('gx'),gy:useOverview('gy'),gz:useOverview('gz'),adc:useOverview('adc')};
+  function useGradientOverview(key){return !!overview&&waveformVisibleGradientPointCount(BL,key,range.start,range.end,vs,ve)>pixelBudget*8;}
+  var overviewUse={rf:useOverview('rf'),phase:useOverview('phase'),gx:useGradientOverview('gx'),gy:useGradientOverview('gy'),gz:useGradientOverview('gz'),adc:useOverview('adc')};
   var dense=overviewUse.rf||overviewUse.phase||overviewUse.gx||overviewUse.gy||overviewUse.gz||overviewUse.adc;
   waveformOverviewActive=dense;
   setViewerNotice('dense',dense?'Dense overview mode is active. Zoom in for full waveform detail.':null);
@@ -1270,7 +1457,7 @@ function drawRfOverview(summary,vi,ch,colors,vs,ve){
     ctx.strokeStyle=colors.rf;ctx.lineWidth=1;ctx.beginPath();
     for(var i=summary.first;i<summary.last;i++){
       if(level.t1[i]<vs||level.t0[i]>ve||level.rfMin[i]===Infinity)continue;
-      var x=t2x(.5*(level.t0[i]+level.t1[i])),y0=y+ch*.45-level.rfMin[i]*scale,y1=y+ch*.45-level.rfMax[i]*scale;
+      var x=t2x(.5*(Math.max(vs,level.t0[i])+Math.min(ve,level.t1[i]))),y0=y+ch*.45-level.rfMin[i]*scale,y1=y+ch*.45-level.rfMax[i]*scale;
       if(Math.abs(y1-y0)<1){y0-=.5;y1+=.5;}ctx.moveTo(x,y0);ctx.lineTo(x,y1);
     }
     ctx.stroke();
@@ -1303,15 +1490,15 @@ function drawPhaseSampled(start,end,vi,ch,colors,vs,ve,maxPoints){
 }
 
 function drawGradientOverview(summary,key,vi,ci,ch,color,vs,ve){
-  var level=summary.level,minValues=level[key+'Min'],maxValues=level[key+'Max'],y=cy(vi),scale=ch*.4/channelRange(ci);
+  var level=summary.level,minValues=level[key+'Min'],maxValues=level[key+'Max'],startValues=level[key+'Start'],endValues=level[key+'End'],y=cy(vi),scale=ch*.4/channelRange(ci);
   rowClip(vi,ch,function(){
-    ctx.strokeStyle=color;ctx.lineWidth=1;ctx.beginPath();
+    var ranges=[];
     for(var i=summary.first;i<summary.last;i++){
-      if(level.t1[i]<vs||level.t0[i]>ve||minValues[i]===Infinity)continue;
-      var x=t2x(.5*(level.t0[i]+level.t1[i])),y0=y-minValues[i]*scale,y1=y-maxValues[i]*scale;
-      if(Math.abs(y1-y0)<1){y0-=.5;y1+=.5;}ctx.moveTo(x,y0);ctx.lineTo(x,y1);
+      if(endValues[i]<vs||startValues[i]>ve||minValues[i]===Infinity)continue;
+      var x0=t2x(Math.max(vs,startValues[i])),x1=t2x(Math.min(ve,endValues[i]));
+      ranges.push([x0,x1,y-maxValues[i]*scale,y-minValues[i]*scale]);
     }
-    ctx.stroke();
+    drawStepEnvelopeGroups(groupEnvelopeRanges(ranges,1),color,.14);
   });
 }
 
@@ -1537,6 +1724,12 @@ mc.addEventListener('touchcancel',function(){_tchDragging=false;cc.classList.rem
 
 /* ── Tooltip helper (shared by mouse hover and touch tap) ─────────── */
 function sampleDerivedSeriesAtTime(series,t){
+  if(series&&series.kind==='envelope'){
+    var base=series.levels&&series.levels[0];if(!base||base.count<1||!isFinite(t))return null;
+    var index=Math.max(0,lowerBoundSeries(base.t1,t));if(index>=base.count||t<base.t0[index]||t>base.t1[index])return null;
+    var span=base.t1[index]-base.t0[index],alpha=span>0?(t-base.t0[index])/span:0;
+    return(base.first[index]+(base.last[index]-base.first[index])*alpha)*series.scale;
+  }
   if(!series||!series.t||!series.v||series.n<1||!isFinite(t))return null;
   var n=Math.min(series.n,series.t.length,series.v.length);
   if(n<1||t<series.t[0]||t>series.t[n-1])return null;
