@@ -212,11 +212,12 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                 });
 
                 postProgress('done', 100, 'Ready');
-                const name = seq.definitionsRaw.get('Name') || uri.path.split(/[\\/]/).pop() || 'SeqEyes Viewer';
+                const sourceName = uriFileName(uri);
+                const name = seq.definitionsRaw.get('Name') || sourceName || 'SeqEyes Viewer';
                 panel.title = `SeqEyes: ${name.replace(/\.(?:seq|bseq)$/i, '')}`;
                 diagnosticState.lastLoad = {
                     activeUri: uri.toString(),
-                    sequenceName: name,
+                    sequenceName: sourceName,
                     blockCount: seq.blocks.length,
                     totalDuration: totalDur,
                     adcCount: ks?.t_adc.length ?? 0,
