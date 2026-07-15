@@ -25,8 +25,17 @@ ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;
 /* K‑space data — pre‑computed on the extension side */
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
 var m1Data=null,pnsData=null,pnsWindowData=null,pnsWindowPending=null,pnsWindowRequestId=0,pnsBusy=false,m1Busy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null;
-var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
+var viewerNotices={};
+var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,waveformOverviewActive=false,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
 var viewerDrawFrame=0,viewerDrawMinimap=false;
+function setViewerNotice(key,message){
+  if(message&&viewerNotices[key]===message)return;
+  if(!message&&!Object.prototype.hasOwnProperty.call(viewerNotices,key))return;
+  if(message)viewerNotices[key]=message;else delete viewerNotices[key];
+  var el=document.getElementById('viewerNotice');if(!el)return;
+  var messages=Object.keys(viewerNotices).map(function(k){return viewerNotices[k];});
+  el.textContent=messages.join(' ');el.style.display=messages.length?'block':'none';
+}
 
 function scheduleViewerDraw(includeMinimap){
   viewerDrawMinimap=viewerDrawMinimap||includeMinimap;
@@ -206,6 +215,8 @@ window.addEventListener('message',function(e){
   }
   if(m.type==='sequenceData'){
     BL=m.blocks||[];TD=m.totalDuration||0;GR=m.gradRaster||1e-5;
+    setViewerNotice('sequence',m.notices&&m.notices.length?m.notices.join(' '):null);
+    setViewerNotice('m1',null);setViewerNotice('pns',null);setViewerNotice('pnsThreshold',null);
     waveformOverview=createWaveformOverview(BL);
     RR=m.rfRaster||RR;AR=m.adcRaster||AR;BR=m.blockRaster||BR;
     blockPos=m.blockPositions||[];
@@ -233,6 +244,7 @@ window.addEventListener('message',function(e){
   }else if(m.type==='m1Data'){
     m1Busy=false;
     if(m.m1&&m.m1.valid){
+      setViewerNotice('m1',null);
       m1Data={
         referenceMode:m.m1.referenceMode||m1ReferenceMode,
         warnings:m.m1.warnings||[],
@@ -246,20 +258,21 @@ window.addEventListener('message',function(e){
       computeGlobalMax();buildLegend();draw();
       if(m.m1.warnings&&m.m1.warnings.length)console.warn('[SeqEyes M1]',m.m1.warnings.join('\n'));
     }else{
-      alert('M1 calculation failed: '+((m.m1&&m.m1.error)||'unknown error'));
+      setViewerNotice('m1','M1 calculation failed: '+((m.m1&&m.m1.error)||'unknown error')+' Zoom in to inspect waveform detail.');
     }
   }else if(m.type==='m1Error'){
     m1Busy=false;
-    alert('M1 calculation failed: '+(m.message||'unknown error'));
+    setViewerNotice('m1',(m.message||'M1 calculation failed.')+(m.message&&/zoom in/i.test(m.message)?'':' Zoom in to inspect waveform detail.'));
   }else if(m.type==='pnsData'){
     pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
     if(m.pns&&m.pns.valid){
+      setViewerNotice('pns',null);
       pnsData=createPnsSeriesPayload(m.pns);
       pnsWindowData=null;pnsWindowPending=null;chVis[7]=true;
       computeGlobalMax();buildLegend();draw();
-      if(!m.pns.ok)alert('PNS warning: predicted level reaches/exceeds 100%.');
+      setViewerNotice('pnsThreshold',m.pns.ok?null:'PNS warning: predicted level reaches or exceeds 100%.');
     }else{
-      alert('PNS calculation failed: '+((m.pns&&m.pns.error)||'unknown error'));
+      setViewerNotice('pns','PNS calculation failed: '+((m.pns&&m.pns.error)||'unknown error')+' Zoom in to inspect waveform detail.');
     }
   }else if(m.type==='pnsWindowData'){
     if(pnsWindowPending&&m.requestId!==pnsWindowPending.requestId)return;
@@ -270,7 +283,7 @@ window.addEventListener('message',function(e){
     }
   }else if(m.type==='pnsError'){
     pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
-    alert('PNS calculation failed: '+(m.message||'unknown error'));
+    setViewerNotice('pns',(m.message||'PNS calculation failed.')+(m.message&&/zoom in/i.test(m.message)?'':' Zoom in to inspect waveform detail.'));
   }else if(m.type==='pnsSelectionCancelled'){
     pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
   }

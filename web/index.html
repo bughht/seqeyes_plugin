@@ -41,6 +41,7 @@ body{font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background
 #tb .ld{width:10px;height:10px;border-radius:2px;border:1px solid rgba(0,0,0,.15)}
 #tb .cur{font:11px monospace;color:var(--cr);margin-left:auto;min-width:300px;text-align:right;white-space:nowrap}
 #tb .ulbl{font-size:10px;color:var(--lb);margin:0 1px}
+#viewerNotice{display:none;flex-shrink:0;padding:5px 10px;border-bottom:1px solid #b8860b;background:rgba(218,165,32,.16);color:var(--fg);font-size:11px;line-height:1.35;white-space:normal}
 #cc{flex:1;overflow:hidden;position:relative;cursor:crosshair}
 #cc.pan{cursor:grabbing}
 #moc{position:absolute;inset:0;pointer-events:none;z-index:2}
@@ -134,6 +135,7 @@ canvas{display:block}
 <button id="kbtn" title="Toggle K-Space View" style="margin-left:4px">K-Space</button>
 <span class="cur" id="cur">← hover for time</span>
 </div>
+<div id="viewerNotice" role="status" aria-live="polite"></div>
 <!-- Progress overlay -->
 <div id="poverlay" style="display:none"><div id="pcard"><div id="pspinner"></div><div id="ptext">Loading sequence…</div><div id="pbar2"><div id="pfill2"></div></div><div id="ppct">0%</div></div></div>
 <!-- Minimap -->
@@ -177,9 +179,18 @@ var GAMMA=42576;
 var ampZoom=[1,1,1,1,1,1,1];
 ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
-var decodedBlocks=null,m1Data=null,pnsData=null,pnsHardware=null,m1Busy=false,pnsBusy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null;
-var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
+var decodedBlocks=null,waveformOverview=null,m1Data=null,pnsData=null,pnsHardware=null,m1Busy=false,pnsBusy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null;
+var viewerNotices={};
+var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,waveformOverviewActive=false,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
 var viewerDrawFrame=0,viewerDrawMinimap=false;
+function setViewerNotice(key,message){
+  if(message&&viewerNotices[key]===message)return;
+  if(!message&&!Object.prototype.hasOwnProperty.call(viewerNotices,key))return;
+  if(message)viewerNotices[key]=message;else delete viewerNotices[key];
+  var el=document.getElementById('viewerNotice');if(!el)return;
+  var messages=Object.keys(viewerNotices).map(function(k){return viewerNotices[k];});
+  el.textContent=messages.join(' ');el.style.display=messages.length?'block':'none';
+}
 function scheduleViewerDraw(includeMinimap){
   viewerDrawMinimap=viewerDrawMinimap||includeMinimap;
   if(viewerDrawFrame)return;
@@ -529,6 +540,7 @@ function serializeGrad(g){
 function loadSequenceSource(sourceBytes,fileName,parseSource){
   var hadSequence=!!currentSequence;
   setExportButtonEnabled(false);
+  setViewerNotice('kspace',null);setViewerNotice('m1',null);setViewerNotice('pns',null);setViewerNotice('pnsThreshold',null);
   try{
     showProgress('start',0,'Parsing sequence...');
     var seq=parseSource();
@@ -543,6 +555,7 @@ function loadSequenceSource(sourceBytes,fileName,parseSource){
     TD=blocks.length>0?blocks[blocks.length-1].startTime+blocks[blocks.length-1].duration:0;
     GR=seq.rasterTimes.gradientRaster;RR=seq.rasterTimes.rfRaster;AR=seq.rasterTimes.adcRaster;BR=seq.rasterTimes.blockDurationRaster;
     BL=serializeBlocks(blocks);
+    waveformOverview=createWaveformOverview(BL);
     m1Data=null;pnsData=null;chVis[7]=false;chVis[8]=false;chVis[9]=false;chVis[10]=false;buildLegend();
 
     // Build block positions for minimap
@@ -554,7 +567,24 @@ function loadSequenceSource(sourceBytes,fileName,parseSource){
 
     showProgress('kspace',55,'Computing k-space...');
     kTraj=null;kAdc=null;kTime=null;kAdcTime=null;
-    var ks=Pulseq.calculateKspace(blocks,GR,TD,0,{rfRaster:RR});
+    var limits=Pulseq.INTERACTIVE_COMPUTE_LIMITS;
+    var kspaceEstimate=Pulseq.estimateKspaceCost(blocks,GR,TD);
+    var kspaceOverBudget=kspaceEstimate.rasterSamples>limits.kspaceRasterSamples||kspaceEstimate.adcSamples>limits.kspaceAdcSamples||kspaceEstimate.gridCandidatePoints>limits.kspaceGridCandidates;
+    var ks=null,kspaceError='';
+    if(!kspaceOverBudget){
+      try{ks=Pulseq.calculateKspace(blocks,GR,TD,0,{
+        rfRaster:RR,maxGridPoints:limits.kspaceGridCandidates,maxAdcSamples:limits.kspaceAdcSamples
+      });}catch(err){kspaceError=err.message||String(err);}
+    }
+    if(kspaceOverBudget){
+      setViewerNotice('kspace','K-space was not calculated because this sequence exceeds the interactive safety budget ('+
+        Pulseq.formatSampleCount(kspaceEstimate.rasterSamples)+' raster samples, '+
+        Pulseq.formatSampleCount(kspaceEstimate.adcSamples)+' ADC samples). Zoom in to inspect waveform detail.');
+    }else if(kspaceError){
+      setViewerNotice('kspace','K-space calculation failed: '+kspaceError+'. Zoom in to inspect waveform detail.');
+    }else if(!ks){
+      setViewerNotice('kspace','K-space calculation did not complete. Zoom in to inspect waveform detail.');
+    }
     if(ks){
       kTraj=[ks.ktraj[0],ks.ktraj[1],ks.ktraj[2]];
       kTime=ks.t_ktraj;
@@ -669,7 +699,8 @@ async function exportCurrentKspace(){
 
 function showM1Result(result){
   m1Busy=false;
-  if(!result||!result.valid){alert('M1 calculation failed: '+((result&&result.error)||'unknown error'));return;}
+  if(!result||!result.valid){setViewerNotice('m1','M1 calculation failed: '+((result&&result.error)||'unknown error')+' Zoom in to inspect waveform detail.');return;}
+  setViewerNotice('m1',null);
   m1Data={
     valid:result.valid,
     ok:result.ok,
@@ -686,18 +717,28 @@ function showM1Result(result){
   if(m1Data.warnings&&m1Data.warnings.length)console.warn('[SeqEyes M1]',m1Data.warnings.join('\n'));
 }
 
+function derivedBudgetWarning(label){
+  var estimate=Pulseq.estimateDerivedCost(decodedBlocks||[],GR);
+  if(estimate.rasterSamples<=Pulseq.INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples)return '';
+  return label+' was not calculated because the full sequence requires about '+
+    Pulseq.formatSampleCount(estimate.rasterSamples)+' native-raster samples. Zoom in to inspect waveform detail; a view-scoped calculation fallback is planned.';
+}
+
 function requestM1(channel){
   if(m1Busy)return;
   if(m1Data){chVis[channel]=!chVis[channel];buildLegend();draw();return;}
   if(!decodedBlocks){alert('Open a Pulseq sequence before calculating M1.');return;}
   m1RequestedChannel=channel;m1Busy=true;buildLegend();
+  var warning=derivedBudgetWarning('M1');
+  if(warning){m1Busy=false;setViewerNotice('m1',warning);buildLegend();return;}
   try{showM1Result(Pulseq.calculateM1(decodedBlocks,GR,{referenceMode:m1ReferenceMode}));}
-  catch(err){m1Busy=false;alert('M1 calculation failed: '+(err.message||String(err)));}
+  catch(err){m1Busy=false;setViewerNotice('m1','M1 calculation failed: '+(err.message||String(err))+' Zoom in to inspect waveform detail.');}
 }
 
 function showPnsResult(result){
   pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
-  if(!result||!result.valid){alert('PNS calculation failed: '+((result&&result.error)||'unknown error'));return;}
+  if(!result||!result.valid){setViewerNotice('pns','PNS calculation failed: '+((result&&result.error)||'unknown error')+' Zoom in to inspect waveform detail.');return;}
+  setViewerNotice('pns',null);
   pnsData={
     valid:result.valid,
     ok:result.ok,
@@ -707,12 +748,14 @@ function showPnsResult(result){
     n:createDerivedSeries(result.timeSec,result.pnsNorm,100)
   };
   chVis[7]=true;computeGlobalMax();buildLegend();draw();
-  if(!result.ok)alert('PNS warning: predicted level reaches/exceeds 100%.');
+  setViewerNotice('pnsThreshold',result.ok?null:'PNS warning: predicted level reaches or exceeds 100%.');
 }
 
 function requestPnsAsc(){
   if(pnsBusy)return;
   if(!decodedBlocks){alert('Open a Pulseq sequence before calculating PNS.');return;}
+  var warning=derivedBudgetWarning('PNS');
+  if(warning){setViewerNotice('pns',warning);return;}
   document.getElementById('ascInput').click();
 }
 
@@ -945,19 +988,22 @@ document.getElementById('ascInput').onchange=function(){
         showPnsResult(Pulseq.calculatePns(decodedBlocks,GR,pnsHardware));
       }catch(err){
         pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
-        alert('PNS calculation failed: '+(err.message||String(err)));
+        setViewerNotice('pns','PNS calculation failed: '+(err.message||String(err))+' Zoom in to inspect waveform detail.');
       }
     };
     reader.onerror=function(){
       pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
-      alert('PNS calculation failed: unable to read ASC file.');
+      setViewerNotice('pns','PNS calculation failed: unable to read ASC file. Zoom in to inspect waveform detail.');
     };
     reader.readAsText(file);
   }
   this.value='';
 };
 document.getElementById('ascInput').addEventListener('cancel',function(){
-  if(pnsHardware)showPnsResult(Pulseq.calculatePns(decodedBlocks,GR,pnsHardware));
+  if(!pnsHardware)return;
+  var warning=derivedBudgetWarning('PNS');
+  if(warning){setViewerNotice('pns',warning);return;}
+  showPnsResult(Pulseq.calculatePns(decodedBlocks,GR,pnsHardware));
 });
 
 /* ── Drag & drop ──────────────────────────────────────────────────────── */
@@ -1202,13 +1248,84 @@ function drawBlocks(vs,ve,s){
     adc:s.getPropertyValue('--adc').trim(),adf:s.getPropertyValue('--adf').trim(),
     tr:s.getPropertyValue('--tr').trim(),fg:s.getPropertyValue('--fg').trim()
   };
-  if(rows[0]>=0)drawRfBlocks(range.start,range.end,rows[0],ch,colors,vs,ve);
-  if(rows[1]>=0)drawPhaseBlocks(range.start,range.end,rows[1],ch,colors,vs,ve);
-  if(rows[2]>=0)drawGradientBlocks(range.start,range.end,'gx',rows[2],2,ch,colors.gx,vs,ve);
-  if(rows[3]>=0)drawGradientBlocks(range.start,range.end,'gy',rows[3],3,ch,colors.gy,vs,ve);
-  if(rows[4]>=0)drawGradientBlocks(range.start,range.end,'gz',rows[4],4,ch,colors.gz,vs,ve);
-  if(rows[5]>=0)drawAdcBlocks(range.start,range.end,rows[5],ch,colors,vs,ve);
-  if(rows[6]>=0)drawTriggerBlocks(range.start,range.end,rows[6],ch,colors,vs,ve);
+  var pixelBudget=Math.max(1,Math.floor(plotWidth()));
+  var overview=selectWaveformOverview(waveformOverview,range.start,range.end,pixelBudget);
+  function useOverview(key){return !!overview&&waveformVisiblePointCount(waveformOverview,key,range.start,range.end)>pixelBudget;}
+  var overviewUse={rf:useOverview('rf'),phase:useOverview('phase'),gx:useOverview('gx'),gy:useOverview('gy'),gz:useOverview('gz'),adc:useOverview('adc')};
+  var dense=overviewUse.rf||overviewUse.phase||overviewUse.gx||overviewUse.gy||overviewUse.gz||overviewUse.adc;
+  waveformOverviewActive=dense;
+  setViewerNotice('dense',dense?'Dense overview mode is active. Zoom in for full waveform detail.':null);
+  if(rows[0]>=0){if(overviewUse.rf)drawRfOverview(overview,rows[0],ch,colors,vs,ve);else drawRfBlocks(range.start,range.end,rows[0],ch,colors,vs,ve);}
+  if(rows[1]>=0){if(overviewUse.phase)drawPhaseSampled(range.start,range.end,rows[1],ch,colors,vs,ve,pixelBudget);else drawPhaseBlocks(range.start,range.end,rows[1],ch,colors,vs,ve);}
+  if(rows[2]>=0){if(overviewUse.gx)drawGradientOverview(overview,'gx',rows[2],2,ch,colors.gx,vs,ve);else drawGradientBlocks(range.start,range.end,'gx',rows[2],2,ch,colors.gx,vs,ve);}
+  if(rows[3]>=0){if(overviewUse.gy)drawGradientOverview(overview,'gy',rows[3],3,ch,colors.gy,vs,ve);else drawGradientBlocks(range.start,range.end,'gy',rows[3],3,ch,colors.gy,vs,ve);}
+  if(rows[4]>=0){if(overviewUse.gz)drawGradientOverview(overview,'gz',rows[4],4,ch,colors.gz,vs,ve);else drawGradientBlocks(range.start,range.end,'gz',rows[4],4,ch,colors.gz,vs,ve);}
+  if(rows[5]>=0){if(overviewUse.adc)drawAdcOverview(overview,rows[5],ch,colors,vs,ve);else drawAdcBlocks(range.start,range.end,rows[5],ch,colors,vs,ve);}
+  if(rows[6]>=0&&range.end-range.start<=pixelBudget)drawTriggerBlocks(range.start,range.end,rows[6],ch,colors,vs,ve);
+}
+
+function drawRfOverview(summary,vi,ch,colors,vs,ve){
+  var level=summary.level,y=cy(vi),scale=ch*.9/channelRange(0);
+  rowClip(vi,ch,function(){
+    ctx.strokeStyle=colors.rf;ctx.lineWidth=1;ctx.beginPath();
+    for(var i=summary.first;i<summary.last;i++){
+      if(level.t1[i]<vs||level.t0[i]>ve||level.rfMin[i]===Infinity)continue;
+      var x=t2x(.5*(level.t0[i]+level.t1[i])),y0=y+ch*.45-level.rfMin[i]*scale,y1=y+ch*.45-level.rfMax[i]*scale;
+      if(Math.abs(y1-y0)<1){y0-=.5;y1+=.5;}ctx.moveTo(x,y0);ctx.lineTo(x,y1);
+    }
+    ctx.stroke();
+  });
+}
+
+function drawPhaseSampled(start,end,vi,ch,colors,vs,ve,maxPoints){
+  var prefix=waveformOverview.pointPrefix.phase,first=prefix[start],last=prefix[end],count=last-first;
+  if(count<=0)return;
+  var y=cy(vi),scale=ch*.9/channelRange(1),sampleCount=Math.min(maxPoints,count),sampleStep=count/sampleCount;
+  rowClip(vi,ch,function(){
+    for(var sampleIndex=0;sampleIndex<sampleCount;sampleIndex++){
+      var ordinal=Math.min(last-1,Math.floor(first+(sampleIndex+.5)*sampleStep)),lo=start,hi=end;
+      while(lo<hi){var mid=(lo+hi)>>1;if(prefix[mid+1]<=ordinal)lo=mid+1;else hi=mid;}
+      if(lo>=end)continue;
+      var block=BL[lo],rf=block.rf,rfCount=rf&&rf.t&&rf.p?Math.min(rf.t.length,rf.p.length):0;
+      var local=ordinal-prefix[lo],time=NaN,value=NaN,isAdc=false;
+      if(local<rfCount){time=rf.t[local];value=rf.p[local];}
+      else if(block.adc&&block.adc.n>1){
+        var adc=block.adc,adcStep=Math.max(1,Math.ceil(adc.n/200)),adcSample=(local-rfCount)*adcStep;
+        var adcStart=adc.s+adc.d,adcEnd=adcStart+adc.n*adc.dw;
+        time=adcSample<adc.n?adcStart+(adcSample+.5)*adc.dw:adcEnd;
+        value=((adc.po||0)+6.283185*(adc.fo||0)*(time-adcStart))%6.28318;value=(value+6.28318)%6.28318;isAdc=true;
+      }
+      if(!isFinite(time)||!isFinite(value)||time<vs||time>ve)continue;
+      ctx.fillStyle=isAdc?colors.adc:colors.rf;
+      ctx.fillRect(t2x(time)-.5,y+ch*.45-value*scale-.5,1,1);
+    }
+  });
+}
+
+function drawGradientOverview(summary,key,vi,ci,ch,color,vs,ve){
+  var level=summary.level,minValues=level[key+'Min'],maxValues=level[key+'Max'],y=cy(vi),scale=ch*.4/channelRange(ci);
+  rowClip(vi,ch,function(){
+    ctx.strokeStyle=color;ctx.lineWidth=1;ctx.beginPath();
+    for(var i=summary.first;i<summary.last;i++){
+      if(level.t1[i]<vs||level.t0[i]>ve||minValues[i]===Infinity)continue;
+      var x=t2x(.5*(level.t0[i]+level.t1[i])),y0=y-minValues[i]*scale,y1=y-maxValues[i]*scale;
+      if(Math.abs(y1-y0)<1){y0-=.5;y1+=.5;}ctx.moveTo(x,y0);ctx.lineTo(x,y1);
+    }
+    ctx.stroke();
+  });
+}
+
+function drawAdcOverview(summary,vi,ch,colors,vs,ve){
+  var level=summary.level,y=cy(vi);
+  rowClip(vi,ch,function(){
+    ctx.fillStyle=colors.adf;ctx.strokeStyle=colors.adc;ctx.lineWidth=1;ctx.beginPath();var hasRect=false;
+    for(var i=summary.first;i<summary.last;i++){
+      if(level.adcStart[i]===Infinity||level.adcEnd[i]<vs||level.adcStart[i]>ve)continue;
+      var x0=t2x(Math.max(vs,level.adcStart[i])),x1=t2x(Math.min(ve,level.adcEnd[i]));
+      ctx.rect(x0,y-ch*.28,Math.max(1,x1-x0),ch*.56);hasRect=true;
+    }
+    if(hasRect){ctx.fill();ctx.stroke();}
+  });
 }
 
 function visibleBlockRange(vs,ve){
@@ -1964,7 +2081,7 @@ if(location.search.indexOf("debug=1")>=0){
   window.__seqeyesDebug={
     state:function(){
       var adcCount=(kAdc&&kAdc[0])?kAdc[0].length:0;
-      return{blocks:BL.length,totalDuration:TD,offset:ox,scale:sc,visibleDuration:visibleDuration(),minRasterTime:minRasterTime(),kOpen:kOpen,kView:kView,kRotX:kRotX,kRotY:kRotY,kScale:kScl,adcCount:adcCount,exportEnabled:!!(exportBtn&&!exportBtn.disabled),derivedRenderPoints:derivedRenderPointCount,derivedEnvelopeCurves:derivedEnvelopeCurveCount,derivedRawCurves:derivedRawCurveCount,lastDrawDurationMs:lastDrawDurationMs,drawCount:viewerDrawCount,cursorDrawCount:viewerCursorDrawCount,kTrajectoryDrawCount:kSpaceTrajectoryDrawCount,kOverlayDrawCount:kSpaceOverlayDrawCount,m1ReferenceMode:m1ReferenceMode,title:document.title};
+      return{blocks:BL.length,totalDuration:TD,offset:ox,scale:sc,visibleDuration:visibleDuration(),minRasterTime:minRasterTime(),kOpen:kOpen,kView:kView,kRotX:kRotX,kRotY:kRotY,kScale:kScl,adcCount:adcCount,exportEnabled:!!(exportBtn&&!exportBtn.disabled),derivedRenderPoints:derivedRenderPointCount,derivedEnvelopeCurves:derivedEnvelopeCurveCount,derivedRawCurves:derivedRawCurveCount,waveformOverviewActive:waveformOverviewActive,notices:Object.keys(viewerNotices).map(function(k){return viewerNotices[k];}),lastDrawDurationMs:lastDrawDurationMs,drawCount:viewerDrawCount,cursorDrawCount:viewerCursorDrawCount,kTrajectoryDrawCount:kSpaceTrajectoryDrawCount,kOverlayDrawCount:kSpaceOverlayDrawCount,m1ReferenceMode:m1ReferenceMode,title:document.title};
     },
     hoverPoint:function(){
       var t=(kAdcTime&&kAdcTime.length)?kAdcTime[Math.floor(kAdcTime.length/2)]:TD*0.5;

@@ -13,6 +13,12 @@ export { decodeAllBlocks, getTotalDuration } from '../src/pulseq/decoder';
 export { calculateKspace } from '../src/pulseq/kspace';
 export { calculateM1 } from '../src/pulseq/m1';
 export { calculatePns, parsePnsHardwareAsc, safePnsModel } from '../src/pulseq/pns';
+export {
+    estimateDerivedCost,
+    estimateKspaceCost,
+    formatSampleCount,
+    INTERACTIVE_COMPUTE_LIMITS,
+} from '../src/pulseq/computeBudget';
 export { detectSequenceTiming } from '../src/pulseq/trdetect';
 export {
     exportKspaceArtifacts,

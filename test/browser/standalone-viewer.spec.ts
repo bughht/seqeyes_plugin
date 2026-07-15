@@ -21,6 +21,8 @@ interface DebugState {
   derivedRenderPoints: number;
   derivedEnvelopeCurves: number;
   derivedRawCurves: number;
+  waveformOverviewActive: boolean;
+  notices: string[];
   lastDrawDurationMs: number;
   drawCount: number;
   m1ReferenceMode: string;

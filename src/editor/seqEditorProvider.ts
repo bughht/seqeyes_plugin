@@ -18,6 +18,12 @@ import { decodeAllBlocks } from '../pulseq/decoder';
 import { calculateKspace, type KSpaceData } from '../pulseq/kspace';
 import { calculateM1, type M1Data } from '../pulseq/m1';
 import { calculatePns, parsePnsHardwareAsc, type PnsHardware, type PnsResult } from '../pulseq/pns';
+import {
+    estimateDerivedCost,
+    estimateKspaceCost,
+    formatSampleCount,
+    INTERACTIVE_COMPUTE_LIMITS,
+} from '../pulseq/computeBudget';
 import { downsampleM4 } from '../pulseq/displayDownsampling';
 import { exportKspaceArtifactsFromBytes } from '../pulseq/kspaceExport';
 import { detectSequenceTiming } from '../pulseq/trdetect';
@@ -129,6 +135,14 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
         let activePnsHardware: PnsHardware | undefined;
         let activePnsResult: PnsResult | undefined;
 
+        const derivedBudgetWarning = (label: 'M1' | 'PNS'): string | undefined => {
+            const estimate = estimateDerivedCost(activeBlocks, activeGradientRaster);
+            if (estimate.rasterSamples <= INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples) return undefined;
+            return `${label} was not calculated because the full sequence requires about `
+                + `${formatSampleCount(estimate.rasterSamples)} native-raster samples. `
+                + 'Zoom in to inspect waveform detail; a view-scoped calculation fallback is planned.';
+        };
+
         // ── Core: parse, decode, compute k‑space, send ──
         const sendSequenceData = async (uri: vscode.Uri) => {
             try {
@@ -157,13 +171,44 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     : 0;
 
                 postProgress('kspace', 55, 'Computing k-space trajectory\u2026');
-                const ks = calculateKspace(
-                    blocks,
-                    seq.rasterTimes.gradientRaster,
-                    totalDur,
-                    0,
-                    { rfRaster: seq.rasterTimes.rfRaster },
+                const sequenceNotices: string[] = [];
+                const kspaceEstimate = estimateKspaceCost(blocks, seq.rasterTimes.gradientRaster, totalDur);
+                const kspaceOverBudget = (
+                    kspaceEstimate.rasterSamples > INTERACTIVE_COMPUTE_LIMITS.kspaceRasterSamples
+                    || kspaceEstimate.adcSamples > INTERACTIVE_COMPUTE_LIMITS.kspaceAdcSamples
+                    || kspaceEstimate.gridCandidatePoints > INTERACTIVE_COMPUTE_LIMITS.kspaceGridCandidates
                 );
+                let ks: KSpaceData | null = null;
+                let kspaceError: string | undefined;
+                if (!kspaceOverBudget) {
+                    try {
+                        ks = calculateKspace(
+                            blocks,
+                            seq.rasterTimes.gradientRaster,
+                            totalDur,
+                            0,
+                            {
+                                rfRaster: seq.rasterTimes.rfRaster,
+                                maxGridPoints: INTERACTIVE_COMPUTE_LIMITS.kspaceGridCandidates,
+                                maxAdcSamples: INTERACTIVE_COMPUTE_LIMITS.kspaceAdcSamples,
+                            },
+                        );
+                    } catch (err) {
+                        kspaceError = err instanceof Error ? err.message : String(err);
+                    }
+                }
+                if (kspaceOverBudget) {
+                    sequenceNotices.push(
+                        'K-space was not calculated because this sequence exceeds the interactive safety budget '
+                        + `(${formatSampleCount(kspaceEstimate.rasterSamples)} raster samples, `
+                        + `${formatSampleCount(kspaceEstimate.adcSamples)} ADC samples). `
+                        + 'Zoom in to inspect waveform detail.',
+                    );
+                } else if (kspaceError) {
+                    sequenceNotices.push(`K-space calculation failed: ${kspaceError}. Zoom in to inspect waveform detail.`);
+                } else if (!ks) {
+                    sequenceNotices.push('K-space calculation did not complete. Zoom in to inspect waveform detail.');
+                }
 
                 postProgress('serialize', 85, 'Preparing data for display\u2026');
                 // Build lightweight block‑position array for the minimap
@@ -209,6 +254,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                         rfUseGuessed: timing.rfUseGuessed,
                     },
                     blockPositions,
+                    notices: sequenceNotices,
                 });
 
                 postProgress('done', 100, 'Ready');
@@ -273,8 +319,20 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     return;
                 }
                 const referenceMode = msg.referenceMode === 'observationTime' ? 'observationTime' : 'rfCenter';
-                const m1 = calculateM1(activeBlocks, activeGradientRaster, { referenceMode });
-                panel.webview.postMessage({ type: 'm1Data', m1: serializeM1(m1) });
+                const warning = derivedBudgetWarning('M1');
+                if (warning) {
+                    panel.webview.postMessage({ type: 'm1Error', message: warning });
+                    return;
+                }
+                try {
+                    const m1 = calculateM1(activeBlocks, activeGradientRaster, { referenceMode });
+                    panel.webview.postMessage({ type: 'm1Data', m1: serializeM1(m1) });
+                } catch (err) {
+                    panel.webview.postMessage({
+                        type: 'm1Error',
+                        message: err instanceof Error ? err.message : String(err),
+                    });
+                }
             } else if (msg.command === 'openPnsAsc') {
                 if (!activeBlocks.length || activeGradientRaster <= 0) {
                     panel.webview.postMessage({ type: 'pnsError', message: 'Load a sequence before calculating PNS.' });
@@ -287,6 +345,11 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                 });
                 if (!uris || uris.length === 0) {
                     if (activePnsHardware) {
+                        const warning = derivedBudgetWarning('PNS');
+                        if (warning) {
+                            panel.webview.postMessage({ type: 'pnsError', message: warning });
+                            return;
+                        }
                         const pns = calculatePns(activeBlocks, activeGradientRaster, activePnsHardware);
                         activePnsResult = pns;
                         panel.webview.postMessage({ type: 'pnsData', pns: serializePns(pns) });
@@ -299,6 +362,11 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     const ascText = await readAscProfileText(uris[0]);
                     const hardware = parsePnsHardwareAsc(ascText);
                     activePnsHardware = hardware;
+                    const warning = derivedBudgetWarning('PNS');
+                    if (warning) {
+                        panel.webview.postMessage({ type: 'pnsError', message: warning });
+                        return;
+                    }
                     const pns = calculatePns(activeBlocks, activeGradientRaster, hardware);
                     activePnsResult = pns;
                     panel.webview.postMessage({ type: 'pnsData', pns: serializePns(pns) });

@@ -23,15 +23,19 @@ var Pulseq = (() => {
   // web/pulseq-browser.ts
   var pulseq_browser_exports = {};
   __export(pulseq_browser_exports, {
+    INTERACTIVE_COMPUTE_LIMITS: () => INTERACTIVE_COMPUTE_LIMITS,
     PACKAGE_VERSION: () => PACKAGE_VERSION,
     calculateKspace: () => calculateKspace,
     calculateM1: () => calculateM1,
     calculatePns: () => calculatePns,
     decodeAllBlocks: () => decodeAllBlocks,
     detectSequenceTiming: () => detectSequenceTiming,
+    estimateDerivedCost: () => estimateDerivedCost,
+    estimateKspaceCost: () => estimateKspaceCost,
     exportKspaceArtifacts: () => exportKspaceArtifacts,
     exportKspaceArtifactsFromBytes: () => exportKspaceArtifactsFromBytes,
     exportKspaceArtifactsFromSequence: () => exportKspaceArtifactsFromSequence,
+    formatSampleCount: () => formatSampleCount,
     formatTrajectoryText: () => formatTrajectoryText,
     getTotalDuration: () => getTotalDuration,
     hasPulseqBinaryMagic: () => hasPulseqBinaryMagic,
@@ -1784,6 +1788,11 @@ var Pulseq = (() => {
     for (const b of blocks) {
       if (b.adc) totalAdcSamples += b.adc.numSamples;
     }
+    if (_options?.maxAdcSamples && totalAdcSamples > _options.maxAdcSamples) return null;
+    if (_options?.maxGridPoints && totalDuration > 0) {
+      const rasterPointCount = Math.max(2, Math.round(totalDuration / GR) + 1);
+      if (rasterPointCount + totalAdcSamples > _options.maxGridPoints) return null;
+    }
     const adcT = new Float64Array(totalAdcSamples);
     let adcIdx = 0;
     for (const b of blocks) {
@@ -2566,6 +2575,60 @@ var Pulseq = (() => {
       const alpha = (t - t0) / (t1 - t0);
       return series.value[index] + alpha * (series.value[index + 1] - series.value[index]);
     };
+  }
+
+  // src/pulseq/computeBudget.ts
+  var INTERACTIVE_COMPUTE_LIMITS = Object.freeze({
+    kspaceRasterSamples: 12e6,
+    kspaceAdcSamples: 8e6,
+    kspaceGridCandidates: 18e6,
+    derivedRasterSamples: 2e6
+  });
+  function estimateKspaceCost(blocks, gradientRaster, totalDuration) {
+    let adcSamples = 0;
+    let gradientSupportPoints = 0;
+    let rfSupportPoints = 0;
+    for (const block of blocks) {
+      if (block.adc?.numSamples && block.adc.numSamples > 0) {
+        adcSamples += block.adc.numSamples;
+      }
+      for (const gradient of [block.gx, block.gy, block.gz]) {
+        if (gradient && gradient.type !== "none" && gradient.timePoints.length >= 2) {
+          gradientSupportPoints += 2;
+        }
+      }
+      if (block.rf) rfSupportPoints += block.rf.use === "r" ? 2 : 3;
+    }
+    const rasterSamples = gradientRaster > 0 && totalDuration > 0 ? Math.max(2, Math.round(totalDuration / gradientRaster) + 1) : 0;
+    const gridCandidatePoints = rasterSamples + adcSamples + gradientSupportPoints + rfSupportPoints + 2;
+    return { rasterSamples, adcSamples, gridCandidatePoints };
+  }
+  function estimateDerivedCost(blocks, gradientRaster) {
+    let firstGradientTime = Infinity;
+    let lastGradientTime = -Infinity;
+    for (const block of blocks) {
+      for (const gradient of [block.gx, block.gy, block.gz]) {
+        const times = gradient?.timePoints;
+        if (!times?.length) continue;
+        const first = times[0];
+        const last = times[times.length - 1];
+        if (Number.isFinite(first) && first < firstGradientTime) firstGradientTime = first;
+        if (Number.isFinite(last) && last > lastGradientTime) lastGradientTime = last;
+      }
+    }
+    if (!Number.isFinite(firstGradientTime) || !Number.isFinite(lastGradientTime) || lastGradientTime < firstGradientTime || gradientRaster <= 0) {
+      return { rasterSamples: 0, firstGradientTime: null, lastGradientTime: null };
+    }
+    const span = lastGradientTime - firstGradientTime;
+    let rasterSamples = Math.max(1, Math.floor(span / gradientRaster) + 1);
+    const finalRasterTime = firstGradientTime + (rasterSamples - 1) * gradientRaster;
+    if (finalRasterTime < lastGradientTime - 1e-15) rasterSamples++;
+    return { rasterSamples, firstGradientTime, lastGradientTime };
+  }
+  function formatSampleCount(value) {
+    if (value >= 1e6) return `${(value / 1e6).toFixed(1)} million`;
+    if (value >= 1e3) return `${(value / 1e3).toFixed(1)} thousand`;
+    return String(value);
   }
 
   // src/pulseq/trdetect.ts
