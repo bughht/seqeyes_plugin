@@ -2,7 +2,7 @@
   "name": "seqeyes-web",
   "displayName": "SeqEyes",
   "description": "Visualize Pulseq .seq and .bseq MRI sequences inside VS Code with interactive diagrams and k-space trajectories.",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "publisher": "SeqEyesDeveloper",
   "license": "MIT",
   "icon": "images/logo.png",
