@@ -56,6 +56,7 @@ canvas{display:block}
 #splash .drop{width:300px;height:100px;border:2px dashed var(--gr);border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--lb);transition:border-color .2s,background .2s}
 #splash .drop.dragover{border-color:var(--adc);background:var(--adf)}
 .web-url-only{display:none}
+.matlab-only{display:none}
 #urlOverlay{position:fixed;inset:0;background:rgba(0,0,0,.40);z-index:520;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px)}
 #urlCard{background:var(--bg);border:1px solid var(--gr);border-radius:8px;padding:18px 20px;width:min(520px,calc(100vw - 32px));box-shadow:0 8px 32px rgba(0,0,0,.22)}
 #urlCard label{display:block;color:var(--fg);font-size:12px;margin-bottom:8px}
@@ -88,7 +89,7 @@ canvas{display:block}
   <img src="logo.svg" alt="SeqEyes-Online" style="width:200px;height:200px;border-radius:12px;box-shadow:0 4px 16px rgba(0,0,0,.15)">
   <h1>SeqEyes</h1>
   <p>Pulseq MRI Sequence Viewer</p>
-  <div class="actions"><button id="splashOpen">📂 Open .seq or .bseq file</button><button id="splashOpenUrl" class="web-url-only">🌐 Open from web</button></div>
+  <div class="actions"><button id="splashOpen">📂 Open .seq or .bseq file</button><button id="splashOpenSeq" class="matlab-only">📂 Open .seq file</button><button id="splashOpenBseq" class="matlab-only">📂 Open .bseq file</button><button id="splashOpenUrl" class="web-url-only">🌐 Open from web</button></div>
   <div class="drop" id="dropZone">Or drag &amp; drop a .seq or .bseq file here</div>
   <p style="font-size:11px;color:var(--lb);margin-top:8px">
     Try with example files from <a href="https://github.com/pulseq/pulseq" target="_blank" style="color:var(--adc)">pulseq/pulseq</a>
@@ -103,6 +104,8 @@ canvas{display:block}
   </div>
 </div>
 <input type="file" id="fileInput" accept=".seq,.bseq" style="display:none">
+<input type="file" id="seqFileInput" accept=".seq" style="display:none">
+<input type="file" id="bseqFileInput" accept=".bseq" style="display:none">
 <input type="file" id="ascInput" accept=".asc" style="display:none">
 
 <!-- ═══════════════════════════════════════════════════════════════
@@ -111,6 +114,8 @@ canvas{display:block}
 <div id="tb">
 <img src="logo.png" alt="SeqEyes" style="width:18px;height:18px;border-radius:3px;vertical-align:middle" title="SeqEyes">
 <button id="openBtn" title="Open another local .seq or .bseq file">📂 Open</button>
+<button id="openSeqBtn" class="matlab-only" title="Open another local .seq file">📂 Open .seq</button>
+<button id="openBseqBtn" class="matlab-only" title="Open another local .bseq file">📂 Open .bseq</button>
 <button id="openUrlBtn" class="web-url-only" title="Open a .seq or .bseq file from a web link">🌐 URL</button>
 <button id="exportKspaceBtn" title="Export ADC k-space trajectory and metadata" disabled>Export</button><div class="sep"></div>
 <button id="pnsBtn" title="Select or replace the ASC profile used for PNS prediction">Select PNS ASC file</button><div class="sep"></div>
@@ -743,6 +748,14 @@ function configureUrlOpenUi(){
   for(var i=0;i<buttons.length;i++)buttons[i].style.display=available?'inline-flex':'none';
 }
 
+function configureHostFileOpenUi(){
+  var isMatlab=window._SEQEYES_HOST==='matlab';
+  document.getElementById('splashOpen').style.display=isMatlab?'none':'inline-flex';
+  document.getElementById('openBtn').style.display=isMatlab?'none':'inline-flex';
+  var buttons=document.querySelectorAll('.matlab-only');
+  for(var i=0;i<buttons.length;i++)buttons[i].style.display=isMatlab?'inline-flex':'none';
+}
+
 function openUrlDialog(){
   if(!isWebUrlOpenAvailable())return;
   var overlay=document.getElementById('urlOverlay');
@@ -878,6 +891,10 @@ async function openSequenceFromUrl(inputUrl){
 /* ── Splash screen handlers ───────────────────────────────────────────── */
 document.getElementById('splashOpen').onclick=function(){document.getElementById('fileInput').click();};
 document.getElementById('openBtn').onclick=function(){document.getElementById('fileInput').click();};
+document.getElementById('splashOpenSeq').onclick=function(){document.getElementById('seqFileInput').click();};
+document.getElementById('openSeqBtn').onclick=function(){document.getElementById('seqFileInput').click();};
+document.getElementById('splashOpenBseq').onclick=function(){document.getElementById('bseqFileInput').click();};
+document.getElementById('openBseqBtn').onclick=function(){document.getElementById('bseqFileInput').click();};
 document.getElementById('splashOpenUrl').onclick=function(){openUrlDialog();};
 document.getElementById('openUrlBtn').onclick=function(){openUrlDialog();};
 document.getElementById('exportKspaceBtn').onclick=function(){void exportCurrentKspace();};
@@ -894,11 +911,20 @@ document.getElementById('urlOverlay').addEventListener('click',function(e){
   if(e.target===this)closeUrlDialog();
 });
 configureUrlOpenUi();
+configureHostFileOpenUi();
 
 /* ── File input ──────────────────────────────────────────────────────── */
 document.getElementById('fileInput').onchange=function(){
   if(this.files&&this.files[0])handleFile(this.files[0]);
   this.value=''; // allow re-opening the same file
+};
+document.getElementById('seqFileInput').onchange=function(){
+  if(this.files&&this.files[0])handleFile(this.files[0]);
+  this.value='';
+};
+document.getElementById('bseqFileInput').onchange=function(){
+  if(this.files&&this.files[0])handleFile(this.files[0]);
+  this.value='';
 };
 document.getElementById('ascInput').onchange=function(){
   if(this.files&&this.files[0]){
