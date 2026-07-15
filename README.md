@@ -1,6 +1,6 @@
 # SeqEyes Online — Pulseq MRI Sequence Viewer
 
-**Visualize [Pulseq](https://github.com/pulseq/pulseq) MRI sequences — in your browser, MATLAB, or VS Code.** Open text `.seq` files everywhere, or official binary `.bseq` files in the web and VS Code viewers, then inspect RF pulses, gradients, ADC readouts, and triggers with interactive zoom & pan. Includes a GPU‑accelerated 3D k‑space viewer with camera presets. Inspired by [SeqEyes](https://github.com/xingwangyong/seqeyes).
+**Visualize [Pulseq](https://github.com/pulseq/pulseq) MRI sequences — in your browser, MATLAB, or VS Code.** Open text `.seq` or official binary `.bseq` files, then inspect RF pulses, gradients, ADC readouts, and triggers with interactive zoom & pan. Includes a GPU‑accelerated 3D k‑space viewer with camera presets. Inspired by [SeqEyes](https://github.com/xingwangyong/seqeyes).
 
 <p align="center">
   <a href="https://bughht.github.io/seqeyes_plugin/"><strong>🌐 Try it Online — No Install Required</strong></a>
@@ -54,7 +54,7 @@ Or press **F5** to launch Extension Development Host.
 
 ## 🧪 MATLAB Toolbox
 
-Open in-memory Pulseq sequences or `.seq` files directly inside MATLAB — call `seqeyes(seq)`, double-click in the Current Folder browser, or open an empty viewer with `seqeyes()`.
+Open in-memory Pulseq sequences, text `.seq` files, or binary `.bseq` files directly inside MATLAB — call `seqeyes(seq)`, double-click a file in the Current Folder browser, or open an empty viewer with `seqeyes()`.
 
 ### Setup
 
@@ -82,6 +82,8 @@ This source setup does not require installing the `.mltbx`; `seqeyes(seq)` uses 
 seqeyes(seq)                  % open an in-memory mr.Sequence object
 seqeyes('spiral_inout.seq')   % open a saved .seq file
 open('spiral_inout.seq')      % or double-click in Current Folder
+seqeyes('gre.bseq')           % open a saved binary .bseq file
+open('gre.bseq')              % or double-click in Current Folder
 ```
 
 No manual `.seq` export is needed for `mr.Sequence` objects; SeqEyes writes a temporary file internally and does not modify Pulseq files or classes. All the same features as the browser & VS Code versions — 7 channels, k-space viewer, themes, tooltips — rendered inside a native MATLAB figure. Requires R2022a+.
@@ -140,7 +142,7 @@ All the same features as the other versions — interactive waveforms, k‑space
 - **Block boundary lines** — toggle in toolbar
 - **Optimized for large files** — binary k‑space encoding, bounds-checked parsers, and no text conversion for `.bseq`
 - **Pulseq format support** — text `.seq` v1.2.0–v1.5.x and official binary `.bseq` v1.5.2 reading
-- **Current `.bseq` hosts** — standalone web, VS Code, Python `SeqEyesViewer.from_file()`, and the k-space export CLI; a direct MATLAB `.bseq` path API is not yet exposed
+- **Current `.bseq` hosts** — standalone web, VS Code, MATLAB `seqeyes('file.bseq')`, Python `SeqEyesViewer.from_file()`, and the k-space export CLI
 
 ## Usage
 

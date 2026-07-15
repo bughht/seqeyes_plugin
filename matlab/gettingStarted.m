@@ -2,7 +2,7 @@ function gettingStarted
 % GETTINGSTARTED  Quick-start guide for SeqEyes MATLAB Toolbox.
 %
 %   SeqEyes is an interactive viewer for Pulseq MRI sequence objects and
-%   Pulseq (.seq) files.
+%   Pulseq text (.seq) and binary (.bseq) files.
 %   It visualises RF pulses, gradient waveforms, ADC readouts, triggers,
 %   and includes a GPU-accelerated 3D k-space viewer.
 %
@@ -10,6 +10,7 @@ function gettingStarted
 %
 %   >> seqeyes(seq)                   % open an in-memory mr.Sequence
 %   >> seqeyes('spiral_inout.seq')    % open a saved .seq file
+%   >> seqeyes('gre.bseq')            % open a saved .bseq file
 %   >> seqeyes()                      % open empty viewer, then drag & drop
 %
 %   seqeyes(seq) writes a temporary .seq file internally. It does not edit
@@ -17,7 +18,7 @@ function gettingStarted
 %
 % ── Auto-Open ─────────────────────────────────────────────────────────
 %
-%   Double-click any .seq file in the Current Folder browser and it will
+%   Double-click any .seq or .bseq file in the Current Folder browser and it will
 %   open automatically in SeqEyes.
 %
 % ── Viewer Controls ───────────────────────────────────────────────────
@@ -29,7 +30,7 @@ function gettingStarted
 %   Minimap bar ................. Click to jump, drag to pan
 %
 %   Toolbar buttons:
-%     📂 Open ... Open another .seq file
+%     📂 Open ... Open another .seq or .bseq file
 %     +/− ........ Zoom
 %     Fit ........ Fit entire sequence to view
 %     ↺ .......... Reset view
@@ -49,7 +50,7 @@ function gettingStarted
 %   MATLAB R2022a or later (for uihtml support).
 %   No additional toolboxes required.
 %
-%   See also: seqeyes, openseq
+%   See also: seqeyes, openseq, openbseq
 
     help gettingStarted;
 end

@@ -589,8 +589,9 @@ function loadSequenceText(text,fileName){
 }
 
 // Expose globally so MATLAB can call it via executeJS()
-window._seqeyesLoadFile = function(text, fileName) {
-  loadSequenceText(text, fileName);
+window._seqeyesLoadFile = function(source, fileName) {
+  if(source instanceof Uint8Array){loadSequenceBytes(source,fileName);}
+  else{loadSequenceText(source,fileName);}
 };
 
 function showProgress(phase,percent,text){
@@ -1941,12 +1942,20 @@ if(location.search.indexOf("debug=1")>=0){
 rs();
 
 // Auto-load if data was pre-embedded by MATLAB (bypasses bridge entirely)
-if (window._SEQEYES_PRELOAD && window._SEQEYES_PRELOAD.text) {
+if (window._SEQEYES_PRELOAD && (window._SEQEYES_PRELOAD.base64 || window._SEQEYES_PRELOAD.text)) {
   var p = window._SEQEYES_PRELOAD;
   window._SEQEYES_PRELOAD = null;
   // Hide splash immediately to avoid flash
   if (splash) splash.style.display = 'none';
-  setTimeout(function() { loadSequenceText(p.text, p.fileName); }, 50);
+  setTimeout(function() {
+    if(p.base64){
+      var binary=atob(p.base64),bytes=new Uint8Array(binary.length);
+      for(var i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
+      loadSequenceBytes(bytes,p.fileName);
+    }else{
+      loadSequenceText(p.text,p.fileName);
+    }
+  }, 50);
 }
 })();
 </script>

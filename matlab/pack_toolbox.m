@@ -32,6 +32,7 @@ tbxName = sprintf('seqeyes-%s', tbxVersion);
 includeFiles = {
     fullfile('matlab', 'seqeyes.m')
     fullfile('matlab', 'openseq.m')
+    fullfile('matlab', 'openbseq.m')
     fullfile('matlab', 'gettingStarted.m')
     fullfile('matlab', 'toolboxInfo.xml')
     fullfile('matlab', 'examples', 'demo.m')

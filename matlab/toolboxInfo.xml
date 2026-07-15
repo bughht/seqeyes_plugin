@@ -10,14 +10,14 @@
     </author>
     <summary>Interactive Pulseq MRI sequence viewer with k-space visualisation</summary>
     <description>
-SeqEyes is an interactive viewer for Pulseq (.seq) MRI sequence files. It visualises
+SeqEyes is an interactive viewer for Pulseq text (.seq) and binary (.bseq) MRI sequence files. It visualises
 RF pulses, gradient waveforms (Gx/Gy/Gz), ADC readouts, and triggers on a zoomable,
 pannable timeline with colour themes and a minimap. A GPU-accelerated 3D k-space viewer
 with camera presets is also included.
 
 Features:
   • Open in-memory mr.Sequence objects with seqeyes(seq)
-  • Double-click .seq files to open automatically
+  • Double-click .seq and .bseq files to open automatically
   • Zoom, pan, and hover tooltips
   • 7-channel view: RF, φ, Gx, Gy, Gz, ADC, Trig
   • 6 colour themes (System, One Light, One Dark, Dracula, Nord, GitHub)

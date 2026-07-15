@@ -1,14 +1,15 @@
 function seqeyes(source)
-% SEQEYES  Open a Pulseq .seq file in the SeqEyes MRI sequence viewer.
+% SEQEYES  Open a Pulseq .seq or .bseq file in the SeqEyes MRI sequence viewer.
 %
 %   seqeyes(seq)         — opens an in-memory mr.Sequence object
-%   seqeyes('file.seq')  — opens the specified .seq file in an interactive viewer
+%   seqeyes('file.seq')  — opens a text Pulseq sequence file
+%   seqeyes('file.bseq') — opens a binary Pulseq sequence file
 %   seqeyes()            — opens an empty viewer (drag & drop or use File > Open)
 %
-%   Double-clicking a .seq file in the MATLAB Current Folder browser also
-%   opens it automatically (via openseq.m).
+%   Double-clicking a .seq or .bseq file in the MATLAB Current Folder browser
+%   also opens it automatically (via openseq.m or openbseq.m).
 %
-%   See also: openseq, gettingStarted
+%   See also: openseq, openbseq, gettingStarted
 
     myDir = fileparts(mfilename('fullpath'));
 
@@ -46,7 +47,7 @@ function seqeyes(source)
 
     g = uigridlayout(fig, [1, 1], 'Padding', [0 0 0 0]);
 
-    % ── If input is given, embed its .seq content into the HTML ─────────
+    % ── If input is given, embed its source bytes into the HTML ─────────
     cleanupObjects = {};
     hasSequence = (nargin >= 1 && ~isempty(source));
     if hasSequence
@@ -94,6 +95,11 @@ function [fullPath, cleanupObjects] = prepareSequenceSource(source)
         if isempty(fullPath) || ~isfile(fullPath)
             error('SeqEyes:FileNotFound', 'File not found: %s', char(source));
         end
+        [~, ~, ext] = fileparts(fullPath);
+        if ~any(strcmpi(ext, {'.seq', '.bseq'}))
+            error('SeqEyes:InvalidFileType', ...
+                  'Expected a Pulseq .seq or .bseq file: %s', char(source));
+        end
         return;
     end
 
@@ -104,7 +110,7 @@ function [fullPath, cleanupObjects] = prepareSequenceSource(source)
     end
 
     error('SeqEyes:InvalidInput', ...
-          'Input must be a .seq file path or an mr.Sequence-like object with a write() method.');
+          'Input must be a .seq or .bseq file path, or an mr.Sequence-like object with a write() method.');
 end
 
 function tf = isTextScalar(value)
@@ -185,18 +191,17 @@ function safeRemoveDir(folderPath)
 end
 
 function [newPath, tempDir] = buildMatlabHTML(templatePath, seqFilePath)
-% BUILDMATLABHTML  Inject MATLAB host metadata and optional .seq content.
+% BUILDMATLABHTML  Inject MATLAB host metadata and optional sequence bytes.
     template = fileread(templatePath);
 
     inject = '<script>window._SEQEYES_HOST="matlab";';
     if ~isempty(seqFilePath)
         [~, name, ext] = fileparts(seqFilePath);
         fileName = [name ext];
-        seqText = fileread(seqFilePath);
-        inject = sprintf(['%swindow._SEQEYES_PRELOAD={text:%s,fileName:%s};' ...
-                          'window._seqeyesLoadFile=function(t,n){' ...
-                          'loadSequenceText(t,n);};'], ...
-                          inject, jsonencode(seqText), jsonencode(fileName));
+        sourceBytes = readFileBytes(seqFilePath);
+        sourceBase64 = matlab.net.base64encode(sourceBytes);
+        inject = sprintf(['%swindow._SEQEYES_PRELOAD={base64:%s,fileName:%s};'], ...
+                          inject, jsonencode(sourceBase64), jsonencode(fileName));
     end
     inject = [inject '</script>'];
 
@@ -222,4 +227,14 @@ function [newPath, tempDir] = buildMatlabHTML(templatePath, seqFilePath)
     fid = fopen(newPath, 'w', 'n', 'UTF-8');
     fprintf(fid, '%s', template);
     fclose(fid);
+end
+
+function bytes = readFileBytes(filePath)
+% READFILEBYTES  Read a sequence without interpreting binary data as text.
+    fid = fopen(filePath, 'rb');
+    if fid < 0
+        error('SeqEyes:FileReadFailed', 'Could not open sequence file: %s', filePath);
+    end
+    cleanupObj = onCleanup(@() fclose(fid)); %#ok<NASGU>
+    bytes = fread(fid, Inf, '*uint8');
 end
