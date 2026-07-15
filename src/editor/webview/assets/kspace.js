@@ -177,6 +177,7 @@ function uploadKSpaceGPU(){
    Toggle / View cycle / Canvas sizing
    ═══════════════════════════════════════════════════════════════════════ */
 document.getElementById("kbtn").onclick=function(){
+  if((!kAdc||!kAdc[0]||!kAdc[0].length)&&typeof showKspaceSafetyDialog==='function'&&showKspaceSafetyDialog())return;
   // Ensure layout class is in sync before toggling
   if(typeof refreshLayout==='function')refreshLayout();
   kOpen=!kOpen;

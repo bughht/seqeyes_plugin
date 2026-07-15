@@ -24,9 +24,63 @@ var ampZoom=[1,1,1,1,1,1,1];
 ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;
 /* K‑space data — pre‑computed on the extension side */
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
-var m1Data=null,pnsData=null,pnsWindowData=null,pnsWindowPending=null,pnsWindowRequestId=0,pnsBusy=false,m1Busy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null;
-var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
+var m1Data=null,m1WindowData=null,m1WindowPending=null,m1WindowRequestId=0,pnsData=null,pnsWindowData=null,pnsWindowPending=null,pnsWindowRequestId=0,pnsBusy=false,m1Busy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null;
+var viewerNotices={};
+var kspaceSafetyWarning=null,kspaceSafetyBusy=false,kspaceSafetyPopupTimer=0;
+var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,waveformOverviewActive=false,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
 var viewerDrawFrame=0,viewerDrawMinimap=false;
+function isMobileSafetyLayout(){return !!(window.matchMedia&&window.matchMedia('(max-width: 768px), (pointer: coarse)').matches);}
+function renderViewerNotices(){
+  var el=document.getElementById('viewerNotice');if(!el)return;el.textContent='';
+  var keys=Object.keys(viewerNotices),visible=0;
+  for(var i=0;i<keys.length;i++){
+    if(keys[i]==='kspace'&&kspaceSafetyWarning&&isMobileSafetyLayout())continue;
+    if(visible)el.appendChild(document.createTextNode(' '));
+    var span=document.createElement('span');span.textContent=viewerNotices[keys[i]];el.appendChild(span);visible++;
+  }
+  if(kspaceSafetyWarning&&!isMobileSafetyLayout()){
+    var action=document.createElement('button');action.type='button';action.className='notice-action';action.textContent=kspaceSafetyBusy?'Calculating…':'Calculate anyway…';action.disabled=kspaceSafetyBusy;
+    action.onclick=showKspaceSafetyDialog;el.appendChild(action);visible++;
+  }
+  el.style.display=visible?'block':'none';
+}
+function setViewerNotice(key,message){
+  if(message&&viewerNotices[key]===message)return;
+  if(!message&&!Object.prototype.hasOwnProperty.call(viewerNotices,key))return;
+  if(message)viewerNotices[key]=message;else delete viewerNotices[key];
+  renderViewerNotices();
+}
+function setKspaceSafetyWarning(message){
+  clearTimeout(kspaceSafetyPopupTimer);kspaceSafetyWarning=message||null;kspaceSafetyBusy=false;
+  setViewerNotice('kspace',message?(message+' Calculating anyway may freeze or crash SeqEyes or its host, exhaust system memory, and cause unsaved work to be lost.'):null);
+  if(kspaceSafetyWarning&&isMobileSafetyLayout())kspaceSafetyPopupTimer=setTimeout(showKspaceSafetyDialog,650);
+  if(!kspaceSafetyWarning)hideKspaceSafetyDialog();
+}
+function showKspaceSafetyDialog(){
+  if(!kspaceSafetyWarning)return false;
+  var overlay=document.getElementById('kspaceSafetyOverlay'),text=document.getElementById('kspaceSafetyText'),proceed=document.getElementById('kspaceSafetyProceed');
+  if(!overlay||!text||!proceed)return false;
+  text.textContent=kspaceSafetyWarning+'\n\nCalculating anyway may freeze or crash SeqEyes or its host, exhaust system memory, and cause unsaved work to be lost. Continue only if you accept this risk.';
+  proceed.disabled=kspaceSafetyBusy;proceed.textContent=kspaceSafetyBusy?'Calculating…':'Calculate anyway (dangerous)';
+  overlay.style.display='flex';overlay.setAttribute('aria-hidden','false');
+  var acknowledge=document.getElementById('kspaceSafetyAcknowledge');if(acknowledge)acknowledge.focus();return true;
+}
+function hideKspaceSafetyDialog(){
+  var overlay=document.getElementById('kspaceSafetyOverlay');if(!overlay)return;overlay.style.display='none';overlay.setAttribute('aria-hidden','true');
+}
+function requestDangerousKspaceCalculation(){
+  if(!kspaceSafetyWarning||kspaceSafetyBusy)return;kspaceSafetyBusy=true;hideKspaceSafetyDialog();renderViewerNotices();
+  if(vscApi)vscApi.postMessage({command:'calculateKspaceUnsafe'});
+}
+function finishDangerousKspaceCalculation(error){
+  kspaceSafetyBusy=false;
+  if(!error){setViewerNotice('kspaceOverrideFailure',null);setKspaceSafetyWarning(null);return;}
+  setViewerNotice('kspaceOverrideFailure','The requested K-space calculation failed: '+error);
+  renderViewerNotices();
+}
+document.getElementById('kspaceSafetyAcknowledge').onclick=hideKspaceSafetyDialog;
+document.getElementById('kspaceSafetyProceed').onclick=requestDangerousKspaceCalculation;
+window.addEventListener('resize',renderViewerNotices);
 
 function scheduleViewerDraw(includeMinimap){
   viewerDrawMinimap=viewerDrawMinimap||includeMinimap;
@@ -61,7 +115,7 @@ function setM1ReferenceMode(mode){
   var restore=[!!chVis[8],!!chVis[9],!!chVis[10]];
   var shouldRecalc=!!m1Data&&(chVis[8]||chVis[9]||chVis[10]);
   m1ReferenceMode=next;writeM1ReferenceMode(next);
-  m1Data=null;chVis[8]=false;chVis[9]=false;chVis[10]=false;
+  m1Data=null;m1WindowData=null;m1WindowPending=null;chVis[8]=false;chVis[9]=false;chVis[10]=false;
   computeGlobalMax();buildLegend();draw();
   if(shouldRecalc){
     m1RestoreChannels=restore;
@@ -182,6 +236,16 @@ buildLegend();
 tuSel.onchange=function(){timeUnit=tuSel.value;draw();};
 guSel.onchange=function(){gradUnit=guSel.value;draw();};
 function setExportButtonEnabled(enabled){if(exportBtn)exportBtn.disabled=!enabled;}
+function applySerializedKspace(payload){
+  kTraj=null;kAdc=null;kTime=null;kAdcTime=null;
+  if(!payload)return;
+  kTraj=[payload.kx,payload.ky,payload.kz];kTime=payload.tk;
+  var n=payload.nAdc||0;
+  if(n>0&&payload.axb){
+    kAdc=[decodeB64F32(payload.axb,n),decodeB64F32(payload.ayb,n),decodeB64F32(payload.azb,n)];
+    kAdcTime=decodeB64F32(payload.tab,n);uploadKSpaceGPU();
+  }
+}
 
 /* ── Data reception ───────────────────────────────────────────────────── */
 window.addEventListener('message',function(e){
@@ -206,22 +270,15 @@ window.addEventListener('message',function(e){
   }
   if(m.type==='sequenceData'){
     BL=m.blocks||[];TD=m.totalDuration||0;GR=m.gradRaster||1e-5;
+    setViewerNotice('sequence',m.notices&&m.notices.length?m.notices.join(' '):null);
+    setViewerNotice('kspaceOverrideFailure',null);setKspaceSafetyWarning(m.kspaceSafety||null);
+    setViewerNotice('m1',null);setViewerNotice('pns',null);setViewerNotice('pnsThreshold',null);
     waveformOverview=createWaveformOverview(BL);
     RR=m.rfRaster||RR;AR=m.adcRaster||AR;BR=m.blockRaster||BR;
     blockPos=m.blockPositions||[];
     mmCache=null;  // invalidate minimap cache on new data
-    kTraj=null;kAdc=null;kTime=null;kAdcTime=null;
-    m1Data=null;pnsData=null;pnsWindowData=null;pnsWindowPending=null;chVis[7]=false;chVis[8]=false;chVis[9]=false;chVis[10]=false;
-    // Decode binary k‑space ADC data (Float32 base64 → typed arrays)
-    if(m.kspace){
-      kTraj=[m.kspace.kx,m.kspace.ky,m.kspace.kz];kTime=m.kspace.tk;
-      var n=m.kspace.nAdc||0;
-      if(n>0&&m.kspace.axb){
-        kAdc=[decodeB64F32(m.kspace.axb,n),decodeB64F32(m.kspace.ayb,n),decodeB64F32(m.kspace.azb,n)];
-        kAdcTime=decodeB64F32(m.kspace.tab,n);
-        uploadKSpaceGPU();  // send to WebGL buffers
-      }
-    }
+    applySerializedKspace(m.kspace);
+    m1Data=null;m1WindowData=null;m1WindowPending=null;pnsData=null;pnsWindowData=null;pnsWindowPending=null;chVis[7]=false;chVis[8]=false;chVis[9]=false;chVis[10]=false;
     // Store timing metadata for minimap tooltip
     if(m.timing) seqTiming=m.timing; else seqTiming=null;
     computeGlobalMax();
@@ -230,36 +287,45 @@ window.addEventListener('message',function(e){
     if(seqTiming&&seqTiming.trTimeSec>0){fitToFirstTR();}else{fit();}
     draw();drawKs();drawMinimap();
     setExportButtonEnabled(true);
+  }else if(m.type==='kspaceData'){
+    applySerializedKspace(m.kspace);finishDangerousKspaceCalculation(null);drawKs();
+    if(typeof kOpen!=='undefined'&&!kOpen)document.getElementById('kbtn').click();
+  }else if(m.type==='kspaceError'){
+    finishDangerousKspaceCalculation(m.message||'Unknown error.');
   }else if(m.type==='m1Data'){
     m1Busy=false;
     if(m.m1&&m.m1.valid){
-      m1Data={
-        referenceMode:m.m1.referenceMode||m1ReferenceMode,
-        warnings:m.m1.warnings||[],
-        x:createDerivedSeries(m.m1.tx||m.m1.t,m.m1.x,1),
-        y:createDerivedSeries(m.m1.ty||m.m1.t,m.m1.y,1),
-        z:createDerivedSeries(m.m1.tz||m.m1.t,m.m1.z,1)
-      };
+      setViewerNotice('m1',null);
+      m1Data=createM1SeriesPayload(m.m1);
+      m1WindowData=null;m1WindowPending=null;
       if(m1RestoreChannels){
         chVis[8]=!!m1RestoreChannels[0];chVis[9]=!!m1RestoreChannels[1];chVis[10]=!!m1RestoreChannels[2];m1RestoreChannels=null;
       }else chVis[m1RequestedChannel]=true;
       computeGlobalMax();buildLegend();draw();
       if(m.m1.warnings&&m.m1.warnings.length)console.warn('[SeqEyes M1]',m.m1.warnings.join('\n'));
+      setViewerNotice('m1Coarse',m.m1.coarse?'Large sequence: showing bounded full-sequence M1. Zoom to 100 TRs or fewer for automatic detail.':null);
     }else{
-      alert('M1 calculation failed: '+((m.m1&&m.m1.error)||'unknown error'));
+      setViewerNotice('m1','M1 calculation failed: '+((m.m1&&m.m1.error)||'unknown error')+' Zoom in to inspect waveform detail.');
     }
+  }else if(m.type==='m1WindowData'){
+    if(m1WindowPending&&m.requestId!==m1WindowPending.requestId)return;
+    m1WindowPending=null;
+    if(m.m1&&m.m1.valid){m1WindowData=createM1SeriesPayload(m.m1);draw();}
+    else if(m.m1&&m.m1.error)setViewerNotice('m1Detail','M1 detail was not calculated: '+m.m1.error);
   }else if(m.type==='m1Error'){
     m1Busy=false;
-    alert('M1 calculation failed: '+(m.message||'unknown error'));
+    setViewerNotice('m1',(m.message||'M1 calculation failed.')+(m.message&&/zoom in/i.test(m.message)?'':' Zoom in to inspect waveform detail.'));
   }else if(m.type==='pnsData'){
     pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
     if(m.pns&&m.pns.valid){
+      setViewerNotice('pns',null);
       pnsData=createPnsSeriesPayload(m.pns);
       pnsWindowData=null;pnsWindowPending=null;chVis[7]=true;
       computeGlobalMax();buildLegend();draw();
-      if(!m.pns.ok)alert('PNS warning: predicted level reaches/exceeds 100%.');
+      setViewerNotice('pnsThreshold',m.pns.ok?null:'PNS warning: predicted level reaches or exceeds 100%.');
+      setViewerNotice('pnsCoarse',m.pns.coarse?'Large sequence: showing bounded full-sequence PNS. Zoom to 100 TRs or fewer for automatic detail.':null);
     }else{
-      alert('PNS calculation failed: '+((m.pns&&m.pns.error)||'unknown error'));
+      setViewerNotice('pns','PNS calculation failed: '+((m.pns&&m.pns.error)||'unknown error')+' Zoom in to inspect waveform detail.');
     }
   }else if(m.type==='pnsWindowData'){
     if(pnsWindowPending&&m.requestId!==pnsWindowPending.requestId)return;
@@ -270,7 +336,7 @@ window.addEventListener('message',function(e){
     }
   }else if(m.type==='pnsError'){
     pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
-    alert('PNS calculation failed: '+(m.message||'unknown error'));
+    setViewerNotice('pns',(m.message||'PNS calculation failed.')+(m.message&&/zoom in/i.test(m.message)?'':' Zoom in to inspect waveform detail.'));
   }else if(m.type==='pnsSelectionCancelled'){
     pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
   }
@@ -295,24 +361,77 @@ function computeGlobalMax(){
 }
 
 function createPnsSeriesPayload(pns){
+  function series(prefix,timeKey,valueKey){
+    return pns.coarse
+      ?createEnvelopeSeries(pns[prefix+'0'],pns[prefix+'1'],pns[prefix+'min'],pns[prefix+'max'],pns[prefix+'first'],pns[prefix+'last'],1)
+      :createDerivedSeries(pns[timeKey]||pns.t,pns[valueKey],1);
+  }
   return{
+    coarse:!!pns.coarse,
     startSec:isFinite(pns.startSec)?pns.startSec:null,
     endSec:isFinite(pns.endSec)?pns.endSec:null,
-    x:createDerivedSeries(pns.tx||pns.t,pns.x,1),
-    y:createDerivedSeries(pns.ty||pns.t,pns.y,1),
-    z:createDerivedSeries(pns.tz||pns.t,pns.z,1),
-    n:createDerivedSeries(pns.tn||pns.t,pns.n,1)
+    x:series('x','tx','x'),
+    y:series('y','ty','y'),
+    z:series('z','tz','z'),
+    n:series('n','tn','n')
   };
 }
 
-function shouldRequestFinePnsWindow(vs,ve){
-  if(!vscApi||!pnsData||!chVis[7])return false;
+function createM1SeriesPayload(m1){
+  function series(prefix,timeKey,valueKey){
+    return m1.coarse
+      ?createEnvelopeSeries(m1[prefix+'0'],m1[prefix+'1'],m1[prefix+'min'],m1[prefix+'max'],m1[prefix+'first'],m1[prefix+'last'],1)
+      :createDerivedSeries(m1[timeKey]||m1.t,m1[valueKey],1);
+  }
+  return{
+    coarse:!!m1.coarse,
+    startSec:isFinite(m1.startSec)?m1.startSec:null,
+    endSec:isFinite(m1.endSec)?m1.endSec:null,
+    referenceMode:m1.referenceMode||m1ReferenceMode,
+    warnings:m1.warnings||[],
+    x:series('x','tx','x'),
+    y:series('y','ty','y'),
+    z:series('z','tz','z')
+  };
+}
+
+function shouldRequestFineM1Window(vs,ve){
+  if(!vscApi||!m1Data||!m1Data.coarse||!(chVis[8]||chVis[9]||chVis[10]))return false;
   var dur=ve-vs;
-  return !!(seqTiming&&seqTiming.trTimeSec>0&&dur<=seqTiming.trTimeSec*10.5);
+  return !!(seqTiming&&seqTiming.trTimeSec>0&&dur<=seqTiming.trTimeSec*100.5);
+}
+
+function derivedWindowCovers(data,vs,ve){
+  return !!(data&&data.startSec!==null&&data.endSec!==null&&data.startSec<=vs+1e-12&&data.endSec>=ve-1e-12);
+}
+
+function requestM1Window(vs,ve){
+  if(!shouldRequestFineM1Window(vs,ve))return;
+  if(derivedWindowCovers(m1WindowData,vs,ve)||derivedWindowCovers(m1WindowPending,vs,ve))return;
+  var dur=Math.max(ve-vs,minRasterTime()),pad=Math.max(dur*.5,seqTiming&&seqTiming.trTimeSec?seqTiming.trTimeSec:0);
+  var start=Math.max(0,vs-pad),end=Math.min(TD||ve,ve+pad);
+  m1WindowPending={startSec:start,endSec:end,requestId:++m1WindowRequestId};
+  vscApi.postMessage({command:'calculateM1Window',requestId:m1WindowPending.requestId,startSec:start,endSec:end,maxPoints:120000,referenceMode:m1ReferenceMode});
+}
+
+function m1SeriesForView(vs,ve){
+  if(!m1Data)return null;
+  if(shouldRequestFineM1Window(vs,ve)){
+    requestM1Window(vs,ve);
+    if(derivedWindowCovers(m1WindowData,vs,ve)){setViewerNotice('m1Detail',null);setViewerNotice('m1Coarse','Large sequence: full sequence uses bounded M1; the current view is detailed.');return m1WindowData;}
+  }
+  if(m1Data.coarse)setViewerNotice('m1Coarse','Large sequence: showing bounded full-sequence M1. Zoom to 100 TRs or fewer for automatic detail.');
+  return m1Data;
+}
+
+function shouldRequestFinePnsWindow(vs,ve){
+  if(!vscApi||!pnsData||!pnsData.coarse||!chVis[7])return false;
+  var dur=ve-vs;
+  return !!(seqTiming&&seqTiming.trTimeSec>0&&dur<=seqTiming.trTimeSec*100.5);
 }
 
 function pnsWindowCovers(data,vs,ve){
-  return !!(data&&data.startSec!==null&&data.endSec!==null&&data.startSec<=vs+1e-12&&data.endSec>=ve-1e-12);
+  return derivedWindowCovers(data,vs,ve);
 }
 
 function requestPnsWindow(vs,ve){
@@ -328,8 +447,9 @@ function pnsSeriesForView(vs,ve){
   if(!pnsData)return null;
   if(shouldRequestFinePnsWindow(vs,ve)){
     requestPnsWindow(vs,ve);
-    if(pnsWindowCovers(pnsWindowData,vs,ve))return pnsWindowData;
+    if(pnsWindowCovers(pnsWindowData,vs,ve)){setViewerNotice('pnsCoarse','Large sequence: full sequence uses bounded PNS; the current view is detailed.');return pnsWindowData;}
   }
+  if(pnsData.coarse)setViewerNotice('pnsCoarse','Large sequence: showing bounded full-sequence PNS. Zoom to 100 TRs or fewer for automatic detail.');
   return pnsData;
 }
 

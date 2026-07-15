@@ -97,6 +97,12 @@ mc.addEventListener('touchcancel',function(){_tchDragging=false;cc.classList.rem
 
 /* ── Tooltip helper (also used by touch tap) ──────────────────────── */
 function sampleDerivedSeriesAtTime(series,t){
+  if(series&&series.kind==='envelope'){
+    var base=series.levels&&series.levels[0];if(!base||base.count<1||!isFinite(t))return null;
+    var index=Math.max(0,lowerBoundSeries(base.t1,t));if(index>=base.count||t<base.t0[index]||t>base.t1[index])return null;
+    var span=base.t1[index]-base.t0[index],alpha=span>0?(t-base.t0[index])/span:0;
+    return(base.first[index]+(base.last[index]-base.first[index])*alpha)*series.scale;
+  }
   if(!series||!series.t||!series.v||series.n<1||!isFinite(t))return null;
   var n=Math.min(series.n,series.t.length,series.v.length);
   if(n<1||t<series.t[0]||t>series.t[n-1])return null;

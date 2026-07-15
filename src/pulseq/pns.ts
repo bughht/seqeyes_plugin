@@ -1,4 +1,6 @@
 import type { DecodedBlock, DecodedGradWaveform } from './types';
+import { BoundedSeriesBuilder, type BoundedSeries } from './boundedSeries';
+import { createDecodedGradientSampler, decodedGradientTimeRange } from './gradientSampler';
 
 export const GAMMA_HZ_PER_T = 42.576e6;
 
@@ -30,6 +32,20 @@ export interface PnsResult {
     pnsY: Float64Array;
     pnsZ: Float64Array;
     pnsNorm: Float64Array;
+}
+
+export interface CoarsePnsResult {
+    valid: boolean;
+    ok: boolean;
+    coarse: true;
+    error?: string;
+    startSec: number;
+    endSec: number;
+    x: BoundedSeries;
+    y: BoundedSeries;
+    z: BoundedSeries;
+    norm: BoundedSeries;
+    warnings: string[];
 }
 
 interface ParsedAscValues {
@@ -188,6 +204,170 @@ export function calculatePns(
     }
 
     return { valid: true, ok, timeSec, pnsX, pnsY, pnsZ, pnsNorm };
+}
+
+/**
+ * Native-raster PNS filter with bounded first/min/max/last output. Unlike the
+ * exact result, this path never allocates a full stimulation array per axis.
+ */
+export function calculatePnsCoarse(
+    blocks: DecodedBlock[],
+    gradientRaster: number,
+    hardware: PnsHardware,
+    options: { maxPoints?: number; gammaHzPerT?: number } = {},
+): CoarsePnsResult {
+    const emptySeries = (): BoundedSeries => ({
+        startTime: new Float64Array(),
+        endTime: new Float64Array(),
+        min: new Float64Array(),
+        max: new Float64Array(),
+        first: new Float64Array(),
+        last: new Float64Array(),
+    });
+    const invalid = (error: string): CoarsePnsResult => ({
+        valid: false,
+        ok: false,
+        coarse: true,
+        error,
+        startSec: 0,
+        endSec: 0,
+        x: emptySeries(),
+        y: emptySeries(),
+        z: emptySeries(),
+        norm: emptySeries(),
+        warnings: [],
+    });
+    const gammaHzPerT = options.gammaHzPerT ?? GAMMA_HZ_PER_T;
+    if (!hardware.valid) return invalid('PNS hardware is not initialized.');
+    if (!blocks.length) return invalid('No sequence loaded.');
+    if (!(gradientRaster > 0) || !(gammaHzPerT > 0)) return invalid('Missing GradientRasterTime or gamma.');
+    const range = decodedGradientTimeRange(blocks);
+    if (!range || !(range.last > range.first)) return invalid('No gradient waveform available for PNS.');
+
+    const dtSec = gradientRaster;
+    let ntMin = Math.floor(range.first / dtSec + Number.EPSILON) + 0.5;
+    const ntMax = Math.ceil(range.last / dtSec - Number.EPSILON) - 0.5;
+    if (ntMin < 0.5) ntMin = 0.5;
+    if (ntMax < ntMin) return invalid('Unable to build regular PNS raster.');
+    const nSamples = Math.floor(ntMax - ntMin + 1.0);
+    if (nSamples < 2) return invalid('Too few samples for PNS computation.');
+
+    const longestTauMs = Math.max(
+        hardware.x.tau1Ms, hardware.x.tau2Ms, hardware.x.tau3Ms,
+        hardware.y.tau1Ms, hardware.y.tau2Ms, hardware.y.tau3Ms,
+        hardware.z.tau1Ms, hardware.z.tau2Ms, hardware.z.tau3Ms,
+    );
+    const zptSec = longestTauMs * 4 / 1000;
+    const preCount = Math.max(0, Math.round(zptSec / (4 * dtSec)));
+    const postCount = Math.max(0, Math.round(zptSec / dtSec));
+    const totalSamples = preCount + nSamples + postCount;
+    const hasAnyNonTrap = blocks.some(block => (
+        block.gx?.type === 'arb' || block.gy?.type === 'arb' || block.gz?.type === 'arb'
+    ));
+    const hasAnyLabelExt = blocks.some(block => !!(block.labelSets?.length || block.labelIncs?.length));
+    const shift = hasAnyNonTrap || hasAnyLabelExt ? 1 : 0;
+    const stimLength = Math.max(0, totalSamples - 1);
+    const desiredStimIndex = (origIndex: number): number => {
+        const paddedIndex = preCount + origIndex;
+        if (shift > 0 && hasAnyLabelExt && origIndex === nSamples - 1) {
+            return Math.min(paddedIndex, stimLength - 1);
+        }
+        return paddedIndex - shift;
+    };
+
+    const startSec = ntMin * dtSec;
+    const endSec = (ntMin + nSamples - 1) * dtSec;
+    const maxPoints = Math.max(1024, Math.min(120_000, options.maxPoints ?? 30_000));
+    const maxBuckets = Math.floor(maxPoints / 4);
+    const builders = [
+        new BoundedSeriesBuilder(startSec, endSec, maxPoints),
+        new BoundedSeriesBuilder(startSec, endSec, maxPoints),
+        new BoundedSeriesBuilder(startSec, endSec, maxPoints),
+        new BoundedSeriesBuilder(startSec, endSec, maxPoints),
+    ];
+    const samplers = [
+        createDecodedGradientSampler(blocks, 'gx'),
+        createDecodedGradientSampler(blocks, 'gy'),
+        createDecodedGradientSampler(blocks, 'gz'),
+    ];
+    const hardwareAxes = [hardware.x, hardware.y, hardware.z];
+    const filterStates = hardwareAxes.map(axis => createPnsFilterState(axis, dtSec));
+    const paddedValue = (axis: number, index: number): number => {
+        if (index < preCount || index >= preCount + nSamples) return 0;
+        const rasterIndex = index - preCount;
+        return samplers[axis]((ntMin + rasterIndex) * dtSec) / gammaHzPerT;
+    };
+    const previous = [paddedValue(0, 0), paddedValue(1, 0), paddedValue(2, 0)];
+    let outputIndex = 0;
+    let ok = true;
+    for (let stimIndex = 0; stimIndex < stimLength; stimIndex++) {
+        const normalized = [0, 0, 0];
+        for (let axis = 0; axis < 3; axis++) {
+            const current = paddedValue(axis, stimIndex + 1);
+            const derivative = (current - previous[axis]) / dtSec;
+            previous[axis] = current;
+            normalized[axis] = updatePnsFilter(filterStates[axis], derivative);
+        }
+        while (outputIndex < nSamples && desiredStimIndex(outputIndex) < stimIndex) outputIndex++;
+        if (outputIndex < nSamples && desiredStimIndex(outputIndex) === stimIndex) {
+            const timeSec = (ntMin + outputIndex) * dtSec;
+            const norm = Math.hypot(normalized[0], normalized[1], normalized[2]);
+            builders[0].add(timeSec, normalized[0]);
+            builders[1].add(timeSec, normalized[1]);
+            builders[2].add(timeSec, normalized[2]);
+            builders[3].add(timeSec, norm);
+            if (norm >= 1) ok = false;
+            outputIndex++;
+        }
+    }
+    const warnings = [
+        `Showing a bounded full-sequence PNS envelope (at most ${maxBuckets.toLocaleString()} buckets per curve). `
+        + 'Zoom to 100 TRs or fewer for an automatic detailed calculation.',
+    ];
+    return {
+        valid: true,
+        ok,
+        coarse: true,
+        startSec,
+        endSec,
+        x: builders[0].finish(),
+        y: builders[1].finish(),
+        z: builders[2].finish(),
+        norm: builders[3].finish(),
+        warnings,
+    };
+}
+
+interface PnsFilterState {
+    alpha1: number;
+    alpha2: number;
+    alpha3: number;
+    lp1: number;
+    lp2: number;
+    lp3: number;
+    hardware: PnsAxisHardware;
+}
+
+function createPnsFilterState(hardware: PnsAxisHardware, dtSec: number): PnsFilterState {
+    const dtMs = dtSec * 1000;
+    return {
+        alpha1: lowpassAlpha(hardware.tau1Ms, dtMs),
+        alpha2: lowpassAlpha(hardware.tau2Ms, dtMs),
+        alpha3: lowpassAlpha(hardware.tau3Ms, dtMs),
+        lp1: 0,
+        lp2: 0,
+        lp3: 0,
+        hardware,
+    };
+}
+
+function updatePnsFilter(state: PnsFilterState, derivative: number): number {
+    state.lp1 = state.alpha1 * derivative + (1 - state.alpha1) * state.lp1;
+    state.lp2 = state.alpha2 * Math.abs(derivative) + (1 - state.alpha2) * state.lp2;
+    state.lp3 = state.alpha3 * derivative + (1 - state.alpha3) * state.lp3;
+    const hw = state.hardware;
+    const numerator = hw.a1 * Math.abs(state.lp1) + hw.a2 * state.lp2 + hw.a3 * Math.abs(state.lp3);
+    return numerator / (hw.stimLimit > 0 ? hw.stimLimit : 1) * hw.gScale;
 }
 
 export function safePnsModel(dgdt: Float64Array, dtSec: number, hw: PnsAxisHardware): Float64Array {

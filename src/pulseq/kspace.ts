@@ -31,11 +31,14 @@ export interface KSpaceData {
  * exceed this many points the function returns null rather than risk an
  * out-of-memory crash.  The uniform raster grid ALWAYS uses the native
  * gradient raster for integration accuracy; the cap only applies as a
- * last‑resort safety check after all essential points are collected.
+ * last-resort safety check. A native-raster lower bound is checked before
+ * proportional allocation, and the actual deduplicated grid is checked again.
  */
 export interface KSpaceOptions {
     /** Optional hard cap on integration grid size. */
     maxGridPoints?: number;
+    /** Optional hard cap on ADC sample count. */
+    maxAdcSamples?: number;
     /** RF raster time in seconds, used to place reset-adjacent grid points. */
     rfRaster?: number;
     /**
@@ -69,6 +72,11 @@ export function calculateKspace(
     let totalAdcSamples = 0;
     for (const b of blocks) {
         if (b.adc) totalAdcSamples += b.adc.numSamples;
+    }
+    if (_options?.maxAdcSamples && totalAdcSamples > _options.maxAdcSamples) return null;
+    if (_options?.maxGridPoints && totalDuration > 0) {
+        const rasterPointCount = Math.max(2, Math.round(totalDuration / GR) + 1);
+        if (rasterPointCount + totalAdcSamples > _options.maxGridPoints) return null;
     }
     // Pre-allocate ADC array to avoid repeated resizing for large sequences
     const adcT = new Float64Array(totalAdcSamples);
