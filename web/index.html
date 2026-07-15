@@ -42,6 +42,15 @@ body{font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background
 #tb .cur{font:11px monospace;color:var(--cr);margin-left:auto;min-width:300px;text-align:right;white-space:nowrap}
 #tb .ulbl{font-size:10px;color:var(--lb);margin:0 1px}
 #viewerNotice{display:none;flex-shrink:0;padding:5px 10px;border-bottom:1px solid #b8860b;background:rgba(218,165,32,.16);color:var(--fg);font-size:11px;line-height:1.35;white-space:normal}
+#viewerNotice .notice-action{margin-left:8px;background:var(--gr);border:1px solid #b8860b;color:var(--fg);padding:2px 7px;border-radius:3px;cursor:pointer;font-size:11px;white-space:nowrap}
+#kspaceSafetyOverlay{position:fixed;inset:0;background:rgba(0,0,0,.48);z-index:540;display:flex;align-items:center;justify-content:center;padding:16px;backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px)}
+#kspaceSafetyCard{width:min(520px,100%);background:var(--bg);border:1px solid #b8860b;border-radius:10px;padding:18px 20px;box-shadow:0 10px 36px rgba(0,0,0,.3)}
+#kspaceSafetyTitle{font-weight:700;font-size:15px;margin-bottom:9px;color:var(--fg)}
+#kspaceSafetyText{font-size:12px;line-height:1.5;color:var(--fg);white-space:pre-line}
+#kspaceSafetyActions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px;flex-wrap:wrap}
+#kspaceSafetyActions button{background:var(--gr);border:1px solid var(--ax);color:var(--fg);padding:7px 11px;border-radius:5px;cursor:pointer;font-size:12px}
+#kspaceSafetyActions #kspaceSafetyProceed{background:#9b1c1c;border-color:#c43b3b;color:#fff}
+#kspaceSafetyActions button:disabled{opacity:.5;cursor:not-allowed}
 #cc{flex:1;overflow:hidden;position:relative;cursor:crosshair}
 #cc.pan{cursor:grabbing}
 #moc{position:absolute;inset:0;pointer-events:none;z-index:2}
@@ -70,6 +79,11 @@ canvas{display:block}
 #urlActions button:disabled{opacity:.45;cursor:not-allowed}
 #urlStatus{min-height:16px;margin-top:9px;color:var(--lb);font-size:11px;line-height:1.35}
 #urlStatus.err{color:var(--cr)}
+@media(max-width:768px),(pointer:coarse){
+  #kspaceSafetyCard{padding:17px 16px}
+  #kspaceSafetyActions{flex-direction:column}
+  #kspaceSafetyActions button{width:100%;min-height:42px}
+}
 /* Minimap */
 #mmap{height:22px;border-bottom:1px solid var(--gr);background:var(--trbg);flex-shrink:0;cursor:pointer;position:relative}
 #mmap canvas{display:block;width:100%;height:100%}
@@ -136,6 +150,13 @@ canvas{display:block}
 <span class="cur" id="cur">← hover for time</span>
 </div>
 <div id="viewerNotice" role="status" aria-live="polite"></div>
+<div id="kspaceSafetyOverlay" style="display:none" aria-hidden="true">
+  <div id="kspaceSafetyCard" role="dialog" aria-modal="true" aria-labelledby="kspaceSafetyTitle" aria-describedby="kspaceSafetyText">
+    <div id="kspaceSafetyTitle">K-space safety limit</div>
+    <div id="kspaceSafetyText"></div>
+    <div id="kspaceSafetyActions"><button id="kspaceSafetyAcknowledge" type="button">Acknowledge</button><button id="kspaceSafetyProceed" type="button">Calculate anyway (dangerous)</button></div>
+  </div>
+</div>
 <!-- Progress overlay -->
 <div id="poverlay" style="display:none"><div id="pcard"><div id="pspinner"></div><div id="ptext">Loading sequence…</div><div id="pbar2"><div id="pfill2"></div></div><div id="ppct">0%</div></div></div>
 <!-- Minimap -->
@@ -181,16 +202,56 @@ ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
 var decodedBlocks=null,waveformOverview=null,m1Data=null,m1WindowData=null,m1WindowPending=null,m1WindowTimer=0,pnsData=null,pnsWindowData=null,pnsWindowPending=null,pnsWindowTimer=0,pnsHardware=null,m1Busy=false,pnsBusy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null;
 var viewerNotices={};
+var kspaceSafetyWarning=null,kspaceSafetyBusy=false,kspaceSafetyPopupTimer=0;
 var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,waveformOverviewActive=false,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
 var viewerDrawFrame=0,viewerDrawMinimap=false;
+function isMobileSafetyLayout(){return !!(window.matchMedia&&window.matchMedia('(max-width: 768px), (pointer: coarse)').matches);}
+function renderViewerNotices(){
+  var el=document.getElementById('viewerNotice');if(!el)return;el.textContent='';
+  var keys=Object.keys(viewerNotices),visible=0;
+  for(var i=0;i<keys.length;i++){
+    if(keys[i]==='kspace'&&kspaceSafetyWarning&&isMobileSafetyLayout())continue;
+    if(visible)el.appendChild(document.createTextNode(' '));
+    var span=document.createElement('span');span.textContent=viewerNotices[keys[i]];el.appendChild(span);visible++;
+  }
+  if(kspaceSafetyWarning&&!isMobileSafetyLayout()){
+    var action=document.createElement('button');action.type='button';action.className='notice-action';action.textContent=kspaceSafetyBusy?'Calculating…':'Calculate anyway…';action.disabled=kspaceSafetyBusy;
+    action.onclick=showKspaceSafetyDialog;el.appendChild(action);visible++;
+  }
+  el.style.display=visible?'block':'none';
+}
 function setViewerNotice(key,message){
   if(message&&viewerNotices[key]===message)return;
   if(!message&&!Object.prototype.hasOwnProperty.call(viewerNotices,key))return;
   if(message)viewerNotices[key]=message;else delete viewerNotices[key];
-  var el=document.getElementById('viewerNotice');if(!el)return;
-  var messages=Object.keys(viewerNotices).map(function(k){return viewerNotices[k];});
-  el.textContent=messages.join(' ');el.style.display=messages.length?'block':'none';
+  renderViewerNotices();
 }
+function setKspaceSafetyWarning(message){
+  clearTimeout(kspaceSafetyPopupTimer);kspaceSafetyWarning=message||null;kspaceSafetyBusy=false;
+  setViewerNotice('kspace',message?(message+' Calculating anyway may freeze or crash SeqEyes or its host, exhaust system memory, and cause unsaved work to be lost.'):null);
+  if(kspaceSafetyWarning&&isMobileSafetyLayout())kspaceSafetyPopupTimer=setTimeout(showKspaceSafetyDialog,650);
+  if(!kspaceSafetyWarning)hideKspaceSafetyDialog();
+}
+function showKspaceSafetyDialog(){
+  if(!kspaceSafetyWarning)return false;
+  var overlay=document.getElementById('kspaceSafetyOverlay'),text=document.getElementById('kspaceSafetyText'),proceed=document.getElementById('kspaceSafetyProceed');
+  if(!overlay||!text||!proceed)return false;
+  text.textContent=kspaceSafetyWarning+'\n\nCalculating anyway may freeze or crash SeqEyes or its host, exhaust system memory, and cause unsaved work to be lost. Continue only if you accept this risk.';
+  proceed.disabled=kspaceSafetyBusy;proceed.textContent=kspaceSafetyBusy?'Calculating…':'Calculate anyway (dangerous)';
+  overlay.style.display='flex';overlay.setAttribute('aria-hidden','false');
+  var acknowledge=document.getElementById('kspaceSafetyAcknowledge');if(acknowledge)acknowledge.focus();return true;
+}
+function hideKspaceSafetyDialog(){
+  var overlay=document.getElementById('kspaceSafetyOverlay');if(!overlay)return;overlay.style.display='none';overlay.setAttribute('aria-hidden','true');
+}
+function finishDangerousKspaceCalculation(error){
+  kspaceSafetyBusy=false;
+  if(!error){setViewerNotice('kspaceOverrideFailure',null);setKspaceSafetyWarning(null);return;}
+  setViewerNotice('kspaceOverrideFailure','The requested K-space calculation failed: '+error);renderViewerNotices();
+}
+document.getElementById('kspaceSafetyAcknowledge').onclick=hideKspaceSafetyDialog;
+document.getElementById('kspaceSafetyProceed').onclick=requestDangerousKspaceCalculation;
+window.addEventListener('resize',renderViewerNotices);
 function scheduleViewerDraw(includeMinimap){
   viewerDrawMinimap=viewerDrawMinimap||includeMinimap;
   if(viewerDrawFrame)return;
@@ -546,6 +607,24 @@ function serializeGrad(g){
   var display=downsampleWaveform(g.timePoints,g.waveform,MAX_PTS);
   return {s:g.startTime,d:g.duration,t:display.time,w:display.values,a:g.amplitude,ty:g.type,ch:g.channel};
 }
+function applyKspaceResult(ks){
+  kTraj=[ks.ktraj[0],ks.ktraj[1],ks.ktraj[2]];kTime=ks.t_ktraj;
+  kAdc=[ks.ktraj_adc[0],ks.ktraj_adc[1],ks.ktraj_adc[2]];kAdcTime=ks.t_adc;
+  uploadKSpaceGPU();drawKs();
+}
+function requestDangerousKspaceCalculation(){
+  if(!kspaceSafetyWarning||kspaceSafetyBusy)return;
+  if(!decodedBlocks||!decodedBlocks.length){finishDangerousKspaceCalculation('No sequence is loaded.');return;}
+  kspaceSafetyBusy=true;hideKspaceSafetyDialog();renderViewerNotices();showProgress('start',0,'Calculating K-space without safety limits...');
+  setTimeout(function(){
+    try{
+      var ks=Pulseq.calculateKspace(decodedBlocks,GR,TD,0,{rfRaster:RR});
+      if(!ks)throw new Error('The calculation did not produce a trajectory.');
+      applyKspaceResult(ks);finishDangerousKspaceCalculation(null);showProgress('done',100,'K-space ready');
+      if(typeof kOpen!=='undefined'&&!kOpen)document.getElementById('kbtn').click();
+    }catch(err){finishDangerousKspaceCalculation(err.message||String(err));showProgress('done',100,'K-space failed');}
+  },50);
+}
 
 /* ═══════════════════════════════════════════════════════════════════════
    File loading (standalone — calls Pulseq bundle directly)
@@ -553,7 +632,7 @@ function serializeGrad(g){
 function loadSequenceSource(sourceBytes,fileName,parseSource){
   var hadSequence=!!currentSequence;
   setExportButtonEnabled(false);
-  setViewerNotice('kspace',null);setViewerNotice('m1',null);setViewerNotice('pns',null);setViewerNotice('pnsThreshold',null);
+  setKspaceSafetyWarning(null);setViewerNotice('kspaceOverrideFailure',null);setViewerNotice('m1',null);setViewerNotice('pns',null);setViewerNotice('pnsThreshold',null);
   try{
     showProgress('start',0,'Parsing sequence...');
     var seq=parseSource();
@@ -582,6 +661,7 @@ function loadSequenceSource(sourceBytes,fileName,parseSource){
     kTraj=null;kAdc=null;kTime=null;kAdcTime=null;
     var limits=Pulseq.INTERACTIVE_COMPUTE_LIMITS;
     var kspaceEstimate=Pulseq.estimateKspaceCost(blocks,GR,TD);
+    var kspaceMemoryEstimate=Pulseq.formatMemorySize(Pulseq.estimateKspacePeakMemoryBytes(kspaceEstimate));
     var kspaceOverBudget=kspaceEstimate.rasterSamples>limits.kspaceRasterSamples||kspaceEstimate.adcSamples>limits.kspaceAdcSamples||kspaceEstimate.gridCandidatePoints>limits.kspaceGridCandidates;
     var ks=null,kspaceError='';
     if(!kspaceOverBudget){
@@ -590,20 +670,17 @@ function loadSequenceSource(sourceBytes,fileName,parseSource){
       });}catch(err){kspaceError=err.message||String(err);}
     }
     if(kspaceOverBudget){
-      setViewerNotice('kspace','K-space was not calculated because this sequence exceeds the interactive safety budget ('+
+      setKspaceSafetyWarning('K-space was not calculated because this sequence exceeds the interactive safety budget ('+
         Pulseq.formatSampleCount(kspaceEstimate.rasterSamples)+' raster samples, '+
-        Pulseq.formatSampleCount(kspaceEstimate.adcSamples)+' ADC samples). Zoom in to inspect waveform detail.');
+        Pulseq.formatSampleCount(kspaceEstimate.adcSamples)+' ADC samples). Estimated peak memory: approximately '+
+        kspaceMemoryEstimate+' (host-dependent).');
     }else if(kspaceError){
       setViewerNotice('kspace','K-space calculation failed: '+kspaceError+'. Zoom in to inspect waveform detail.');
     }else if(!ks){
       setViewerNotice('kspace','K-space calculation did not complete. Zoom in to inspect waveform detail.');
     }
     if(ks){
-      kTraj=[ks.ktraj[0],ks.ktraj[1],ks.ktraj[2]];
-      kTime=ks.t_ktraj;
-      kAdc=[ks.ktraj_adc[0],ks.ktraj_adc[1],ks.ktraj_adc[2]];
-      kAdcTime=ks.t_adc;
-      uploadKSpaceGPU();
+      applyKspaceResult(ks);
     }else{kTraj=null;kAdc=null;kTime=null;kAdcTime=null;}
 
     showProgress('done',100,'Ready');
@@ -1949,6 +2026,7 @@ function uploadKSpaceGPU(){
 
 /* ── K-space toggle ───────────────────────────────────────────────────── */
 document.getElementById("kbtn").onclick=function(){
+  if((!kAdc||!kAdc[0]||!kAdc[0].length)&&typeof showKspaceSafetyDialog==='function'&&showKspaceSafetyDialog())return;
   if(typeof refreshLayout==='function')refreshLayout();
   kOpen=!kOpen;var p=document.getElementById("right");
   if(kOpen){
@@ -2280,7 +2358,9 @@ if(location.search.indexOf("debug=1")>=0){
       var t=(kAdcTime&&kAdcTime.length)?kAdcTime[Math.floor(kAdcTime.length/2)]:TD*0.5;
       var x=t2x(t),y=M.t+cH()*3.5;
       return{x:x,y:y,time:t};
-    }
+    },
+    showKspaceSafetyWarning:function(message){setKspaceSafetyWarning(message||'K-space exceeds the interactive safety budget.');},
+    kspaceSafetyState:function(){return{active:!!kspaceSafetyWarning,busy:kspaceSafetyBusy,dialogOpen:document.getElementById('kspaceSafetyOverlay').style.display!=='none'};}
   };
 }
 

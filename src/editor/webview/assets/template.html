@@ -21,6 +21,16 @@
 <span class="cur" id="cur">← hover for time</span>
 </div>
 <div id="viewerNotice" role="status" aria-live="polite"></div>
+<div id="kspaceSafetyOverlay" style="display:none" aria-hidden="true">
+  <div id="kspaceSafetyCard" role="dialog" aria-modal="true" aria-labelledby="kspaceSafetyTitle" aria-describedby="kspaceSafetyText">
+    <div id="kspaceSafetyTitle">K-space safety limit</div>
+    <div id="kspaceSafetyText"></div>
+    <div id="kspaceSafetyActions">
+      <button id="kspaceSafetyAcknowledge" type="button">Acknowledge</button>
+      <button id="kspaceSafetyProceed" type="button">Calculate anyway (dangerous)</button>
+    </div>
+  </div>
+</div>
 <!-- ── Progress overlay (centered card during loading) ── -->
 <div id="poverlay" style="display:none">
   <div id="pcard">

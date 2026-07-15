@@ -54,7 +54,7 @@ export function selectPnsWindowBlocks(
 
 function overlappingBlocks(blocks: DecodedBlock[], startSec: number, endSec: number): DecodedBlock[] {
     return blocks.filter(block => (
-        block.startTime + block.duration >= startSec
+        block.startTime + block.duration > startSec
         && block.startTime <= endSec
     ));
 }

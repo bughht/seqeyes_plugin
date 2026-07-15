@@ -130,6 +130,49 @@ test('adapts file controls and disables drop for MATLAB on macOS', async ({ page
   await expect(page.locator('#dropZone')).toContainText('Drag & drop is unavailable in MATLAB Desktop on macOS');
 });
 
+test('offers an explicit dangerous K-space override from the desktop warning', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await page.evaluate(() => {
+    (window as unknown as { __seqeyesDebug: { showKspaceSafetyWarning: (message: string) => void } })
+      .__seqeyesDebug.showKspaceSafetyWarning('K-space was skipped for 20.0M raster samples. Estimated peak memory: approximately 2.7 GiB (host-dependent).');
+  });
+
+  const notice = page.locator('#viewerNotice');
+  await expect(notice).toBeVisible();
+  await expect(notice).toContainText('may freeze or crash');
+  await expect(notice).toContainText('2.7 GiB');
+  await notice.locator('button', { hasText: 'Calculate anyway' }).click();
+
+  const dialog = page.locator('#kspaceSafetyOverlay');
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText('unsaved work');
+  await expect(dialog).toContainText('2.7 GiB');
+  await expect(dialog.locator('#kspaceSafetyAcknowledge')).toBeVisible();
+  await expect(dialog.locator('#kspaceSafetyProceed')).toContainText('dangerous');
+  await dialog.locator('#kspaceSafetyProceed').click();
+  await expect(dialog).toBeHidden({ timeout: 20_000 });
+  await expect(page.locator('#kbtn')).toHaveText('K ✕', { timeout: 20_000 });
+  expect((await debugState(page)).adcCount).toBeGreaterThan(0);
+});
+
+test('uses a modal instead of a long K-space warning in a mobile browser', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/?debug=1');
+  await page.locator('#splash').evaluate(element => { (element as HTMLElement).style.display = 'none'; });
+  await page.evaluate(() => {
+    (window as unknown as { __seqeyesDebug: { showKspaceSafetyWarning: (message: string) => void } })
+      .__seqeyesDebug.showKspaceSafetyWarning('K-space was skipped for 20.0M raster samples. Estimated peak memory: approximately 2.7 GiB (host-dependent).');
+  });
+
+  const dialog = page.locator('#kspaceSafetyOverlay');
+  await expect(dialog).toBeVisible();
+  await expect(page.locator('#viewerNotice')).toBeHidden();
+  await dialog.locator('#kspaceSafetyAcknowledge').click();
+  await expect(dialog).toBeHidden();
+  await page.locator('#kbtn').click();
+  await expect(dialog).toBeVisible();
+});
+
 test('keeps drop enabled for MATLAB on Windows', async ({ page }) => {
   await page.addInitScript(() => {
     const hostWindow = window as Window & { _SEQEYES_HOST?: string; _SEQEYES_PLATFORM?: string };

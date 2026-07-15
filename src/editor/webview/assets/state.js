@@ -26,16 +26,61 @@ ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
 var m1Data=null,m1WindowData=null,m1WindowPending=null,m1WindowRequestId=0,pnsData=null,pnsWindowData=null,pnsWindowPending=null,pnsWindowRequestId=0,pnsBusy=false,m1Busy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null;
 var viewerNotices={};
+var kspaceSafetyWarning=null,kspaceSafetyBusy=false,kspaceSafetyPopupTimer=0;
 var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,waveformOverviewActive=false,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
 var viewerDrawFrame=0,viewerDrawMinimap=false;
+function isMobileSafetyLayout(){return !!(window.matchMedia&&window.matchMedia('(max-width: 768px), (pointer: coarse)').matches);}
+function renderViewerNotices(){
+  var el=document.getElementById('viewerNotice');if(!el)return;el.textContent='';
+  var keys=Object.keys(viewerNotices),visible=0;
+  for(var i=0;i<keys.length;i++){
+    if(keys[i]==='kspace'&&kspaceSafetyWarning&&isMobileSafetyLayout())continue;
+    if(visible)el.appendChild(document.createTextNode(' '));
+    var span=document.createElement('span');span.textContent=viewerNotices[keys[i]];el.appendChild(span);visible++;
+  }
+  if(kspaceSafetyWarning&&!isMobileSafetyLayout()){
+    var action=document.createElement('button');action.type='button';action.className='notice-action';action.textContent=kspaceSafetyBusy?'Calculating…':'Calculate anyway…';action.disabled=kspaceSafetyBusy;
+    action.onclick=showKspaceSafetyDialog;el.appendChild(action);visible++;
+  }
+  el.style.display=visible?'block':'none';
+}
 function setViewerNotice(key,message){
   if(message&&viewerNotices[key]===message)return;
   if(!message&&!Object.prototype.hasOwnProperty.call(viewerNotices,key))return;
   if(message)viewerNotices[key]=message;else delete viewerNotices[key];
-  var el=document.getElementById('viewerNotice');if(!el)return;
-  var messages=Object.keys(viewerNotices).map(function(k){return viewerNotices[k];});
-  el.textContent=messages.join(' ');el.style.display=messages.length?'block':'none';
+  renderViewerNotices();
 }
+function setKspaceSafetyWarning(message){
+  clearTimeout(kspaceSafetyPopupTimer);kspaceSafetyWarning=message||null;kspaceSafetyBusy=false;
+  setViewerNotice('kspace',message?(message+' Calculating anyway may freeze or crash SeqEyes or its host, exhaust system memory, and cause unsaved work to be lost.'):null);
+  if(kspaceSafetyWarning&&isMobileSafetyLayout())kspaceSafetyPopupTimer=setTimeout(showKspaceSafetyDialog,650);
+  if(!kspaceSafetyWarning)hideKspaceSafetyDialog();
+}
+function showKspaceSafetyDialog(){
+  if(!kspaceSafetyWarning)return false;
+  var overlay=document.getElementById('kspaceSafetyOverlay'),text=document.getElementById('kspaceSafetyText'),proceed=document.getElementById('kspaceSafetyProceed');
+  if(!overlay||!text||!proceed)return false;
+  text.textContent=kspaceSafetyWarning+'\n\nCalculating anyway may freeze or crash SeqEyes or its host, exhaust system memory, and cause unsaved work to be lost. Continue only if you accept this risk.';
+  proceed.disabled=kspaceSafetyBusy;proceed.textContent=kspaceSafetyBusy?'Calculating…':'Calculate anyway (dangerous)';
+  overlay.style.display='flex';overlay.setAttribute('aria-hidden','false');
+  var acknowledge=document.getElementById('kspaceSafetyAcknowledge');if(acknowledge)acknowledge.focus();return true;
+}
+function hideKspaceSafetyDialog(){
+  var overlay=document.getElementById('kspaceSafetyOverlay');if(!overlay)return;overlay.style.display='none';overlay.setAttribute('aria-hidden','true');
+}
+function requestDangerousKspaceCalculation(){
+  if(!kspaceSafetyWarning||kspaceSafetyBusy)return;kspaceSafetyBusy=true;hideKspaceSafetyDialog();renderViewerNotices();
+  if(vscApi)vscApi.postMessage({command:'calculateKspaceUnsafe'});
+}
+function finishDangerousKspaceCalculation(error){
+  kspaceSafetyBusy=false;
+  if(!error){setViewerNotice('kspaceOverrideFailure',null);setKspaceSafetyWarning(null);return;}
+  setViewerNotice('kspaceOverrideFailure','The requested K-space calculation failed: '+error);
+  renderViewerNotices();
+}
+document.getElementById('kspaceSafetyAcknowledge').onclick=hideKspaceSafetyDialog;
+document.getElementById('kspaceSafetyProceed').onclick=requestDangerousKspaceCalculation;
+window.addEventListener('resize',renderViewerNotices);
 
 function scheduleViewerDraw(includeMinimap){
   viewerDrawMinimap=viewerDrawMinimap||includeMinimap;
@@ -191,6 +236,16 @@ buildLegend();
 tuSel.onchange=function(){timeUnit=tuSel.value;draw();};
 guSel.onchange=function(){gradUnit=guSel.value;draw();};
 function setExportButtonEnabled(enabled){if(exportBtn)exportBtn.disabled=!enabled;}
+function applySerializedKspace(payload){
+  kTraj=null;kAdc=null;kTime=null;kAdcTime=null;
+  if(!payload)return;
+  kTraj=[payload.kx,payload.ky,payload.kz];kTime=payload.tk;
+  var n=payload.nAdc||0;
+  if(n>0&&payload.axb){
+    kAdc=[decodeB64F32(payload.axb,n),decodeB64F32(payload.ayb,n),decodeB64F32(payload.azb,n)];
+    kAdcTime=decodeB64F32(payload.tab,n);uploadKSpaceGPU();
+  }
+}
 
 /* ── Data reception ───────────────────────────────────────────────────── */
 window.addEventListener('message',function(e){
@@ -216,23 +271,14 @@ window.addEventListener('message',function(e){
   if(m.type==='sequenceData'){
     BL=m.blocks||[];TD=m.totalDuration||0;GR=m.gradRaster||1e-5;
     setViewerNotice('sequence',m.notices&&m.notices.length?m.notices.join(' '):null);
+    setViewerNotice('kspaceOverrideFailure',null);setKspaceSafetyWarning(m.kspaceSafety||null);
     setViewerNotice('m1',null);setViewerNotice('pns',null);setViewerNotice('pnsThreshold',null);
     waveformOverview=createWaveformOverview(BL);
     RR=m.rfRaster||RR;AR=m.adcRaster||AR;BR=m.blockRaster||BR;
     blockPos=m.blockPositions||[];
     mmCache=null;  // invalidate minimap cache on new data
-    kTraj=null;kAdc=null;kTime=null;kAdcTime=null;
+    applySerializedKspace(m.kspace);
     m1Data=null;m1WindowData=null;m1WindowPending=null;pnsData=null;pnsWindowData=null;pnsWindowPending=null;chVis[7]=false;chVis[8]=false;chVis[9]=false;chVis[10]=false;
-    // Decode binary k‑space ADC data (Float32 base64 → typed arrays)
-    if(m.kspace){
-      kTraj=[m.kspace.kx,m.kspace.ky,m.kspace.kz];kTime=m.kspace.tk;
-      var n=m.kspace.nAdc||0;
-      if(n>0&&m.kspace.axb){
-        kAdc=[decodeB64F32(m.kspace.axb,n),decodeB64F32(m.kspace.ayb,n),decodeB64F32(m.kspace.azb,n)];
-        kAdcTime=decodeB64F32(m.kspace.tab,n);
-        uploadKSpaceGPU();  // send to WebGL buffers
-      }
-    }
     // Store timing metadata for minimap tooltip
     if(m.timing) seqTiming=m.timing; else seqTiming=null;
     computeGlobalMax();
@@ -241,6 +287,11 @@ window.addEventListener('message',function(e){
     if(seqTiming&&seqTiming.trTimeSec>0){fitToFirstTR();}else{fit();}
     draw();drawKs();drawMinimap();
     setExportButtonEnabled(true);
+  }else if(m.type==='kspaceData'){
+    applySerializedKspace(m.kspace);finishDangerousKspaceCalculation(null);drawKs();
+    if(typeof kOpen!=='undefined'&&!kOpen)document.getElementById('kbtn').click();
+  }else if(m.type==='kspaceError'){
+    finishDangerousKspaceCalculation(m.message||'Unknown error.');
   }else if(m.type==='m1Data'){
     m1Busy=false;
     if(m.m1&&m.m1.valid){

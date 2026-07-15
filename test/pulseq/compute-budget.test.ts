@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   estimateDerivedCost,
   estimateKspaceCost,
+  estimateKspacePeakMemoryBytes,
+  formatMemorySize,
   formatSampleCount,
   INTERACTIVE_COMPUTE_LIMITS,
 } from '../../src/pulseq/computeBudget';
@@ -33,6 +35,7 @@ describe('interactive calculation budgets', () => {
       gridCandidatePoints: 104_101,
     });
     expect(estimateDerivedCost(blocks, 1e-5).rasterSamples).toBe(80_001);
+    expect(estimateKspacePeakMemoryBytes(estimateKspaceCost(blocks, 1e-5, 1))).toBeGreaterThan(10 * 1024 * 1024);
   });
 
   it('rejects oversized ADC and raster requests before proportional allocations', () => {
@@ -66,6 +69,8 @@ describe('interactive calculation budgets', () => {
       INTERACTIVE_COMPUTE_LIMITS.kspaceRasterSamples,
     );
     expect(formatSampleCount(9_250_001)).toBe('9.3 million');
+    expect(formatMemorySize(2.5 * 1024 ** 3)).toBe('2.5 GiB');
+    expect(formatMemorySize(512 * 1024 ** 2)).toBe('512 MiB');
   });
 });
 

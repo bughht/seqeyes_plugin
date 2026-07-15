@@ -17,6 +17,8 @@ export { selectM1WindowBlocks, selectPnsWindowBlocks } from '../src/pulseq/deriv
 export {
     estimateDerivedCost,
     estimateKspaceCost,
+    estimateKspacePeakMemoryBytes,
+    formatMemorySize,
     formatSampleCount,
     INTERACTIVE_COMPUTE_LIMITS,
 } from '../src/pulseq/computeBudget';

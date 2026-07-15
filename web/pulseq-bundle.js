@@ -34,9 +34,11 @@ var Pulseq = (() => {
     detectSequenceTiming: () => detectSequenceTiming,
     estimateDerivedCost: () => estimateDerivedCost,
     estimateKspaceCost: () => estimateKspaceCost,
+    estimateKspacePeakMemoryBytes: () => estimateKspacePeakMemoryBytes,
     exportKspaceArtifacts: () => exportKspaceArtifacts,
     exportKspaceArtifactsFromBytes: () => exportKspaceArtifactsFromBytes,
     exportKspaceArtifactsFromSequence: () => exportKspaceArtifactsFromSequence,
+    formatMemorySize: () => formatMemorySize,
     formatSampleCount: () => formatSampleCount,
     formatTrajectoryText: () => formatTrajectoryText,
     getTotalDuration: () => getTotalDuration,
@@ -3018,7 +3020,7 @@ var Pulseq = (() => {
     };
   }
   function overlappingBlocks(blocks, startSec, endSec) {
-    return blocks.filter((block) => block.startTime + block.duration >= startSec && block.startTime <= endSec);
+    return blocks.filter((block) => block.startTime + block.duration > startSec && block.startTime <= endSec);
   }
   function finiteMin(a, b) {
     const aa = Number.isFinite(a) ? a : 0;
@@ -3057,6 +3059,11 @@ var Pulseq = (() => {
     const gridCandidatePoints = rasterSamples + adcSamples + gradientSupportPoints + rfSupportPoints + 2;
     return { rasterSamples, adcSamples, gridCandidatePoints };
   }
+  function estimateKspacePeakMemoryBytes(estimate) {
+    const gridBytes = Math.max(0, estimate.gridCandidatePoints) * 96;
+    const adcAndTransferBytes = Math.max(0, estimate.adcSamples) * 104;
+    return Math.ceil(Math.min(Number.MAX_SAFE_INTEGER, (gridBytes + adcAndTransferBytes) * 1.25));
+  }
   function estimateDerivedCost(blocks, gradientRaster) {
     let firstGradientTime = Infinity;
     let lastGradientTime = -Infinity;
@@ -3083,6 +3090,22 @@ var Pulseq = (() => {
     if (value >= 1e6) return `${(value / 1e6).toFixed(1)} million`;
     if (value >= 1e3) return `${(value / 1e3).toFixed(1)} thousand`;
     return String(value);
+  }
+  function formatMemorySize(bytes) {
+    const safeBytes = Math.max(0, Number.isFinite(bytes) ? bytes : 0);
+    const kib = 1024;
+    const mib = kib * 1024;
+    const gib = mib * 1024;
+    if (safeBytes >= gib) {
+      const value = safeBytes / gib;
+      return `${value.toFixed(value >= 10 ? 0 : 1)} GiB`;
+    }
+    if (safeBytes >= mib) {
+      const value = safeBytes / mib;
+      return `${value.toFixed(value >= 10 ? 0 : 1)} MiB`;
+    }
+    if (safeBytes >= kib) return `${(safeBytes / kib).toFixed(1)} KiB`;
+    return `${Math.round(safeBytes)} bytes`;
   }
 
   // src/pulseq/trdetect.ts
