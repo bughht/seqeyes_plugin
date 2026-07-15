@@ -112,13 +112,18 @@ test('loads a dropped official bseq fixture and exports it', async ({ page }) =>
   expect(metadata.adcSampleCount).toBe(4096);
 });
 
-test('keeps URL import hidden in embedded-host mode', async ({ page }) => {
+test('adapts file opening controls for MATLAB embedded-host mode', async ({ page }) => {
   await page.addInitScript(() => {
     (window as Window & { _SEQEYES_HOST?: string })._SEQEYES_HOST = 'matlab';
   });
   await page.goto('/?debug=1');
   await expect(page.locator('#splashOpenUrl')).toBeHidden();
   await expect(page.locator('#openUrlBtn')).toBeHidden();
+  await expect(page.locator('#splashOpen')).toBeHidden();
+  await expect(page.locator('#splashOpenSeq')).toBeVisible();
+  await expect(page.locator('#splashOpenBseq')).toBeVisible();
+  await expect(page.locator('#dropZone')).toHaveClass(/matlab-drop-unavailable/);
+  await expect(page.locator('#dropZone')).toContainText('Drag & drop is unavailable in MATLAB Desktop');
 });
 
 test('keeps theme, zoom clamp, hover readout, and k-space drag interactive', async ({ page }) => {

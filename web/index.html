@@ -55,6 +55,7 @@ canvas{display:block}
 #splash button:hover{opacity:.85}
 #splash .drop{width:300px;height:100px;border:2px dashed var(--gr);border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--lb);transition:border-color .2s,background .2s}
 #splash .drop.dragover{border-color:var(--adc);background:var(--adf)}
+#splash .drop.matlab-drop-unavailable{height:auto;min-height:48px;padding:12px 16px;box-sizing:border-box;border-style:solid;text-align:center}
 .web-url-only{display:none}
 .matlab-only{display:none}
 #urlOverlay{position:fixed;inset:0;background:rgba(0,0,0,.40);z-index:520;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px)}
@@ -754,6 +755,13 @@ function configureHostFileOpenUi(){
   document.getElementById('openBtn').style.display=isMatlab?'none':'inline-flex';
   var buttons=document.querySelectorAll('.matlab-only');
   for(var i=0;i<buttons.length;i++)buttons[i].style.display=isMatlab?'inline-flex':'none';
+  var hostDropZone=document.getElementById('dropZone');
+  if(hostDropZone){
+    hostDropZone.textContent=isMatlab
+      ?'Drag & drop is unavailable in MATLAB Desktop. Use Open .seq or Open .bseq above.'
+      :'Or drag & drop a .seq or .bseq file here';
+    hostDropZone.classList.toggle('matlab-drop-unavailable',isMatlab);
+  }
 }
 
 function openUrlDialog(){
@@ -953,7 +961,7 @@ document.getElementById('ascInput').addEventListener('cancel',function(){
 
 /* ── Drag & drop ──────────────────────────────────────────────────────── */
 var dropZone=document.getElementById('dropZone');
-if(dropZone){
+if(dropZone&&window._SEQEYES_HOST!=='matlab'){
   dropZone.addEventListener('dragover',function(e){e.preventDefault();this.classList.add('dragover');});
   dropZone.addEventListener('dragleave',function(){this.classList.remove('dragover');});
   dropZone.addEventListener('drop',function(e){e.preventDefault();this.classList.remove('dragover');
