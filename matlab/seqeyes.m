@@ -194,7 +194,15 @@ function [newPath, tempDir] = buildMatlabHTML(templatePath, seqFilePath)
 % BUILDMATLABHTML  Inject MATLAB host metadata and optional sequence bytes.
     template = fileread(templatePath);
 
-    inject = '<script>window._SEQEYES_HOST="matlab";';
+    if ismac
+        hostPlatform = 'macos';
+    elseif ispc
+        hostPlatform = 'windows';
+    else
+        hostPlatform = 'linux';
+    end
+    inject = sprintf(['<script>window._SEQEYES_HOST="matlab";' ...
+                      'window._SEQEYES_PLATFORM=%s;'], jsonencode(hostPlatform));
     if ~isempty(seqFilePath)
         [~, name, ext] = fileparts(seqFilePath);
         fileName = [name ext];

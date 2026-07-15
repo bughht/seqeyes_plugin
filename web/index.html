@@ -751,16 +751,17 @@ function configureUrlOpenUi(){
 
 function configureHostFileOpenUi(){
   var isMatlab=window._SEQEYES_HOST==='matlab';
+  var isMatlabMac=isMatlab&&window._SEQEYES_PLATFORM==='macos';
   document.getElementById('splashOpen').style.display=isMatlab?'none':'inline-flex';
   document.getElementById('openBtn').style.display=isMatlab?'none':'inline-flex';
   var buttons=document.querySelectorAll('.matlab-only');
   for(var i=0;i<buttons.length;i++)buttons[i].style.display=isMatlab?'inline-flex':'none';
   var hostDropZone=document.getElementById('dropZone');
   if(hostDropZone){
-    hostDropZone.textContent=isMatlab
-      ?'Drag & drop is unavailable in MATLAB Desktop. Use Open .seq or Open .bseq above.'
+    hostDropZone.textContent=isMatlabMac
+      ?'Drag & drop is unavailable in MATLAB Desktop on macOS. Use Open .seq or Open .bseq above.'
       :'Or drag & drop a .seq or .bseq file here';
-    hostDropZone.classList.toggle('matlab-drop-unavailable',isMatlab);
+    hostDropZone.classList.toggle('matlab-drop-unavailable',isMatlabMac);
   }
 }
 
@@ -961,7 +962,8 @@ document.getElementById('ascInput').addEventListener('cancel',function(){
 
 /* ── Drag & drop ──────────────────────────────────────────────────────── */
 var dropZone=document.getElementById('dropZone');
-if(dropZone&&window._SEQEYES_HOST!=='matlab'){
+var disableExternalDrop=window._SEQEYES_HOST==='matlab'&&window._SEQEYES_PLATFORM==='macos';
+if(dropZone&&!disableExternalDrop){
   dropZone.addEventListener('dragover',function(e){e.preventDefault();this.classList.add('dragover');});
   dropZone.addEventListener('dragleave',function(){this.classList.remove('dragover');});
   dropZone.addEventListener('drop',function(e){e.preventDefault();this.classList.remove('dragover');

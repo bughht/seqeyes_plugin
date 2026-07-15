@@ -112,9 +112,11 @@ test('loads a dropped official bseq fixture and exports it', async ({ page }) =>
   expect(metadata.adcSampleCount).toBe(4096);
 });
 
-test('adapts file opening controls for MATLAB embedded-host mode', async ({ page }) => {
+test('adapts file controls and disables drop for MATLAB on macOS', async ({ page }) => {
   await page.addInitScript(() => {
-    (window as Window & { _SEQEYES_HOST?: string })._SEQEYES_HOST = 'matlab';
+    const hostWindow = window as Window & { _SEQEYES_HOST?: string; _SEQEYES_PLATFORM?: string };
+    hostWindow._SEQEYES_HOST = 'matlab';
+    hostWindow._SEQEYES_PLATFORM = 'macos';
   });
   await page.goto('/?debug=1');
   await expect(page.locator('#splashOpenUrl')).toBeHidden();
@@ -123,7 +125,20 @@ test('adapts file opening controls for MATLAB embedded-host mode', async ({ page
   await expect(page.locator('#splashOpenSeq')).toBeVisible();
   await expect(page.locator('#splashOpenBseq')).toBeVisible();
   await expect(page.locator('#dropZone')).toHaveClass(/matlab-drop-unavailable/);
-  await expect(page.locator('#dropZone')).toContainText('Drag & drop is unavailable in MATLAB Desktop');
+  await expect(page.locator('#dropZone')).toContainText('Drag & drop is unavailable in MATLAB Desktop on macOS');
+});
+
+test('keeps drop enabled for MATLAB on Windows', async ({ page }) => {
+  await page.addInitScript(() => {
+    const hostWindow = window as Window & { _SEQEYES_HOST?: string; _SEQEYES_PLATFORM?: string };
+    hostWindow._SEQEYES_HOST = 'matlab';
+    hostWindow._SEQEYES_PLATFORM = 'windows';
+  });
+  await page.goto('/?debug=1');
+  await expect(page.locator('#dropZone')).not.toHaveClass(/matlab-drop-unavailable/);
+  await expect(page.locator('#dropZone')).toContainText('Or drag & drop a .seq or .bseq file here');
+  await dropSequence(page, fixtures.binaryGre);
+  await expectCanvasVaried(page.locator('#mc'));
 });
 
 test('keeps theme, zoom clamp, hover readout, and k-space drag interactive', async ({ page }) => {
