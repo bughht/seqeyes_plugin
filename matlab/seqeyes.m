@@ -18,6 +18,7 @@ function seqeyes(source)
     if ~isfile(htmlPath)
         htmlPath = fullfile(fileparts(myDir), 'web', 'index.html');
     end
+    templatePath = htmlPath;
 
     if ~isfile(htmlPath)
         error('SeqEyes:NotFound', ...
@@ -80,9 +81,50 @@ function seqeyes(source)
     h = uihtml(g, 'HTMLSource', htmlPath);
     h.Layout.Row = 1;
     h.Layout.Column = 1;
+    h.DataChangedFcn = @(src, event) handleHtmlDataChanged(src, event, templatePath, fig);
 
     fig.UserData.htmlComponent = h;
     drawnow;
+end
+
+function handleHtmlDataChanged(htmlComponent, ~, templatePath, fig)
+% HANDLEHTMLDATACHANGED  Handle requests from the MATLAB-hosted web UI.
+    request = htmlComponent.Data;
+    if ~isstruct(request) || ~isfield(request, 'action') || ...
+            ~strcmp(request.action, 'openSequence')
+        return;
+    end
+
+    userData = fig.UserData;
+    if isfield(userData, 'openDialogBusy') && userData.openDialogBusy
+        return;
+    end
+    userData.openDialogBusy = true;
+    fig.UserData = userData;
+    busyCleanup = onCleanup(@() clearOpenDialogBusy(fig)); %#ok<NASGU>
+
+    [fileName, folderPath] = uigetfile( ...
+        {'*.seq;*.bseq', 'Pulseq sequence files (*.seq, *.bseq)'}, ...
+        'Open Pulseq Sequence');
+    if isequal(fileName, 0)
+        return;
+    end
+
+    [newHtmlPath, tempDir] = buildMatlabHTML(templatePath, fullfile(folderPath, fileName));
+    userData = fig.UserData;
+    userData.cleanup{end+1} = onCleanup(@() safeRemoveDir(tempDir));
+    fig.UserData = userData;
+    htmlComponent.HTMLSource = newHtmlPath;
+end
+
+function clearOpenDialogBusy(fig)
+% CLEAROPENDIALOGBUSY  Release the native file-dialog re-entry guard.
+    if ~isvalid(fig)
+        return;
+    end
+    userData = fig.UserData;
+    userData.openDialogBusy = false;
+    fig.UserData = userData;
 end
 
 % =========================================================================

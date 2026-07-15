@@ -877,13 +877,21 @@ async function openSequenceFromUrl(inputUrl){
 
 /* ── Splash screen handlers ───────────────────────────────────────────── */
 var sequenceFileInput=document.getElementById('fileInput');
-// MATLAB's embedded Chromium delegates this picker to the native OS. On macOS,
-// an unknown extension in accept=".seq,.bseq" can be disabled even though the
-// page supports it. Leave the useful browser filter intact, but let MATLAB's
-// picker show all files and validate the selected extension in handleFile().
-if(window._SEQEYES_HOST==='matlab')sequenceFileInput.removeAttribute('accept');
-document.getElementById('splashOpen').onclick=function(){sequenceFileInput.click();};
-document.getElementById('openBtn').onclick=function(){sequenceFileInput.click();};
+var matlabHtmlComponent=null;
+window.setup=function(htmlComponent){matlabHtmlComponent=htmlComponent;};
+function requestLocalSequence(){
+  if(window._SEQEYES_HOST==='matlab'){
+    if(matlabHtmlComponent){
+      matlabHtmlComponent.Data={action:'openSequence',nonce:Date.now()};
+    }else{
+      alert('The MATLAB file picker is not ready yet. Please try again.');
+    }
+    return;
+  }
+  sequenceFileInput.click();
+}
+document.getElementById('splashOpen').onclick=requestLocalSequence;
+document.getElementById('openBtn').onclick=requestLocalSequence;
 document.getElementById('splashOpenUrl').onclick=function(){openUrlDialog();};
 document.getElementById('openUrlBtn').onclick=function(){openUrlDialog();};
 document.getElementById('exportKspaceBtn').onclick=function(){void exportCurrentKspace();};
