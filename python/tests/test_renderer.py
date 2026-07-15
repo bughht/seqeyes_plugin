@@ -44,6 +44,18 @@ class TestBuildHtml:
         html = _build_html(SAMPLE_SEQ_TEXT, inject_bundle=False)
         expected_b64 = base64.b64encode(SAMPLE_SEQ_TEXT.encode()).decode()
         assert expected_b64 in html
+        assert 'window.SEQEYES_SOURCE_KIND = "text";' in html
+
+    def test_build_html_contains_binary_sequence_data(self):
+        """Binary sources should stay byte-exact and use byte dispatch."""
+        from seqeyes._renderer import _build_html
+
+        source = b"\x01pulseq\x02\x00\xff"
+        html = _build_html(source, label="demo.bseq", inject_bundle=False)
+        expected_b64 = base64.b64encode(source).decode()
+        assert expected_b64 in html
+        assert 'window.SEQEYES_SOURCE_KIND = "bytes";' in html
+        assert 'window.SEQEYES_SOURCE_NAME = "demo.bseq";' in html
 
     def test_build_html_with_theme(self):
         """Theme should be applied as a body class."""

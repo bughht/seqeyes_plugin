@@ -73,7 +73,7 @@ body.layout-vertical #rc{flex-direction:row;gap:4px;top:6px;left:4px}
 <body>
 <!-- ── Toolbar ── -->
 <div id="tb">
-<button id="openBtn" title="Open another .seq file">📂 Open</button>
+<button id="openBtn" title="Open another .seq or .bseq file">📂 Open</button>
 <button id="zi" title="Zoom In (scroll wheel)">+</button>
 <button id="zo" title="Zoom Out">−</button>
 <button id="zf" title="Fit All">Fit</button>
@@ -107,7 +107,7 @@ body.layout-vertical #rc{flex-direction:row;gap:4px;top:6px;left:4px}
 <div id="right"><div class="handle" id="khandle"></div><canvas id="kg"></canvas><canvas id="kc"></canvas><div id="rc"><button id="krst" title="Reset view">↺</button><button id="kax" title="Toggle projection">Prj</button><button id="kunit" title="Toggle k-space unit (1/m ↔ rad/m)">Unit: 1/m</button><div style="display:flex;align-items:center;gap:2px;margin-top:4px"><span style="font-size:9px;color:var(--lb)">Size</span><input type="range" id="kdot" min="1" max="12" value="2" style="width:50px;accent-color:var(--adc)" title="ADC marker size"></div></div></div>
 </div>
 <!-- Hidden file inputs for standalone mode -->
-<input type="file" id="fileInput" accept=".seq" style="display:none">
+<input type="file" id="fileInput" accept=".seq,.bseq" style="display:none">
 <input type="file" id="ascFileInput" accept=".asc" style="display:none">
 
 <!-- ═══════════════════════════════════════════════════════════════════════
@@ -1239,8 +1239,8 @@ document.getElementById('theme').onchange=function(){
 document.getElementById('fileInput').onchange=function(){
   var file=this.files[0];if(!file)return;
   var reader=new FileReader();
-  reader.onload=function(){loadSequenceText(reader.result);};
-  reader.readAsText(file);
+  reader.onload=function(){loadSequenceBytes(new Uint8Array(reader.result),file.name);};
+  reader.readAsArrayBuffer(file);
 };
 
 // ── Minimap ──
@@ -1322,7 +1322,7 @@ new MutationObserver(function(){mmCache=null;draw();drawKs();drawMinimap();}).ob
    ═══════════════════════════════════════════════════════════════════════ */
 
 /**
- * Load raw .seq text, parse it, decode blocks, compute k‑space, and render.
+ * Load a parsed .seq/.bseq source, decode blocks, compute k-space, and render.
  * Called either:
  *   - automatically on page load if window.SEQEYES_RAW_B64 is set
  *   - when the user opens a file via the 📂 button
@@ -1396,10 +1396,10 @@ function convertBlock(blk) {
   return b;
 }
 
-function loadSequenceText(rawText) {
-  if (!rawText || typeof rawText !== 'string') return;
-  if (typeof Pulseq === 'undefined' || typeof Pulseq.parseSequenceText !== 'function') {
-    console.error('[SeqEyes] Pulseq bundle not loaded — cannot parse .seq text.');
+function loadSequence(parseSource) {
+  if (typeof parseSource !== 'function') return;
+  if (typeof Pulseq === 'undefined') {
+    console.error('[SeqEyes] Pulseq bundle not loaded — cannot parse sequence data.');
     return;
   }
 
@@ -1419,7 +1419,7 @@ function loadSequenceText(rawText) {
       fill.style.width = '20%'; pct.textContent = '20%';
 
       // Parse
-      var seq = Pulseq.parseSequenceText(rawText);
+      var seq = parseSource();
       fill.style.width = '40%'; pct.textContent = '40%';
 
       // Detect timing
@@ -1551,14 +1551,40 @@ function loadSequenceText(rawText) {
   });
 }
 
+function loadSequenceText(rawText) {
+  if (!rawText || typeof rawText !== 'string') return;
+  if (typeof Pulseq === 'undefined' || typeof Pulseq.parseSequenceText !== 'function') {
+    console.error('[SeqEyes] Pulseq bundle not loaded — cannot parse .seq text.');
+    return;
+  }
+  loadSequence(function() { return Pulseq.parseSequenceText(rawText); });
+}
+
+function loadSequenceBytes(rawBytes, fileName) {
+  if (!(rawBytes instanceof Uint8Array) || rawBytes.length === 0) return;
+  if (typeof Pulseq === 'undefined' || typeof Pulseq.parseSequenceBytes !== 'function') {
+    console.error('[SeqEyes] Pulseq bundle not loaded — cannot parse sequence bytes.');
+    return;
+  }
+  loadSequence(function() { return Pulseq.parseSequenceBytes(rawBytes, fileName || ''); });
+}
+
 /* SEQEYES_DATA_PLACEHOLDER */
 
 // ── Auto‑load on page start ──
 // Check for data injected by the Python host via base64
 if (window.SEQEYES_RAW_B64) {
   try {
-    var rawText = atob(window.SEQEYES_RAW_B64);
-    loadSequenceText(rawText);
+    var encodedSource = atob(window.SEQEYES_RAW_B64);
+    var sourceBytes = new Uint8Array(encodedSource.length);
+    for (var sourceIndex = 0; sourceIndex < encodedSource.length; sourceIndex++) {
+      sourceBytes[sourceIndex] = encodedSource.charCodeAt(sourceIndex);
+    }
+    if (window.SEQEYES_SOURCE_KIND === 'bytes') {
+      loadSequenceBytes(sourceBytes, window.SEQEYES_SOURCE_NAME || 'sequence.bseq');
+    } else {
+      loadSequenceText(new TextDecoder('utf-8').decode(sourceBytes));
+    }
   } catch(e) {
     console.error('[SeqEyes] Failed to decode base64 sequence data:', e);
   }
@@ -1569,10 +1595,10 @@ document.addEventListener('dragover', function(e) { e.preventDefault(); });
 document.addEventListener('drop', function(e) {
   e.preventDefault();
   var file = e.dataTransfer.files[0];
-  if (!file || !file.name.endsWith('.seq')) return;
+  if (!file || !/\.(?:seq|bseq)$/i.test(file.name)) return;
   var reader = new FileReader();
-  reader.onload = function() { loadSequenceText(reader.result); };
-  reader.readAsText(file);
+  reader.onload = function() { loadSequenceBytes(new Uint8Array(reader.result), file.name); };
+  reader.readAsArrayBuffer(file);
 });
 
 // ── Defer initial render until after browser layout is complete ──

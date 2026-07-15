@@ -12,7 +12,7 @@ import base64
 import json
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, Union
 
 
 # ── Paths ─────────────────────────────────────────────────────────────────
@@ -27,6 +27,7 @@ _BUNDLE_CANDIDATES = [
     Path.cwd() / "web" / "pulseq-bundle.js",
 ]
 _VALID_GRAD_UNITS = {"Hz/m", "mT/m", "G/cm"}
+SequenceSource = Union[str, bytes, bytearray, memoryview]
 
 
 def _find_bundle() -> str:
@@ -60,7 +61,7 @@ def _normalize_grad_disp(unit: str) -> str:
 
 
 def _build_html(
-    seq_text: str,
+    sequence_source: SequenceSource,
     *,
     theme: Optional[str] = None,
     inject_bundle: bool = True,
@@ -74,8 +75,8 @@ def _build_html(
 
     Parameters
     ----------
-    seq_text : str
-        Raw .seq file content.
+    sequence_source : str or bytes-like
+        Raw text ``.seq`` content or binary ``.bseq`` bytes.
     theme : str or None
         CSS theme class to apply to ``<body>``.
     inject_bundle : bool
@@ -93,7 +94,9 @@ def _build_html(
     """
     template = _read_viewer_template()
     grad_disp = _normalize_grad_disp(grad_disp)
-    seq_b64 = base64.b64encode(seq_text.encode("utf-8")).decode("ascii")
+    source_is_text = isinstance(sequence_source, str)
+    source_bytes = sequence_source.encode("utf-8") if source_is_text else bytes(sequence_source)
+    source_b64 = base64.b64encode(source_bytes).decode("ascii")
 
     # 1. Inject the pulseq-bundle.js
     bundle_placeholder = "<!-- PULSEQ_BUNDLE_PLACEHOLDER -->"
@@ -108,7 +111,9 @@ def _build_html(
 
     # 2. Build options injection block (sequence data + display opts)
     opts = [
-        f"window.SEQEYES_RAW_B64 = {json.dumps(seq_b64)};",
+        f"window.SEQEYES_RAW_B64 = {json.dumps(source_b64)};",
+        f"window.SEQEYES_SOURCE_KIND = {json.dumps('text' if source_is_text else 'bytes')};",
+        f"window.SEQEYES_SOURCE_NAME = {json.dumps(label)};",
         f"window.SEQEYES_LABEL = {json.dumps(label)};",
         f"window.SEQEYES_SHOW_BLOCKS = {json.dumps(show_blocks)};",
         f"window.SEQEYES_TIME_RANGE = {json.dumps(list(time_range))};",
@@ -144,8 +149,8 @@ class SeqEyesViewer:
 
     Parameters
     ----------
-    seq_text : str
-        Raw .seq file content as a string.
+    sequence_source : str or bytes-like
+        Raw text ``.seq`` content or binary ``.bseq`` bytes.
     label : str
         Display label (not yet rendered on the viewer).
     show_blocks : bool
@@ -167,7 +172,7 @@ class SeqEyesViewer:
 
     def __init__(
         self,
-        seq_text: str,
+        sequence_source: SequenceSource,
         *,
         label: str = "",
         show_blocks: bool = False,
@@ -178,7 +183,9 @@ class SeqEyesViewer:
         width: str = "100%",
         height: str = "550px",
     ) -> None:
-        self._seq_text = seq_text
+        if not isinstance(sequence_source, (str, bytes, bytearray, memoryview)):
+            raise TypeError("sequence_source must be .seq text or .bseq bytes")
+        self._sequence_source = sequence_source
         self._label = label
         self._show_blocks = show_blocks
         self._time_range = time_range
@@ -188,12 +195,28 @@ class SeqEyesViewer:
         self._width = width
         self._height = height
 
+    @classmethod
+    def from_file(cls, path: Union[str, os.PathLike[str]], **kwargs: Any) -> "SeqEyesViewer":
+        """Create a viewer from a local ``.seq`` or ``.bseq`` file."""
+        source_path = Path(path)
+        if source_path.suffix.lower() not in {".seq", ".bseq"}:
+            raise ValueError("SeqEyesViewer.from_file() expects a .seq or .bseq file")
+        if not source_path.is_file():
+            raise FileNotFoundError(source_path)
+        kwargs.setdefault("label", source_path.name)
+        source: SequenceSource = (
+            source_path.read_text(encoding="utf-8")
+            if source_path.suffix.lower() == ".seq"
+            else source_path.read_bytes()
+        )
+        return cls(source, **kwargs)
+
     # ── Jupyter integration ───────────────────────────────────────────
 
     def _repr_html_(self) -> str:
         """Return an HTML iframe that Jupyter renders inline."""
         html = _build_html(
-            self._seq_text,
+            self._sequence_source,
             theme=self._theme,
             label=self._label,
             show_blocks=self._show_blocks,
@@ -231,7 +254,7 @@ class SeqEyesViewer:
     def to_html(self, *, inject_bundle: bool = True) -> str:
         """Return the full standalone HTML string (for saving to a file)."""
         return _build_html(
-            self._seq_text,
+            self._sequence_source,
             theme=self._theme,
             inject_bundle=inject_bundle,
             label=self._label,

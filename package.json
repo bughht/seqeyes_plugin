@@ -146,7 +146,7 @@
     "check": "npm run compile && npm run lint && npm test && npm run build:web",
     "export:kspace": "node out/cli/exportKspace.js",
     "package": "vsce package",
-    "build:web": "npx esbuild web/pulseq-browser.ts --bundle --format=iife --global-name=Pulseq --outfile=web/pulseq-bundle.js --target=es2020 && node -e \"require('fs').copyFileSync('images/logo.png','web/logo.png')\"",
+    "build:web": "npx esbuild web/pulseq-browser.ts --bundle --format=iife --global-name=Pulseq --outfile=web/pulseq-bundle.js --target=es2020 && node -e \"const fs=require('fs');fs.copyFileSync('images/logo.png','web/logo.png');fs.copyFileSync('web/pulseq-bundle.js','python/src/seqeyes/resources/pulseq-bundle.js')\"",
     "predeploy": "npm run build:web"
   },
   "devDependencies": {

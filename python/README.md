@@ -1,7 +1,7 @@
 # SeqEyes — Interactive Pulseq MRI Sequence Viewer for Python
 
 **SeqEyes** is a lightweight Python package that provides interactive
-visualization of Pulseq (.seq) MRI sequences in Jupyter notebooks.
+visualization of Pulseq text (`.seq`) and binary (`.bseq`) MRI sequences in Jupyter notebooks.
 It works as a drop‑in replacement for `pypulseq.Sequence.plot()`,
 rendering an interactive viewer directly in Jupyter notebook cell
 output — just like Plotly.
@@ -60,13 +60,23 @@ with open('my_sequence.seq') as f:
 viewer  # renders inline in Jupyter
 ```
 
+Open either supported file format directly:
+
+```python
+from seqeyes import SeqEyesViewer
+
+SeqEyesViewer.from_file("my_sequence.seq", theme="dark")
+SeqEyesViewer.from_file("my_sequence.bseq", theme="dark")
+```
+
 ## API Reference
 
 | Function | Description |
 |---|---|
 | `seqeyes.set(**kwargs)` | Enable SeqEyes and set global defaults (`theme`, `show_blocks`, `time_disp`, `grad_disp`, `time_range`) |
 | `seqeyes.reset()` | Restore matplotlib `seq.plot()` and clear all defaults |
-| `SeqEyesViewer(seq_text, ...)` | Low‑level viewer for raw `.seq` content (no pypulseq needed) |
+| `SeqEyesViewer(source, ...)` | Low-level viewer for raw `.seq` text or `.bseq` bytes |
+| `SeqEyesViewer.from_file(path, ...)` | Open a local `.seq` or `.bseq` file without pypulseq |
 
 ## Viewer Controls
 

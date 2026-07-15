@@ -44,6 +44,32 @@ class TestSeqEyesViewer:
         v = SeqEyesViewer(SAMPLE_SEQ_TEXT)
         assert v is not None
 
+    def test_viewer_loads_binary_file(self, tmp_path):
+        source = b"\x01pulseq\x02\x00\xff"
+        path = tmp_path / "demo.bseq"
+        path.write_bytes(source)
+
+        raw = SeqEyesViewer.from_file(path).to_html(inject_bundle=False)
+
+        assert 'window.SEQEYES_SOURCE_KIND = "bytes";' in raw
+        assert 'window.SEQEYES_SOURCE_NAME = "demo.bseq";' in raw
+        assert __import__("base64").b64encode(source).decode() in raw
+
+    def test_viewer_loads_text_file(self, tmp_path):
+        path = tmp_path / "demo.seq"
+        path.write_text(SAMPLE_SEQ_TEXT, encoding="utf-8")
+
+        raw = SeqEyesViewer.from_file(path).to_html(inject_bundle=False)
+
+        assert 'window.SEQEYES_SOURCE_KIND = "text";' in raw
+        assert 'window.SEQEYES_SOURCE_NAME = "demo.seq";' in raw
+
+    def test_viewer_rejects_unsupported_file_extension(self, tmp_path):
+        path = tmp_path / "demo.txt"
+        path.write_text("not a sequence", encoding="utf-8")
+        with pytest.raises(ValueError, match=r"\.seq or \.bseq"):
+            SeqEyesViewer.from_file(path)
+
     def test_repr_html_is_iframe(self):
         v = SeqEyesViewer(SAMPLE_SEQ_TEXT)
         html = v._repr_html_()

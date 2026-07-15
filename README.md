@@ -140,7 +140,7 @@ All the same features as the other versions — interactive waveforms, k‑space
 - **Block boundary lines** — toggle in toolbar
 - **Optimized for large files** — binary k‑space encoding, bounds-checked parsers, and no text conversion for `.bseq`
 - **Pulseq format support** — text `.seq` v1.2.0–v1.5.x and official binary `.bseq` v1.5.2 reading
-- **Current `.bseq` hosts** — standalone web, VS Code, and the k-space export CLI; direct MATLAB/Python `.bseq` path APIs are not yet exposed
+- **Current `.bseq` hosts** — standalone web, VS Code, Python `SeqEyesViewer.from_file()`, and the k-space export CLI; a direct MATLAB `.bseq` path API is not yet exposed
 
 ## Usage
 
