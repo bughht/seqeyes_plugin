@@ -319,10 +319,15 @@ function drawRfOverview(summary,vi,ch,colors,vs,ve){
       ctx.fillStyle=colors.rff;ctx.fillRect(x0,y-ch*.45,Math.max(1,x1-x0),ch*.9);
       var n=Math.min(rf.t?rf.t.length:0,rf.m?rf.m.length:0),pointBudget=Math.max(8,Math.ceil(Math.max(1,x1-x0)*4)),first=true;
       ctx.strokeStyle=colors.rf;ctx.lineWidth=1.1;ctx.beginPath();
-      var emitted=forEachWaveformPoint(rf.t,rf.m,pointBudget,function(time,value){var sx=t2x(time),sy=base-value*scale;if(first){ctx.moveTo(sx,sy);first=false;}else ctx.lineTo(sx,sy);});
+      var emitted=rf.bp?appendBlockRfPath(rf,base,scale):forEachWaveformPoint(rf.t,rf.m,pointBudget,function(time,value){var sx=t2x(time),sy=base-value*scale;if(first){ctx.moveTo(sx,sy);first=false;}else ctx.lineTo(sx,sy);});
       if(emitted>1)ctx.stroke();rfRenderPointCount+=emitted;if(n<=pointBudget)rfRawCurveCount++;else rfReducedCurveCount++;
     }
   });
+}
+
+function appendBlockRfPath(rf,base,scale){
+  var amplitude=isFinite(rf.pk)?rf.pk:(rf.m&&rf.m.length?Math.abs(rf.m[0]):0),top=base-amplitude*scale,x0=t2x(rf.s),x1=t2x(rf.s+rf.d);
+  ctx.moveTo(x0,base);ctx.lineTo(x0,top);ctx.lineTo(x1,top);ctx.lineTo(x1,base);return 4;
 }
 
 function drawPhaseSampled(start,end,vi,ch,colors,vs,ve,maxPoints){
@@ -400,7 +405,7 @@ function drawRfBlocks(start,end,vi,ch,colors,vs,ve,maxPoints){
       ctx.fillStyle=colors.rff;ctx.fillRect(x0,y-ch*.45,x1-x0,ch*.9);
       if(!rf.t||!rf.m||rf.t.length<2)continue;
       var n=Math.min(rf.t.length,rf.m.length);
-      var first=true,emitted=forEachWaveformPoint(rf.t,rf.m,pointBudget,function(time,value){
+      var first=true,emitted=rf.bp?appendBlockRfPath(rf,y+ch*.45,scale):forEachWaveformPoint(rf.t,rf.m,pointBudget,function(time,value){
         var sx=t2x(time),sy=y+ch*.45-value*scale;if(first){ctx.moveTo(sx,sy);first=false;}else ctx.lineTo(sx,sy);
       });
       rfRenderPointCount+=emitted;if(n<=pointBudget)rfRawCurveCount++;else rfReducedCurveCount++;hasPath=hasPath||emitted>1;

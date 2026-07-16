@@ -578,13 +578,14 @@ function downsampleWaveform(time,values,maxPts){
 }
 
 function waveformMagnitudeMetrics(time,values){
-  var n=Math.min(time?time.length:0,values?values.length:0),peak=0,area=0;
-  for(var i=0;i<n;i++)if(isFinite(values[i]))peak=Math.max(peak,Math.abs(values[i]));
+  var n=Math.min(time?time.length:0,values?values.length:0),peak=0,min=Infinity,max=-Infinity,area=0,finiteCount=0;
+  for(var i=0;i<n;i++)if(isFinite(values[i])){var magnitude=Math.abs(values[i]);peak=Math.max(peak,magnitude);min=Math.min(min,magnitude);max=Math.max(max,magnitude);finiteCount++;}
   for(var sample=1;sample<n;sample++){
     var dt=time[sample]-time[sample-1];if(!isFinite(dt)||dt<=0)continue;
     area+=.5*(Math.abs(values[sample-1]||0)+Math.abs(values[sample]||0))*dt;
   }
-  return{peak:peak,area:area};
+  var tolerance=Math.max(1e-12,peak*1e-9),blockPulse=finiteCount===n&&n>=2&&peak>0&&max-min<=tolerance;
+  return{peak:peak,area:area,blockPulse:blockPulse};
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -604,6 +605,7 @@ function serializeBlocks(blocks){
         m:displayM.values,
         pk:magnitudeMetrics.peak,
         ar:magnitudeMetrics.area,
+        bp:magnitudeMetrics.blockPulse,
         pt:downsample(b.rf.timePoints,MAX_PTS),
         p:rawP?rawP.map(function(v){return((v%(2*Math.PI))+2*Math.PI)%(2*Math.PI)}):null,
         a:b.rf.amplitude,fo:b.rf.freqOffset,po:b.rf.phaseOffset,
@@ -1570,10 +1572,15 @@ function drawRfOverview(summary,vi,ch,colors,vs,ve){
       ctx.fillStyle=colors.rff;ctx.fillRect(x0,y-ch*.45,Math.max(1,x1-x0),ch*.9);
       var n=Math.min(rf.t?rf.t.length:0,rf.m?rf.m.length:0),pointBudget=Math.max(8,Math.ceil(Math.max(1,x1-x0)*4)),first=true;
       ctx.strokeStyle=colors.rf;ctx.lineWidth=1.1;ctx.beginPath();
-      var emitted=forEachWaveformPoint(rf.t,rf.m,pointBudget,function(time,value){var sx=t2x(time),sy=base-value*scale;if(first){ctx.moveTo(sx,sy);first=false;}else ctx.lineTo(sx,sy);});
+      var emitted=rf.bp?appendBlockRfPath(rf,base,scale):forEachWaveformPoint(rf.t,rf.m,pointBudget,function(time,value){var sx=t2x(time),sy=base-value*scale;if(first){ctx.moveTo(sx,sy);first=false;}else ctx.lineTo(sx,sy);});
       if(emitted>1)ctx.stroke();rfRenderPointCount+=emitted;if(n<=pointBudget)rfRawCurveCount++;else rfReducedCurveCount++;
     }
   });
+}
+
+function appendBlockRfPath(rf,base,scale){
+  var amplitude=isFinite(rf.pk)?rf.pk:(rf.m&&rf.m.length?Math.abs(rf.m[0]):0),top=base-amplitude*scale,x0=t2x(rf.s),x1=t2x(rf.s+rf.d);
+  ctx.moveTo(x0,base);ctx.lineTo(x0,top);ctx.lineTo(x1,top);ctx.lineTo(x1,base);return 4;
 }
 
 function drawPhaseSampled(start,end,vi,ch,colors,vs,ve,maxPoints){
@@ -1651,7 +1658,7 @@ function drawRfBlocks(start,end,vi,ch,colors,vs,ve,maxPoints){
       ctx.fillStyle=colors.rff;ctx.fillRect(x0,y-ch*.45,x1-x0,ch*.9);
       if(!rf.t||!rf.m||rf.t.length<2)continue;
       var n=Math.min(rf.t.length,rf.m.length);
-      var first=true,emitted=forEachWaveformPoint(rf.t,rf.m,pointBudget,function(time,value){
+      var first=true,emitted=rf.bp?appendBlockRfPath(rf,y+ch*.45,scale):forEachWaveformPoint(rf.t,rf.m,pointBudget,function(time,value){
         var sx=t2x(time),sy=y+ch*.45-value*scale;if(first){ctx.moveTo(sx,sy);first=false;}else ctx.lineTo(sx,sy);
       });
       rfRenderPointCount+=emitted;if(n<=pointBudget)rfRawCurveCount++;else rfReducedCurveCount++;hasPath=hasPath||emitted>1;
@@ -2403,7 +2410,7 @@ if(location.search.indexOf("debug=1")>=0){
       if(!isFinite(start)||!isFinite(end)||end<=start)return false;
       ox=Math.max(0,start);sc=plotWidth()/(end-start);clampView();draw();drawMinimap();return true;
     },
-    rfEvents:function(){var out=[];for(var i=0;i<BL.length;i++)if(BL[i].rf)out.push({start:BL[i].rf.s,end:BL[i].rf.s+BL[i].rf.d,points:Math.min(BL[i].rf.t?BL[i].rf.t.length:0,BL[i].rf.m?BL[i].rf.m.length:0)});return out;},
+    rfEvents:function(){var out=[];for(var i=0;i<BL.length;i++)if(BL[i].rf)out.push({start:BL[i].rf.s,end:BL[i].rf.s+BL[i].rf.d,points:Math.min(BL[i].rf.t?BL[i].rf.t.length:0,BL[i].rf.m?BL[i].rf.m.length:0),blockPulse:!!BL[i].rf.bp});return out;},
     showKspaceSafetyWarning:function(message){setKspaceSafetyWarning(message||'K-space exceeds the interactive safety budget.');},
     kspaceSafetyState:function(){return{active:!!kspaceSafetyWarning,busy:kspaceSafetyBusy,dialogOpen:document.getElementById('kspaceSafetyOverlay').style.display!=='none'};}
   };

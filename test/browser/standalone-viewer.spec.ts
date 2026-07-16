@@ -82,9 +82,11 @@ test('preserves resolvable RF pulse shapes and bounds the full-sequence RF overv
     start: number;
     end: number;
     points: number;
+    blockPulse: boolean;
   }>;
   expect(rfEvents.length).toBeGreaterThan(20);
   expect(Math.min(...rfEvents.map(event => event.points))).toBeGreaterThan(100);
+  expect(rfEvents.some(event => event.blockPulse)).toBe(false);
 
   const first = rfEvents[0];
   const last = rfEvents[7];
@@ -116,8 +118,13 @@ test('keeps homogeneous RF pulses discrete and renders mixed dense RF as bounded
   await openSequenceText(page, 'homogeneous-rf.seq', syntheticRfSequence(877, false));
   await page.locator('#zf').click();
   const homogeneous = await debugState(page);
+  const homogeneousEvents = await page.evaluate(() => window.__seqeyesDebug.rfEvents()) as Array<{ blockPulse: boolean }>;
+  expect(homogeneousEvents).toHaveLength(877);
+  expect(homogeneousEvents.every(event => event.blockPulse)).toBe(true);
   expect(homogeneous.rfOverviewBuckets).toBe(0);
   expect(homogeneous.rfRawCurves).toBeGreaterThan(800);
+  expect(homogeneous.rfReducedCurves).toBe(0);
+  expect(homogeneous.rfRenderPoints).toBe(homogeneous.rfRawCurves * 4);
   await expectCanvasRegionVaried(page.locator('#mc'), 0.05, 0, 0.9, 0.18);
 
   await openSequenceText(page, 'mixed-dense-rf.seq', syntheticRfSequence(2_500, true));
