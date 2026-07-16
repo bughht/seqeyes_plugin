@@ -638,11 +638,13 @@ function serializeBlocks(blocks: DecodedBlock[]): object[] {
         const o: Record<string, unknown> = { i: b.index, s: b.startTime, d: b.duration };
 
         if (b.rf) {
+            const displayMagnitude = downsampleM4(b.rf.timePoints, b.rf.magnitude, MAX_DISPLAY_PTS);
             const rawP = downsample(b.rf.phase, MAX_DISPLAY_PTS);
             o.rf = {
                 s: b.rf.startTime, d: b.rf.duration,
-                t: downsample(b.rf.timePoints, MAX_DISPLAY_PTS),
-                m: downsample(b.rf.magnitude, MAX_DISPLAY_PTS),
+                t: displayMagnitude.time,
+                m: displayMagnitude.values,
+                pt: downsample(b.rf.timePoints, MAX_DISPLAY_PTS),
                 p: rawP ? rawP.map(v => ((v % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)) : null,
                 a: b.rf.amplitude, fo: b.rf.freqOffset, po: b.rf.phaseOffset,
                 u: b.rf.use || 'u',   // 'e'=excitation, 'r'=refocusing, 'i'=inversion, 's'=saturation, 'u'=undefined

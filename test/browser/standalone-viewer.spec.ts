@@ -22,6 +22,10 @@ interface DebugState {
   derivedEnvelopeCurves: number;
   derivedRawCurves: number;
   waveformOverviewActive: boolean;
+  rfRenderPoints: number;
+  rfRawCurves: number;
+  rfReducedCurves: number;
+  rfOverviewBuckets: number;
   notices: string[];
   lastDrawDurationMs: number;
   drawCount: number;
@@ -70,6 +74,41 @@ test('renders GRE waveform, minimap, k-space panel, and enables export', async (
   expect(state.blocks).toBeGreaterThan(0);
   expect(state.adcCount).toBeGreaterThan(0);
   expect(state.exportEnabled).toBe(true);
+});
+
+test('preserves resolvable RF pulse shapes and bounds the full-sequence RF overview', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  const rfEvents = await page.evaluate(() => window.__seqeyesDebug.rfEvents()) as Array<{
+    start: number;
+    end: number;
+    points: number;
+  }>;
+  expect(rfEvents.length).toBeGreaterThan(20);
+  expect(Math.min(...rfEvents.map(event => event.points))).toBeGreaterThan(100);
+
+  const first = rfEvents[0];
+  const last = rfEvents[7];
+  const padding = (last.end - first.start) * 0.03;
+  const changed = await page.evaluate(({ start, end }) => window.__seqeyesDebug.setView(start, end), {
+    start: Math.max(0, first.start - padding),
+    end: last.end + padding,
+  });
+  expect(changed).toBe(true);
+
+  const detailed = await debugState(page);
+  expect(detailed.rfRawCurves).toBeGreaterThanOrEqual(8);
+  expect(detailed.rfReducedCurves).toBe(0);
+  expect(detailed.rfOverviewBuckets).toBe(0);
+  expect(detailed.rfRenderPoints).toBeGreaterThan(1_000);
+  await expectCanvasRegionVaried(page.locator('#mc'), 0.05, 0, 0.9, 0.18);
+
+  await page.locator('#zf').click();
+  const overview = await debugState(page);
+  expect(overview.rfReducedCurves).toBeGreaterThan(20);
+  expect(overview.rfOverviewBuckets).toBe(0);
+  expect(overview.rfRenderPoints).toBeGreaterThan(overview.rfReducedCurves * 3);
+  expect(overview.rfRenderPoints).toBeLessThan(12_000);
+  await expectCanvasRegionVaried(page.locator('#mc'), 0.05, 0, 0.9, 0.18);
 });
 
 test('renders spiral and rotation-extension fixtures without blank canvases', async ({ page }) => {

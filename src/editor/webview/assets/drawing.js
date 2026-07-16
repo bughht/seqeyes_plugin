@@ -2,7 +2,7 @@
    Main draw loop
    ═══════════════════════════════════════════════════════════════════════ */
 function draw(){
-  var drawStarted=performance.now();derivedRenderPointCount=0;derivedEnvelopeCurveCount=0;derivedRawCurveCount=0;viewerDrawCount++;
+  var drawStarted=performance.now();derivedRenderPointCount=0;derivedEnvelopeCurveCount=0;derivedRawCurveCount=0;rfRenderPointCount=0;rfRawCurveCount=0;rfReducedCurveCount=0;rfOverviewBucketCount=0;viewerDrawCount++;
   var w=mc.width/(window.devicePixelRatio||1),h=mc.height/(window.devicePixelRatio||1);
   var s=getComputedStyle(document.body);
   ctx.clearRect(0,0,w,h);
@@ -279,11 +279,13 @@ function drawBlocks(vs,ve,s){
   var overview=selectWaveformOverview(waveformOverview,range.start,range.end,pixelBudget);
   function useOverview(key){return !!overview&&waveformVisiblePointCount(waveformOverview,key,range.start,range.end)>pixelBudget;}
   function useGradientOverview(key){return !!overview&&waveformVisibleGradientPointCount(BL,key,range.start,range.end,vs,ve)>pixelBudget*8;}
-  var overviewUse={rf:useOverview('rf'),phase:useOverview('phase'),gx:useGradientOverview('gx'),gy:useGradientOverview('gy'),gz:useGradientOverview('gz'),adc:useOverview('adc')};
+  var rfPoints=waveformVisiblePointCount(waveformOverview,'rf',range.start,range.end),rfEvents=waveformVisiblePointCount(waveformOverview,'rfEvents',range.start,range.end);
+  var aggregateRf=!!overview&&rfEvents>pixelBudget*2,reduceRf=aggregateRf||rfPoints>pixelBudget*8;
+  var overviewUse={rf:reduceRf,phase:useOverview('phase'),gx:useGradientOverview('gx'),gy:useGradientOverview('gy'),gz:useGradientOverview('gz'),adc:useOverview('adc')};
   var dense=overviewUse.rf||overviewUse.phase||overviewUse.gx||overviewUse.gy||overviewUse.gz||overviewUse.adc;
   waveformOverviewActive=dense;
   setViewerNotice('dense',dense?'Dense overview mode is active. Zoom in for full waveform detail.':null);
-  if(rows[0]>=0){if(overviewUse.rf)drawRfOverview(overview,rows[0],ch,colors,vs,ve);else drawRfBlocks(range.start,range.end,rows[0],ch,colors,vs,ve);}
+  if(rows[0]>=0){if(aggregateRf)drawRfOverview(overview,rows[0],ch,colors,vs,ve);else drawRfBlocks(range.start,range.end,rows[0],ch,colors,vs,ve,pixelBudget*8);}
   if(rows[1]>=0){if(overviewUse.phase)drawPhaseSampled(range.start,range.end,rows[1],ch,colors,vs,ve,pixelBudget);else drawPhaseBlocks(range.start,range.end,rows[1],ch,colors,vs,ve);}
   if(rows[2]>=0){if(overviewUse.gx)drawGradientOverview(overview,'gx',rows[2],2,ch,colors.gx,vs,ve);else drawGradientBlocks(range.start,range.end,'gx',rows[2],2,ch,colors.gx,vs,ve);}
   if(rows[3]>=0){if(overviewUse.gy)drawGradientOverview(overview,'gy',rows[3],3,ch,colors.gy,vs,ve);else drawGradientBlocks(range.start,range.end,'gy',rows[3],3,ch,colors.gy,vs,ve);}
@@ -295,11 +297,12 @@ function drawBlocks(vs,ve,s){
 function drawRfOverview(summary,vi,ch,colors,vs,ve){
   var level=summary.level,y=cy(vi),scale=ch*.9/channelRange(0);
   rowClip(vi,ch,function(){
-    ctx.strokeStyle=colors.rf;ctx.lineWidth=1;ctx.beginPath();
+    ctx.strokeStyle=colors.rf;ctx.fillStyle=colors.rff;ctx.lineWidth=1;ctx.beginPath();
     for(var i=summary.first;i<summary.last;i++){
-      if(level.t1[i]<vs||level.t0[i]>ve||level.rfMin[i]===Infinity)continue;
-      var x=t2x(.5*(Math.max(vs,level.t0[i])+Math.min(ve,level.t1[i]))),y0=y+ch*.45-level.rfMin[i]*scale,y1=y+ch*.45-level.rfMax[i]*scale;
-      if(Math.abs(y1-y0)<1){y0-=.5;y1+=.5;}ctx.moveTo(x,y0);ctx.lineTo(x,y1);
+      if(level.rfEnd[i]<vs||level.rfStart[i]>ve||level.rfMin[i]===Infinity)continue;
+      var x0=t2x(Math.max(vs,level.rfStart[i])),x1=t2x(Math.min(ve,level.rfEnd[i])),width=Math.max(1,x1-x0);
+      var y0=y+ch*.45-level.rfMin[i]*scale,y1=y+ch*.45-level.rfMax[i]*scale,top=Math.min(y0,y1),height=Math.max(1,Math.abs(y1-y0));
+      ctx.fillRect(x0,y-ch*.45,width,ch*.9);ctx.rect(x0,top,width,height);rfOverviewBucketCount++;
     }
     ctx.stroke();
   });
@@ -314,9 +317,9 @@ function drawPhaseSampled(start,end,vi,ch,colors,vs,ve,maxPoints){
       var ordinal=Math.min(last-1,Math.floor(first+(sampleIndex+.5)*sampleStep)),lo=start,hi=end;
       while(lo<hi){var mid=(lo+hi)>>1;if(prefix[mid+1]<=ordinal)lo=mid+1;else hi=mid;}
       if(lo>=end)continue;
-      var block=BL[lo],rf=block.rf,rfCount=rf&&rf.t&&rf.p?Math.min(rf.t.length,rf.p.length):0;
+      var block=BL[lo],rf=block.rf,phaseTime=rf&&(rf.pt||rf.t),rfCount=phaseTime&&rf.p?Math.min(phaseTime.length,rf.p.length):0;
       var local=ordinal-prefix[lo],time=NaN,value=NaN,isAdc=false;
-      if(local<rfCount){time=rf.t[local];value=rf.p[local];}
+      if(local<rfCount){time=phaseTime[local];value=rf.p[local];}
       else if(block.adc&&block.adc.n>1){
         var adc=block.adc,adcStep=Math.max(1,Math.ceil(adc.n/200)),adcSample=(local-rfCount)*adcStep;
         var adcStart=adc.s+adc.d,adcEnd=adcStart+adc.n*adc.dw;
@@ -364,21 +367,26 @@ function visibleBlockRange(vs,ve){
   return{start:Math.max(0,start-1),end:Math.min(BL.length,lo+1)};
 }
 
-function drawRfBlocks(start,end,vi,ch,colors,vs,ve){
+function drawRfBlocks(start,end,vi,ch,colors,vs,ve,maxPoints){
   var y=cy(vi),scale=ch*.9/channelRange(0);
   rowClip(vi,ch,function(){
-    ctx.strokeStyle=colors.rf;ctx.lineWidth=1.1;ctx.beginPath();var hasPath=false;
+    var visibleEvents=[];
     for(var bi=start;bi<end;bi++){
       var rf=BL[bi].rf;if(!rf||rf.s+rf.d<vs||rf.s>ve)continue;
+      visibleEvents.push(rf);
+    }
+    var pointBudget=Math.max(4,Math.floor((maxPoints||Infinity)/Math.max(1,visibleEvents.length)));
+    ctx.strokeStyle=colors.rf;ctx.lineWidth=1.1;ctx.beginPath();var hasPath=false;
+    for(var eventIndex=0;eventIndex<visibleEvents.length;eventIndex++){
+      var rf=visibleEvents[eventIndex];
       var x0=t2x(rf.s),x1=t2x(rf.s+rf.d);
       ctx.fillStyle=colors.rff;ctx.fillRect(x0,y-ch*.45,x1-x0,ch*.9);
       if(!rf.t||!rf.m||rf.t.length<2)continue;
       var n=Math.min(rf.t.length,rf.m.length);
-      for(var i=0;i<n;i++){
-        var sx=t2x(rf.t[i]),sy=y+ch*.45-rf.m[i]*scale;
-        if(i===0)ctx.moveTo(sx,sy);else ctx.lineTo(sx,sy);
-      }
-      hasPath=true;
+      var first=true,emitted=forEachWaveformPoint(rf.t,rf.m,pointBudget,function(time,value){
+        var sx=t2x(time),sy=y+ch*.45-value*scale;if(first){ctx.moveTo(sx,sy);first=false;}else ctx.lineTo(sx,sy);
+      });
+      rfRenderPointCount+=emitted;if(n<=pointBudget)rfRawCurveCount++;else rfReducedCurveCount++;hasPath=hasPath||emitted>1;
     }
     if(hasPath)ctx.stroke();
   });
@@ -389,10 +397,10 @@ function drawPhaseBlocks(start,end,vi,ch,colors,vs,ve){
   rowClip(vi,ch,function(){
     ctx.strokeStyle=colors.rf;ctx.lineWidth=.8;ctx.beginPath();var hasRf=false;
     for(var bi=start;bi<end;bi++){
-      var rf=BL[bi].rf;if(!rf||!rf.p||!rf.t||rf.s+rf.d<vs||rf.s>ve)continue;
-      var n=Math.min(rf.t.length,rf.p.length);
+      var rf=BL[bi].rf,phaseTime=rf&&(rf.pt||rf.t);if(!rf||!rf.p||!phaseTime||rf.s+rf.d<vs||rf.s>ve)continue;
+      var n=Math.min(phaseTime.length,rf.p.length);
       for(var i=0;i<n;i++){
-        var sx=t2x(rf.t[i]),sy=y+ch*.45-rf.p[i]*scale;
+        var sx=t2x(phaseTime[i]),sy=y+ch*.45-rf.p[i]*scale;
         if(i===0)ctx.moveTo(sx,sy);else ctx.lineTo(sx,sy);
       }
       hasRf=hasRf||n>1;

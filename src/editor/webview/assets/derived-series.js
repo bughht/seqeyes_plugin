@@ -206,6 +206,21 @@ function forEachDerivedPoint(series,viewStart,viewEnd,maxPoints,visit){
   return emitted;
 }
 
+/* Ordered M4-style reduction for one waveform. Keeps both extrema per bucket. */
+function forEachWaveformPoint(time,values,maxPoints,visit){
+  var n=Math.min(time?time.length:0,values?values.length:0);if(n<1||maxPoints<1)return 0;
+  if(n<=maxPoints){for(var direct=0;direct<n;direct++)visit(time[direct],values[direct]);return n;}
+  var bucketCount=Math.max(1,Math.floor(maxPoints/4)),emitted=0;
+  for(var bucket=0;bucket<bucketCount;bucket++){
+    var start=Math.floor(bucket*n/bucketCount),end=Math.max(start+1,Math.floor((bucket+1)*n/bucketCount));end=Math.min(n,end);
+    var minIndex=start,maxIndex=start;
+    for(var i=start+1;i<end;i++){if(values[i]<values[minIndex])minIndex=i;if(values[i]>values[maxIndex])maxIndex=i;}
+    var indices=[start,minIndex,maxIndex,end-1].sort(function(a,b){return a-b;}),previous=-1;
+    for(var j=0;j<indices.length;j++){var index=indices[j];if(index===previous)continue;visit(time[index],values[index]);previous=index;emitted++;}
+  }
+  return emitted;
+}
+
 /* Block-indexed min/max summaries for RF, gradients, and ADC occupancy. */
 function createWaveformOverview(blocks){
   if(!blocks||!blocks.length)return null;
@@ -217,23 +232,25 @@ function createWaveformOverview(blocks){
 function createEmptyWaveformOverviewLevel(count,bucketSize){
   var level={count:count,bucketSize:bucketSize,t0:new Float64Array(count),t1:new Float64Array(count),
     rfMin:new Float64Array(count),rfMax:new Float64Array(count),gxMin:new Float64Array(count),gxMax:new Float64Array(count),
+    rfStart:new Float64Array(count),rfEnd:new Float64Array(count),
     gyMin:new Float64Array(count),gyMax:new Float64Array(count),gzMin:new Float64Array(count),gzMax:new Float64Array(count),
     gxStart:new Float64Array(count),gxEnd:new Float64Array(count),gyStart:new Float64Array(count),gyEnd:new Float64Array(count),gzStart:new Float64Array(count),gzEnd:new Float64Array(count),
     adcStart:new Float64Array(count),adcEnd:new Float64Array(count)};
-  var mins=[level.rfMin,level.gxMin,level.gyMin,level.gzMin,level.gxStart,level.gyStart,level.gzStart,level.adcStart];
-  var maxs=[level.rfMax,level.gxMax,level.gyMax,level.gzMax,level.gxEnd,level.gyEnd,level.gzEnd,level.adcEnd];
+  var mins=[level.rfMin,level.rfStart,level.gxMin,level.gyMin,level.gzMin,level.gxStart,level.gyStart,level.gzStart,level.adcStart];
+  var maxs=[level.rfMax,level.rfEnd,level.gxMax,level.gyMax,level.gzMax,level.gxEnd,level.gyEnd,level.gzEnd,level.adcEnd];
   for(var m=0;m<mins.length;m++)mins[m].fill(Infinity);
   for(var x=0;x<maxs.length;x++)maxs[x].fill(-Infinity);
   return level;
 }
 
 function createWaveformPointPrefixes(blocks){
-  var keys=['rf','phase','gx','gy','gz','adc'],prefix={};
+  var keys=['rf','rfEvents','phase','gx','gy','gz','adc'],prefix={};
   for(var ki=0;ki<keys.length;ki++)prefix[keys[ki]]=new Float64Array(blocks.length+1);
   for(var i=0;i<blocks.length;i++){
     var block=blocks[i],rf=block.rf,adc=block.adc;
     prefix.rf[i+1]=prefix.rf[i]+(rf&&rf.t&&rf.m?Math.min(rf.t.length,rf.m.length):0);
-    var rfPhase=rf&&rf.t&&rf.p?Math.min(rf.t.length,rf.p.length):0,adcPhase=0;
+    prefix.rfEvents[i+1]=prefix.rfEvents[i]+(rf?1:0);
+    var rfPhase=rf&&(rf.pt||rf.t)&&rf.p?Math.min((rf.pt||rf.t).length,rf.p.length):0,adcPhase=0;
     if(adc&&adc.n>1){var step=Math.max(1,Math.ceil(adc.n/200));adcPhase=Math.floor(adc.n/step)+1;}
     prefix.phase[i+1]=prefix.phase[i]+rfPhase+adcPhase;
     prefix.gx[i+1]=prefix.gx[i]+overviewGradientPointCount(block.gx);
@@ -255,6 +272,15 @@ function includeOverviewValues(values,minArray,maxArray,bucket){
     if(value<minArray[bucket])minArray[bucket]=value;
     if(value>maxArray[bucket])maxArray[bucket]=value;
   }
+}
+
+function includeOverviewRf(rf,level,bucket){
+  if(!rf)return;
+  includeOverviewValues(rf.m,level.rfMin,level.rfMax,bucket);
+  if(level.rfMin[bucket]===Infinity)includeOverviewValues([rf.a||0],level.rfMin,level.rfMax,bucket);
+  var start=isFinite(rf.s)?rf.s:(rf.t&&rf.t.length?rf.t[0]:NaN),end=isFinite(rf.d)&&isFinite(start)?start+rf.d:(rf.t&&rf.t.length?rf.t[rf.t.length-1]:NaN);
+  if(isFinite(start)&&start<level.rfStart[bucket])level.rfStart[bucket]=start;
+  if(isFinite(end)&&end>level.rfEnd[bucket])level.rfEnd[bucket]=end;
 }
 
 function includeOverviewGradient(gradient,level,key,bucket){
@@ -279,9 +305,7 @@ function buildWaveformOverviewLevel(blocks,bucketSize){
     level.t0[bucket]=blocks[start].s;level.t1[bucket]=blocks[end-1].s+blocks[end-1].d;
     for(var bi=start;bi<end;bi++){
       var block=blocks[bi],rf=block.rf;
-      if(rf){
-        includeOverviewValues(rf.m,level.rfMin,level.rfMax,bucket);if(level.rfMin[bucket]===Infinity)includeOverviewValues([rf.a||0],level.rfMin,level.rfMax,bucket);
-      }
+      if(rf)includeOverviewRf(rf,level,bucket);
       includeOverviewGradient(block.gx,level,'gx',bucket);includeOverviewGradient(block.gy,level,'gy',bucket);includeOverviewGradient(block.gz,level,'gz',bucket);
       if(block.adc){
         var adcStart=block.adc.s+block.adc.d,adcEnd=adcStart+block.adc.n*block.adc.dw;
@@ -295,7 +319,7 @@ function buildWaveformOverviewLevel(blocks,bucketSize){
 
 function mergeWaveformOverviewLevel(child){
   var count=Math.ceil(child.count/4),level=createEmptyWaveformOverviewLevel(count,child.bucketSize*4);
-  var channels=[['rfMin','rfMax'],['gxMin','gxMax'],['gyMin','gyMax'],['gzMin','gzMax'],['gxStart','gxEnd'],['gyStart','gyEnd'],['gzStart','gzEnd'],['adcStart','adcEnd']];
+  var channels=[['rfMin','rfMax'],['rfStart','rfEnd'],['gxMin','gxMax'],['gyMin','gyMax'],['gzMin','gzMax'],['gxStart','gxEnd'],['gyStart','gyEnd'],['gzStart','gzEnd'],['adcStart','adcEnd']];
   for(var bucket=0;bucket<count;bucket++){
     var start=bucket*4,end=Math.min(child.count,start+4);
     level.t0[bucket]=child.t0[start];level.t1[bucket]=child.t1[end-1];

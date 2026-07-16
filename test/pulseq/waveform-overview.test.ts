@@ -7,6 +7,10 @@ import { describe, expect, it } from 'vitest';
 interface OverviewApi {
   createWaveformOverview: (blocks: unknown[]) => {
     levels: Array<{
+      rfStart: Float64Array;
+      rfEnd: Float64Array;
+      rfMin: Float64Array;
+      rfMax: Float64Array;
       gxStart: Float64Array;
       gxEnd: Float64Array;
       gxMin: Float64Array;
@@ -31,6 +35,12 @@ interface OverviewApi {
     key: string,
     startBlock: number,
     endBlock: number,
+  ) => number;
+  forEachWaveformPoint: (
+    time: number[],
+    values: number[],
+    maxPoints: number,
+    visit: (time: number, value: number) => void,
   ) => number;
 }
 
@@ -70,6 +80,47 @@ describe('standalone waveform overview', () => {
     expect(base.gxEnd[0]).toBeLessThan(20);
     expect(base.gxMin[0]).toBe(0);
     expect(base.gxMax[0]).toBe(1);
+  });
+
+  it('keeps RF extrema and active pulse support instead of the full block duration', () => {
+    const api = loadOverviewApi();
+    const overview = api.createWaveformOverview([{
+      s: 4,
+      d: 1,
+      rf: {
+        s: 4.25,
+        d: 0.1,
+        t: [4.25, 4.275, 4.3, 4.325, 4.35],
+        m: [0, 2, 9, -3, 0],
+      },
+    }]);
+    const base = overview.levels[0];
+
+    expect(base.rfStart[0]).toBeCloseTo(4.25, 12);
+    expect(base.rfEnd[0]).toBeCloseTo(4.35, 12);
+    expect(base.rfEnd[0]).toBeLessThan(5);
+    expect(base.rfMin[0]).toBe(-3);
+    expect(base.rfMax[0]).toBe(9);
+    expect(api.waveformVisiblePointCount(overview, 'rfEvents', 0, 1)).toBe(1);
+  });
+
+  it('preserves narrow RF extrema during bounded per-pulse reduction', () => {
+    const api = loadOverviewApi();
+    const time = Array.from({ length: 1_000 }, (_, index) => index * 1e-6);
+    const values = new Array<number>(1_000).fill(0);
+    values[123] = 11;
+    values[777] = -7;
+    const reduced: Array<[number, number]> = [];
+    const count = api.forEachWaveformPoint(time, values, 80, (sampleTime, value) => {
+      reduced.push([sampleTime, value]);
+    });
+
+    expect(count).toBeLessThanOrEqual(80);
+    expect(reduced.map(([, value]) => value)).toContain(11);
+    expect(reduced.map(([, value]) => value)).toContain(-7);
+    expect(reduced.map(([sampleTime]) => sampleTime)).toEqual(
+      [...reduced.map(([sampleTime]) => sampleTime)].sort((left, right) => left - right),
+    );
   });
 
   it('keeps coarse extrema as explicit time buckets when selecting a display level', () => {
