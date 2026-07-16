@@ -21,6 +21,7 @@ interface OverviewApi {
       start: Float64Array;
       end: Float64Array;
       peak: Float64Array;
+      peakTime: Float64Array;
       area: Float64Array;
     };
   };
@@ -57,6 +58,9 @@ interface OverviewApi {
     widePixelThreshold: number,
   ) => {
     peak: Float64Array;
+    peakTime: Float64Array;
+    occupiedStart: Float64Array;
+    occupiedEnd: Float64Array;
     area: Float64Array;
     events: Uint32Array;
     wide: number[];
@@ -163,9 +167,15 @@ describe('standalone waveform overview', () => {
     expect(bins.secondsPerPixel).toBeCloseTo(0.1, 12);
     expect(bins.events[1]).toBe(1);
     expect(bins.peak[1]).toBe(10);
+    expect(bins.peakTime[1]).toBeCloseTo(0.12, 12);
+    expect(bins.occupiedStart[1]).toBeCloseTo(0.11, 12);
+    expect(bins.occupiedEnd[1]).toBeCloseTo(0.13, 12);
     expect(bins.area[1]).toBeCloseTo(0.1, 12);
     expect(bins.events[6]).toBe(1);
     expect(bins.peak[6]).toBe(30);
+    expect(bins.peakTime[6]).toBeCloseTo(0.65, 12);
+    expect(bins.occupiedStart[6]).toBeCloseTo(0.61, 12);
+    expect(bins.occupiedEnd[6]).toBeCloseTo(0.69, 12);
     expect(bins.area[6]).toBeCloseTo(1.2, 12);
     expect([...bins.events].filter(Boolean)).toHaveLength(2);
     expect(bins.events[2]).toBe(0);

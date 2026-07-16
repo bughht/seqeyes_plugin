@@ -222,26 +222,27 @@ function forEachWaveformPoint(time,values,maxPoints,visit){
 }
 
 function createRfEventOverview(blocks){
-  var starts=[],ends=[],peaks=[],areas=[],waveforms=[];
+  var starts=[],ends=[],peaks=[],peakTimes=[],areas=[],waveforms=[];
   for(var bi=0;bi<blocks.length;bi++){
     var rf=blocks[bi]&&blocks[bi].rf;if(!rf)continue;
     var start=isFinite(rf.s)?rf.s:(rf.t&&rf.t.length?rf.t[0]:NaN),end=isFinite(rf.d)&&isFinite(start)?start+Math.max(0,rf.d):(rf.t&&rf.t.length?rf.t[rf.t.length-1]:NaN);
     if(!isFinite(start)||!isFinite(end))continue;
-    var n=Math.min(rf.t?rf.t.length:0,rf.m?rf.m.length:0),peak=isFinite(rf.pk)?Math.abs(rf.pk):0,area=isFinite(rf.ar)?Math.max(0,rf.ar):0;
-    if(!isFinite(rf.pk))for(var i=0;i<n;i++)if(isFinite(rf.m[i]))peak=Math.max(peak,Math.abs(rf.m[i]));
+    var n=Math.min(rf.t?rf.t.length:0,rf.m?rf.m.length:0),peak=isFinite(rf.pk)?Math.abs(rf.pk):0,peakTime=(start+end)*.5,area=isFinite(rf.ar)?Math.max(0,rf.ar):0,samplePeak=-1;
+    for(var i=0;i<n;i++)if(isFinite(rf.m[i])&&isFinite(rf.t[i])&&Math.abs(rf.m[i])>samplePeak){samplePeak=Math.abs(rf.m[i]);peakTime=rf.t[i];}
+    if(!isFinite(rf.pk))peak=Math.max(0,samplePeak);
     if(!isFinite(rf.ar))for(var sample=1;sample<n;sample++){
       var dt=rf.t[sample]-rf.t[sample-1];if(!isFinite(dt)||dt<=0)continue;
       area+=.5*(Math.abs(rf.m[sample-1]||0)+Math.abs(rf.m[sample]||0))*dt;
     }
     if(n<2&&peak>0&&end>start)area=peak*(end-start);
-    starts.push(start);ends.push(end);peaks.push(peak);areas.push(area);waveforms.push(rf);
+    starts.push(start);ends.push(end);peaks.push(peak);peakTimes.push(peakTime);areas.push(area);waveforms.push(rf);
   }
-  return{count:starts.length,start:new Float64Array(starts),end:new Float64Array(ends),peak:new Float64Array(peaks),area:new Float64Array(areas),waveforms:waveforms};
+  return{count:starts.length,start:new Float64Array(starts),end:new Float64Array(ends),peak:new Float64Array(peaks),peakTime:new Float64Array(peakTimes),area:new Float64Array(areas),waveforms:waveforms};
 }
 
 function binRfEvents(series,viewStart,viewEnd,pixelCount,widePixelThreshold){
-  var count=Math.max(1,Math.floor(pixelCount)),peak=new Float64Array(count),area=new Float64Array(count),events=new Uint32Array(count),wide=[];
-  if(!series||series.count<1||!isFinite(viewStart)||!isFinite(viewEnd)||viewEnd<=viewStart)return{peak:peak,area:area,events:events,wide:wide,secondsPerPixel:0};
+  var count=Math.max(1,Math.floor(pixelCount)),peak=new Float64Array(count),peakTime=new Float64Array(count),occupiedStart=new Float64Array(count),occupiedEnd=new Float64Array(count),area=new Float64Array(count),events=new Uint32Array(count),wide=[];
+  if(!series||series.count<1||!isFinite(viewStart)||!isFinite(viewEnd)||viewEnd<=viewStart)return{peak:peak,peakTime:peakTime,occupiedStart:occupiedStart,occupiedEnd:occupiedEnd,area:area,events:events,wide:wide,secondsPerPixel:0};
   var secondsPerPixel=(viewEnd-viewStart)/count,first=Math.max(0,lowerBoundSeries(series.end,viewStart));
   for(var i=first;i<series.count;i++){
     var start=series.start[i],end=series.end[i];if(start>viewEnd)break;if(end<viewStart)continue;
@@ -254,10 +255,14 @@ function binRfEvents(series,viewStart,viewEnd,pixelCount,widePixelThreshold){
       var overlap=Math.max(0,Math.min(clippedEnd,binEnd)-Math.max(clippedStart,binStart));
       if(duration<=0){if(bin!==firstBin)continue;overlap=secondsPerPixel;}
       if(overlap<=0)continue;
-      peak[bin]=Math.max(peak[bin],series.peak[i]);area[bin]+=series.area[i]*(duration>0?overlap/duration:1);events[bin]++;
+      var overlapStart=Math.max(clippedStart,binStart),overlapEnd=Math.min(clippedEnd,binEnd),eventPeak=series.peak[i];
+      if(events[bin]<1){occupiedStart[bin]=overlapStart;occupiedEnd[bin]=overlapEnd;peakTime[bin]=Math.max(overlapStart,Math.min(overlapEnd,series.peakTime[i]));}
+      else{occupiedStart[bin]=Math.min(occupiedStart[bin],overlapStart);occupiedEnd[bin]=Math.max(occupiedEnd[bin],overlapEnd);}
+      if(eventPeak>peak[bin]){peak[bin]=eventPeak;peakTime[bin]=Math.max(overlapStart,Math.min(overlapEnd,series.peakTime[i]));}
+      area[bin]+=series.area[i]*(duration>0?overlap/duration:1);events[bin]++;
     }
   }
-  return{peak:peak,area:area,events:events,wide:wide,secondsPerPixel:secondsPerPixel};
+  return{peak:peak,peakTime:peakTime,occupiedStart:occupiedStart,occupiedEnd:occupiedEnd,area:area,events:events,wide:wide,secondsPerPixel:secondsPerPixel};
 }
 
 /* Block-indexed min/max summaries for RF, gradients, and ADC occupancy. */

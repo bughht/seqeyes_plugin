@@ -1555,10 +1555,14 @@ function drawRfOverview(summary,vi,ch,colors,vs,ve){
       var mean=Math.min(bins.peak[bin],bins.area[bin]/bins.secondsPerPixel),x=t2x(vs+(bin+.5)*bins.secondsPerPixel);
       if(mean>0)ctx.fillRect(x-.5,base-mean*scale,1,Math.max(1,mean*scale));
     }
-    ctx.globalAlpha=.55;ctx.fillStyle=colors.rf;
+    ctx.globalAlpha=.75;ctx.strokeStyle=colors.rf;ctx.lineWidth=1.1;
     for(var peakBin=0;peakBin<bins.peak.length;peakBin++){
       if(bins.events[peakBin]<1||bins.peak[peakBin]<=0)continue;
-      var peakX=t2x(vs+(peakBin+.5)*bins.secondsPerPixel);ctx.fillRect(peakX-.5,base-bins.peak[peakBin]*scale-.5,1,1);rfOverviewBucketCount++;rfRenderPointCount++;
+      var leftX=t2x(bins.occupiedStart[peakBin]),rightX=t2x(bins.occupiedEnd[peakBin]),peakX=t2x(bins.peakTime[peakBin]);
+      if(rightX-leftX<2){var centerX=(leftX+rightX)*.5;leftX=centerX-1;rightX=centerX+1;}
+      peakX=Math.max(leftX+.25,Math.min(rightX-.25,peakX));
+      ctx.beginPath();ctx.moveTo(leftX,base);ctx.lineTo(peakX,base-bins.peak[peakBin]*scale);ctx.lineTo(rightX,base);ctx.stroke();
+      rfOverviewBucketCount++;rfRenderPointCount+=3;
     }
     ctx.globalAlpha=1;
     for(var wi=0;wi<bins.wide.length;wi++){

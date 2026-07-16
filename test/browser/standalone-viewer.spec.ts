@@ -111,7 +111,7 @@ test('preserves resolvable RF pulse shapes and bounds the full-sequence RF overv
   await expectCanvasRegionVaried(page.locator('#mc'), 0.05, 0, 0.9, 0.18);
 });
 
-test('keeps homogeneous RF pulses discrete and renders mixed dense RF as volume columns', async ({ page }) => {
+test('keeps homogeneous RF pulses discrete and renders mixed dense RF as bounded pulse glyphs', async ({ page }) => {
   await page.goto('/?debug=1');
   await openSequenceText(page, 'homogeneous-rf.seq', syntheticRfSequence(877, false));
   await page.locator('#zf').click();
@@ -124,6 +124,7 @@ test('keeps homogeneous RF pulses discrete and renders mixed dense RF as volume 
   await page.locator('#zf').click();
   const mixed = await debugState(page);
   expect(mixed.rfOverviewBuckets).toBeGreaterThan(100);
+  expect(mixed.rfRenderPoints).toBeGreaterThanOrEqual(mixed.rfOverviewBuckets * 3);
   expect(mixed.rfRenderPoints).toBeLessThan(5_000);
   expect(mixed.rfRawCurves + mixed.rfReducedCurves).toBeGreaterThan(5);
   await expectCanvasRegionVaried(page.locator('#mc'), 0.05, 0, 0.9, 0.18);
