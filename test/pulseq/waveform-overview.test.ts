@@ -16,6 +16,13 @@ interface OverviewApi {
       gxMin: Float64Array;
       gxMax: Float64Array;
     }>;
+    rfEvents: {
+      count: number;
+      start: Float64Array;
+      end: Float64Array;
+      peak: Float64Array;
+      area: Float64Array;
+    };
   };
   createEnvelopeSeries: (
     start: number[], end: number[], min: number[], max: number[], first: number[], last: number[], scale: number,
@@ -42,6 +49,19 @@ interface OverviewApi {
     maxPoints: number,
     visit: (time: number, value: number) => void,
   ) => number;
+  binRfEvents: (
+    series: unknown,
+    viewStart: number,
+    viewEnd: number,
+    pixelCount: number,
+    widePixelThreshold: number,
+  ) => {
+    peak: Float64Array;
+    area: Float64Array;
+    events: Uint32Array;
+    wide: number[];
+    secondsPerPixel: number;
+  };
 }
 
 describe('standalone waveform overview', () => {
@@ -121,6 +141,38 @@ describe('standalone waveform overview', () => {
     expect(reduced.map(([sampleTime]) => sampleTime)).toEqual(
       [...reduced.map(([sampleTime]) => sampleTime)].sort((left, right) => left - right),
     );
+  });
+
+  it('bins mixed RF pulses as independent peak and volume columns with empty gaps', () => {
+    const api = loadOverviewApi();
+    const overview = api.createWaveformOverview([
+      {
+        s: 0.1,
+        d: 0.1,
+        rf: { s: 0.11, d: 0.02, t: [0.11, 0.12, 0.13], m: [0, 10, 0] },
+      },
+      {
+        s: 0.6,
+        d: 0.2,
+        rf: { s: 0.61, d: 0.08, t: [0.61, 0.65, 0.69], m: [0, 30, 0] },
+      },
+    ]);
+    const bins = api.binRfEvents(overview.rfEvents, 0, 1, 10, 100);
+
+    expect(overview.rfEvents.count).toBe(2);
+    expect(bins.secondsPerPixel).toBeCloseTo(0.1, 12);
+    expect(bins.events[1]).toBe(1);
+    expect(bins.peak[1]).toBe(10);
+    expect(bins.area[1]).toBeCloseTo(0.1, 12);
+    expect(bins.events[6]).toBe(1);
+    expect(bins.peak[6]).toBe(30);
+    expect(bins.area[6]).toBeCloseTo(1.2, 12);
+    expect([...bins.events].filter(Boolean)).toHaveLength(2);
+    expect(bins.events[2]).toBe(0);
+    expect(bins.events[3]).toBe(0);
+    expect(bins.events[4]).toBe(0);
+    expect(bins.events[5]).toBe(0);
+    expect(bins.wide).toEqual([]);
   });
 
   it('keeps coarse extrema as explicit time buckets when selecting a display level', () => {

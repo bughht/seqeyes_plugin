@@ -577,6 +577,16 @@ function downsampleWaveform(time,values,maxPts){
   return{time:outT,values:outV};
 }
 
+function waveformMagnitudeMetrics(time,values){
+  var n=Math.min(time?time.length:0,values?values.length:0),peak=0,area=0;
+  for(var i=0;i<n;i++)if(isFinite(values[i]))peak=Math.max(peak,Math.abs(values[i]));
+  for(var sample=1;sample<n;sample++){
+    var dt=time[sample]-time[sample-1];if(!isFinite(dt)||dt<=0)continue;
+    area+=.5*(Math.abs(values[sample-1]||0)+Math.abs(values[sample]||0))*dt;
+  }
+  return{peak:peak,area:area};
+}
+
 /* ═══════════════════════════════════════════════════════════════════════
    Serialisation — mirrors seqEditorProvider.ts serializeBlocks
    ═══════════════════════════════════════════════════════════════════════ */
@@ -586,11 +596,14 @@ function serializeBlocks(blocks){
     var o={i:b.index,s:b.startTime,d:b.duration};
     if(b.rf){
       var displayM=downsampleWaveform(b.rf.timePoints,b.rf.magnitude,MAX_PTS);
+      var magnitudeMetrics=waveformMagnitudeMetrics(b.rf.timePoints,b.rf.magnitude);
       var rawP=downsample(b.rf.phase,MAX_PTS);
       o.rf={
         s:b.rf.startTime,d:b.rf.duration,
         t:displayM.time,
         m:displayM.values,
+        pk:magnitudeMetrics.peak,
+        ar:magnitudeMetrics.area,
         pt:downsample(b.rf.timePoints,MAX_PTS),
         p:rawP?rawP.map(function(v){return((v%(2*Math.PI))+2*Math.PI)%(2*Math.PI)}):null,
         a:b.rf.amplitude,fo:b.rf.freqOffset,po:b.rf.phaseOffset,
@@ -1533,16 +1546,29 @@ function drawBlocks(vs,ve,s){
 }
 
 function drawRfOverview(summary,vi,ch,colors,vs,ve){
-  var level=summary.level,y=cy(vi),scale=ch*.9/channelRange(0);
+  var y=cy(vi),base=y+ch*.45,scale=ch*.9/channelRange(0),pixelCount=Math.max(1,Math.ceil(plotWidth()));
+  var bins=binRfEvents(waveformOverview.rfEvents,vs,ve,pixelCount,2),series=waveformOverview.rfEvents;
   rowClip(vi,ch,function(){
-    ctx.strokeStyle=colors.rf;ctx.fillStyle=colors.rff;ctx.lineWidth=1;ctx.beginPath();
-    for(var i=summary.first;i<summary.last;i++){
-      if(level.rfEnd[i]<vs||level.rfStart[i]>ve||level.rfMin[i]===Infinity)continue;
-      var x0=t2x(Math.max(vs,level.rfStart[i])),x1=t2x(Math.min(ve,level.rfEnd[i])),width=Math.max(1,x1-x0);
-      var y0=y+ch*.45-level.rfMin[i]*scale,y1=y+ch*.45-level.rfMax[i]*scale,top=Math.min(y0,y1),height=Math.max(1,Math.abs(y1-y0));
-      ctx.fillRect(x0,y-ch*.45,width,ch*.9);ctx.rect(x0,top,width,height);rfOverviewBucketCount++;
+    ctx.fillStyle=colors.rf;ctx.globalAlpha=.28;
+    for(var bin=0;bin<bins.peak.length;bin++){
+      if(bins.events[bin]<1||bins.peak[bin]<=0)continue;
+      var mean=Math.min(bins.peak[bin],bins.area[bin]/bins.secondsPerPixel),x=t2x(vs+(bin+.5)*bins.secondsPerPixel);
+      if(mean>0)ctx.fillRect(x-.5,base-mean*scale,1,Math.max(1,mean*scale));
     }
-    ctx.stroke();
+    ctx.globalAlpha=.55;ctx.fillStyle=colors.rf;
+    for(var peakBin=0;peakBin<bins.peak.length;peakBin++){
+      if(bins.events[peakBin]<1||bins.peak[peakBin]<=0)continue;
+      var peakX=t2x(vs+(peakBin+.5)*bins.secondsPerPixel);ctx.fillRect(peakX-.5,base-bins.peak[peakBin]*scale-.5,1,1);rfOverviewBucketCount++;rfRenderPointCount++;
+    }
+    ctx.globalAlpha=1;
+    for(var wi=0;wi<bins.wide.length;wi++){
+      var rf=series.waveforms[bins.wide[wi]],x0=t2x(Math.max(vs,rf.s)),x1=t2x(Math.min(ve,rf.s+rf.d));
+      ctx.fillStyle=colors.rff;ctx.fillRect(x0,y-ch*.45,Math.max(1,x1-x0),ch*.9);
+      var n=Math.min(rf.t?rf.t.length:0,rf.m?rf.m.length:0),pointBudget=Math.max(8,Math.ceil(Math.max(1,x1-x0)*4)),first=true;
+      ctx.strokeStyle=colors.rf;ctx.lineWidth=1.1;ctx.beginPath();
+      var emitted=forEachWaveformPoint(rf.t,rf.m,pointBudget,function(time,value){var sx=t2x(time),sy=base-value*scale;if(first){ctx.moveTo(sx,sy);first=false;}else ctx.lineTo(sx,sy);});
+      if(emitted>1)ctx.stroke();rfRenderPointCount+=emitted;if(n<=pointBudget)rfRawCurveCount++;else rfReducedCurveCount++;
+    }
   });
 }
 

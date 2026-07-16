@@ -111,6 +111,24 @@ test('preserves resolvable RF pulse shapes and bounds the full-sequence RF overv
   await expectCanvasRegionVaried(page.locator('#mc'), 0.05, 0, 0.9, 0.18);
 });
 
+test('keeps homogeneous RF pulses discrete and renders mixed dense RF as volume columns', async ({ page }) => {
+  await page.goto('/?debug=1');
+  await openSequenceText(page, 'homogeneous-rf.seq', syntheticRfSequence(877, false));
+  await page.locator('#zf').click();
+  const homogeneous = await debugState(page);
+  expect(homogeneous.rfOverviewBuckets).toBe(0);
+  expect(homogeneous.rfRawCurves).toBeGreaterThan(800);
+  await expectCanvasRegionVaried(page.locator('#mc'), 0.05, 0, 0.9, 0.18);
+
+  await openSequenceText(page, 'mixed-dense-rf.seq', syntheticRfSequence(2_500, true));
+  await page.locator('#zf').click();
+  const mixed = await debugState(page);
+  expect(mixed.rfOverviewBuckets).toBeGreaterThan(100);
+  expect(mixed.rfRenderPoints).toBeLessThan(5_000);
+  expect(mixed.rfRawCurves + mixed.rfReducedCurves).toBeGreaterThan(5);
+  await expectCanvasRegionVaried(page.locator('#mc'), 0.05, 0, 0.9, 0.18);
+});
+
 test('renders spiral and rotation-extension fixtures without blank canvases', async ({ page }) => {
   await loadViewer(page, fixtures.spiral);
   await expectCanvasVaried(page.locator('#mc'));
@@ -522,6 +540,15 @@ async function openSequence(page: Page, sequencePath: string): Promise<void> {
   await expectSequenceLoaded(page);
 }
 
+async function openSequenceText(page: Page, name: string, source: string): Promise<void> {
+  await page.locator('#fileInput').setInputFiles({
+    name,
+    mimeType: 'text/plain',
+    buffer: Buffer.from(source),
+  });
+  await expectSequenceLoaded(page);
+}
+
 async function dropSequence(page: Page, sequencePath: string): Promise<void> {
   const data = readFileSync(sequencePath).toString('base64');
   const name = sequencePath.split('/').pop() || 'sequence.bseq';
@@ -650,6 +677,55 @@ function syntheticAsc(): string {
     );
   }
   return `${lines.join('\n')}\n`;
+}
+
+function syntheticRfSequence(eventCount: number, mixed: boolean): string {
+  const blocks: string[] = [];
+  for (let index = 0; index < eventCount; index++) {
+    const inversion = mixed && index % 200 === 0;
+    blocks.push(`${index + 1} ${inversion ? 2000 : 200} ${inversion ? 2 : 1} 0 0 0 0 0`);
+  }
+  return `# Synthetic RF density regression fixture
+[VERSION]
+major 1
+minor 5
+revision 1
+
+[DEFINITIONS]
+AdcRasterTime 1e-7
+BlockDurationRaster 1e-5
+GradientRasterTime 1e-5
+Name ${mixed ? 'mixed_rf_density' : 'homogeneous_rf'}
+RadiofrequencyRasterTime 1e-6
+
+[BLOCKS]
+${blocks.join('\n')}
+
+[RF]
+1 200 1 2 3 50 100 0 0 0 0 e
+2 600 1 2 4 5000 100 0 0 0 0 i
+
+[SHAPES]
+shape_id 1
+num_samples 2
+1
+1
+
+shape_id 2
+num_samples 2
+0
+0
+
+shape_id 3
+num_samples 2
+0
+100
+
+shape_id 4
+num_samples 2
+0
+10000
+`;
 }
 
 function clamp(value: number, min: number, max: number): number {

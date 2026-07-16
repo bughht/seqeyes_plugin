@@ -221,12 +221,51 @@ function forEachWaveformPoint(time,values,maxPoints,visit){
   return emitted;
 }
 
+function createRfEventOverview(blocks){
+  var starts=[],ends=[],peaks=[],areas=[],waveforms=[];
+  for(var bi=0;bi<blocks.length;bi++){
+    var rf=blocks[bi]&&blocks[bi].rf;if(!rf)continue;
+    var start=isFinite(rf.s)?rf.s:(rf.t&&rf.t.length?rf.t[0]:NaN),end=isFinite(rf.d)&&isFinite(start)?start+Math.max(0,rf.d):(rf.t&&rf.t.length?rf.t[rf.t.length-1]:NaN);
+    if(!isFinite(start)||!isFinite(end))continue;
+    var n=Math.min(rf.t?rf.t.length:0,rf.m?rf.m.length:0),peak=isFinite(rf.pk)?Math.abs(rf.pk):0,area=isFinite(rf.ar)?Math.max(0,rf.ar):0;
+    if(!isFinite(rf.pk))for(var i=0;i<n;i++)if(isFinite(rf.m[i]))peak=Math.max(peak,Math.abs(rf.m[i]));
+    if(!isFinite(rf.ar))for(var sample=1;sample<n;sample++){
+      var dt=rf.t[sample]-rf.t[sample-1];if(!isFinite(dt)||dt<=0)continue;
+      area+=.5*(Math.abs(rf.m[sample-1]||0)+Math.abs(rf.m[sample]||0))*dt;
+    }
+    if(n<2&&peak>0&&end>start)area=peak*(end-start);
+    starts.push(start);ends.push(end);peaks.push(peak);areas.push(area);waveforms.push(rf);
+  }
+  return{count:starts.length,start:new Float64Array(starts),end:new Float64Array(ends),peak:new Float64Array(peaks),area:new Float64Array(areas),waveforms:waveforms};
+}
+
+function binRfEvents(series,viewStart,viewEnd,pixelCount,widePixelThreshold){
+  var count=Math.max(1,Math.floor(pixelCount)),peak=new Float64Array(count),area=new Float64Array(count),events=new Uint32Array(count),wide=[];
+  if(!series||series.count<1||!isFinite(viewStart)||!isFinite(viewEnd)||viewEnd<=viewStart)return{peak:peak,area:area,events:events,wide:wide,secondsPerPixel:0};
+  var secondsPerPixel=(viewEnd-viewStart)/count,first=Math.max(0,lowerBoundSeries(series.end,viewStart));
+  for(var i=first;i<series.count;i++){
+    var start=series.start[i],end=series.end[i];if(start>viewEnd)break;if(end<viewStart)continue;
+    var clippedStart=Math.max(viewStart,start),clippedEnd=Math.min(viewEnd,end),duration=Math.max(0,end-start);
+    if(duration/secondsPerPixel>=widePixelThreshold){wide.push(i);continue;}
+    var firstBin=Math.max(0,Math.min(count-1,Math.floor((clippedStart-viewStart)/secondsPerPixel)));
+    var lastBin=Math.max(firstBin,Math.min(count-1,Math.ceil((clippedEnd-viewStart)/secondsPerPixel)-1));
+    for(var bin=firstBin;bin<=lastBin;bin++){
+      var binStart=viewStart+bin*secondsPerPixel,binEnd=binStart+secondsPerPixel;
+      var overlap=Math.max(0,Math.min(clippedEnd,binEnd)-Math.max(clippedStart,binStart));
+      if(duration<=0){if(bin!==firstBin)continue;overlap=secondsPerPixel;}
+      if(overlap<=0)continue;
+      peak[bin]=Math.max(peak[bin],series.peak[i]);area[bin]+=series.area[i]*(duration>0?overlap/duration:1);events[bin]++;
+    }
+  }
+  return{peak:peak,area:area,events:events,wide:wide,secondsPerPixel:secondsPerPixel};
+}
+
 /* Block-indexed min/max summaries for RF, gradients, and ADC occupancy. */
 function createWaveformOverview(blocks){
   if(!blocks||!blocks.length)return null;
   var level=buildWaveformOverviewLevel(blocks,1),levels=[level];
   while(level.count>1){level=mergeWaveformOverviewLevel(level);levels.push(level);}
-  return{levels:levels,blockCount:blocks.length,pointPrefix:createWaveformPointPrefixes(blocks)};
+  return{levels:levels,blockCount:blocks.length,pointPrefix:createWaveformPointPrefixes(blocks),rfEvents:createRfEventOverview(blocks)};
 }
 
 function createEmptyWaveformOverviewLevel(count,bucketSize){
