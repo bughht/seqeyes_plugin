@@ -7,11 +7,23 @@ import { describe, expect, it } from 'vitest';
 interface OverviewApi {
   createWaveformOverview: (blocks: unknown[]) => {
     levels: Array<{
+      rfStart: Float64Array;
+      rfEnd: Float64Array;
+      rfMin: Float64Array;
+      rfMax: Float64Array;
       gxStart: Float64Array;
       gxEnd: Float64Array;
       gxMin: Float64Array;
       gxMax: Float64Array;
     }>;
+    rfEvents: {
+      count: number;
+      start: Float64Array;
+      end: Float64Array;
+      peak: Float64Array;
+      peakTime: Float64Array;
+      area: Float64Array;
+    };
   };
   createEnvelopeSeries: (
     start: number[], end: number[], min: number[], max: number[], first: number[], last: number[], scale: number,
@@ -32,6 +44,28 @@ interface OverviewApi {
     startBlock: number,
     endBlock: number,
   ) => number;
+  forEachWaveformPoint: (
+    time: number[],
+    values: number[],
+    maxPoints: number,
+    visit: (time: number, value: number) => void,
+  ) => number;
+  binRfEvents: (
+    series: unknown,
+    viewStart: number,
+    viewEnd: number,
+    pixelCount: number,
+    widePixelThreshold: number,
+  ) => {
+    peak: Float64Array;
+    peakTime: Float64Array;
+    occupiedStart: Float64Array;
+    occupiedEnd: Float64Array;
+    area: Float64Array;
+    events: Uint32Array;
+    wide: number[];
+    secondsPerPixel: number;
+  };
 }
 
 describe('standalone waveform overview', () => {
@@ -70,6 +104,85 @@ describe('standalone waveform overview', () => {
     expect(base.gxEnd[0]).toBeLessThan(20);
     expect(base.gxMin[0]).toBe(0);
     expect(base.gxMax[0]).toBe(1);
+  });
+
+  it('keeps RF extrema and active pulse support instead of the full block duration', () => {
+    const api = loadOverviewApi();
+    const overview = api.createWaveformOverview([{
+      s: 4,
+      d: 1,
+      rf: {
+        s: 4.25,
+        d: 0.1,
+        t: [4.25, 4.275, 4.3, 4.325, 4.35],
+        m: [0, 2, 9, -3, 0],
+      },
+    }]);
+    const base = overview.levels[0];
+
+    expect(base.rfStart[0]).toBeCloseTo(4.25, 12);
+    expect(base.rfEnd[0]).toBeCloseTo(4.35, 12);
+    expect(base.rfEnd[0]).toBeLessThan(5);
+    expect(base.rfMin[0]).toBe(-3);
+    expect(base.rfMax[0]).toBe(9);
+    expect(api.waveformVisiblePointCount(overview, 'rfEvents', 0, 1)).toBe(1);
+  });
+
+  it('preserves narrow RF extrema during bounded per-pulse reduction', () => {
+    const api = loadOverviewApi();
+    const time = Array.from({ length: 1_000 }, (_, index) => index * 1e-6);
+    const values = new Array<number>(1_000).fill(0);
+    values[123] = 11;
+    values[777] = -7;
+    const reduced: Array<[number, number]> = [];
+    const count = api.forEachWaveformPoint(time, values, 80, (sampleTime, value) => {
+      reduced.push([sampleTime, value]);
+    });
+
+    expect(count).toBeLessThanOrEqual(80);
+    expect(reduced.map(([, value]) => value)).toContain(11);
+    expect(reduced.map(([, value]) => value)).toContain(-7);
+    expect(reduced.map(([sampleTime]) => sampleTime)).toEqual(
+      [...reduced.map(([sampleTime]) => sampleTime)].sort((left, right) => left - right),
+    );
+  });
+
+  it('bins mixed RF pulses as independent peak and volume columns with empty gaps', () => {
+    const api = loadOverviewApi();
+    const overview = api.createWaveformOverview([
+      {
+        s: 0.1,
+        d: 0.1,
+        rf: { s: 0.11, d: 0.02, t: [0.11, 0.12, 0.13], m: [0, 10, 0] },
+      },
+      {
+        s: 0.6,
+        d: 0.2,
+        rf: { s: 0.61, d: 0.08, t: [0.61, 0.65, 0.69], m: [0, 30, 0] },
+      },
+    ]);
+    const bins = api.binRfEvents(overview.rfEvents, 0, 1, 10, 100);
+
+    expect(overview.rfEvents.count).toBe(2);
+    expect(bins.secondsPerPixel).toBeCloseTo(0.1, 12);
+    expect(bins.events[1]).toBe(1);
+    expect(bins.peak[1]).toBe(10);
+    expect(bins.peakTime[1]).toBeCloseTo(0.12, 12);
+    expect(bins.occupiedStart[1]).toBeCloseTo(0.11, 12);
+    expect(bins.occupiedEnd[1]).toBeCloseTo(0.13, 12);
+    expect(bins.area[1]).toBeCloseTo(0.1, 12);
+    expect(bins.events[6]).toBe(1);
+    expect(bins.peak[6]).toBe(30);
+    expect(bins.peakTime[6]).toBeCloseTo(0.65, 12);
+    expect(bins.occupiedStart[6]).toBeCloseTo(0.61, 12);
+    expect(bins.occupiedEnd[6]).toBeCloseTo(0.69, 12);
+    expect(bins.area[6]).toBeCloseTo(1.2, 12);
+    expect([...bins.events].filter(Boolean)).toHaveLength(2);
+    expect(bins.events[2]).toBe(0);
+    expect(bins.events[3]).toBe(0);
+    expect(bins.events[4]).toBe(0);
+    expect(bins.events[5]).toBe(0);
+    expect(bins.wide).toEqual([]);
   });
 
   it('keeps coarse extrema as explicit time buckets when selecting a display level', () => {

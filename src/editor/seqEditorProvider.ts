@@ -638,11 +638,17 @@ function serializeBlocks(blocks: DecodedBlock[]): object[] {
         const o: Record<string, unknown> = { i: b.index, s: b.startTime, d: b.duration };
 
         if (b.rf) {
+            const displayMagnitude = downsampleM4(b.rf.timePoints, b.rf.magnitude, MAX_DISPLAY_PTS);
+            const magnitudeMetrics = waveformMagnitudeMetrics(b.rf.timePoints, b.rf.magnitude);
             const rawP = downsample(b.rf.phase, MAX_DISPLAY_PTS);
             o.rf = {
                 s: b.rf.startTime, d: b.rf.duration,
-                t: downsample(b.rf.timePoints, MAX_DISPLAY_PTS),
-                m: downsample(b.rf.magnitude, MAX_DISPLAY_PTS),
+                t: displayMagnitude.time,
+                m: displayMagnitude.values,
+                pk: magnitudeMetrics.peak,
+                ar: magnitudeMetrics.area,
+                bp: magnitudeMetrics.blockPulse,
+                pt: downsample(b.rf.timePoints, MAX_DISPLAY_PTS),
                 p: rawP ? rawP.map(v => ((v % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)) : null,
                 a: b.rf.amplitude, fo: b.rf.freqOffset, po: b.rf.phaseOffset,
                 u: b.rf.use || 'u',   // 'e'=excitation, 'r'=refocusing, 'i'=inversion, 's'=saturation, 'u'=undefined
@@ -664,6 +670,35 @@ function serializeBlocks(blocks: DecodedBlock[]): object[] {
         }
         return o;
     });
+}
+
+function waveformMagnitudeMetrics(
+    time: Float64Array | number[],
+    values: Float64Array | number[],
+): { peak: number; area: number; blockPulse: boolean } {
+    const count = Math.min(time.length, values.length);
+    let peak = 0;
+    let min = Infinity;
+    let max = -Infinity;
+    let area = 0;
+    let finiteCount = 0;
+    for (let index = 0; index < count; index++) {
+        if (Number.isFinite(values[index])) {
+            const magnitude = Math.abs(values[index]);
+            peak = Math.max(peak, magnitude);
+            min = Math.min(min, magnitude);
+            max = Math.max(max, magnitude);
+            finiteCount++;
+        }
+    }
+    for (let index = 1; index < count; index++) {
+        const delta = time[index] - time[index - 1];
+        if (!Number.isFinite(delta) || delta <= 0) continue;
+        area += 0.5 * (Math.abs(values[index - 1] || 0) + Math.abs(values[index] || 0)) * delta;
+    }
+    const tolerance = Math.max(1e-12, peak * 1e-9);
+    const blockPulse = finiteCount === count && count >= 2 && peak > 0 && max - min <= tolerance;
+    return { peak, area, blockPulse };
 }
 
 async function readAndParseSequence(uri: vscode.Uri, didRead: () => void) {
