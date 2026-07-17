@@ -41,6 +41,7 @@ body{font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background
 #tb .cur{font:11px monospace;color:var(--cr);margin-left:auto;min-width:300px;text-align:right;white-space:nowrap}
 #tb .ulbl{font-size:10px;color:var(--lb);margin:0 1px}
 #viewerNotice{display:none;flex-shrink:0;padding:5px 10px;border-bottom:1px solid #b8860b;background:rgba(218,165,32,.16);color:var(--fg);font-size:11px;line-height:1.35;white-space:normal}
+#viewerNotice .notice-row+.notice-row{margin-top:2px}
 #viewerNotice .notice-action{margin-left:8px;background:var(--gr);border:1px solid #b8860b;color:var(--fg);padding:2px 7px;border-radius:3px;cursor:pointer;font-size:11px;white-space:nowrap}
 #kspaceSafetyOverlay{position:fixed;inset:0;background:rgba(0,0,0,.48);z-index:540;display:flex;align-items:center;justify-content:center;padding:16px;backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px)}
 #kspaceSafetyCard{width:min(520px,100%);background:var(--bg);border:1px solid #b8860b;border-radius:10px;padding:18px 20px;box-shadow:0 10px 36px rgba(0,0,0,.3)}

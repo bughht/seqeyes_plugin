@@ -32,15 +32,17 @@ var viewerDrawFrame=0,viewerDrawMinimap=false;
 function isMobileSafetyLayout(){return !!(window.matchMedia&&window.matchMedia('(max-width: 768px), (pointer: coarse)').matches);}
 function renderViewerNotices(){
   var el=document.getElementById('viewerNotice');if(!el)return;el.textContent='';
-  var keys=Object.keys(viewerNotices),visible=0;
+  var keys=Object.keys(viewerNotices),visible=0,kspaceRow=null;
   for(var i=0;i<keys.length;i++){
     if(keys[i]==='kspace'&&kspaceSafetyWarning&&isMobileSafetyLayout())continue;
-    if(visible)el.appendChild(document.createTextNode(' '));
-    var span=document.createElement('span');span.textContent=viewerNotices[keys[i]];el.appendChild(span);visible++;
+    var row=document.createElement('div');row.className='notice-row';
+    var span=document.createElement('span');span.textContent=viewerNotices[keys[i]];row.appendChild(span);el.appendChild(row);
+    if(keys[i]==='kspace')kspaceRow=row;
+    visible++;
   }
   if(kspaceSafetyWarning&&!isMobileSafetyLayout()){
     var action=document.createElement('button');action.type='button';action.className='notice-action';action.textContent=kspaceSafetyBusy?'Calculating…':'Calculate anyway…';action.disabled=kspaceSafetyBusy;
-    action.onclick=showKspaceSafetyDialog;el.appendChild(action);visible++;
+    action.onclick=showKspaceSafetyDialog;(kspaceRow||el).appendChild(action);if(!kspaceRow)visible++;
   }
   el.style.display=visible?'block':'none';
 }
