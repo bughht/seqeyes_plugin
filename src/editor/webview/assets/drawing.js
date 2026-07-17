@@ -28,7 +28,7 @@ function drawCursorOverlay(){
   var color=getComputedStyle(document.body).getPropertyValue('--cr').trim();
   moctx.strokeStyle=color;moctx.lineWidth=0.8;moctx.setLineDash([4,3]);
   moctx.beginPath();moctx.moveTo(cx,M.t);moctx.lineTo(cx,h-M.b);moctx.stroke();moctx.setLineDash([]);
-  moctx.fillStyle=color;moctx.font='10px monospace';moctx.textAlign='center';
+  moctx.fillStyle=color;moctx.font=fontSpec(10,'monospace');moctx.textAlign='center';
   var label=fmtT(timeConv(cursorT)),tw=moctx.measureText(label).width;
   moctx.fillText(label,Math.max(M.l+tw/2+4,Math.min(cx,w-M.r-tw/2-4)),M.t-1);
 }
@@ -45,7 +45,7 @@ function drawBlockBounds(w,h,vs,ve,s){
   for(var i=range.start;i<range.end;i++){
     var x=t2x(BL[i].s);if(x<M.l||x>w-M.r)continue;
     ctx.beginPath();ctx.moveTo(x,M.t);ctx.lineTo(x,h-M.b);ctx.stroke();
-    ctx.fillStyle=s.getPropertyValue('--ax').trim();ctx.font='9px monospace';ctx.textAlign='center';
+    ctx.fillStyle=s.getPropertyValue('--ax').trim();ctx.font=fontSpec(9,'monospace');ctx.textAlign='center';
     ctx.fillText('#'+BL[i].i,x,M.t-2);
   }
   ctx.setLineDash([]);
@@ -68,6 +68,53 @@ function channelRange(ci){
   return 1;
 }
 function fmtPhase(v){if(Math.abs(v-6.28318)<1e-3)return'2\u03c0';if(Math.abs(v-3.14159)<1e-3)return'\u03c0';if(v>=1)return v.toFixed(2);if(v>=0.01)return v.toFixed(3);return v.toExponential(1);}
+function axisTickLabels(ci){
+  if(ci===0)return [fmtAmp(channelRange(0))+'Hz','0'];
+  if(ci===1){var ph=channelRange(1);return [fmtPhase(ph),fmtPhase(ph/2),'0'];}
+  if(ci>=2&&ci<=4)return ['\u00b1'+fmtAmp(gradConv(channelRange(ci)))+gradUnitStr(),'0'];
+  if(ci===5)return ['on'];
+  if(ci===6)return ['ch'];
+  if(ci===7)return [fmtAmp(channelRange(7))+'%','0'];
+  if(ci>=8&&ci<=10)return ['\u00b1'+fmtAmp(channelRange(ci))+'s/m','0'];
+  return [];
+}
+function axisTickLabelOffset(){return Math.round(14*textScaleFactor());}
+function axisUnitLabelOffset(){return Math.round(4*textScaleFactor());}
+function canvasTextWidth(font,text){
+  ctx.save();ctx.font=font;
+  var width=ctx.measureText(String(text||'')).width;
+  ctx.restore();return width;
+}
+function canvasTextDescent(font,text){
+  ctx.save();ctx.font=font;
+  var metrics=ctx.measureText(String(text||'0123456789'));
+  ctx.restore();
+  return metrics.actualBoundingBoxDescent||Math.max(2,scaledPx(2));
+}
+function maxCanvasTextWidth(font,labels){
+  var max=0;
+  for(var i=0;i<labels.length;i++)max=Math.max(max,canvasTextWidth(font,labels[i]));
+  return max;
+}
+function applyAdaptiveCanvasMargins(w,narrow){
+  var axFont=fontSpec(narrow?9:10,'monospace');
+  var chFont=fontSpec(narrow?14:18,'monospace','bold');
+  var vc=visChannels(),maxTickWidth=0,maxChannelWidth=0;
+  for(var vi=0;vi<vc.length;vi++){
+    var ci=vc[vi];
+    maxChannelWidth=Math.max(maxChannelWidth,canvasTextWidth(chFont,CH[ci]||''));
+    maxTickWidth=Math.max(maxTickWidth,maxCanvasTextWidth(axFont,axisTickLabels(ci)));
+  }
+  var neededLeft=narrow
+    ? Math.ceil(Math.max(4+maxTickWidth,4+maxChannelWidth)+6)
+    : Math.ceil(Math.max(12+maxTickWidth,40+maxChannelWidth)+6);
+  var maxLeft=Math.max(M.l,Math.floor(w-M.r-80));
+  M.l=Math.max(M.l,Math.min(maxLeft,neededLeft));
+  if(textScaleFactor()>1){
+    var neededBottom=Math.ceil(axisTickLabelOffset()+canvasTextDescent(axFont,'000.000')+3);
+    M.b=Math.max(M.b,neededBottom);
+  }
+}
 function rowClip(vi,ch,fn){
   var w=mc.width/(window.devicePixelRatio||1),top=M.t+vi*ch,bottom=M.t+(vi+1)*ch,rw=Math.max(0,w-M.l-M.r);
   if(rw<=0||bottom<=top)return;
@@ -78,16 +125,16 @@ function rowClip(vi,ch,fn){
 /* ── Axes (X time + Y per channel) ────────────────────────────────────── */
 function drawAxes(w,h,vs,ve,s){
   var narrow=(typeof layoutMode!=='undefined'&&layoutMode==='vertical')||w<600;
-  var axFont=narrow?'9px monospace':'10px monospace';
-  var chFont=narrow?'bold 14px monospace':'bold 18px monospace';
+  var axFont=fontSpec(narrow?9:10,'monospace');
+  var chFont=fontSpec(narrow?14:18,'monospace','bold');
   // X-axis
   ctx.fillStyle=s.getPropertyValue('--lb').trim();ctx.font=axFont;ctx.textAlign='center';
   ctx.strokeStyle=s.getPropertyValue('--ax').trim();ctx.lineWidth=1;
   ctx.beginPath();ctx.moveTo(M.l,h-M.b);ctx.lineTo(w-M.r,h-M.b);ctx.stroke();
   var st=nice((ve-vs)/8),t=Math.floor(vs/st)*st;
-  while(t<=ve){ctx.fillText(fmtT(timeConv(t)),t2x(t),h-M.b+14);t+=st;}
+  while(t<=ve){ctx.fillText(fmtT(timeConv(t)),t2x(t),h-M.b+axisTickLabelOffset());t+=st;}
   ctx.textAlign='right';
-  ctx.fillText('time ('+timeUnitStr()+')',w-4,h-M.b+4);
+  ctx.fillText('time ('+timeUnitStr()+')',w-4,h-M.b+axisUnitLabelOffset());
 
   // Y-axes — one per visible channel
   var vc=visChannels(),ch=cH();
@@ -105,13 +152,13 @@ function drawAxes(w,h,vs,ve,s){
     ctx.fillStyle=s.getPropertyValue('--lb').trim();ctx.font=axFont;
     var lblX=narrow?4:M.l-12;
     ctx.textAlign=narrow?'left':'right';
-    if(ci===0){ctx.fillText(fmtAmp(channelRange(0))+'Hz',lblX,M.t+vi*ch+12);ctx.fillText('0',lblX,y0+ch/2-2);}
-    else if(ci===1){var ph=channelRange(1);ctx.fillText(fmtPhase(ph),lblX,M.t+vi*ch+12);ctx.fillText(fmtPhase(ph/2),lblX,y0+4);ctx.fillText('0',lblX,y0+ch/2-2);}
-    else if(ci>=2&&ci<=4){var d=gradConv(channelRange(ci));ctx.fillText('\u00b1'+fmtAmp(d)+gradUnitStr(),lblX,M.t+vi*ch+12);ctx.fillText('0',lblX,y0+4);}
-    else if(ci===5){ctx.fillText('on',lblX,M.t+vi*ch+12);}
-    else if(ci===6){ctx.fillText('ch',lblX,M.t+vi*ch+12);}
-    else if(ci===7){ctx.fillText(fmtAmp(channelRange(7))+'%',lblX,M.t+vi*ch+12);ctx.fillText('0',lblX,M.t+(vi+1)*ch-4);}
-    else if(ci>=8&&ci<=10){ctx.fillText('\u00b1'+fmtAmp(channelRange(ci))+'s/m',lblX,M.t+vi*ch+12);ctx.fillText('0',lblX,y0+4);}
+    var tickLabels=axisTickLabels(ci);
+    if(ci===0){ctx.fillText(tickLabels[0],lblX,M.t+vi*ch+12);ctx.fillText(tickLabels[1],lblX,y0+ch/2-2);}
+    else if(ci===1){ctx.fillText(tickLabels[0],lblX,M.t+vi*ch+12);ctx.fillText(tickLabels[1],lblX,y0+4);ctx.fillText(tickLabels[2],lblX,y0+ch/2-2);}
+    else if(ci>=2&&ci<=4){ctx.fillText(tickLabels[0],lblX,M.t+vi*ch+12);ctx.fillText(tickLabels[1],lblX,y0+4);}
+    else if(ci===5||ci===6){ctx.fillText(tickLabels[0],lblX,M.t+vi*ch+12);}
+    else if(ci===7){ctx.fillText(tickLabels[0],lblX,M.t+vi*ch+12);ctx.fillText(tickLabels[1],lblX,M.t+(vi+1)*ch-4);}
+    else if(ci>=8&&ci<=10){ctx.fillText(tickLabels[0],lblX,M.t+vi*ch+12);ctx.fillText(tickLabels[1],lblX,y0+4);}
 
     // Small tick marks
     ctx.strokeStyle=s.getPropertyValue('--ax').trim();ctx.lineWidth=0.5;
@@ -481,7 +528,7 @@ function drawAdcBlocks(start,end,vi,ch,colors,vs,ve){
       if(x1-x0>30)labels.push({text:adc.n+'pts',x:(x0+x1)/2});
     }
     if(hasRect){ctx.fillStyle=colors.adf;ctx.fill();ctx.strokeStyle=colors.adc;ctx.lineWidth=1;ctx.stroke();}
-    ctx.fillStyle=colors.fg;ctx.font='9px monospace';ctx.textAlign='center';
+    ctx.fillStyle=colors.fg;ctx.font=fontSpec(9,'monospace');ctx.textAlign='center';
     for(var li=0;li<labels.length;li++)ctx.fillText(labels[li].text,labels[li].x,y+3);
   });
 }
@@ -500,7 +547,7 @@ function drawTriggerBlocks(start,end,vi,ch,colors,vs,ve){
         labels.push({text:'ch'+tg.c,x:x});hasTrigger=true;
       }
     }
-    if(hasTrigger)ctx.fill();ctx.font='8px monospace';ctx.textAlign='center';
+    if(hasTrigger)ctx.fill();ctx.font=fontSpec(8,'monospace');ctx.textAlign='center';
     for(var li=0;li<labels.length;li++)ctx.fillText(labels[li].text,labels[li].x,y+ch*.28);
   });
 }

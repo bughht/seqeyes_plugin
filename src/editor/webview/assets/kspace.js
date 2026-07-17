@@ -324,7 +324,7 @@ function drawKCursorMarker(ctx,proj,cs,W,H){
   ctx.fillStyle="rgba(255,215,0,0.90)";
   ctx.beginPath();ctx.arc(p.x,p.y,Math.max(5,kDotSize+4),0,6.283);ctx.fill();ctx.stroke();
   ctx.fillStyle=cs.getPropertyValue("--fg").trim();
-  ctx.font="10px monospace";
+  ctx.font=fontSpec(10,"monospace");
   ctx.textAlign="left";
   ctx.fillText(s.source==="adc"?"ADC":"ktraj",p.x+8,p.y-8);
   ctx.restore();
@@ -554,7 +554,7 @@ function drawKs_core(W,H,dpr){
 
   // ── Check data ──
   if(!kAdc||!kAdcTime||!kAdc[0]||kAdc[0].length===0){
-    ctx.fillStyle="#f00";ctx.font="11px monospace";ctx.fillText("NO ADC data",10,20);return;
+    ctx.fillStyle="#f00";ctx.font=fontSpec(11,"monospace");ctx.fillText("NO ADC data",10,20);return;
   }
   var adcX=kAdc[0],adcY=kAdc[1],adcZ=kAdc[2], nAdc=adcX.length;
 
@@ -567,7 +567,7 @@ function drawKs_core(W,H,dpr){
     _kBrng=Math.max(xmax-xmin,ymax-ymin,zmax-zmin,1e-6);
     _kBoundsDirty=false;
   }
-  if(!isFinite(_kBxmin)){ctx.fillStyle="#f00";ctx.font="11px monospace";ctx.fillText("ALL NaN",10,20);return;}
+  if(!isFinite(_kBxmin)){ctx.fillStyle="#f00";ctx.font=fontSpec(11,"monospace");ctx.fillText("ALL NaN",10,20);return;}
 
   // ── Auto-fit (initial open only) ──
   if(kAutoFit){
@@ -645,8 +645,8 @@ function drawKsOverlay(W,H,dpr,cs){
     ctx.strokeStyle=col;ctx.lineWidth=1.6;ctx.setLineDash([]);
     ctx.beginPath();ctx.moveTo(t2.x,t2.y);ctx.lineTo(t1.x,t1.y);ctx.stroke();
     ctx.fillStyle=col;ctx.beginPath();ctx.arc(t1.x,t1.y,4,0,6.283);ctx.fill();
-    ctx.fillStyle=col;ctx.font="bold 11px monospace";ctx.fillText(label,t1.x+5,t1.y-5);
-    ctx.fillStyle=cs.getPropertyValue("--lb").trim();ctx.font="8px monospace";
+    ctx.fillStyle=col;ctx.font=fontSpec(11,"monospace","bold");ctx.fillText(label,t1.x+5,t1.y-5);
+    ctx.fillStyle=cs.getPropertyValue("--lb").trim();ctx.font=fontSpec(8,"monospace");
     for(var v=tick;v<=al;v+=tick){
       var tp=proj(fx*v,fy*v,fz*v);
       var tm=proj(-fx*v,-fy*v,-fz*v);
