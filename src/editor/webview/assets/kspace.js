@@ -344,8 +344,9 @@ kCanvas.addEventListener("wheel",function(e){e.preventDefault();
   var mx=(e.clientX-r.left)/dpr, my=(e.clientY-r.top)/dpr;
   var zf=e.deltaY<0?1.25:0.8, W=kCanvas.width/dpr, H=kCanvas.height/dpr;
   var dz=(1-1/zf)*dpr/kScl;
+  var rx=kView==="3d"?kRotX:_tRotX,ry=kView==="3d"?kRotY:_tRotY;
   kAutoFit=false;
-  setKSpaceTarget(kRotX, kRotY, kScl*zf, kCx+(mx-W/2)*dz, kCy-(my-H/2)*dz, kCz, false);
+  setKSpaceTarget(rx, ry, kScl*zf, kCx+(mx-W/2)*dz, kCy-(my-H/2)*dz, kCz, false);
 },{passive:false});
 
 window.addEventListener("mousemove",function(e){
@@ -637,8 +638,21 @@ function drawKsOverlay(W,H,dpr,cs){
     var ry=dy2*cxR-rz2*sxR;
     return {x:W/2+rx*kScl*invDpr, y:H/2-ry*kScl*invDpr};
   }
+  function axisProjectionLenSq(fx,fy,fz){
+    var rx=fx*cz-fz*sz;
+    var rz=fx*sz+fz*cz;
+    var ry=fy*cxR-rz*sxR;
+    return rx*rx+ry*ry;
+  }
+  function hideAxis(fx,fy,fz,label){
+    if(kView==="xy")return label==="kz";
+    if(kView==="xz")return label==="ky";
+    if(kView==="yz")return label==="kx";
+    return axisProjectionLenSq(fx,fy,fz)<1e-10;
+  }
   var tick=kNice(rng3);
   function drawAxis3D(fx,fy,fz,label,col){
+    if(hideAxis(fx,fy,fz,label))return;
     var al=rng3*0.65;
     var t1=proj(fx*al,fy*al,fz*al);
     var t2=proj(-fx*al,-fy*al,-fz*al);
