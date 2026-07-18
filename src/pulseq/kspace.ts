@@ -51,6 +51,14 @@ export interface KSpaceOptions {
     gradientSupport?: 'endpoints' | 'all';
 }
 
+const TRAJECTORY_TIME_ACCURACY_SEC = 1e-10;
+const GRADIENT_ENDPOINT_TOLERANCE_SEC = 1e-12;
+
+function canonicalTrajectoryTime(timeSec: number): number {
+    return TRAJECTORY_TIME_ACCURACY_SEC
+        * Math.round(timeSec / TRAJECTORY_TIME_ACCURACY_SEC);
+}
+
 export function calculateKspace(
     blocks: DecodedBlock[],
     gradientRaster: number,
@@ -62,7 +70,7 @@ export function calculateKspace(
 
     const GR = gradientRaster;
     const RF = _options?.rfRaster && _options.rfRaster > 0 ? _options.rfRaster : 1e-6;
-    const tacc = 1e-10;
+    const tacc = TRAJECTORY_TIME_ACCURACY_SEC;
 
     const gradientSupport = _options?.gradientSupport ?? 'endpoints';
 
@@ -135,7 +143,10 @@ export function calculateKspace(
     // Build block edges for fast block lookup
     const edges: number[] = [0];
     let cum = 0;
-    for (const b of blocks) { cum += b.duration; edges.push(cum); }
+    for (const b of blocks) {
+        cum += b.duration;
+        edges.push(canonicalTrajectoryTime(cum));
+    }
     for (let i = 0; i < N; i++) {
         const t = grid[i];
         const bi = blockIdx(t, edges);
@@ -217,7 +228,11 @@ function gradVal(g: DecodedGradWaveform|undefined, t: number): number {
     if (!g || g.type === 'none') return 0;
     const tp = g.timePoints, wf = g.waveform;
     if (!tp || tp.length < 2) return 0;
-    if (t < tp[0] || t > tp[tp.length-1]) return 0;
+    const first = tp[0], last = tp[tp.length - 1];
+    if (t < first - GRADIENT_ENDPOINT_TOLERANCE_SEC
+        || t > last + GRADIENT_ENDPOINT_TOLERANCE_SEC) return 0;
+    if (t <= first + GRADIENT_ENDPOINT_TOLERANCE_SEC) return wf[0];
+    if (t >= last - GRADIENT_ENDPOINT_TOLERANCE_SEC) return wf[wf.length - 1];
     let lo=0,hi=tp.length-1;
     while(hi-lo>1){const m=(lo+hi)>>1;if(tp[m]<=t)lo=m;else hi=m;}
     const s=tp[hi]-tp[lo];if(s<=0)return wf[lo];

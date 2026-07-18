@@ -1782,11 +1782,16 @@ var Pulseq = (() => {
   }
 
   // src/pulseq/kspace.ts
+  var TRAJECTORY_TIME_ACCURACY_SEC = 1e-10;
+  var GRADIENT_ENDPOINT_TOLERANCE_SEC = 1e-12;
+  function canonicalTrajectoryTime(timeSec) {
+    return TRAJECTORY_TIME_ACCURACY_SEC * Math.round(timeSec / TRAJECTORY_TIME_ACCURACY_SEC);
+  }
   function calculateKspace(blocks, gradientRaster, totalDuration, trajectoryDelay = 0, _options) {
     if (!blocks.length || !gradientRaster || gradientRaster <= 0) return null;
     const GR = gradientRaster;
     const RF = _options?.rfRaster && _options.rfRaster > 0 ? _options.rfRaster : 1e-6;
-    const tacc = 1e-10;
+    const tacc = TRAJECTORY_TIME_ACCURACY_SEC;
     const gradientSupport = _options?.gradientSupport ?? "endpoints";
     const excT = [], refT = [];
     const gradTimes = [];
@@ -1854,7 +1859,7 @@ var Pulseq = (() => {
     let cum = 0;
     for (const b of blocks) {
       cum += b.duration;
-      edges.push(cum);
+      edges.push(canonicalTrajectoryTime(cum));
     }
     for (let i = 0; i < N; i++) {
       const t = grid[i];
@@ -1955,7 +1960,10 @@ var Pulseq = (() => {
     if (!g || g.type === "none") return 0;
     const tp = g.timePoints, wf = g.waveform;
     if (!tp || tp.length < 2) return 0;
-    if (t < tp[0] || t > tp[tp.length - 1]) return 0;
+    const first = tp[0], last = tp[tp.length - 1];
+    if (t < first - GRADIENT_ENDPOINT_TOLERANCE_SEC || t > last + GRADIENT_ENDPOINT_TOLERANCE_SEC) return 0;
+    if (t <= first + GRADIENT_ENDPOINT_TOLERANCE_SEC) return wf[0];
+    if (t >= last - GRADIENT_ENDPOINT_TOLERANCE_SEC) return wf[wf.length - 1];
     let lo = 0, hi = tp.length - 1;
     while (hi - lo > 1) {
       const m = lo + hi >> 1;
@@ -2280,21 +2288,21 @@ var Pulseq = (() => {
       createDecodedGradientSampler(blocks, "gy"),
       createDecodedGradientSampler(blocks, "gz")
     ];
-    const unsignedM0 = [0, 0, 0];
-    const unsignedM1 = [0, 0, 0];
+    const effectiveM0 = [0, 0, 0];
+    const effectiveM1 = [0, 0, 0];
     let sign = 1;
     let tReset = excitationTimes.length ? excitationTimes[0] : range.first;
     if (range.first < tReset) tReset = range.first;
     let currentT = tReset;
-    const reported = (axis, tSec) => referenceMode === "observationTime" ? sign * (unsignedM1[axis] - (tSec - tReset) * unsignedM0[axis]) : sign * unsignedM1[axis];
+    const reported = (axis, tSec) => referenceMode === "observationTime" ? effectiveM1[axis] - (tSec - tReset) * effectiveM0[axis] : effectiveM1[axis];
     const advanceTo = (targetT) => {
       if (!(targetT > currentT + TIME_EPS2)) return;
       for (let axis = 0; axis < 3; axis++) {
         const ga = samplers[axis](currentT);
         const gb = samplers[axis](targetT);
         const integrated = integrateLinearSegment(currentT, targetT, tReset, ga, gb);
-        unsignedM0[axis] += integrated[0];
-        unsignedM1[axis] += integrated[1];
+        effectiveM0[axis] += sign * integrated[0];
+        effectiveM1[axis] += sign * integrated[1];
       }
       currentT = targetT;
     };
@@ -2316,8 +2324,8 @@ var Pulseq = (() => {
           sign = 1;
           tReset = eventTime;
           currentT = eventTime;
-          unsignedM0.fill(0);
-          unsignedM1.fill(0);
+          effectiveM0.fill(0);
+          effectiveM1.fill(0);
           for (const builder of builders) builder.add(eventTime, 0);
         } else {
           addReported(eventTime);
@@ -2441,8 +2449,8 @@ var Pulseq = (() => {
     let tReset = excitationTimes.length ? excitationTimes[0] : tMin;
     if (samples.length && samples[0] < tReset) tReset = samples[0];
     let currentT = tReset;
-    let unsignedM0 = 0;
-    let unsignedM1 = 0;
+    let effectiveM0 = 0;
+    let effectiveM1 = 0;
     let gradientIndex = -1;
     const seekGradient = (t) => {
       while (gradientIndex + 1 < gradient.time.length && gradient.time[gradientIndex + 1] <= t + TIME_EPS2) {
@@ -2464,8 +2472,8 @@ var Pulseq = (() => {
       return gradient.value[gradientIndex] + alpha * (gradient.value[gradientIndex + 1] - gradient.value[gradientIndex]);
     };
     const reportedM1At = (t) => {
-      if (referenceMode === "observationTime") return sign * (unsignedM1 - (t - tReset) * unsignedM0);
-      return sign * unsignedM1;
+      if (referenceMode === "observationTime") return effectiveM1 - (t - tReset) * effectiveM0;
+      return effectiveM1;
     };
     const advanceTo = (targetT) => {
       if (!(targetT > currentT + TIME_EPS2)) return;
@@ -2476,8 +2484,8 @@ var Pulseq = (() => {
         const ga = sampleGradient(currentT);
         const gb = sampleGradient(nextT);
         const [m0Seg, m1Seg] = integrateLinearSegment(currentT, nextT, tReset, ga, gb);
-        unsignedM0 += m0Seg;
-        unsignedM1 += m1Seg;
+        effectiveM0 += sign * m0Seg;
+        effectiveM1 += sign * m1Seg;
         currentT = nextT;
       }
     };
@@ -2499,8 +2507,8 @@ var Pulseq = (() => {
           sign = 1;
           tReset = nextEvtT;
           currentT = nextEvtT;
-          unsignedM0 = 0;
-          unsignedM1 = 0;
+          effectiveM0 = 0;
+          effectiveM1 = 0;
         } else {
           outT.push(nextEvtT);
           outM1.push(reportedM1At(nextEvtT));
