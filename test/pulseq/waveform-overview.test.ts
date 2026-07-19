@@ -32,6 +32,10 @@ interface OverviewApi {
     series: unknown, start: number, end: number, maxBuckets: number,
     visit: (t0: number, t1: number, min: number, max: number) => void,
   ) => number;
+  sampleEnvelopeRangeAtTime: (
+    series: unknown,
+    timeSec: number,
+  ) => { startTime: number; endTime: number; min: number; max: number; first: number; last: number } | null;
   selectWaveformOverview: (
     overview: unknown,
     startBlock: number,
@@ -199,6 +203,19 @@ describe('standalone waveform overview', () => {
 
     expect(count).toBe(1);
     expect(ranges).toEqual([[0, 4, -4, 5]]);
+  });
+
+  it('returns an envelope range instead of inventing a point value inside a bucket', () => {
+    const api = loadOverviewApi();
+    const series = api.createEnvelopeSeries(
+      [0, 1], [1, 2],
+      [2, 4], [6, 4],
+      [2, 4], [6, 4], 1,
+    );
+
+    expect(api.sampleEnvelopeRangeAtTime(series, 0.25)).toMatchObject({ min: 2, max: 6 });
+    expect(api.sampleEnvelopeRangeAtTime(series, 0.75)).toMatchObject({ min: 2, max: 6 });
+    expect(api.sampleEnvelopeRangeAtTime(series, 1.5)).toMatchObject({ min: 4, max: 4 });
   });
 });
 

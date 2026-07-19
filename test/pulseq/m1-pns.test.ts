@@ -38,29 +38,101 @@ describe('M1 calculation', () => {
     expect(result.m1x[2]).toBeCloseTo(-2.0, 12);
   });
 
-  it('resets M1 at excitation RF center and flips sign at refocusing RF center', () => {
+  it('compresses only the constant RF-centered portion of a gradient-free delay', () => {
+    const blocks = [
+      block(1, 0, 0.01, grad('gx', [0, 0.005, 0.01], [0, 100, 0])),
+      block(2, 0.01, 0.09),
+    ];
+
+    const rfCentered = calculateM1(blocks, 0.001, { referenceMode: 'rfCenter' });
+    const observationTime = calculateM1(blocks, 0.001, { referenceMode: 'observationTime' });
+    const plateauStart = Array.from(rfCentered.tSec).findIndex(time => Math.abs(time - 0.01) < 1e-12);
+
+    expect(plateauStart).toBeGreaterThanOrEqual(0);
+    expect(rfCentered.tSec.length).toBeLessThan(observationTime.tSec.length / 2);
+    expect(rfCentered.tSec[plateauStart + 1]).toBeCloseTo(0.1, 12);
+    expect(rfCentered.m1x[plateauStart + 1]).toBe(rfCentered.m1x[plateauStart]);
+    expect(observationTime.m1x[observationTime.m1x.length - 1]).not.toBeCloseTo(
+      observationTime.m1x[plateauStart],
+      12,
+    );
+  });
+
+  it('preserves accumulated M1 and flips only subsequent integration at refocusing', () => {
     const blocks = [
       {
-        ...block(1, 0, 0.1, grad('gx', [0, 0.1], [100, 100])),
-        rf: rf(1, 0.05, 'e'),
+        ...block(1, 0, 0.01, grad('gx', [0, 0.01], [100, 100])),
+        rf: rf(1, 0, 'e'),
       },
       {
-        ...block(2, 0.1, 0.1, grad('gx', [0.1, 0.2], [100, 100])),
-        rf: rf(2, 0.15, 'r'),
+        ...block(2, 0.01, 0.01, grad('gx', [0.01, 0.02], [100, 100])),
+        rf: rf(2, 0.01, 'r'),
       },
     ];
 
-    const result = calculateM1(blocks, 0.05);
-    const eventIndex = Array.from(result.tSec).findIndex(t => Math.abs(t - 0.05) < 1e-12);
-    const refocusIndex = Array.from(result.tSec).findIndex(t => Math.abs(t - 0.15) < 1e-12);
+    const result = calculateM1(blocks, 0.005);
 
     expect(result.valid).toBe(true);
     expect(result.referenceMode).toBe('rfCenter');
-    expect(eventIndex).toBeGreaterThanOrEqual(0);
-    expect(refocusIndex).toBeGreaterThanOrEqual(0);
-    expect(result.m1x[eventIndex]).toBeCloseTo(0, 12);
-    expect(result.m1x[refocusIndex]).toBeGreaterThan(0);
-    expect(result.m1x[result.m1x.length - 1]).toBeLessThan(0);
+    expect(m1At(result, 0)).toBeCloseTo(0, 12);
+    expect(m1At(result, 0.005)).toBeCloseTo(0.00125, 12);
+    expect(m1At(result, 0.01)).toBeCloseTo(0.005, 12);
+    expect(m1At(result, 0.015)).toBeCloseTo(-0.00125, 12);
+    expect(m1At(result, 0.02)).toBeCloseTo(-0.01, 12);
+  });
+
+  it('derives observation-time M1 from the same signed effective moments', () => {
+    const blocks = [
+      {
+        ...block(1, 0, 0.01, grad('gx', [0, 0.01], [100, 100])),
+        rf: rf(1, 0, 'e'),
+      },
+      {
+        ...block(2, 0.01, 0.01, grad('gx', [0.01, 0.02], [100, 100])),
+        rf: rf(2, 0.01, 'r'),
+      },
+    ];
+
+    const result = calculateM1(blocks, 0.005, { referenceMode: 'observationTime' });
+
+    expect(m1At(result, 0.005)).toBeCloseTo(-0.00125, 12);
+    expect(m1At(result, 0.01)).toBeCloseTo(-0.005, 12);
+    expect(m1At(result, 0.015)).toBeCloseTo(-0.00875, 12);
+    expect(m1At(result, 0.02)).toBeCloseTo(-0.01, 12);
+  });
+
+  it('integrates a continuous triangular bipolar gradient exactly', () => {
+    const blocks = [
+      block(1, 0, 0.02, grad('gx', [0, 0.005, 0.01, 0.015, 0.02], [0, 100, 0, -100, 0])),
+    ];
+
+    const rfCentered = calculateM1(blocks, 0.001);
+    const observationTime = calculateM1(blocks, 0.001, { referenceMode: 'observationTime' });
+
+    expect(m1At(rfCentered, 0.02)).toBeCloseTo(-0.005, 12);
+    expect(m1At(observationTime, 0.02)).toBeCloseTo(-0.005, 12);
+  });
+
+  it('keeps exact and coarse endpoints aligned for bipolar and refocusing cases', () => {
+    const cases = [
+      [block(1, 0, 0.02, grad('gx', [0, 0.005, 0.01, 0.015, 0.02], [0, 100, 0, -100, 0]))],
+      [
+        { ...block(1, 0, 0.01, grad('gx', [0, 0.01], [100, 100])), rf: rf(1, 0, 'e') },
+        { ...block(2, 0.01, 0.01, grad('gx', [0.01, 0.02], [100, 100])), rf: rf(2, 0.01, 'r') },
+      ],
+    ];
+
+    for (const blocks of cases) {
+      for (const referenceMode of ['rfCenter', 'observationTime'] as const) {
+        const exact = calculateM1(blocks, 0.001, { referenceMode });
+        const coarse = calculateM1Coarse(blocks, 0.001, { referenceMode, maxPoints: 1024 });
+        expect(coarse.valid).toBe(true);
+        expect(coarse.x.last[coarse.x.last.length - 1]).toBeCloseTo(
+          exact.m1x[exact.m1x.length - 1],
+          12,
+        );
+      }
+    }
   });
 
   it('streams a bounded full-sequence M1 envelope without losing extrema', () => {
@@ -74,6 +146,49 @@ describe('M1 calculation', () => {
     expect(Math.max(...Array.from(coarse.x.max))).toBeCloseTo(
       Math.max(...Array.from(exact.m1x)),
       10,
+    );
+  });
+
+  it('fast-forwards RF-centered coarse calculation through constant gradient-free buckets', () => {
+    const blocks = [
+      block(1, 0, 0.01, grad('gx', [0, 0.005, 0.01], [0, 100, 0])),
+      block(2, 0.01, 0.09),
+    ];
+    const exact = calculateM1(blocks, 0.001, { referenceMode: 'rfCenter' });
+    const coarse = calculateM1Coarse(blocks, 0.001, { referenceMode: 'rfCenter', maxPoints: 1024 });
+    const plateauBuckets = Array.from(coarse.x.startTime)
+      .map((start, index) => ({ start, end: coarse.x.endTime[index], index }))
+      .filter(bucket => bucket.start >= 0.02 && bucket.end <= 0.09);
+
+    expect(coarse.x.last[coarse.x.last.length - 1]).toBeCloseTo(
+      exact.m1x[exact.m1x.length - 1],
+      12,
+    );
+    expect(plateauBuckets.length).toBeGreaterThan(10);
+    for (const bucket of plateauBuckets) {
+      expect(coarse.x.min[bucket.index]).toBe(coarse.x.max[bucket.index]);
+      expect(coarse.x.first[bucket.index]).toBe(coarse.x.last[bucket.index]);
+    }
+  });
+
+  it('preserves refocusing events while fast-forwarding a gradient-free delay', () => {
+    const blocks = [
+      {
+        ...block(1, 0, 0.01, grad('gx', [0, 0.005, 0.01], [0, 100, 0])),
+        rf: rf(1, 0, 'e'),
+      },
+      {
+        ...block(2, 0.01, 0.02),
+        rf: rf(2, 0.02, 'r'),
+      },
+      block(3, 0.03, 0.01, grad('gx', [0.03, 0.035, 0.04], [0, 100, 0])),
+    ];
+    const exact = calculateM1(blocks, 0.001, { referenceMode: 'rfCenter' });
+    const coarse = calculateM1Coarse(blocks, 0.001, { referenceMode: 'rfCenter', maxPoints: 1024 });
+
+    expect(coarse.x.last[coarse.x.last.length - 1]).toBeCloseTo(
+      exact.m1x[exact.m1x.length - 1],
+      12,
     );
   });
 });
@@ -212,6 +327,15 @@ function rf(blockIndex: number, centerTime: number, use: string): DecodedBlock['
     phaseOffset: 0,
     use,
   };
+}
+
+function m1At(result: ReturnType<typeof calculateM1>, timeSec: number): number {
+  let index = -1;
+  for (let candidate = 0; candidate < result.tSec.length; candidate++) {
+    if (Math.abs(result.tSec[candidate] - timeSec) < 1e-12) index = candidate;
+  }
+  expect(index, `missing M1 sample at ${timeSec} s`).toBeGreaterThanOrEqual(0);
+  return result.m1x[index];
 }
 
 function syntheticAsc(): string {

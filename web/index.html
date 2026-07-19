@@ -282,17 +282,15 @@ function timeUnitStr(){return timeUnit;}
 function setExportButtonEnabled(enabled){if(exportBtn)exportBtn.disabled=!enabled||exportBusy;}
 function normalizeM1ReferenceMode(mode){return mode==='observationTime'?'observationTime':'rfCenter';}
 function readM1ReferenceMode(){
-  try{return normalizeM1ReferenceMode(localStorage.getItem('seqeyes.m1ReferenceMode'));}catch(_){return 'rfCenter';}
-}
-function writeM1ReferenceMode(mode){
-  try{localStorage.setItem('seqeyes.m1ReferenceMode',mode);}catch(_){}
+  try{localStorage.removeItem('seqeyes.m1ReferenceMode');}catch(_){}
+  return 'rfCenter';
 }
 function setM1ReferenceMode(mode){
   var next=normalizeM1ReferenceMode(mode);
   if(next===m1ReferenceMode)return m1ReferenceMode;
   var restore=[!!chVis[8],!!chVis[9],!!chVis[10]];
   var shouldRecalc=!!m1Data&&(chVis[8]||chVis[9]||chVis[10]);
-  m1ReferenceMode=next;writeM1ReferenceMode(next);
+  m1ReferenceMode=next;
   m1Data=null;m1WindowData=null;m1WindowPending=null;chVis[8]=false;chVis[9]=false;chVis[10]=false;
   computeGlobalMax();buildLegend();draw();
   if(shouldRecalc){
@@ -1874,13 +1872,23 @@ function pushDerivedPart(parts,label,series,t,unit){
   var v=sampleDerivedSeriesAtTime(series,t);if(v===null)return;
   parts.push(label+'='+fmtDerivedValue(v,unit));
 }
+function pushM1DerivedPart(parts,label,series,t){
+  if(series&&series.kind==='envelope'){
+    var range=sampleEnvelopeRangeAtTime(series,t);if(!range)return;
+    if(range.min===range.max)parts.push(label+'='+fmtDerivedValue(range.min,'s/m'));
+    else parts.push(label+'\u2208['+fmtSignedAmp(range.min)+', '+fmtSignedAmp(range.max)+'] s/m');
+    return;
+  }
+  pushDerivedPart(parts,label,series,t,'s/m');
+}
 function appendDerivedTooltipLines(lines,ct){
   if(pnsData&&chVis[7]){
     var p=[];pushDerivedPart(p,'X',pnsData.x,ct,'%');pushDerivedPart(p,'Y',pnsData.y,ct,'%');pushDerivedPart(p,'Z',pnsData.z,ct,'%');pushDerivedPart(p,'Norm',pnsData.n,ct,'%');
     if(p.length)lines.push('PNS: '+p.join('  '));
   }
-  if(m1Data&&(chVis[8]||chVis[9]||chVis[10])){
-    var m=[];if(chVis[8])pushDerivedPart(m,'M1x',m1Data.x,ct,'s/m');if(chVis[9])pushDerivedPart(m,'M1y',m1Data.y,ct,'s/m');if(chVis[10])pushDerivedPart(m,'M1z',m1Data.z,ct,'s/m');
+  var activeM1=m1SeriesForView(ox,ox+visibleDuration());
+  if(activeM1&&(chVis[8]||chVis[9]||chVis[10])){
+    var m=[];if(chVis[8])pushM1DerivedPart(m,'M1x',activeM1.x,ct);if(chVis[9])pushM1DerivedPart(m,'M1y',activeM1.y,ct);if(chVis[10])pushM1DerivedPart(m,'M1z',activeM1.z,ct);
     if(m.length)lines.push('M1: '+m.join('  '));
   }
 }
@@ -2409,6 +2417,17 @@ if(location.search.indexOf("debug=1")>=0){
     setView:function(start,end){
       if(!isFinite(start)||!isFinite(end)||end<=start)return false;
       ox=Math.max(0,start);sc=plotWidth()/(end-start);clampView();draw();drawMinimap();return true;
+    },
+    firstM1RangeTime:function(){
+      if(!m1Data||!m1Data.x||m1Data.x.kind!=='envelope')return null;
+      var base=m1Data.x.levels&&m1Data.x.levels[0];if(!base)return null;
+      for(var i=0;i<base.count;i++)if(base.min[i]!==base.max[i])return 0.5*(base.t0[i]+base.t1[i]);
+      return null;
+    },
+    m1TooltipLineAt:function(timeSec){
+      var lines=[];appendDerivedTooltipLines(lines,timeSec);
+      for(var i=0;i<lines.length;i++)if(lines[i].indexOf('M1:')===0)return lines[i];
+      return null;
     },
     rfEvents:function(){var out=[];for(var i=0;i<BL.length;i++)if(BL[i].rf)out.push({start:BL[i].rf.s,end:BL[i].rf.s+BL[i].rf.d,points:Math.min(BL[i].rf.t?BL[i].rf.t.length:0,BL[i].rf.m?BL[i].rf.m.length:0),blockPulse:!!BL[i].rf.bp});return out;},
     showKspaceSafetyWarning:function(message){setKspaceSafetyWarning(message||'K-space exceeds the interactive safety budget.');},

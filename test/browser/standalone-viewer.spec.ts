@@ -41,6 +41,7 @@ interface HoverPoint {
 
 const fixtures = {
   gre: resolve('test/kspace_baselines/v151_gre/seq/writeGradientEcho.seq'),
+  largeSequence: resolve('test/seq/spiral_inout.seq'),
   spiral: resolve('test/kspace_baselines/v151_spiral/seq/writeSpiral.seq'),
   rotExt: resolve('test/seqeyes_demo_seq_files/writeRadialGradientEcho_rotExt.seq'),
   binaryGre: resolve('test/pulseq/binary/gre.bseq'),
@@ -536,6 +537,44 @@ test('calculates M1 lazily and accepts a synthetic ASC profile for PNS', async (
 
   for (let i = 0; i < 24; i++) await wheelOn(page, page.locator('#mc'), -1200);
   expect((await debugState(page)).derivedRawCurves).toBeGreaterThan(0);
+});
+
+test('starts every release session in RF-center mode despite a legacy saved developer mode', async ({ page }) => {
+  await page.goto('/?debug=1');
+  await page.evaluate(() => localStorage.setItem('seqeyes.m1ReferenceMode', 'observationTime'));
+  await page.reload();
+
+  expect((await debugState(page)).m1ReferenceMode).toBe('rfCenter');
+  expect(await page.evaluate(() => localStorage.getItem('seqeyes.m1ReferenceMode'))).toBeNull();
+
+  await page.evaluate(() => {
+    (window as unknown as { SeqEyesDev: { setM1ReferenceMode: (mode: string) => string } })
+      .SeqEyesDev.setM1ReferenceMode('observationTime');
+  });
+  expect((await debugState(page)).m1ReferenceMode).toBe('observationTime');
+  await page.reload();
+  expect((await debugState(page)).m1ReferenceMode).toBe('rfCenter');
+});
+
+test('uses ranges for coarse M1 tooltips and point values after detailed-window calculation', async ({ page }) => {
+  await loadViewer(page, fixtures.largeSequence);
+  const m1Legend = page.locator('#legend .li').filter({ hasText: 'M1x' });
+  await m1Legend.click();
+  await expect(m1Legend).not.toHaveClass(/off/, { timeout: 20_000 });
+
+  const rangeTime = await page.evaluate(() => window.__seqeyesDebug.firstM1RangeTime()) as number | null;
+  expect(rangeTime).not.toBeNull();
+  const coarseLine = await page.evaluate(time => window.__seqeyesDebug.m1TooltipLineAt(time), rangeTime) as string;
+  expect(coarseLine).toContain('∈[');
+
+  const detailStart = Math.max(0, rangeTime! - 0.045);
+  await page.evaluate(({ start, end }) => window.__seqeyesDebug.setView(start, end), {
+    start: detailStart,
+    end: detailStart + 0.09,
+  });
+  await expect.poll(async () => (
+    await page.evaluate(time => window.__seqeyesDebug.m1TooltipLineAt(time), rangeTime)
+  ), { timeout: 20_000 }).not.toContain('∈[');
 });
 
 async function loadViewer(page: Page, sequencePath: string): Promise<void> {

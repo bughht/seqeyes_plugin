@@ -94,6 +94,18 @@ function forEachEnvelopeRange(series,viewStart,viewEnd,maxBuckets,visit){
   return emitted;
 }
 
+function sampleEnvelopeRangeAtTime(series,timeSec){
+  if(!series||series.kind!=='envelope'||!series.levels.length||!isFinite(timeSec))return null;
+  var base=series.levels[0];if(!base||base.count<1)return null;
+  var index=Math.max(0,lowerBoundSeries(base.t1,timeSec));
+  if(index>=base.count||timeSec<base.t0[index]||timeSec>base.t1[index])return null;
+  return{
+    startTime:base.t0[index],endTime:base.t1[index],
+    min:base.min[index]*series.scale,max:base.max[index]*series.scale,
+    first:base.first[index]*series.scale,last:base.last[index]*series.scale
+  };
+}
+
 function lowerBoundSeries(values,target){
   var lo=0,hi=values.length;
   while(lo<hi){var mid=(lo+hi)>>1;if(values[mid]<target)lo=mid+1;else hi=mid}
