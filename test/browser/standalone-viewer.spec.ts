@@ -41,7 +41,7 @@ interface HoverPoint {
 
 const fixtures = {
   gre: resolve('test/kspace_baselines/v151_gre/seq/writeGradientEcho.seq'),
-  largeGre: resolve('../demo_files/test_gre3d.seq'),
+  largeSequence: resolve('test/seq/spiral_inout.seq'),
   spiral: resolve('test/kspace_baselines/v151_spiral/seq/writeSpiral.seq'),
   rotExt: resolve('test/seqeyes_demo_seq_files/writeRadialGradientEcho_rotExt.seq'),
   binaryGre: resolve('test/pulseq/binary/gre.bseq'),
@@ -557,7 +557,7 @@ test('starts every release session in RF-center mode despite a legacy saved deve
 });
 
 test('uses ranges for coarse M1 tooltips and point values after detailed-window calculation', async ({ page }) => {
-  await loadViewer(page, fixtures.largeGre);
+  await loadViewer(page, fixtures.largeSequence);
   const m1Legend = page.locator('#legend .li').filter({ hasText: 'M1x' });
   await m1Legend.click();
   await expect(m1Legend).not.toHaveClass(/off/, { timeout: 20_000 });
