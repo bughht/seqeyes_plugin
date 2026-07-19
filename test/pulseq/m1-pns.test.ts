@@ -38,6 +38,26 @@ describe('M1 calculation', () => {
     expect(result.m1x[2]).toBeCloseTo(-2.0, 12);
   });
 
+  it('compresses only the constant RF-centered portion of a gradient-free delay', () => {
+    const blocks = [
+      block(1, 0, 0.01, grad('gx', [0, 0.005, 0.01], [0, 100, 0])),
+      block(2, 0.01, 0.09),
+    ];
+
+    const rfCentered = calculateM1(blocks, 0.001, { referenceMode: 'rfCenter' });
+    const observationTime = calculateM1(blocks, 0.001, { referenceMode: 'observationTime' });
+    const plateauStart = Array.from(rfCentered.tSec).findIndex(time => Math.abs(time - 0.01) < 1e-12);
+
+    expect(plateauStart).toBeGreaterThanOrEqual(0);
+    expect(rfCentered.tSec.length).toBeLessThan(observationTime.tSec.length / 2);
+    expect(rfCentered.tSec[plateauStart + 1]).toBeCloseTo(0.1, 12);
+    expect(rfCentered.m1x[plateauStart + 1]).toBe(rfCentered.m1x[plateauStart]);
+    expect(observationTime.m1x[observationTime.m1x.length - 1]).not.toBeCloseTo(
+      observationTime.m1x[plateauStart],
+      12,
+    );
+  });
+
   it('preserves accumulated M1 and flips only subsequent integration at refocusing', () => {
     const blocks = [
       {
@@ -126,6 +146,49 @@ describe('M1 calculation', () => {
     expect(Math.max(...Array.from(coarse.x.max))).toBeCloseTo(
       Math.max(...Array.from(exact.m1x)),
       10,
+    );
+  });
+
+  it('fast-forwards RF-centered coarse calculation through constant gradient-free buckets', () => {
+    const blocks = [
+      block(1, 0, 0.01, grad('gx', [0, 0.005, 0.01], [0, 100, 0])),
+      block(2, 0.01, 0.09),
+    ];
+    const exact = calculateM1(blocks, 0.001, { referenceMode: 'rfCenter' });
+    const coarse = calculateM1Coarse(blocks, 0.001, { referenceMode: 'rfCenter', maxPoints: 1024 });
+    const plateauBuckets = Array.from(coarse.x.startTime)
+      .map((start, index) => ({ start, end: coarse.x.endTime[index], index }))
+      .filter(bucket => bucket.start >= 0.02 && bucket.end <= 0.09);
+
+    expect(coarse.x.last[coarse.x.last.length - 1]).toBeCloseTo(
+      exact.m1x[exact.m1x.length - 1],
+      12,
+    );
+    expect(plateauBuckets.length).toBeGreaterThan(10);
+    for (const bucket of plateauBuckets) {
+      expect(coarse.x.min[bucket.index]).toBe(coarse.x.max[bucket.index]);
+      expect(coarse.x.first[bucket.index]).toBe(coarse.x.last[bucket.index]);
+    }
+  });
+
+  it('preserves refocusing events while fast-forwarding a gradient-free delay', () => {
+    const blocks = [
+      {
+        ...block(1, 0, 0.01, grad('gx', [0, 0.005, 0.01], [0, 100, 0])),
+        rf: rf(1, 0, 'e'),
+      },
+      {
+        ...block(2, 0.01, 0.02),
+        rf: rf(2, 0.02, 'r'),
+      },
+      block(3, 0.03, 0.01, grad('gx', [0.03, 0.035, 0.04], [0, 100, 0])),
+    ];
+    const exact = calculateM1(blocks, 0.001, { referenceMode: 'rfCenter' });
+    const coarse = calculateM1Coarse(blocks, 0.001, { referenceMode: 'rfCenter', maxPoints: 1024 });
+
+    expect(coarse.x.last[coarse.x.last.length - 1]).toBeCloseTo(
+      exact.m1x[exact.m1x.length - 1],
+      12,
     );
   });
 });

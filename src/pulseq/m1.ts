@@ -53,6 +53,11 @@ interface GradientSeries {
     value: number[];
 }
 
+interface TimeInterval {
+    start: number;
+    end: number;
+}
+
 const TIME_EPS = 1e-15;
 
 export function calculateM1(blocks: DecodedBlock[], gradientRaster: number, options: M1Options = {}): M1Data {
@@ -97,19 +102,61 @@ export function calculateM1(blocks: DecodedBlock[], gradientRaster: number, opti
     if (x.t.length !== y.t.length || x.t.length !== z.t.length) {
         warnings.push(`Internal warning: per-axis M1 output sizes disagree (${x.t.length}, ${y.t.length}, ${z.t.length}). Plot may be inconsistent.`);
     }
+    const output = referenceMode === 'rfCenter'
+        ? compactRfCenteredSamples(x.t, x.m1, y.m1, z.m1)
+        : { t: x.t, x: x.m1, y: y.m1, z: z.m1 };
 
     return {
         valid: true,
         ok: true,
         referenceMode,
-        tSec: new Float64Array(x.t),
-        m1x: new Float64Array(x.m1),
-        m1y: new Float64Array(y.m1),
-        m1z: new Float64Array(z.m1),
+        tSec: new Float64Array(output.t),
+        m1x: new Float64Array(output.x),
+        m1y: new Float64Array(output.y),
+        m1z: new Float64Array(output.z),
         warnings,
         excitationTimesSec: new Float64Array(excitationTimes),
         refocusingTimesSec: new Float64Array(refocusingTimes),
     };
+}
+
+/**
+ * RF-centered M1 is exactly constant while every axis has zero effective
+ * gradient. Preserve both ends of each plateau so browser interpolation is a
+ * horizontal hold, while dropping redundant raster samples in its interior.
+ */
+function compactRfCenteredSamples(
+    time: number[],
+    x: number[],
+    y: number[],
+    z: number[],
+): { t: number[]; x: number[]; y: number[]; z: number[] } {
+    const count = Math.min(time.length, x.length, y.length, z.length);
+    if (count <= 2) return {
+        t: time.slice(0, count),
+        x: x.slice(0, count),
+        y: y.slice(0, count),
+        z: z.slice(0, count),
+    };
+    const out = { t: [time[0]], x: [x[0]], y: [y[0]], z: [z[0]] };
+    const sameVector = (left: number, right: number): boolean => (
+        x[left] === x[right] && y[left] === y[right] && z[left] === z[right]
+    );
+    for (let index = 1; index < count - 1; index++) {
+        const duplicateTime = time[index] <= time[index - 1] + TIME_EPS
+            || time[index + 1] <= time[index] + TIME_EPS;
+        const insidePlateau = sameVector(index - 1, index) && sameVector(index, index + 1);
+        if (!duplicateTime && insidePlateau) continue;
+        out.t.push(time[index]);
+        out.x.push(x[index]);
+        out.y.push(y[index]);
+        out.z.push(z[index]);
+    }
+    out.t.push(time[count - 1]);
+    out.x.push(x[count - 1]);
+    out.y.push(y[count - 1]);
+    out.z.push(z[count - 1]);
+    return out;
 }
 
 function appendM1AdvisoryWarnings(rfEvents: RfEvent[], tMin: number, warnings: string[]): void {
@@ -224,13 +271,44 @@ export function calculateM1Coarse(
     const regularLast = range.first + Math.max(0, regularCount - 1) * gradientRaster;
     const hasFinalSample = regularLast < range.last - TIME_EPS;
     const totalSamples = regularCount + (hasFinalSample ? 1 : 0);
+    const sampleTimeAt = (index: number): number => (
+        index < regularCount ? range.first + index * gradientRaster : range.last
+    );
+    const gradientFreeIntervals = referenceMode === 'rfCenter'
+        ? collectGradientFreeIntervals(blocks)
+        : [];
+    let gradientFreeIndex = 0;
     let eventIndex = 0;
     let sampleIndex = 0;
     while (eventIndex < events.length || sampleIndex < totalSamples) {
         const eventTime = eventIndex < events.length ? events[eventIndex].tSec : Number.POSITIVE_INFINITY;
         const sampleTime = sampleIndex < totalSamples
-            ? (sampleIndex < regularCount ? range.first + sampleIndex * gradientRaster : range.last)
+            ? sampleTimeAt(sampleIndex)
             : Number.POSITIVE_INFINITY;
+        while (gradientFreeIndex < gradientFreeIntervals.length
+            && gradientFreeIntervals[gradientFreeIndex].end <= currentT + TIME_EPS) {
+            gradientFreeIndex++;
+        }
+        const gap = gradientFreeIntervals[gradientFreeIndex];
+        const ordinaryTarget = Math.min(eventTime, sampleTime);
+        if (gap && currentT < gap.start - TIME_EPS && gap.start < ordinaryTarget - TIME_EPS) {
+            advanceTo(gap.start);
+            addReported(gap.start);
+            continue;
+        }
+        if (gap && currentT >= gap.start - TIME_EPS && currentT < gap.end - TIME_EPS) {
+            const jumpTarget = Math.min(gap.end, eventTime, endSec);
+            if (jumpTarget > currentT + TIME_EPS) {
+                for (let axis = 0; axis < 3; axis++) {
+                    builders[axis].addConstantRange(currentT, jumpTarget, effectiveM1[axis]);
+                }
+                currentT = jumpTarget;
+                while (sampleIndex < totalSamples && sampleTimeAt(sampleIndex) <= currentT + TIME_EPS) {
+                    sampleIndex++;
+                }
+                continue;
+            }
+        }
         if (eventTime <= sampleTime) {
             advanceTo(eventTime);
             if (events[eventIndex].kind === 'reset') {
@@ -302,6 +380,45 @@ function collectGradientSeries(blocks: DecodedBlock[], channel: 'gx' | 'gy' | 'g
         }
     }
     return series;
+}
+
+/** Conservative block-local gaps where every physical gradient is exactly zero. */
+function collectGradientFreeIntervals(blocks: DecodedBlock[]): TimeInterval[] {
+    const gaps: TimeInterval[] = [];
+    const appendGap = (start: number, end: number): void => {
+        if (!(end > start + TIME_EPS)) return;
+        const previous = gaps[gaps.length - 1];
+        if (previous && start <= previous.end + TIME_EPS) {
+            previous.end = Math.max(previous.end, end);
+        } else {
+            gaps.push({ start, end });
+        }
+    };
+    for (const block of blocks) {
+        const blockStart = block.startTime;
+        const blockEnd = block.startTime + block.duration;
+        if (!(blockEnd > blockStart + TIME_EPS)) continue;
+        const active: TimeInterval[] = [];
+        for (const gradient of [block.gx, block.gy, block.gz]) {
+            if (!gradient?.timePoints.length || !gradient.waveform.length || gradient.type === 'none') continue;
+            let nonzero = false;
+            for (const value of gradient.waveform) {
+                if (value !== 0) { nonzero = true; break; }
+            }
+            if (!nonzero) continue;
+            const first = Math.max(blockStart, gradient.timePoints[0]);
+            const last = Math.min(blockEnd, gradient.timePoints[gradient.timePoints.length - 1]);
+            if (last > first + TIME_EPS) active.push({ start: first, end: last });
+        }
+        active.sort((left, right) => left.start - right.start);
+        let cursor = blockStart;
+        for (const interval of active) {
+            if (interval.start > cursor + TIME_EPS) appendGap(cursor, interval.start);
+            cursor = Math.max(cursor, interval.end);
+        }
+        if (cursor < blockEnd - TIME_EPS) appendGap(cursor, blockEnd);
+    }
+    return gaps;
 }
 
 function appendGradientPoint(series: GradientSeries, t: number, value: number): void {

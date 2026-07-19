@@ -38,11 +38,41 @@ export class BoundedSeriesBuilder {
 
     add(tSec: number, value: number): void {
         if (!Number.isFinite(tSec) || !Number.isFinite(value)) return;
+        this.addToBucket(this.bucketIndex(tSec), tSec, value);
+    }
+
+    /** Fill a known constant interval without visiting every source-raster sample. */
+    addConstantRange(startSec: number, endSec: number, value: number): void {
+        if (!Number.isFinite(startSec) || !Number.isFinite(endSec) || !Number.isFinite(value)) return;
+        const start = Math.max(this.startSec, Math.min(startSec, endSec));
+        const end = Math.min(this.endSec, Math.max(startSec, endSec));
+        if (end < start) return;
+        const firstIndex = this.bucketIndex(start);
+        const lastIndex = this.bucketIndex(end);
+        for (let index = firstIndex; index <= lastIndex; index++) {
+            const bucketStart = this.span > 0
+                ? this.startSec + this.span * index / this.bucketCount
+                : start;
+            const bucketEnd = this.span > 0
+                ? this.startSec + this.span * (index + 1) / this.bucketCount
+                : end;
+            const left = Math.max(start, bucketStart);
+            const right = Math.min(end, bucketEnd);
+            if (right < left) continue;
+            this.addToBucket(index, left, value);
+            this.addToBucket(index, right, value);
+        }
+    }
+
+    private bucketIndex(tSec: number): number {
         const normalized = this.span > 0 ? (tSec - this.startSec) / this.span : 0;
-        const index = Math.max(0, Math.min(
+        return Math.max(0, Math.min(
             this.bucketCount - 1,
             Math.floor(normalized * this.bucketCount),
         ));
+    }
+
+    private addToBucket(index: number, tSec: number, value: number): void {
         const bucket = this.buckets[index];
         if (!bucket) {
             this.buckets[index] = {

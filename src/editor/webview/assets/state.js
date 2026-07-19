@@ -104,17 +104,15 @@ var vscApi=(typeof acquireVsCodeApi!=='undefined')?acquireVsCodeApi():null;
 
 function normalizeM1ReferenceMode(mode){return mode==='observationTime'?'observationTime':'rfCenter';}
 function readM1ReferenceMode(){
-  try{return normalizeM1ReferenceMode(localStorage.getItem('seqeyes.m1ReferenceMode'));}catch(_){return 'rfCenter';}
-}
-function writeM1ReferenceMode(mode){
-  try{localStorage.setItem('seqeyes.m1ReferenceMode',mode);}catch(_){}
+  try{localStorage.removeItem('seqeyes.m1ReferenceMode');}catch(_){}
+  return 'rfCenter';
 }
 function setM1ReferenceMode(mode){
   var next=normalizeM1ReferenceMode(mode);
   if(next===m1ReferenceMode)return m1ReferenceMode;
   var restore=[!!chVis[8],!!chVis[9],!!chVis[10]];
   var shouldRecalc=!!m1Data&&(chVis[8]||chVis[9]||chVis[10]);
-  m1ReferenceMode=next;writeM1ReferenceMode(next);
+  m1ReferenceMode=next;
   m1Data=null;m1WindowData=null;m1WindowPending=null;chVis[8]=false;chVis[9]=false;chVis[10]=false;
   computeGlobalMax();buildLegend();draw();
   if(shouldRecalc){

@@ -123,13 +123,23 @@ function pushDerivedPart(parts,label,series,t,unit){
   var v=sampleDerivedSeriesAtTime(series,t);if(v===null)return;
   parts.push(label+'='+fmtDerivedValue(v,unit));
 }
+function pushM1DerivedPart(parts,label,series,t){
+  if(series&&series.kind==='envelope'){
+    var range=sampleEnvelopeRangeAtTime(series,t);if(!range)return;
+    if(range.min===range.max)parts.push(label+'='+fmtDerivedValue(range.min,'s/m'));
+    else parts.push(label+'\u2208['+fmtSignedAmp(range.min)+', '+fmtSignedAmp(range.max)+'] s/m');
+    return;
+  }
+  pushDerivedPart(parts,label,series,t,'s/m');
+}
 function appendDerivedTooltipLines(lines,ct){
   if(pnsData&&chVis[7]){
     var p=[];pushDerivedPart(p,'X',pnsData.x,ct,'%');pushDerivedPart(p,'Y',pnsData.y,ct,'%');pushDerivedPart(p,'Z',pnsData.z,ct,'%');pushDerivedPart(p,'Norm',pnsData.n,ct,'%');
     if(p.length)lines.push('PNS: '+p.join('  '));
   }
-  if(m1Data&&(chVis[8]||chVis[9]||chVis[10])){
-    var m=[];if(chVis[8])pushDerivedPart(m,'M1x',m1Data.x,ct,'s/m');if(chVis[9])pushDerivedPart(m,'M1y',m1Data.y,ct,'s/m');if(chVis[10])pushDerivedPart(m,'M1z',m1Data.z,ct,'s/m');
+  var activeM1=m1SeriesForView(ox,ox+visibleDuration());
+  if(activeM1&&(chVis[8]||chVis[9]||chVis[10])){
+    var m=[];if(chVis[8])pushM1DerivedPart(m,'M1x',activeM1.x,ct);if(chVis[9])pushM1DerivedPart(m,'M1y',activeM1.y,ct);if(chVis[10])pushM1DerivedPart(m,'M1z',activeM1.z,ct);
     if(m.length)lines.push('M1: '+m.join('  '));
   }
 }
