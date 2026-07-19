@@ -5,6 +5,11 @@ const path = require('node:path');
 const { runTests } = require('@vscode/test-electron');
 
 async function main() {
+  // Codex/VS Code-integrated terminals can inherit Extension Host variables.
+  // They must not leak into the fresh desktop process under test.
+  for (const key of Object.keys(process.env)) {
+    if (key === 'ELECTRON_RUN_AS_NODE' || key.startsWith('VSCODE_')) delete process.env[key];
+  }
   const repoRoot = path.resolve(__dirname, '..', '..');
   const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'seqeyes-vscode-e2e-'));
 
@@ -15,7 +20,7 @@ async function main() {
   fs.writeFileSync(path.join(workspacePath, 'invalid.bseq'), 'This is not a binary Pulseq sequence.\n', 'utf8');
 
   try {
-    await runTests({
+    const testOptions = {
       version: process.env.SEQEYES_VSCODE_TEST_VERSION || '1.85.2',
       extensionDevelopmentPath: repoRoot,
       extensionTestsPath: path.resolve(__dirname, 'suite', 'index.js'),
@@ -28,7 +33,12 @@ async function main() {
         SEQEYES_TEST_MODE: '1',
         SEQEYES_TEST_WORKSPACE: workspacePath,
       },
-    });
+    };
+    if (process.env.SEQEYES_VSCODE_EXECUTABLE_PATH) {
+      testOptions.vscodeExecutablePath = process.env.SEQEYES_VSCODE_EXECUTABLE_PATH;
+      delete testOptions.version;
+    }
+    await runTests(testOptions);
   } finally {
     fs.rmSync(workspacePath, { recursive: true, force: true });
   }
