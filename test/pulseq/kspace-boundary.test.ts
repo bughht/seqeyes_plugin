@@ -43,26 +43,26 @@ describe('k-space gradient boundary equivalence', () => {
   });
 
   it('matches the frozen EPI-RS Pulseq k-space summaries for text and binary input', () => {
-    const fixtureDirectory = join(__dirname, '..', '..', '..', 'bseq', 'benchmark_data', 'demo_seq_pairs');
+    const fixtureDirectory = join(__dirname, 'binary');
     const expected = {
       seq: {
-        first: [-124.20456885928618, 121.09379999999996, 0.0015000000007603376],
-        middle: [-124.20456885928043, 0.00011200000054689685, 0.0015000000007603376],
-        last: [-124.20456885927467, -124.99982400001073, 0.0015000000007603376],
-        min: [-124.20456885929779, -124.99982400001073, 0.0015000000007603376],
-        max: [124.20474885929583, 121.09379999999996, 0.0015000000007603376],
+        first: [217.5685765514701, 0, 0.0017550000020492007],
+        middle: [-217.56727655184918, -218.181510003301, 0.0017550001284689642],
+        last: [-217.56727655181325, -218.1815100216362, 0.0017549972762935795],
+        min: [-217.5672765523617, -218.1815100216362, 0.0017549972762935795],
+        max: [217.56857655221708, 213.6362400000081, 0.0017550001284689642],
       },
       bseq: {
-        first: [-124.20460385438966, 121.09375, 0],
-        middle: [-124.20460385438976, 0, 0],
-        last: [-124.2046038543906, -125, 0],
-        min: [-124.2046038543907, -125, 0],
-        max: [124.20460385439057, 121.09375, 0],
+        first: [217.56800920598332, 0, 5.9117155615240335e-12],
+        middle: [-217.5680092063631, -218.18181818511997, 1.446096575818956e-10],
+        last: [-217.56800920631972, -218.1818182034574, -2.684828359633684e-9],
+        min: [-217.56800920687192, -218.1818182034574, -2.684828359633684e-9],
+        max: [217.568009206729, 213.63636363637116, 1.446096575818956e-10],
       },
     };
 
     for (const extension of ['seq', 'bseq'] as const) {
-      const path = join(fixtureDirectory, `writeEpiRS.${extension}`);
+      const path = join(fixtureDirectory, `epi_rs.${extension}`);
       const sequence = parseSequenceBytes(readFileSync(path), path);
       const blocks = decodeAllBlocks(sequence);
       const result = calculateKspace(
