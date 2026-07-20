@@ -53,7 +53,7 @@ function drawBlockBounds(w,h,vs,ve,s){
 function drawGrid(w,h,vs,ve,s){
   ctx.strokeStyle=s.getPropertyValue('--gr').trim();ctx.lineWidth=0.5;
   var st=nice((ve-vs)/8),t=Math.floor(vs/st)*st;
-  while(t<=ve){var x=t2x(t);ctx.beginPath();ctx.moveTo(x,M.t);ctx.lineTo(x,h-M.b);ctx.stroke();t+=st;}
+  while(t<=ve){var x=t2x(t);if(x>=M.l){ctx.beginPath();ctx.moveTo(x,M.t);ctx.lineTo(x,h-M.b);ctx.stroke();}t+=st;}
   var ch=cH(),vc=visChannels();
   for(var i=0;i<=vc.length;i++){ctx.beginPath();ctx.moveTo(M.l,M.t+i*ch);ctx.lineTo(w-M.r,M.t+i*ch);ctx.stroke();}
 }
