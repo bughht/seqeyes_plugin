@@ -220,7 +220,7 @@ describe('standalone waveform overview', () => {
 });
 
 function loadOverviewApi(): OverviewApi {
-  const source = readFileSync(join(__dirname, '..', '..', 'web', 'derived-series.js'), 'utf8');
+  const source = readFileSync(join(__dirname, '..', '..', 'src', 'editor', 'webview', 'assets', 'derived-series.js'), 'utf8');
   const context = createContext({ Float64Array, Int32Array, Infinity, isFinite, Math });
   runInContext(source, context);
   return context as unknown as OverviewApi;

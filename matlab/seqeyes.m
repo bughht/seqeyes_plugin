@@ -222,7 +222,8 @@ function [newPath, tempDir] = buildMatlabHTML(templatePath, seqFilePath)
     mkdir(tempDir);
     [tmplDir, ~, ~] = fileparts(templatePath);
     copyfile(fullfile(tmplDir, 'pulseq-bundle.js'), fullfile(tempDir, 'pulseq-bundle.js'));
-    copyfile(fullfile(tmplDir, 'derived-series.js'), fullfile(tempDir, 'derived-series.js'));
+    copyfile(fullfile(tmplDir, 'webview-bundle.js'), fullfile(tempDir, 'webview-bundle.js'));
+    copyfile(fullfile(tmplDir, 'styles.css'), fullfile(tempDir, 'styles.css'));
     % Copy logo assets if they exist (silently skip if missing)
     if isfile(fullfile(tmplDir, 'logo.png'))
         copyfile(fullfile(tmplDir, 'logo.png'), fullfile(tempDir, 'logo.png'));
