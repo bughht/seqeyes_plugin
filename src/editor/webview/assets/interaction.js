@@ -2,7 +2,7 @@
    Mouse interaction
    ═══════════════════════════════════════════════════════════════════════ */
 
-var _touchTooltipTimer=null,_pointerFrame=0,_pendingPointer=null,mmDrag=false;
+var _touchTooltipTimer=null,_pointerFrame=0,_pendingPointer=null,mmDrag=false,yLimitEdit=null;
 
 mc.addEventListener('wheel',function(e){e.preventDefault();
   var changed=false;
@@ -15,7 +15,11 @@ mc.addEventListener('wheel',function(e){e.preventDefault();
     var zf=e.deltaY<0?1.3:1/1.3;changed=zoomAt(mx2,zf);
   }
   if(changed)scheduleViewerDraw(true);},{passive:false});
-mc.addEventListener('mousedown',function(e){if(e.button===0){dr=true;dsx=e.clientX;dso=ox;cc.classList.add('pan')}});
+mc.addEventListener('mousedown',function(e){
+  if(e.button!==0)return;
+  if((e.ctrlKey||e.metaKey)&&startYLimitEdit(e)){e.preventDefault();return;}
+  dr=true;dsx=e.clientX;dso=ox;cc.classList.add('pan');
+});
 window.addEventListener('mousemove',function(e){
   // Skip waveform pointer work while user is dragging/rotating k-space.
   if(typeof kDragging!=='undefined'&&kDragging)return;
@@ -51,6 +55,82 @@ function flushPointerUpdate(){
 function clearViewerCursor(){
   cursorT=0;cursorActive=false;curEl.textContent='\u2190 hover for time';tt.style.display='none';
   drawCursorOverlay();if(typeof drawKsOverlayFast==='function')drawKsOverlayFast();
+}
+
+function editableYLimitChannel(ci){return (ci>=2&&ci<=4)||(ci>=8&&ci<=10);}
+function yLimitLabelText(ci){
+  if(ci>=2&&ci<=4)return '\u00b1'+fmtAmp(gradConv(channelRange(ci)))+gradUnitStr();
+  if(ci>=8&&ci<=10)return '\u00b1'+fmtAmp(channelRange(ci))+'s/m';
+  return '';
+}
+function yLimitDisplayValue(ci){
+  if(ci>=2&&ci<=4)return gradConv(channelRange(ci));
+  if(ci>=8&&ci<=10)return channelRange(ci);
+  return NaN;
+}
+function formatYLimitInputValue(v){
+  if(!isFinite(v))return '';
+  return String(Number(v.toPrecision(6)));
+}
+function displayToInternalYLimit(ci,value){
+  if(ci>=2&&ci<=4){
+    if(gradUnit==='mT/m')return value*GAMMA;
+    if(gradUnit==='G/cm')return value*GAMMA*10;
+    return value;
+  }
+  return value;
+}
+function baseYLimitRange(ci){
+  if(ci>=2&&ci<=4)return gMax[ci]||1;
+  if(ci>=8&&ci<=10)return gMax[ci]||0.001;
+  return 1;
+}
+function setYLimitFromDisplayValue(ci,value){
+  var target=displayToInternalYLimit(ci,value),base=baseYLimitRange(ci);
+  if(!isFinite(target)||target<=0||!isFinite(base)||base<=0)return false;
+  var oldZoom=ampZoom[ci]||1;
+  ampZoom[ci]=Math.max(0.1,Math.min(100,target/base));
+  return ampZoom[ci]!==oldZoom;
+}
+function yLimitLabelHitTest(e){
+  var r=mc.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
+  var vc=visChannels(),ch=cH(),vi=Math.floor((my-M.t)/ch);
+  if(vi<0||vi>=vc.length)return null;
+  var ci=vc[vi];if(!editableYLimitChannel(ci))return null;
+  var w=mc.width/(window.devicePixelRatio||1),narrow=(typeof layoutMode!=='undefined'&&layoutMode==='vertical')||w<600;
+  var font=narrow?'9px monospace':'10px monospace',label=yLimitLabelText(ci),lblX=narrow?4:M.l-12,labelY=M.t+vi*ch+12;
+  ctx.save();ctx.font=font;var tw=ctx.measureText(label).width;ctx.restore();
+  var x0=narrow?lblX-4:lblX-tw-4,x1=narrow?lblX+tw+4:lblX+4,y0=labelY-12,y1=labelY+4;
+  if(mx<x0||mx>x1||my<y0||my>y1)return null;
+  return {ci:ci,vi:vi,labelX:lblX,labelY:labelY,width:Math.max(56,Math.ceil(tw+18)),narrow:narrow};
+}
+function finishYLimitEdit(commit){
+  if(!yLimitEdit)return;
+  var edit=yLimitEdit,input=edit.input;
+  yLimitEdit=null;
+  if(input&&input.parentNode)input.parentNode.removeChild(input);
+  if(commit){
+    var value=Number(input.value.trim());
+    if(setYLimitFromDisplayValue(edit.ci,value))scheduleViewerDraw(true);
+  }
+}
+function startYLimitEdit(e){
+  var hit=yLimitLabelHitTest(e);if(!hit)return false;
+  finishYLimitEdit(false);
+  dr=false;cc.classList.remove('pan');tt.style.display='none';
+  var input=document.createElement('input'),ccRect=cc.getBoundingClientRect(),mcRect=mc.getBoundingClientRect();
+  input.id='ylimEdit';input.type='text';input.inputMode='decimal';input.value=formatYLimitInputValue(yLimitDisplayValue(hit.ci));
+  var left=mcRect.left-ccRect.left+(hit.narrow?hit.labelX:hit.labelX-hit.width),top=mcRect.top-ccRect.top+hit.labelY-14;
+  input.style.left=Math.max(2,Math.round(left))+'px';input.style.top=Math.max(2,Math.round(top))+'px';input.style.width=hit.width+'px';
+  input.addEventListener('keydown',function(ev){
+    if(ev.key==='Enter'){ev.preventDefault();finishYLimitEdit(true);}
+    else if(ev.key==='Escape'){ev.preventDefault();finishYLimitEdit(false);}
+  });
+  input.addEventListener('blur',function(){finishYLimitEdit(true);});
+  input.addEventListener('mousedown',function(ev){ev.stopPropagation();});
+  cc.appendChild(input);yLimitEdit={input:input,ci:hit.ci};
+  input.focus();input.select();
+  return true;
 }
 
 /* ── Touch: waveform viewer ───────────────────────────────────────── */
