@@ -4,7 +4,7 @@
 var cc=document.getElementById('cc'),mc=document.getElementById('mc'),ctx=mc.getContext('2d'),
  moc=document.getElementById('moc'),moctx=moc.getContext('2d'),
  tt=document.getElementById('tt'),curEl=document.getElementById('cur'),legend=document.getElementById('legend'),
- tuSel=document.getElementById('tu'),guSel=document.getElementById('gu');
+ tuSel=document.getElementById('tu'),guSel=document.getElementById('gu'),textScaleSel=document.getElementById('textScale');
 var exportBtn=document.getElementById('exportKspaceBtn');
 var pnsBtn=document.getElementById('pnsBtn');
 var BL=[],waveformOverview=null,TD=0,GR=1e-5,RR=1e-6,AR=1e-7,BR=1e-5; // blocks, duration, rasters [s]
@@ -29,6 +29,51 @@ var viewerNotices={};
 var kspaceSafetyWarning=null,kspaceSafetyBusy=false,kspaceSafetyPopupTimer=0;
 var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,waveformOverviewActive=false,rfRenderPointCount=0,rfRawCurveCount=0,rfReducedCurveCount=0,rfOverviewBucketCount=0,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
 var viewerDrawFrame=0,viewerDrawMinimap=false;
+var textScale=readTextScalePercent();
+
+function normalizeTextScalePercent(value){
+  var n=parseInt(value,10);
+  if(!isFinite(n))n=100;
+  n=Math.max(80,Math.min(200,n));
+  var steps=[80,100,125,150,175,200],best=100,bestDist=Infinity;
+  for(var i=0;i<steps.length;i++){
+    var d=Math.abs(steps[i]-n);
+    if(d<bestDist){bestDist=d;best=steps[i];}
+  }
+  return best;
+}
+function readTextScalePercent(){
+  try{return normalizeTextScalePercent(localStorage.getItem('seqeyes.textScalePercent'));}catch(_){return 100;}
+}
+function writeTextScalePercent(value){
+  try{localStorage.setItem('seqeyes.textScalePercent',String(normalizeTextScalePercent(value)));}catch(_){}
+}
+function textScaleFactor(){return textScale/100;}
+function scaledPx(px){
+  return Math.max(1,Math.round(px*textScaleFactor()*10)/10);
+}
+function fontPx(px){return scaledPx(px)+'px';}
+function fontSpec(px,family,weight){
+  return (weight?weight+' ':'')+fontPx(px)+' '+(family||'monospace');
+}
+function applyTextScaleCss(){
+  var b=document.body;if(!b)return;
+  b.style.setProperty('--font-body',fontPx(13));
+}
+function setTextScalePercent(value,persist,redraw){
+  textScale=normalizeTextScalePercent(value);
+  if(textScaleSel&&textScaleSel.value!==String(textScale))textScaleSel.value=String(textScale);
+  if(persist)writeTextScalePercent(textScale);
+  applyTextScaleCss();
+  if(redraw){
+    if(typeof rs==='function')rs();
+    else if(typeof draw==='function')draw();
+    if(typeof drawKs==='function')drawKs();
+  }
+}
+setTextScalePercent(textScale,false,false);
+if(textScaleSel)textScaleSel.onchange=function(){setTextScalePercent(this.value,true,true);};
+
 function isMobileSafetyLayout(){return !!(window.matchMedia&&window.matchMedia('(max-width: 768px), (pointer: coarse)').matches);}
 function renderViewerNotices(){
   var el=document.getElementById('viewerNotice');if(!el)return;el.textContent='';
@@ -639,7 +684,7 @@ function drawMinimap(){
     if(seqTiming.trCount>1)info+=seqTiming.trCount+' TRs';
   }
   if(info){
-    mmCtx.fillStyle='rgba(0,0,0,0.35)';mmCtx.font='9px monospace';mmCtx.textAlign='left';
+    mmCtx.fillStyle='rgba(0,0,0,0.35)';mmCtx.font=fontSpec(9,'monospace');mmCtx.textAlign='left';
     mmCtx.fillText(info,5,H-3);
     mmCtx.fillStyle=s.getPropertyValue('--fg').trim();mmCtx.globalAlpha=0.9;
     mmCtx.fillText(info,4,H-4);
@@ -662,11 +707,11 @@ function rs(){
   moc.width=r.width*dpr;moc.height=r.height*dpr;
   moc.style.width=r.width+'px';moc.style.height=r.height+'px';
   moctx.setTransform(dpr,0,0,dpr,0,0);
-  // Adaptive margins for small/narrow screens
+  // Keep legacy margins by default; expand only when scaled axis labels need room.
   if(layoutMode==='vertical'||r.width<600){
-    M.l=60;M.r=3;M.t=5;M.b=18;
+    M.l=60;M.r=3;M.t=5;M.b=18;if(typeof applyAdaptiveCanvasMargins==='function')applyAdaptiveCanvasMargins(r.width,true);
   }else{
-    M.l=92;M.r=4;M.t=8;M.b=22;
+    M.l=92;M.r=4;M.t=8;M.b=22;if(typeof applyAdaptiveCanvasMargins==='function')applyAdaptiveCanvasMargins(r.width,false);
   }
   // Resize minimap canvas too
   var mr=document.getElementById('mmap').getBoundingClientRect();
