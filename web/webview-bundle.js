@@ -97,7 +97,7 @@ function scheduleViewerDraw(includeMinimap){
 }
 
 /* Timing metadata (TR/TE info for minimap tooltip) */
-var seqTiming=null;  // {trTimeSec,trCount,hasExplicitTR,teTimeSec,hasExplicitTE,rfUseGuessed}
+var seqTiming=null;  // {trTimeSec,trCount,hasExplicitTR,teTimeSec,hasExplicitTE,rfUseGuessed,derivedDetailMaxViewSec}
 
 /* Block positions for minimap: [{i,s,d}, ...] */
 var blockPos=[];
@@ -304,7 +304,7 @@ window.addEventListener('message',function(e){
       }else chVis[m1RequestedChannel]=true;
       computeGlobalMax();buildLegend();draw();
       if(m.m1.warnings&&m.m1.warnings.length)console.warn('[SeqEyes M1]',m.m1.warnings.join('\n'));
-      setViewerNotice('m1Coarse',m.m1.coarse?'Large sequence: showing bounded full-sequence M1. Zoom to 100 TRs or fewer for automatic detail.':null);
+      setViewerNotice('m1Coarse',m.m1.coarse?'Large sequence: showing bounded full-sequence M1. Zoom in for automatic detail.':null);
     }else{
       setViewerNotice('m1','M1 calculation failed: '+((m.m1&&m.m1.error)||'unknown error')+' Zoom in to inspect waveform detail.');
     }
@@ -324,7 +324,7 @@ window.addEventListener('message',function(e){
       pnsWindowData=null;pnsWindowPending=null;chVis[7]=true;
       computeGlobalMax();buildLegend();draw();
       setViewerNotice('pnsThreshold',m.pns.ok?null:'PNS warning: predicted level reaches or exceeds 100%.');
-      setViewerNotice('pnsCoarse',m.pns.coarse?'Large sequence: showing bounded full-sequence PNS. Zoom to 100 TRs or fewer for automatic detail.':null);
+      setViewerNotice('pnsCoarse',m.pns.coarse?'Large sequence: showing bounded full-sequence PNS. Zoom in for automatic detail.':null);
     }else{
       setViewerNotice('pns','PNS calculation failed: '+((m.pns&&m.pns.error)||'unknown error')+' Zoom in to inspect waveform detail.');
     }
@@ -396,10 +396,14 @@ function createM1SeriesPayload(m1){
   };
 }
 
+function shouldRequestFineDerivedWindow(vs,ve){
+  var dur=ve-vs,maxView=seqTiming&&Number(seqTiming.derivedDetailMaxViewSec);
+  return !!(dur>0&&isFinite(maxView)&&maxView>0&&dur<=maxView+1e-12);
+}
+
 function shouldRequestFineM1Window(vs,ve){
   if(!vscApi||!m1Data||!m1Data.coarse||!(chVis[8]||chVis[9]||chVis[10]))return false;
-  var dur=ve-vs;
-  return !!(seqTiming&&seqTiming.trTimeSec>0&&dur<=seqTiming.trTimeSec*100.5);
+  return shouldRequestFineDerivedWindow(vs,ve);
 }
 
 function derivedWindowCovers(data,vs,ve){
@@ -421,14 +425,13 @@ function m1SeriesForView(vs,ve){
     requestM1Window(vs,ve);
     if(derivedWindowCovers(m1WindowData,vs,ve)){setViewerNotice('m1Detail',null);setViewerNotice('m1Coarse','Large sequence: full sequence uses bounded M1; the current view is detailed.');return m1WindowData;}
   }
-  if(m1Data.coarse)setViewerNotice('m1Coarse','Large sequence: showing bounded full-sequence M1. Zoom to 100 TRs or fewer for automatic detail.');
+  if(m1Data.coarse)setViewerNotice('m1Coarse','Large sequence: showing bounded full-sequence M1. Zoom in for automatic detail.');
   return m1Data;
 }
 
 function shouldRequestFinePnsWindow(vs,ve){
   if(!vscApi||!pnsData||!pnsData.coarse||!chVis[7])return false;
-  var dur=ve-vs;
-  return !!(seqTiming&&seqTiming.trTimeSec>0&&dur<=seqTiming.trTimeSec*100.5);
+  return shouldRequestFineDerivedWindow(vs,ve);
 }
 
 function pnsWindowCovers(data,vs,ve){
@@ -450,7 +453,7 @@ function pnsSeriesForView(vs,ve){
     requestPnsWindow(vs,ve);
     if(pnsWindowCovers(pnsWindowData,vs,ve)){setViewerNotice('pnsCoarse','Large sequence: full sequence uses bounded PNS; the current view is detailed.');return pnsWindowData;}
   }
-  if(pnsData.coarse)setViewerNotice('pnsCoarse','Large sequence: showing bounded full-sequence PNS. Zoom to 100 TRs or fewer for automatic detail.');
+  if(pnsData.coarse)setViewerNotice('pnsCoarse','Large sequence: showing bounded full-sequence PNS. Zoom in for automatic detail.');
   return pnsData;
 }
 

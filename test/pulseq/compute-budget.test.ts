@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  derivedDetailViewLimitSec,
   estimateDerivedCost,
   estimateKspaceCost,
   estimateKspacePeakMemoryBytes,
@@ -71,6 +72,17 @@ describe('interactive calculation budgets', () => {
     expect(formatSampleCount(9_250_001)).toBe('9.3 million');
     expect(formatMemorySize(2.5 * 1024 ** 3)).toBe('2.5 GiB');
     expect(formatMemorySize(512 * 1024 ** 2)).toBe('512 MiB');
+  });
+
+  it('allows sample-bounded detail without TR metadata and caps long-TR viewports', () => {
+    const noTrLimit = derivedDetailViewLimitSec(1e-5, 0);
+    const longTrLimit = derivedDetailViewLimitSec(1e-5, 0.26972);
+    const shortTrLimit = derivedDetailViewLimitSec(1e-5, 0.002);
+
+    expect(noTrLimit).toBeCloseTo(10, 12);
+    expect(longTrLimit).toBeCloseTo(10, 12);
+    expect(shortTrLimit).toBeCloseTo(0.201, 12);
+    expect(derivedDetailViewLimitSec(0, 0)).toBe(0);
   });
 });
 

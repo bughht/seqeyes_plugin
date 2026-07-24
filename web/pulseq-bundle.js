@@ -31,6 +31,7 @@ var Pulseq = (() => {
     calculatePns: () => calculatePns,
     calculatePnsCoarse: () => calculatePnsCoarse,
     decodeAllBlocks: () => decodeAllBlocks,
+    derivedDetailViewLimitSec: () => derivedDetailViewLimitSec,
     detectSequenceTiming: () => detectSequenceTiming,
     estimateDerivedCost: () => estimateDerivedCost,
     estimateKspaceCost: () => estimateKspaceCost,
@@ -53,7 +54,7 @@ var Pulseq = (() => {
   });
 
   // package.json
-  var version = "0.2.11";
+  var version = "0.2.12";
 
   // src/pulseq/decompressor.ts
   function decompressShape(compressed, numSamples) {
@@ -1403,21 +1404,112 @@ var Pulseq = (() => {
     return parseSequenceText(text);
   }
 
-  // src/pulseq/decoder.ts
+  // src/pulseq/rfClassification.ts
   var GAMMA_HZ_T = 42576e3;
   var DEFAULT_B0_T = 3;
+  var sequenceUseCache = /* @__PURE__ */ new WeakMap();
+  function classifyRfUse(rf, seq) {
+    if (seq.versionCombined >= VER_V15 && rf.use && rf.use.toLowerCase() !== "u") {
+      return rf.use.toLowerCase();
+    }
+    const flipAngleDeg = estimateRfFlipAngleDeg(rf, seq);
+    if (isLegacyFatSaturation(rf, seq)) return "s";
+    return flipAngleDeg >= 120 ? "r" : "e";
+  }
+  function classifyRfUses(seq) {
+    const cachedUses = sequenceUseCache.get(seq);
+    if (cachedUses) return cachedUses;
+    const libraryUses = /* @__PURE__ */ new Map();
+    const uses = seq.blocks.map((block) => {
+      if (block.rfId <= 0) return "";
+      const cached = libraryUses.get(block.rfId);
+      if (cached !== void 0) return cached;
+      const rf = seq.rfs.get(block.rfId);
+      const use = rf ? classifyRfUse(rf, seq) : "";
+      libraryUses.set(block.rfId, use);
+      return use;
+    });
+    if (seq.versionCombined >= VER_V15 || uses.includes("e")) {
+      sequenceUseCache.set(seq, uses);
+      return uses;
+    }
+    const saturationBlocks = uses.map((use, index) => use === "s" ? index : -1).filter((index) => index >= 0);
+    if (saturationBlocks.length < 2) {
+      sequenceUseCache.set(seq, uses);
+      return uses;
+    }
+    for (let anchor = 0; anchor < saturationBlocks.length; anchor++) {
+      const start = saturationBlocks[anchor] + 1;
+      const end = saturationBlocks[anchor + 1] ?? uses.length;
+      for (let index = start; index < end; index++) {
+        if (!uses[index] || uses[index] === "s") continue;
+        uses[index] = "e";
+        break;
+      }
+    }
+    sequenceUseCache.set(seq, uses);
+    return uses;
+  }
+  function estimateRfFlipAngleDeg(rf, seq) {
+    const magShape = seq.shapes.get(rf.magShapeId);
+    if (magShape && magShape.numSamples > 0) {
+      const raster = seq.rasterTimes.rfRaster;
+      const timeShape = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples : void 0;
+      let area = 0;
+      let previousTime = timeShape ? timeShape[0] * raster : 0.5 * raster;
+      let previousAmplitude = Math.abs(rf.amplitude * magShape.samples[0]);
+      for (let index = 1; index < magShape.numSamples; index++) {
+        const time = timeShape ? timeShape[index] * raster : (index + 0.5) * raster;
+        const amplitude = Math.abs(rf.amplitude * magShape.samples[index]);
+        const duration = time - previousTime;
+        if (duration > 0) area += 0.5 * (previousAmplitude + amplitude) * duration;
+        previousTime = time;
+        previousAmplitude = amplitude;
+      }
+      return 360 * area;
+    }
+    const absoluteAmplitude = Math.abs(rf.amplitude);
+    if (absoluteAmplitude > 3e3) return 180;
+    if (absoluteAmplitude > 1500) return 120;
+    return 90;
+  }
+  function isLegacyFatSaturation(rf, seq) {
+    const b0Tesla = getB0(seq);
+    const frequencyPpm = rf.freqPPM !== 0 ? rf.freqPPM : b0Tesla > 0 ? 1e6 * rf.freqOffset / (GAMMA_HZ_T * b0Tesla) : 0;
+    const durationSec = estimateRfDuration(rf, seq);
+    return durationSec > 6e-3 && frequencyPpm >= -4.5 && frequencyPpm <= -3;
+  }
+  function estimateRfDuration(rf, seq) {
+    const magShape = seq.shapes.get(rf.magShapeId);
+    if (!magShape || magShape.numSamples <= 0) return 0;
+    const raster = seq.rasterTimes.rfRaster;
+    const timeShape = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples : void 0;
+    if (timeShape && timeShape.length > 0) {
+      return timeShape[timeShape.length - 1] * raster + raster;
+    }
+    return magShape.numSamples * raster;
+  }
   function getB0(seq) {
+    const raw = seq.definitions.get("B0") ?? seq.definitions.get("b0") ?? seq.definitions.get("b_0");
+    if (raw && raw.length > 0) return +raw[0];
+    return DEFAULT_B0_T;
+  }
+
+  // src/pulseq/decoder.ts
+  var GAMMA_HZ_T2 = 42576e3;
+  var DEFAULT_B0_T2 = 3;
+  function getB02(seq) {
     const raw = seq.definitions.get("B0");
     if (raw && Array.isArray(raw) && raw.length > 0) return +raw[0];
     const raw2 = seq.definitions.get("b0") ?? seq.definitions.get("b_0");
     if (raw2 && Array.isArray(raw2) && raw2.length > 0) return +raw2[0];
-    return DEFAULT_B0_T;
+    return DEFAULT_B0_T2;
   }
   function effFreqOff(freqOffset, freqPPM, b0) {
-    return freqOffset + freqPPM * 1e-6 * GAMMA_HZ_T * b0;
+    return freqOffset + freqPPM * 1e-6 * GAMMA_HZ_T2 * b0;
   }
   function effPhaseOff(phaseOffset, phasePPM, b0) {
-    return phaseOffset + phasePPM * 1e-6 * GAMMA_HZ_T * b0;
+    return phaseOffset + phasePPM * 1e-6 * GAMMA_HZ_T2 * b0;
   }
   function decodeAllBlocks(seq) {
     return decodeBlockRange(seq, 0, seq.blocks.length);
@@ -1434,13 +1526,14 @@ var Pulseq = (() => {
       cumulative += blockDurationSeconds(seq, seq.blocks[i]);
     }
     const decoded = [];
+    const classifiedRfUses = classifyRfUses(seq);
     for (let i = s; i < e; i++) {
       const block = seq.blocks[i];
       const dur = blockDurationSeconds(seq, block);
       const db = { index: block.num, duration: dur, startTime: cumulative };
       if (block.rfId > 0) {
         const rf = seq.rfs.get(block.rfId);
-        if (rf) db.rf = decodeRF(seq, rf, cumulative, dur);
+        if (rf) db.rf = decodeRF(seq, rf, cumulative, dur, classifiedRfUses[i]);
       }
       db.gx = decodeGradient(seq, block.gxId, cumulative, dur, "gx");
       db.gy = decodeGradient(seq, block.gyId, cumulative, dur, "gy");
@@ -1469,11 +1562,11 @@ var Pulseq = (() => {
     if (seq.versionCombined < VER_PRE_14) return block.dur * 1e-6;
     return block.dur * seq.rasterTimes.blockDurationRaster;
   }
-  function decodeRF(seq, rf, blockStart, _blockDur) {
+  function decodeRF(seq, rf, blockStart, _blockDur, classifiedUse) {
     const raster = seq.rasterTimes.rfRaster;
     const rfDelay = rf.delay * 1e-6;
     const rfStart = blockStart + rfDelay;
-    const b0 = getB0(seq);
+    const b0 = getB02(seq);
     const freqFull = effFreqOff(rf.freqOffset, rf.freqPPM, b0);
     const phaseFull = effPhaseOff(rf.phaseOffset, rf.phasePPM, b0);
     const magShape = seq.shapes.get(rf.magShapeId);
@@ -1494,15 +1587,7 @@ var Pulseq = (() => {
     }
     const duration = n > 0 ? t[n - 1] - rfStart + raster : 0;
     const centerTime = rf.center >= 0 ? blockStart + rfDelay + rf.center * 1e-6 : estimateRfPeakTime(t, amp, rfStart, duration);
-    let use = rf.use || "";
-    if (!use || use === "u") {
-      let faDeg = 0;
-      for (let i = 1; i < n; i++) {
-        const dt = t[i] - t[i - 1];
-        faDeg += 360 * (amp[i] + amp[i - 1]) * 0.5 * dt;
-      }
-      use = faDeg >= 120 ? "r" : "e";
-    }
+    const use = classifiedUse || "u";
     return {
       blockIndex: rf.id,
       startTime: rfStart,
@@ -1658,7 +1743,7 @@ var Pulseq = (() => {
     return value * amplitude;
   }
   function decodeADC(adc, blockStart, seq) {
-    const b0 = getB0(seq);
+    const b0 = getB02(seq);
     const freqFull = effFreqOff(adc.freqOffset, adc.freqPPM, b0);
     const phaseFull = effPhaseOff(adc.phaseOffset, adc.phasePPM, b0);
     return {
@@ -2510,7 +2595,7 @@ var Pulseq = (() => {
       }
     }
     warnings.push(
-      `Showing a bounded full-sequence M1 envelope (at most ${maxBuckets.toLocaleString()} buckets per axis). Zoom to 100 TRs or fewer for an automatic detailed calculation.`
+      `Showing a bounded full-sequence M1 envelope (at most ${maxBuckets.toLocaleString()} buckets per axis). Zoom in for an automatic detailed calculation; viewport sample limits also apply.`
     );
     return {
       valid: true,
@@ -2611,7 +2696,7 @@ var Pulseq = (() => {
     const events = [];
     for (const block of blocks) {
       if (!block.rf) continue;
-      const use = classifyRfUse(block.rf.use);
+      const use = classifyRfUse2(block.rf.use);
       if (!use) continue;
       const rec = { tSec: block.rf.centerTime, use };
       events.push(rec);
@@ -2626,7 +2711,7 @@ var Pulseq = (() => {
     events.sort((a, b) => a.tSec - b.tSec);
     return events;
   }
-  function classifyRfUse(raw) {
+  function classifyRfUse2(raw) {
     const c = (raw || "u").toLowerCase();
     if (c === "e" || c === "r" || c === "s" || c === "i" || c === "p") return c;
     return "u";
@@ -2986,7 +3071,7 @@ var Pulseq = (() => {
       }
     }
     const warnings = [
-      `Showing a bounded full-sequence PNS envelope (at most ${maxBuckets.toLocaleString()} buckets per curve). Zoom to 100 TRs or fewer for an automatic detailed calculation.`
+      `Showing a bounded full-sequence PNS envelope (at most ${maxBuckets.toLocaleString()} buckets per curve). Zoom in for an automatic detailed calculation; viewport sample limits also apply.`
     ];
     return {
       valid: true,
@@ -3259,6 +3344,12 @@ var Pulseq = (() => {
     kspaceGridCandidates: 18e6,
     derivedRasterSamples: 2e6
   });
+  function derivedDetailViewLimitSec(gradientRaster, trTimeSec, maxRasterSamples = INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples) {
+    if (!(gradientRaster > 0) || !(maxRasterSamples > 0)) return 0;
+    const sampleLimitedDuration = maxRasterSamples * gradientRaster / 2;
+    if (!(trTimeSec > 0)) return sampleLimitedDuration;
+    return Math.min(sampleLimitedDuration, trTimeSec * 100.5);
+  }
   function estimateKspaceCost(blocks, gradientRaster, totalDuration) {
     let adcSamples = 0;
     let gradientSupportPoints = 0;
@@ -3328,11 +3419,9 @@ var Pulseq = (() => {
   }
 
   // src/pulseq/trdetect.ts
-  var GAMMA_HZ_T2 = 42576e3;
-  var DEFAULT_B0_T2 = 3;
   function detectSequenceTiming(seq) {
-    const b0 = getB02(seq);
     const supportsRfUse = seq.versionCombined >= 1005e3;
+    const classifiedRfUses = classifyRfUses(seq);
     let teTimeSec = 0;
     let hasExplicitTE = false;
     const teDef = seq.definitions.get("EchoTime") ?? seq.definitions.get("TE");
@@ -3362,7 +3451,7 @@ var Pulseq = (() => {
         rfUsePerBlock.push(0);
         continue;
       }
-      const useChar = classifyRfUse2(rf, seq, supportsRfUse, b0);
+      const useChar = classifiedRfUses[i] || "u";
       const useCode = useChar.charCodeAt(0);
       rfUsePerBlock.push(useCode);
       if (useChar === "e") {
@@ -3415,11 +3504,6 @@ var Pulseq = (() => {
       rfUsePerBlock
     };
   }
-  function getB02(seq) {
-    const raw = seq.definitions.get("B0") ?? seq.definitions.get("b0") ?? seq.definitions.get("b_0");
-    if (raw && Array.isArray(raw) && raw.length > 0) return +raw[0];
-    return DEFAULT_B0_T2;
-  }
   function computeCumulativeTimes(seq) {
     const times = [];
     let cum = 0;
@@ -3432,40 +3516,6 @@ var Pulseq = (() => {
   function blockDurationSeconds2(seq, block) {
     if (seq.versionCombined < VER_PRE_14) return block.dur * 1e-6;
     return block.dur * seq.rasterTimes.blockDurationRaster;
-  }
-  function classifyRfUse2(rf, seq, supportsMetadata, b0Tesla) {
-    if (supportsMetadata && rf.use && rf.use !== "u" && rf.use !== "U") {
-      return rf.use.toLowerCase();
-    }
-    const faDeg = estimateFlipAngleDeg(rf, seq);
-    if (faDeg < 90.01) return "e";
-    const freqPPM = rf.freqPPM !== 0 ? rf.freqPPM : b0Tesla > 0 ? 1e6 * rf.freqOffset / (GAMMA_HZ_T2 * b0Tesla) : 0;
-    const durEst = estimateRfDuration(rf, seq);
-    if (durEst > 6e-3 && freqPPM >= -4.5 && freqPPM <= -3) return "s";
-    return "r";
-  }
-  function estimateFlipAngleDeg(rf, seq) {
-    const magShape = seq.shapes.get(rf.magShapeId);
-    if (magShape && magShape.numSamples > 0) {
-      const raster = seq.rasterTimes.rfRaster;
-      const timeShape = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples : void 0;
-      let area = 0;
-      let prevT = timeShape ? timeShape[0] * raster : 0.5 * raster;
-      let prevAmp = Math.abs(rf.amplitude * magShape.samples[0]);
-      for (let i = 1; i < magShape.numSamples; i++) {
-        const t = timeShape ? timeShape[i] * raster : (i + 0.5) * raster;
-        const amp = Math.abs(rf.amplitude * magShape.samples[i]);
-        const dt = t - prevT;
-        if (dt > 0) area += 0.5 * (prevAmp + amp) * dt;
-        prevT = t;
-        prevAmp = amp;
-      }
-      return 360 * area;
-    }
-    const absAmp = Math.abs(rf.amplitude);
-    if (absAmp > 3e3) return 180;
-    if (absAmp > 1500) return 120;
-    return 90;
   }
   function estimateRfCenter(rf, _seq) {
     const magShape = _seq.shapes.get(rf.magShapeId);
@@ -3482,16 +3532,6 @@ var Pulseq = (() => {
     const raster = _seq.rasterTimes.rfRaster;
     const timeShape = rf.timeShapeId > 0 ? _seq.shapes.get(rf.timeShapeId)?.samples : void 0;
     return timeShape ? (timeShape[peakIdx] ?? 0) * raster : (peakIdx + 0.5) * raster;
-  }
-  function estimateRfDuration(rf, seq) {
-    const magShape = seq.shapes.get(rf.magShapeId);
-    if (!magShape || magShape.numSamples <= 0) return 0;
-    const raster = seq.rasterTimes.rfRaster;
-    const timeShape = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples : void 0;
-    if (timeShape && timeShape.length > 0) {
-      return timeShape[timeShape.length - 1] * raster + raster;
-    }
-    return magShape.numSamples * raster;
   }
   function estimateTRFromExcitations(excTimesSec) {
     if (excTimesSec.length < 2) return 0;
