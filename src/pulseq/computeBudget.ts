@@ -24,6 +24,25 @@ export interface DerivedCostEstimate {
     lastGradientTime: number | null;
 }
 
+/**
+ * Maximum visible duration eligible for an automatic detailed M1/PNS request.
+ *
+ * Viewport requests are padded by half a viewport on each side, so their
+ * nominal calculation span is twice the visible duration. The block selector
+ * can add RF/PNS history; the host performs the authoritative sample estimate
+ * after selection and may still ask the user to zoom further.
+ */
+export function derivedDetailViewLimitSec(
+    gradientRaster: number,
+    trTimeSec: number,
+    maxRasterSamples = INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples,
+): number {
+    if (!(gradientRaster > 0) || !(maxRasterSamples > 0)) return 0;
+    const sampleLimitedDuration = maxRasterSamples * gradientRaster / 2;
+    if (!(trTimeSec > 0)) return sampleLimitedDuration;
+    return Math.min(sampleLimitedDuration, trTimeSec * 100.5);
+}
+
 /** Cheap lower-bound estimate made before k-space allocates raster/ADC arrays. */
 export function estimateKspaceCost(
     blocks: DecodedBlock[],

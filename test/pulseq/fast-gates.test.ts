@@ -35,6 +35,82 @@ ${extra}
 `;
 }
 
+function legacy110DegreeSequence(): string {
+  return `
+[VERSION]
+major 1
+minor 4
+revision 0
+
+[DEFINITIONS]
+AdcRasterTime 1e-7
+GradientRasterTime 1e-5
+RadiofrequencyRasterTime 1e-6
+BlockDurationRaster 1e-5
+
+[BLOCKS]
+1 1000 1 0 0 0 0 0
+2 1000 0 0 0 0 0 0
+3 1000 1 0 0 0 0 0
+
+[RF]
+1 305555.555555556 1 2 0 0 0 0
+
+[SHAPES]
+shape_id 1
+num_samples 2
+1
+1
+
+shape_id 2
+num_samples 2
+0
+0
+`;
+}
+
+function legacyFatSatAnchoredSequence(): string {
+  return `
+[VERSION]
+major 1
+minor 4
+revision 0
+
+[DEFINITIONS]
+AdcRasterTime 1e-7
+GradientRasterTime 1e-5
+RadiofrequencyRasterTime 1e-6
+BlockDurationRaster 1e-5
+
+[BLOCKS]
+1 1000 1 0 0 0 0 0
+2 1000 2 0 0 0 0 0
+3 1000 0 0 0 0 0 0
+4 1000 1 0 0 0 0 0
+5 1000 2 0 0 0 0 0
+
+[RF]
+1 38.1944444444444 1 2 3 0 -424.504 0
+2 104.166666666667 1 2 3 0 0 0
+
+[SHAPES]
+shape_id 1
+num_samples 2
+1
+1
+
+shape_id 2
+num_samples 2
+0
+0
+
+shape_id 3
+num_samples 2
+0
+8000
+`;
+}
+
 function expectFiniteArray(values: Float64Array, label: string): void {
   expect(values.length, `${label} should not be empty`).toBeGreaterThan(0);
   const sampledValues = [
@@ -86,6 +162,28 @@ describe('Pulseq fast fixture gates', () => {
     expectFiniteArray(kspace!.ktraj_adc[0], 'kx_adc');
     expectFiniteArray(kspace!.ktraj_adc[1], 'ky_adc');
     expectFiniteArray(kspace!.ktraj_adc[2], 'kz_adc');
+  });
+
+  it('classifies a legacy 110-degree RF consistently as excitation for TR and M1', () => {
+    const seq = parseSequenceText(legacy110DegreeSequence());
+    const timing = detectSequenceTiming(seq);
+    const decoded = decodeAllBlocks(seq);
+    const decodedUses = decoded.flatMap(block => block.rf ? [block.rf.use] : []);
+
+    expect(timing.rfUseGuessed).toBe(true);
+    expect(timing.excitationTimesSec).toHaveLength(2);
+    expect(timing.trTimeSec).toBeCloseTo(0.02, 12);
+    expect(decodedUses).toEqual(['e', 'e']);
+  });
+
+  it('uses recurring legacy fat-saturation pulses to identify phase-modulated excitations', () => {
+    const seq = parseSequenceText(legacyFatSatAnchoredSequence());
+    const timing = detectSequenceTiming(seq);
+    const decodedUses = decodeAllBlocks(seq).flatMap(block => block.rf ? [block.rf.use] : []);
+
+    expect(timing.excitationTimesSec).toHaveLength(2);
+    expect(timing.trTimeSec).toBeCloseTo(0.03, 12);
+    expect(decodedUses).toEqual(['s', 'e', 's', 'e']);
   });
 });
 

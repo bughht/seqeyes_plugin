@@ -331,7 +331,7 @@ export function calculateM1Coarse(
     }
     warnings.push(
         `Showing a bounded full-sequence M1 envelope (at most ${maxBuckets.toLocaleString()} buckets per axis). `
-        + 'Zoom to 100 TRs or fewer for an automatic detailed calculation.',
+        + 'Zoom in for an automatic detailed calculation; viewport sample limits also apply.',
     );
     return {
         valid: true,
