@@ -44,6 +44,22 @@ function setKSpaceTarget(rx, ry, s, cx, cy, cz, instant) {
     startKSpaceAnim();
   }
 }
+function kClampScale(s){return Math.max(0.001,Math.min(1e6,s));}
+function kWheelZoomFactor(e){
+  var dy=e.deltaY;
+  if(e.deltaMode===1)dy*=16;
+  else if(e.deltaMode===2)dy*=(window.innerHeight||800);
+  return Math.max(0.2,Math.min(5,Math.exp(-dy*0.0015)));
+}
+function kCameraPlaneToWorld(x,y,rx,ry){
+  var cy=Math.cos(ry),sy=Math.sin(ry),cx=Math.cos(rx),sx=Math.sin(rx);
+  var z1=-y*sx;
+  return{x:x*cy+z1*sy,y:y*cx,z:-x*sy+z1*cy};
+}
+function kScreenDeltaToWorld(dx,dy,rx,ry,s){
+  var dpr=window.devicePixelRatio||1;
+  return kCameraPlaneToWorld(-dx*dpr/s,dy*dpr/s,rx,ry);
+}
 document.getElementById("kdot").oninput=function(){kDotSize=parseInt(this.value);drawKs();};
 document.getElementById("kunit").onclick=function(){
   kUnit=kUnit==="cyc"?"rad":"cyc";this.textContent=kUnit==="cyc"?"Unit: 1/m":"Unit: rad/m";drawKs();
@@ -335,17 +351,23 @@ kCanvas.addEventListener("mousedown",function(e){
   kDragging=true;kDragPrev={x:e.clientX,y:e.clientY};kDragBtn=e.button;
   // Cancel any running animation so it doesn't fight the drag
   if(_kAnimId){cancelAnimationFrame(_kAnimId);_kAnimId=null;}
+  _tRotX=kRotX; _tRotY=kRotY; _tScl=kScl; _tCx=kCx; _tCy=kCy; _tCz=kCz;
   e.preventDefault();
 });
 kCanvas.addEventListener("contextmenu",function(e){e.preventDefault();});
 
 kCanvas.addEventListener("wheel",function(e){e.preventDefault();
   var r=kCanvas.getBoundingClientRect(),dpr=window.devicePixelRatio||1;
-  var mx=(e.clientX-r.left)/dpr, my=(e.clientY-r.top)/dpr;
-  var zf=e.deltaY<0?1.25:0.8, W=kCanvas.width/dpr, H=kCanvas.height/dpr;
-  var dz=(1-1/zf)*dpr/kScl;
+  var mx=e.clientX-r.left, my=e.clientY-r.top;
+  var W=kCanvas.width/dpr, H=kCanvas.height/dpr;
+  var rx=_tRotX,ry=_tRotY,s=_tScl;
+  if(!isFinite(s)||s<=0)s=kScl;
+  var ns=kClampScale(s*kWheelZoomFactor(e));
+  if(ns===s)return;
+  var shift=(1-s/ns)*dpr/s;
+  var d=kCameraPlaneToWorld((mx-W/2)*shift,-(my-H/2)*shift,rx,ry);
   kAutoFit=false;
-  setKSpaceTarget(kRotX, kRotY, kScl*zf, kCx+(mx-W/2)*dz, kCy-(my-H/2)*dz, kCz, false);
+  setKSpaceTarget(rx, ry, ns, _tCx+d.x, _tCy+d.y, _tCz+d.z, false);
 },{passive:false});
 
 window.addEventListener("mousemove",function(e){
@@ -358,12 +380,9 @@ window.addEventListener("mousemove",function(e){
     kRotY+=dx*0.008; kRotX-=dy*0.008;
     _tRotY=kRotY; _tRotX=kRotX;  // sync targets
   }else{
-    // right/middle drag = instant pan
-    var cz=Math.cos(kRotY),sz=Math.sin(kRotY),cx=Math.cos(kRotX),sx=Math.sin(kRotX);
-    var dpr=window.devicePixelRatio||1;
-    dx/=(dpr*kScl); dy/=(dpr*kScl);
-    if(Math.abs(cz)>0.01){kCy+=dy/cx;kCx+=(-dx-sz*sx*(dy/cx))/cz;}
-    else{kCy+=dy/cx;kCz+=(dx-cz*sx*(dy/cx))/sz;}
+    // right/middle drag = pan in camera space
+    var d=kScreenDeltaToWorld(dx,dy,kRotX,kRotY,kScl);
+    kCx+=d.x;kCy+=d.y;kCz+=d.z;
     _tCy=kCy; _tCx=kCx; _tCz=kCz;  // sync targets
     kAutoFit=false;
   }
@@ -375,6 +394,7 @@ window.addEventListener("mouseup",function(){kDragging=false;kDragPrev=null;});
 var _kTouchActive=false,_kTouchPrev=null,_kTouchPinch0=0,_kTouchMid=null,_kTouchBtn=0;
 kCanvas.addEventListener("touchstart",function(e){
   if(_kAnimId){cancelAnimationFrame(_kAnimId);_kAnimId=null;}
+  _tRotX=kRotX; _tRotY=kRotY; _tScl=kScl; _tCx=kCx; _tCy=kCy; _tCz=kCz;
   if(e.touches.length===1){
     _kTouchActive=true;_kTouchBtn=0;
     _kTouchPrev={x:e.touches[0].clientX,y:e.touches[0].clientY};
@@ -409,11 +429,8 @@ kCanvas.addEventListener("touchmove",function(e){
     var mid=getTouchMid(e.touches);
     var pdx=(mid.x-_kTouchPrev.x), pdy=(mid.y-_kTouchPrev.y);
     _kTouchPrev={x:mid.x,y:mid.y};
-    var cz=Math.cos(kRotY),sz=Math.sin(kRotY),cx=Math.cos(kRotX),sx=Math.sin(kRotX);
-    var dpr=window.devicePixelRatio||1;
-    pdx/=(dpr*kScl); pdy/=(dpr*kScl);
-    if(Math.abs(cz)>0.01){kCy+=pdy/cx;kCx+=(-pdx-sz*sx*(pdy/cx))/cz;}
-    else{kCy+=pdy/cx;kCz+=(pdx-cz*sx*(pdy/cx))/sz;}
+    var d=kScreenDeltaToWorld(pdx,pdy,kRotX,kRotY,kScl);
+    kCx+=d.x;kCy+=d.y;kCz+=d.z;
     _tCy=kCy; _tCx=kCx; _tCz=kCz; kAutoFit=false;
     drawKsFast();
   }
@@ -637,8 +654,21 @@ function drawKsOverlay(W,H,dpr,cs){
     var ry=dy2*cxR-rz2*sxR;
     return {x:W/2+rx*kScl*invDpr, y:H/2-ry*kScl*invDpr};
   }
+  function axisProjectionLenSq(fx,fy,fz){
+    var rx=fx*cz-fz*sz;
+    var rz=fx*sz+fz*cz;
+    var ry=fy*cxR-rz*sxR;
+    return rx*rx+ry*ry;
+  }
+  function hideAxis(fx,fy,fz,label){
+    if(kView==="xy")return label==="kz";
+    if(kView==="xz")return label==="ky";
+    if(kView==="yz")return label==="kx";
+    return axisProjectionLenSq(fx,fy,fz)<1e-10;
+  }
   var tick=kNice(rng3);
   function drawAxis3D(fx,fy,fz,label,col){
+    if(hideAxis(fx,fy,fz,label))return;
     var al=rng3*0.65;
     var t1=proj(fx*al,fy*al,fz*al);
     var t2=proj(-fx*al,-fy*al,-fz*al);
