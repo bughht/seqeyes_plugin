@@ -10,6 +10,15 @@ export const INTERACTIVE_COMPUTE_LIMITS = Object.freeze({
     kspaceAdcSamples: 8_000_000,
     kspaceGridCandidates: 18_000_000,
     derivedRasterSamples: 2_000_000,
+    /**
+     * Ceiling on the display samples one sequence load may carry to the VS Code
+     * webview, counted as (time, amplitude) pairs across every RF and gradient
+     * waveform. At 12 bytes per pair this bounds the shared binary buffers at
+     * roughly 137 MiB in the extension host and again in the renderer.
+     * Per-waveform detail is reduced uniformly once a sequence would exceed it,
+     * because the alternative is an allocation neither process can satisfy.
+     */
+    displayTransportSamples: 12_000_000,
 });
 
 export interface KspaceCostEstimate {

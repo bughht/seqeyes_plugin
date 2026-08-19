@@ -8,7 +8,8 @@
  *   3. Detects TE/TR timing (from definitions or RF‑pulse estimation)
  *   4. Decodes all waveforms via the decoder
  *   5. Computes k‑space trajectory
- *   6. Sends serialised block data + timing metadata to the webview
+ *   6. Packs the block data (see blockTransport.ts — scalars as JSON, waveform
+ *      samples as binary buffers) and sends it with timing metadata
  *   7. The webview renders an interactive Canvas diagram with minimap
  */
 
@@ -37,13 +38,17 @@ import {
 import { downsampleM4 } from '../pulseq/displayDownsampling';
 import { exportKspaceArtifactsFromBytes } from '../pulseq/kspaceExport';
 import { detectSequenceTiming } from '../pulseq/trdetect';
+import {
+    estimateEnvelopeJsonBytes,
+    MAX_V8_STRING_LENGTH,
+    packBlocks,
+} from './blockTransport';
 import { getWebviewContent } from './webviewContent';
-import type { DecodedBlock, DecodedGradWaveform } from '../pulseq/types';
+import type { DecodedBlock } from '../pulseq/types';
 
 // ─── Constants ────────────────────────────────────────────────────────────
 
 const VIEW_TYPE = 'seqeyes.sequenceViewer';
-const MAX_DISPLAY_PTS = 500;   // downsample waveforms to ≤ 500 pts for webview
 
 export interface SeqEyesDiagnosticLoadState {
     activeUri: string;
@@ -259,12 +264,34 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                 });
 
 
-                const serialized = serializeBlocks(blocks);
+                const packed = packBlocks(blocks);
+                if (packed.notice) sequenceNotices.push(packed.notice);
+
+                // The waveform samples travel as binary buffers, but a sequence
+                // with millions of blocks can still push the scalar envelope
+                // past what `JSON.stringify` can produce inside postMessage.
+                const envelopeBytes = estimateEnvelopeJsonBytes(packed.blocks);
+                if (envelopeBytes > MAX_V8_STRING_LENGTH * 0.8) {
+                    throw new Error(
+                        `This sequence has ${seq.blocks.length} blocks, whose block metadata alone needs about `
+                        + `${formatMemorySize(envelopeBytes)} to transfer \u2014 beyond what the viewer can deliver `
+                        + 'to its renderer. Export the k-space trajectory instead, or split the sequence.',
+                    );
+                }
 
                 postProgress('send', 95, 'Rendering\u2026');
-                panel.webview.postMessage({
+                // Deliberately not awaited: VS Code resolves this promise only
+                // once the webview has finished initialising, which can be long
+                // after this call \u2014 or never, if the editor is closed first.
+                // Serialisation runs synchronously inside postMessage, so
+                // attaching a rejection handler is what catches a payload the
+                // host cannot serialise; awaiting would deadlock the open.
+                const delivery = panel.webview.postMessage({
                     type: 'sequenceData',
-                    blocks: serialized,
+                    blocks: packed.blocks,
+                    sampleTimes: packed.sampleTimes,
+                    sampleValues: packed.sampleValues,
+                    sampleCount: packed.sampleCount,
                     totalDuration: totalDur,
                     gradRaster: seq.rasterTimes.gradientRaster,
                     rfRaster: seq.rasterTimes.rfRaster,
@@ -282,6 +309,15 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     },
                     blockPositions,
                     notices: sequenceNotices,
+                });
+                delivery.then(undefined, (err: unknown) => {
+                    const message = err instanceof Error ? err.message : String(err);
+                    recordDiagnosticError(uri, err);
+                    panel.webview.postMessage({
+                        type: 'loadError',
+                        message: `The viewer could not transfer this sequence to its renderer: ${message}`,
+                    });
+                    vscode.window.showErrorMessage(`SeqEyes could not display this sequence: ${message}`);
                 });
 
                 postProgress('done', 100, 'Ready');
@@ -536,7 +572,7 @@ body{font-family:sans-serif;display:flex;align-items:center;justify-content:cent
 body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
 .e{text-align:center;color:#e6194b;max-width:600px}
 .e pre{background:#f5f5f5;padding:16px;border-radius:4px;text-align:left;overflow:auto;font-size:12px;color:#333}
-</style></head><body><div class="e"><h2>Parse Error</h2><pre>${msg.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</pre></div></body></html>`;
+</style></head><body><div class="e"><h2>Failed To Open Sequence</h2><pre>${msg.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</pre></div></body></html>`;
     }
 }
 
@@ -633,88 +669,10 @@ function recordDiagnosticError(uri: vscode.Uri, err: unknown): void {
 
 // ─── Webview serialisation ────────────────────────────────────────────────
 
-function serializeBlocks(blocks: DecodedBlock[]): object[] {
-    return blocks.map(b => {
-        const o: Record<string, unknown> = { i: b.index, s: b.startTime, d: b.duration };
-
-        if (b.rf) {
-            const displayMagnitude = downsampleM4(b.rf.timePoints, b.rf.magnitude, MAX_DISPLAY_PTS);
-            const magnitudeMetrics = waveformMagnitudeMetrics(b.rf.timePoints, b.rf.magnitude);
-            const rawP = downsample(b.rf.phase, MAX_DISPLAY_PTS);
-            o.rf = {
-                s: b.rf.startTime, d: b.rf.duration,
-                t: displayMagnitude.time,
-                m: displayMagnitude.values,
-                pk: magnitudeMetrics.peak,
-                ar: magnitudeMetrics.area,
-                bp: magnitudeMetrics.blockPulse,
-                pt: downsample(b.rf.timePoints, MAX_DISPLAY_PTS),
-                p: rawP ? rawP.map(v => ((v % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)) : null,
-                a: b.rf.amplitude, fo: b.rf.freqOffset, po: b.rf.phaseOffset,
-                u: b.rf.use || 'u',   // 'e'=excitation, 'r'=refocusing, 'i'=inversion, 's'=saturation, 'u'=undefined
-            };
-        }
-        if (b.gx) o.gx = serializeGrad(b.gx);
-        if (b.gy) o.gy = serializeGrad(b.gy);
-        if (b.gz) o.gz = serializeGrad(b.gz);
-
-        if (b.adc) {
-            o.adc = {
-                s: b.adc.startTime, n: b.adc.numSamples,
-                dw: b.adc.dwell, d: b.adc.delay,
-                fo: b.adc.freqOffset, po: b.adc.phaseOffset,
-            };
-        }
-        if (b.triggers?.length) {
-            o.trg = b.triggers.map(t => ({ s: t.startTime, c: t.channel, d: t.delay, dr: t.duration }));
-        }
-        return o;
-    });
-}
-
-function waveformMagnitudeMetrics(
-    time: Float64Array | number[],
-    values: Float64Array | number[],
-): { peak: number; area: number; blockPulse: boolean } {
-    const count = Math.min(time.length, values.length);
-    let peak = 0;
-    let min = Infinity;
-    let max = -Infinity;
-    let area = 0;
-    let finiteCount = 0;
-    for (let index = 0; index < count; index++) {
-        if (Number.isFinite(values[index])) {
-            const magnitude = Math.abs(values[index]);
-            peak = Math.max(peak, magnitude);
-            min = Math.min(min, magnitude);
-            max = Math.max(max, magnitude);
-            finiteCount++;
-        }
-    }
-    for (let index = 1; index < count; index++) {
-        const delta = time[index] - time[index - 1];
-        if (!Number.isFinite(delta) || delta <= 0) continue;
-        area += 0.5 * (Math.abs(values[index - 1] || 0) + Math.abs(values[index] || 0)) * delta;
-    }
-    const tolerance = Math.max(1e-12, peak * 1e-9);
-    const blockPulse = finiteCount === count && count >= 2 && peak > 0 && max - min <= tolerance;
-    return { peak, area, blockPulse };
-}
-
 async function readAndParseSequence(uri: vscode.Uri, didRead: () => void) {
     const fileBytes = await vscode.workspace.fs.readFile(uri);
     didRead();
     return parseSequenceBytes(fileBytes, uriFileName(uri));
-}
-
-function serializeGrad(g: DecodedGradWaveform): Record<string, unknown> {
-    const display = downsampleM4(g.timePoints, g.waveform, MAX_DISPLAY_PTS);
-    return {
-        s: g.startTime, d: g.duration,
-        t: display.time,
-        w: display.values,
-        a: g.amplitude, ty: g.type, ch: g.channel,
-    };
 }
 
 /** Convert k‑space data for webview transfer.

@@ -267,7 +267,17 @@ window.addEventListener('message',function(e){
     return;
   }
   if(m.type==='sequenceData'){
-    BL=m.blocks||[];TD=m.totalDuration||0;GR=m.gradRaster||1e-5;
+    try{
+      BL=unpackSequenceBlocks(m.blocks,m.sampleTimes,m.sampleValues,m.sampleCount||0);
+    }catch(err){
+      // Do not fall through with the previous sequence still on screen.
+      BL=[];waveformOverview=null;blockPos=[];mmCache=null;
+      setViewerNotice('sequence','Failed to load the sequence waveforms: '+(err&&err.message||err)+'.');
+      setExportButtonEnabled(false);
+      draw();drawMinimap();
+      return;
+    }
+    TD=m.totalDuration||0;GR=m.gradRaster||1e-5;
     setViewerNotice('sequence',m.notices&&m.notices.length?m.notices.join(' '):null);
     setViewerNotice('kspaceOverrideFailure',null);setKspaceSafetyWarning(m.kspaceSafety||null);
     setViewerNotice('m1',null);setViewerNotice('pns',null);setViewerNotice('pnsThreshold',null);
@@ -285,6 +295,13 @@ window.addEventListener('message',function(e){
     if(seqTiming&&seqTiming.trTimeSec>0){fitToFirstTR();}else{fit();}
     draw();drawKs();drawMinimap();
     setExportButtonEnabled(true);
+  }else if(m.type==='loadError'){
+    // The extension host could not deliver the sequence. Say so instead of
+    // leaving an empty diagram behind a progress bar that reached "Ready".
+    BL=[];waveformOverview=null;blockPos=[];mmCache=null;
+    setViewerNotice('sequence',m.message||'The sequence could not be loaded.');
+    setExportButtonEnabled(false);
+    draw();drawMinimap();
   }else if(m.type==='kspaceData'){
     applySerializedKspace(m.kspace);finishDangerousKspaceCalculation(null);drawKs();
     if(typeof kOpen!=='undefined'&&!kOpen)document.getElementById('kbtn').click();
