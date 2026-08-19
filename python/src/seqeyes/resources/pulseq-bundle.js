@@ -31,6 +31,7 @@ var Pulseq = (() => {
     calculatePns: () => calculatePns,
     calculatePnsCoarse: () => calculatePnsCoarse,
     decodeAllBlocks: () => decodeAllBlocks,
+    derivedDetailViewLimitSec: () => derivedDetailViewLimitSec,
     detectSequenceTiming: () => detectSequenceTiming,
     estimateDerivedCost: () => estimateDerivedCost,
     estimateKspaceCost: () => estimateKspaceCost,
@@ -53,7 +54,7 @@ var Pulseq = (() => {
   });
 
   // package.json
-  var version = "0.2.10";
+  var version = "0.2.12";
 
   // src/pulseq/decompressor.ts
   function decompressShape(compressed, numSamples) {
@@ -1403,21 +1404,112 @@ var Pulseq = (() => {
     return parseSequenceText(text);
   }
 
-  // src/pulseq/decoder.ts
+  // src/pulseq/rfClassification.ts
   var GAMMA_HZ_T = 42576e3;
   var DEFAULT_B0_T = 3;
+  var sequenceUseCache = /* @__PURE__ */ new WeakMap();
+  function classifyRfUse(rf, seq) {
+    if (seq.versionCombined >= VER_V15 && rf.use && rf.use.toLowerCase() !== "u") {
+      return rf.use.toLowerCase();
+    }
+    const flipAngleDeg = estimateRfFlipAngleDeg(rf, seq);
+    if (isLegacyFatSaturation(rf, seq)) return "s";
+    return flipAngleDeg >= 120 ? "r" : "e";
+  }
+  function classifyRfUses(seq) {
+    const cachedUses = sequenceUseCache.get(seq);
+    if (cachedUses) return cachedUses;
+    const libraryUses = /* @__PURE__ */ new Map();
+    const uses = seq.blocks.map((block) => {
+      if (block.rfId <= 0) return "";
+      const cached = libraryUses.get(block.rfId);
+      if (cached !== void 0) return cached;
+      const rf = seq.rfs.get(block.rfId);
+      const use = rf ? classifyRfUse(rf, seq) : "";
+      libraryUses.set(block.rfId, use);
+      return use;
+    });
+    if (seq.versionCombined >= VER_V15 || uses.includes("e")) {
+      sequenceUseCache.set(seq, uses);
+      return uses;
+    }
+    const saturationBlocks = uses.map((use, index) => use === "s" ? index : -1).filter((index) => index >= 0);
+    if (saturationBlocks.length < 2) {
+      sequenceUseCache.set(seq, uses);
+      return uses;
+    }
+    for (let anchor = 0; anchor < saturationBlocks.length; anchor++) {
+      const start = saturationBlocks[anchor] + 1;
+      const end = saturationBlocks[anchor + 1] ?? uses.length;
+      for (let index = start; index < end; index++) {
+        if (!uses[index] || uses[index] === "s") continue;
+        uses[index] = "e";
+        break;
+      }
+    }
+    sequenceUseCache.set(seq, uses);
+    return uses;
+  }
+  function estimateRfFlipAngleDeg(rf, seq) {
+    const magShape = seq.shapes.get(rf.magShapeId);
+    if (magShape && magShape.numSamples > 0) {
+      const raster = seq.rasterTimes.rfRaster;
+      const timeShape = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples : void 0;
+      let area = 0;
+      let previousTime = timeShape ? timeShape[0] * raster : 0.5 * raster;
+      let previousAmplitude = Math.abs(rf.amplitude * magShape.samples[0]);
+      for (let index = 1; index < magShape.numSamples; index++) {
+        const time = timeShape ? timeShape[index] * raster : (index + 0.5) * raster;
+        const amplitude = Math.abs(rf.amplitude * magShape.samples[index]);
+        const duration = time - previousTime;
+        if (duration > 0) area += 0.5 * (previousAmplitude + amplitude) * duration;
+        previousTime = time;
+        previousAmplitude = amplitude;
+      }
+      return 360 * area;
+    }
+    const absoluteAmplitude = Math.abs(rf.amplitude);
+    if (absoluteAmplitude > 3e3) return 180;
+    if (absoluteAmplitude > 1500) return 120;
+    return 90;
+  }
+  function isLegacyFatSaturation(rf, seq) {
+    const b0Tesla = getB0(seq);
+    const frequencyPpm = rf.freqPPM !== 0 ? rf.freqPPM : b0Tesla > 0 ? 1e6 * rf.freqOffset / (GAMMA_HZ_T * b0Tesla) : 0;
+    const durationSec = estimateRfDuration(rf, seq);
+    return durationSec > 6e-3 && frequencyPpm >= -4.5 && frequencyPpm <= -3;
+  }
+  function estimateRfDuration(rf, seq) {
+    const magShape = seq.shapes.get(rf.magShapeId);
+    if (!magShape || magShape.numSamples <= 0) return 0;
+    const raster = seq.rasterTimes.rfRaster;
+    const timeShape = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples : void 0;
+    if (timeShape && timeShape.length > 0) {
+      return timeShape[timeShape.length - 1] * raster + raster;
+    }
+    return magShape.numSamples * raster;
+  }
   function getB0(seq) {
+    const raw = seq.definitions.get("B0") ?? seq.definitions.get("b0") ?? seq.definitions.get("b_0");
+    if (raw && raw.length > 0) return +raw[0];
+    return DEFAULT_B0_T;
+  }
+
+  // src/pulseq/decoder.ts
+  var GAMMA_HZ_T2 = 42576e3;
+  var DEFAULT_B0_T2 = 3;
+  function getB02(seq) {
     const raw = seq.definitions.get("B0");
     if (raw && Array.isArray(raw) && raw.length > 0) return +raw[0];
     const raw2 = seq.definitions.get("b0") ?? seq.definitions.get("b_0");
     if (raw2 && Array.isArray(raw2) && raw2.length > 0) return +raw2[0];
-    return DEFAULT_B0_T;
+    return DEFAULT_B0_T2;
   }
   function effFreqOff(freqOffset, freqPPM, b0) {
-    return freqOffset + freqPPM * 1e-6 * GAMMA_HZ_T * b0;
+    return freqOffset + freqPPM * 1e-6 * GAMMA_HZ_T2 * b0;
   }
   function effPhaseOff(phaseOffset, phasePPM, b0) {
-    return phaseOffset + phasePPM * 1e-6 * GAMMA_HZ_T * b0;
+    return phaseOffset + phasePPM * 1e-6 * GAMMA_HZ_T2 * b0;
   }
   function decodeAllBlocks(seq) {
     return decodeBlockRange(seq, 0, seq.blocks.length);
@@ -1434,13 +1526,14 @@ var Pulseq = (() => {
       cumulative += blockDurationSeconds(seq, seq.blocks[i]);
     }
     const decoded = [];
+    const classifiedRfUses = classifyRfUses(seq);
     for (let i = s; i < e; i++) {
       const block = seq.blocks[i];
       const dur = blockDurationSeconds(seq, block);
       const db = { index: block.num, duration: dur, startTime: cumulative };
       if (block.rfId > 0) {
         const rf = seq.rfs.get(block.rfId);
-        if (rf) db.rf = decodeRF(seq, rf, cumulative, dur);
+        if (rf) db.rf = decodeRF(seq, rf, cumulative, dur, classifiedRfUses[i]);
       }
       db.gx = decodeGradient(seq, block.gxId, cumulative, dur, "gx");
       db.gy = decodeGradient(seq, block.gyId, cumulative, dur, "gy");
@@ -1469,11 +1562,11 @@ var Pulseq = (() => {
     if (seq.versionCombined < VER_PRE_14) return block.dur * 1e-6;
     return block.dur * seq.rasterTimes.blockDurationRaster;
   }
-  function decodeRF(seq, rf, blockStart, _blockDur) {
+  function decodeRF(seq, rf, blockStart, _blockDur, classifiedUse) {
     const raster = seq.rasterTimes.rfRaster;
     const rfDelay = rf.delay * 1e-6;
     const rfStart = blockStart + rfDelay;
-    const b0 = getB0(seq);
+    const b0 = getB02(seq);
     const freqFull = effFreqOff(rf.freqOffset, rf.freqPPM, b0);
     const phaseFull = effPhaseOff(rf.phaseOffset, rf.phasePPM, b0);
     const magShape = seq.shapes.get(rf.magShapeId);
@@ -1494,15 +1587,7 @@ var Pulseq = (() => {
     }
     const duration = n > 0 ? t[n - 1] - rfStart + raster : 0;
     const centerTime = rf.center >= 0 ? blockStart + rfDelay + rf.center * 1e-6 : estimateRfPeakTime(t, amp, rfStart, duration);
-    let use = rf.use || "";
-    if (!use || use === "u") {
-      let faDeg = 0;
-      for (let i = 1; i < n; i++) {
-        const dt = t[i] - t[i - 1];
-        faDeg += 360 * (amp[i] + amp[i - 1]) * 0.5 * dt;
-      }
-      use = faDeg >= 120 ? "r" : "e";
-    }
+    const use = classifiedUse || "u";
     return {
       blockIndex: rf.id,
       startTime: rfStart,
@@ -1658,7 +1743,7 @@ var Pulseq = (() => {
     return value * amplitude;
   }
   function decodeADC(adc, blockStart, seq) {
-    const b0 = getB0(seq);
+    const b0 = getB02(seq);
     const freqFull = effFreqOff(adc.freqOffset, adc.freqPPM, b0);
     const phaseFull = effPhaseOff(adc.phaseOffset, adc.phasePPM, b0);
     return {
@@ -1784,9 +1869,7 @@ var Pulseq = (() => {
   // src/pulseq/kspace.ts
   var TRAJECTORY_TIME_ACCURACY_SEC = 1e-10;
   var GRADIENT_ENDPOINT_TOLERANCE_SEC = 1e-12;
-  function canonicalTrajectoryTime(timeSec) {
-    return TRAJECTORY_TIME_ACCURACY_SEC * Math.round(timeSec / TRAJECTORY_TIME_ACCURACY_SEC);
-  }
+  var POLYNOMIAL_SUPPORT_EPSILON_SEC = 1e-12;
   function calculateKspace(blocks, gradientRaster, totalDuration, trajectoryDelay = 0, _options) {
     if (!blocks.length || !gradientRaster || gradientRaster <= 0) return null;
     const GR = gradientRaster;
@@ -1794,7 +1877,6 @@ var Pulseq = (() => {
     const tacc = TRAJECTORY_TIME_ACCURACY_SEC;
     const gradientSupport = _options?.gradientSupport ?? "endpoints";
     const excT = [], refT = [];
-    const gradTimes = [];
     let totalAdcSamples = 0;
     for (const b of blocks) {
       if (b.adc) totalAdcSamples += b.adc.numSamples;
@@ -1807,9 +1889,6 @@ var Pulseq = (() => {
     const adcT = new Float64Array(totalAdcSamples);
     let adcIdx = 0;
     for (const b of blocks) {
-      collectGradientSupport(b.gx, gradTimes, gradientSupport);
-      collectGradientSupport(b.gy, gradTimes, gradientSupport);
-      collectGradientSupport(b.gz, gradTimes, gradientSupport);
       if (b.rf) {
         const iso = Number.isFinite(b.rf.centerTime) ? b.rf.centerTime : b.rf.startTime + b.rf.duration * 0.5;
         const u = b.rf.use || "";
@@ -1824,11 +1903,12 @@ var Pulseq = (() => {
           adcT[adcIdx++] = t0 + (s + 0.5) * dwell + trajectoryDelay;
       }
     }
+    const gradientSeries = buildGlobalGradientSeries(blocks, GR, totalDuration);
     const cand = [];
     const pushC = (t) => {
       if (isFinite(t) && t >= -tacc) cand.push(Math.max(0, tacc * Math.round(t / tacc)));
     };
-    for (const t of gradTimes) pushC(t);
+    for (const series of gradientSeries) collectSeriesSupport(series, gradientSupport, pushC);
     for (const t of excT) {
       pushC(t);
       pushC(t - RF);
@@ -1855,39 +1935,12 @@ var Pulseq = (() => {
     if (N < 2) return null;
     if (_options?.maxGridPoints && N > _options.maxGridPoints) return null;
     const gx = new Float64Array(N), gy = new Float64Array(N), gz = new Float64Array(N);
-    const edges = [0];
-    let cum = 0;
-    for (const b of blocks) {
-      cum += b.duration;
-      edges.push(canonicalTrajectoryTime(cum));
-    }
+    const cursors = [0, 0, 0];
     for (let i = 0; i < N; i++) {
       const t = grid[i];
-      const bi = blockIdx(t, edges);
-      if (bi >= 0 && bi < blocks.length) {
-        const block = blocks[bi];
-        const localX = gradVal(block.gx, t);
-        const localY = gradVal(block.gy, t);
-        const localZ = gradVal(block.gz, t);
-        const rotated = rotateGradient(block, localX, localY, localZ);
-        gx[i] = rotated[0];
-        gy[i] = rotated[1];
-        gz[i] = rotated[2];
-      }
-    }
-    const kx = new Float64Array(N), ky = new Float64Array(N), kz = new Float64Array(N);
-    for (let i = 1; i < N; i++) {
-      const dt = grid[i] - grid[i - 1];
-      if (dt <= 0) {
-        kx[i] = kx[i - 1];
-        ky[i] = ky[i - 1];
-        kz[i] = kz[i - 1];
-        continue;
-      }
-      const gxm = 0.5 * (gx[i - 1] + gx[i]), gym = 0.5 * (gy[i - 1] + gy[i]), gzm = 0.5 * (gz[i - 1] + gz[i]);
-      kx[i] = kx[i - 1] + gxm * dt;
-      ky[i] = ky[i - 1] + gym * dt;
-      kz[i] = kz[i - 1] + gzm * dt;
+      gx[i] = sampleSeries(gradientSeries[0], t, cursors, 0);
+      gy[i] = sampleSeries(gradientSeries[1], t, cursors, 1);
+      gz[i] = sampleSeries(gradientSeries[2], t, cursors, 2);
     }
     const eIdx = [], rIdx = [];
     for (const t of excT) {
@@ -1900,37 +1953,52 @@ var Pulseq = (() => {
     }
     eIdx.sort((a, b) => a - b);
     rIdx.sort((a, b) => a - b);
-    const bounds = [0];
-    for (const i of eIdx) bounds.push(i);
-    for (const i of rIdx) bounds.push(i);
-    bounds.push(N - 1);
-    bounds.sort((a, b) => a - b);
-    const bUniq = [bounds[0]];
-    for (let i = 1; i < bounds.length; i++) if (bounds[i] !== bUniq[bUniq.length - 1]) bUniq.push(bounds[i]);
-    let dkX = -kx[0], dkY = -ky[0], dkZ = -kz[0];
-    let pE = 0, pR = 0;
-    for (let s = 0; s < bUniq.length - 1; s++) {
-      const st = bUniq[s], en = bUniq[s + 1];
-      if (pE < eIdx.length && eIdx[pE] === st) {
-        dkX = -kx[st];
-        dkY = -ky[st];
-        dkZ = -kz[st];
-        pE++;
-      } else if (pR < rIdx.length && rIdx[pR] === st) {
-        dkX = -2 * kx[st] - dkX;
-        dkY = -2 * ky[st] - dkY;
-        dkZ = -2 * kz[st] - dkZ;
-        pR++;
+    const excitationAt = new Uint8Array(N);
+    const refocusingAt = new Uint8Array(N);
+    for (const i of eIdx) excitationAt[i] = 1;
+    for (const i of rIdx) refocusingAt[i] = 1;
+    const kx = new Float64Array(N), ky = new Float64Array(N), kz = new Float64Array(N);
+    let cx = 0, cy = 0, cz = 0;
+    if (refocusingAt[0] && !excitationAt[0]) {
+      kx[0] = -kx[0];
+      ky[0] = -ky[0];
+      kz[0] = -kz[0];
+    }
+    for (let i = 1; i < N; i++) {
+      const dt = grid[i] - grid[i - 1];
+      if (dt <= 0) {
+        kx[i] = kx[i - 1];
+        ky[i] = ky[i - 1];
+        kz[i] = kz[i - 1];
+        continue;
       }
-      for (let j = st; j < en; j++) {
-        kx[j] += dkX;
-        ky[j] += dkY;
-        kz[j] += dkZ;
+      const dx = 0.5 * (gx[i - 1] + gx[i]) * dt;
+      const dy = 0.5 * (gy[i - 1] + gy[i]) * dt;
+      const dz = 0.5 * (gz[i - 1] + gz[i]) * dt;
+      const yx = dx - cx, yy = dy - cy, yz = dz - cz;
+      const nx = kx[i - 1] + yx, ny = ky[i - 1] + yy, nz = kz[i - 1] + yz;
+      cx = nx - kx[i - 1] - yx;
+      cy = ny - ky[i - 1] - yy;
+      cz = nz - kz[i - 1] - yz;
+      kx[i] = nx;
+      ky[i] = ny;
+      kz[i] = nz;
+      if (excitationAt[i]) {
+        kx[i] = 0;
+        ky[i] = 0;
+        kz[i] = 0;
+        cx = 0;
+        cy = 0;
+        cz = 0;
+      } else if (refocusingAt[i]) {
+        kx[i] = -kx[i];
+        ky[i] = -ky[i];
+        kz[i] = -kz[i];
+        cx = -cx;
+        cy = -cy;
+        cz = -cz;
       }
     }
-    kx[N - 1] += dkX;
-    ky[N - 1] += dkY;
-    kz[N - 1] += dkZ;
     const kxP = new Float64Array(kx), kyP = new Float64Array(ky), kzP = new Float64Array(kz);
     for (const i of eIdx) {
       if (i > 0) {
@@ -1948,13 +2016,135 @@ var Pulseq = (() => {
     }
     return { ktraj: [kxP, kyP, kzP], t_ktraj: new Float64Array(grid), ktraj_adc: [kxA, kyA, kzA], t_adc: new Float64Array(adcT) };
   }
-  function collectGradientSupport(g, support, mode) {
-    if (!g || g.type === "none" || !g.timePoints || g.timePoints.length < 2) return;
+  function collectSeriesSupport(series, mode, push) {
+    if (series.times.length < 2) return;
     if (mode === "all") {
-      for (let i = 0; i < g.timePoints.length; i++) support.push(g.timePoints[i]);
+      for (const time of series.times) push(time);
       return;
     }
-    support.push(g.timePoints[0], g.timePoints[g.timePoints.length - 1]);
+    for (const time of series.requiredSupport) push(time);
+  }
+  function buildGlobalGradientSeries(blocks, gradientRaster, totalDuration) {
+    const output = [
+      { times: [], values: [], requiredSupport: [] },
+      { times: [], values: [], requiredSupport: [] },
+      { times: [], values: [], requiredSupport: [] }
+    ];
+    for (const block of blocks) {
+      for (let axis = 0; axis < 3; axis++) {
+        const piece = physicalGradientPiece(block, axis);
+        if (piece.times.length) appendGradientPiece(output[axis], piece, gradientRaster);
+      }
+    }
+    for (const series of output) {
+      if (!series.times.length) continue;
+      const first = series.times[0];
+      const last = series.times[series.times.length - 1];
+      if (first > 0) {
+        series.times.unshift(-POLYNOMIAL_SUPPORT_EPSILON_SEC, first - POLYNOMIAL_SUPPORT_EPSILON_SEC);
+        series.values.unshift(0, 0);
+        series.requiredSupport.push(-POLYNOMIAL_SUPPORT_EPSILON_SEC, first - POLYNOMIAL_SUPPORT_EPSILON_SEC);
+      }
+      if (last < totalDuration) {
+        series.times.push(last + POLYNOMIAL_SUPPORT_EPSILON_SEC, totalDuration + POLYNOMIAL_SUPPORT_EPSILON_SEC);
+        series.values.push(0, 0);
+        series.requiredSupport.push(last + POLYNOMIAL_SUPPORT_EPSILON_SEC, totalDuration + POLYNOMIAL_SUPPORT_EPSILON_SEC);
+      }
+    }
+    return output;
+  }
+  function physicalGradientPiece(block, axis) {
+    const gradients = [block.gx, block.gy, block.gz];
+    const hasGradient = gradients.some((g) => g && g.type !== "none" && g.timePoints.length >= 2);
+    if (!hasGradient) return { times: [], values: [], requiredSupport: [] };
+    if (!block.rotation?.values) {
+      const gradient = gradients[axis];
+      if (!gradient || gradient.type === "none" || gradient.timePoints.length < 2) {
+        return { times: [], values: [], requiredSupport: [] };
+      }
+      return {
+        times: Array.from(gradient.timePoints),
+        values: Array.from(gradient.waveform),
+        requiredSupport: []
+      };
+    }
+    const times = [];
+    for (const gradient of gradients) {
+      if (!gradient || gradient.type === "none") continue;
+      for (const time of gradient.timePoints) times.push(time);
+    }
+    times.sort((a, b) => a - b);
+    const uniqueTimes = [];
+    for (const time of times) {
+      if (!uniqueTimes.length || time - uniqueTimes[uniqueTimes.length - 1] > GRADIENT_ENDPOINT_TOLERANCE_SEC) {
+        uniqueTimes.push(time);
+      }
+    }
+    return {
+      times: uniqueTimes,
+      values: uniqueTimes.map((time) => {
+        const rotated = rotateGradient(
+          block,
+          gradVal(block.gx, time),
+          gradVal(block.gy, time),
+          gradVal(block.gz, time)
+        );
+        return rotated[axis];
+      }),
+      requiredSupport: []
+    };
+  }
+  function appendGradientPiece(target, piece, gradientRaster) {
+    if (!piece.times.length) return;
+    target.requiredSupport.push(piece.times[0], piece.times[piece.times.length - 1]);
+    if (!target.times.length) {
+      target.times.push(...piece.times);
+      target.values.push(...piece.values);
+      return;
+    }
+    const lastIndex = target.times.length - 1;
+    const previousTime = target.times[lastIndex];
+    const firstTime = piece.times[0];
+    if (previousTime + gradientRaster < firstTime) {
+      if (target.values[lastIndex] !== 0) {
+        if (Math.abs(target.values[lastIndex]) > 1e-6) {
+          target.times.push(previousTime + gradientRaster * 0.5);
+          target.values.push(0);
+          target.requiredSupport.push(previousTime + gradientRaster * 0.5);
+        } else {
+          target.values[lastIndex] = 0;
+        }
+      }
+      if (piece.values[0] !== 0) {
+        if (Math.abs(piece.values[0]) > 1e-6) {
+          target.times.push(firstTime - gradientRaster * 0.5);
+          target.values.push(0);
+          target.requiredSupport.push(firstTime - gradientRaster * 0.5);
+        } else {
+          piece.values[0] = 0;
+        }
+      }
+    }
+    let start = 0;
+    const currentLast = target.times[target.times.length - 1];
+    while (start < piece.times.length && piece.times[start] <= currentLast) start++;
+    for (let i = start; i < piece.times.length; i++) {
+      target.times.push(piece.times[i]);
+      target.values.push(piece.values[i]);
+    }
+  }
+  function sampleSeries(series, time, cursors, axis) {
+    const n = series.times.length;
+    if (!n || time < series.times[0] || time > series.times[n - 1]) return 0;
+    let cursor = Math.min(cursors[axis], n - 2);
+    while (cursor + 1 < n && series.times[cursor + 1] < time) cursor++;
+    cursors[axis] = cursor;
+    if (cursor + 1 >= n) return series.values[n - 1];
+    const t0 = series.times[cursor], t1 = series.times[cursor + 1];
+    const v0 = series.values[cursor], v1 = series.values[cursor + 1];
+    if (time <= t0 || t1 <= t0) return v0;
+    if (time >= t1) return v1;
+    return v0 + (v1 - v0) * (time - t0) / (t1 - t0);
   }
   function gradVal(g, t) {
     if (!g || g.type === "none") return 0;
@@ -1973,15 +2163,6 @@ var Pulseq = (() => {
     const s = tp[hi] - tp[lo];
     if (s <= 0) return wf[lo];
     return wf[lo] + (wf[hi] - wf[lo]) * (t - tp[lo]) / s;
-  }
-  function blockIdx(t, edges) {
-    let lo = 0, hi = edges.length - 1;
-    while (lo < hi) {
-      const m = lo + hi >> 1;
-      if (edges[m] <= t + 1e-12) lo = m + 1;
-      else hi = m;
-    }
-    return Math.max(0, lo - 1);
   }
   function timeIdx(t, g) {
     let lo = 0, hi = g.length;
@@ -2414,7 +2595,7 @@ var Pulseq = (() => {
       }
     }
     warnings.push(
-      `Showing a bounded full-sequence M1 envelope (at most ${maxBuckets.toLocaleString()} buckets per axis). Zoom to 100 TRs or fewer for an automatic detailed calculation.`
+      `Showing a bounded full-sequence M1 envelope (at most ${maxBuckets.toLocaleString()} buckets per axis). Zoom in for an automatic detailed calculation; viewport sample limits also apply.`
     );
     return {
       valid: true,
@@ -2515,7 +2696,7 @@ var Pulseq = (() => {
     const events = [];
     for (const block of blocks) {
       if (!block.rf) continue;
-      const use = classifyRfUse(block.rf.use);
+      const use = classifyRfUse2(block.rf.use);
       if (!use) continue;
       const rec = { tSec: block.rf.centerTime, use };
       events.push(rec);
@@ -2530,7 +2711,7 @@ var Pulseq = (() => {
     events.sort((a, b) => a.tSec - b.tSec);
     return events;
   }
-  function classifyRfUse(raw) {
+  function classifyRfUse2(raw) {
     const c = (raw || "u").toLowerCase();
     if (c === "e" || c === "r" || c === "s" || c === "i" || c === "p") return c;
     return "u";
@@ -2890,7 +3071,7 @@ var Pulseq = (() => {
       }
     }
     const warnings = [
-      `Showing a bounded full-sequence PNS envelope (at most ${maxBuckets.toLocaleString()} buckets per curve). Zoom to 100 TRs or fewer for an automatic detailed calculation.`
+      `Showing a bounded full-sequence PNS envelope (at most ${maxBuckets.toLocaleString()} buckets per curve). Zoom in for an automatic detailed calculation; viewport sample limits also apply.`
     ];
     return {
       valid: true,
@@ -3172,6 +3353,12 @@ var Pulseq = (() => {
      */
     displayTransportSamples: 12e6
   });
+  function derivedDetailViewLimitSec(gradientRaster, trTimeSec, maxRasterSamples = INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples) {
+    if (!(gradientRaster > 0) || !(maxRasterSamples > 0)) return 0;
+    const sampleLimitedDuration = maxRasterSamples * gradientRaster / 2;
+    if (!(trTimeSec > 0)) return sampleLimitedDuration;
+    return Math.min(sampleLimitedDuration, trTimeSec * 100.5);
+  }
   function estimateKspaceCost(blocks, gradientRaster, totalDuration) {
     let adcSamples = 0;
     let gradientSupportPoints = 0;
@@ -3241,11 +3428,9 @@ var Pulseq = (() => {
   }
 
   // src/pulseq/trdetect.ts
-  var GAMMA_HZ_T2 = 42576e3;
-  var DEFAULT_B0_T2 = 3;
   function detectSequenceTiming(seq) {
-    const b0 = getB02(seq);
     const supportsRfUse = seq.versionCombined >= 1005e3;
+    const classifiedRfUses = classifyRfUses(seq);
     let teTimeSec = 0;
     let hasExplicitTE = false;
     const teDef = seq.definitions.get("EchoTime") ?? seq.definitions.get("TE");
@@ -3275,7 +3460,7 @@ var Pulseq = (() => {
         rfUsePerBlock.push(0);
         continue;
       }
-      const useChar = classifyRfUse2(rf, seq, supportsRfUse, b0);
+      const useChar = classifiedRfUses[i] || "u";
       const useCode = useChar.charCodeAt(0);
       rfUsePerBlock.push(useCode);
       if (useChar === "e") {
@@ -3328,11 +3513,6 @@ var Pulseq = (() => {
       rfUsePerBlock
     };
   }
-  function getB02(seq) {
-    const raw = seq.definitions.get("B0") ?? seq.definitions.get("b0") ?? seq.definitions.get("b_0");
-    if (raw && Array.isArray(raw) && raw.length > 0) return +raw[0];
-    return DEFAULT_B0_T2;
-  }
   function computeCumulativeTimes(seq) {
     const times = [];
     let cum = 0;
@@ -3345,40 +3525,6 @@ var Pulseq = (() => {
   function blockDurationSeconds2(seq, block) {
     if (seq.versionCombined < VER_PRE_14) return block.dur * 1e-6;
     return block.dur * seq.rasterTimes.blockDurationRaster;
-  }
-  function classifyRfUse2(rf, seq, supportsMetadata, b0Tesla) {
-    if (supportsMetadata && rf.use && rf.use !== "u" && rf.use !== "U") {
-      return rf.use.toLowerCase();
-    }
-    const faDeg = estimateFlipAngleDeg(rf, seq);
-    if (faDeg < 90.01) return "e";
-    const freqPPM = rf.freqPPM !== 0 ? rf.freqPPM : b0Tesla > 0 ? 1e6 * rf.freqOffset / (GAMMA_HZ_T2 * b0Tesla) : 0;
-    const durEst = estimateRfDuration(rf, seq);
-    if (durEst > 6e-3 && freqPPM >= -4.5 && freqPPM <= -3) return "s";
-    return "r";
-  }
-  function estimateFlipAngleDeg(rf, seq) {
-    const magShape = seq.shapes.get(rf.magShapeId);
-    if (magShape && magShape.numSamples > 0) {
-      const raster = seq.rasterTimes.rfRaster;
-      const timeShape = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples : void 0;
-      let area = 0;
-      let prevT = timeShape ? timeShape[0] * raster : 0.5 * raster;
-      let prevAmp = Math.abs(rf.amplitude * magShape.samples[0]);
-      for (let i = 1; i < magShape.numSamples; i++) {
-        const t = timeShape ? timeShape[i] * raster : (i + 0.5) * raster;
-        const amp = Math.abs(rf.amplitude * magShape.samples[i]);
-        const dt = t - prevT;
-        if (dt > 0) area += 0.5 * (prevAmp + amp) * dt;
-        prevT = t;
-        prevAmp = amp;
-      }
-      return 360 * area;
-    }
-    const absAmp = Math.abs(rf.amplitude);
-    if (absAmp > 3e3) return 180;
-    if (absAmp > 1500) return 120;
-    return 90;
   }
   function estimateRfCenter(rf, _seq) {
     const magShape = _seq.shapes.get(rf.magShapeId);
@@ -3395,16 +3541,6 @@ var Pulseq = (() => {
     const raster = _seq.rasterTimes.rfRaster;
     const timeShape = rf.timeShapeId > 0 ? _seq.shapes.get(rf.timeShapeId)?.samples : void 0;
     return timeShape ? (timeShape[peakIdx] ?? 0) * raster : (peakIdx + 0.5) * raster;
-  }
-  function estimateRfDuration(rf, seq) {
-    const magShape = seq.shapes.get(rf.magShapeId);
-    if (!magShape || magShape.numSamples <= 0) return 0;
-    const raster = seq.rasterTimes.rfRaster;
-    const timeShape = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples : void 0;
-    if (timeShape && timeShape.length > 0) {
-      return timeShape[timeShape.length - 1] * raster + raster;
-    }
-    return magShape.numSamples * raster;
   }
   function estimateTRFromExcitations(excTimesSec) {
     if (excTimesSec.length < 2) return 0;

@@ -2,15 +2,15 @@
  * kspace.ts — K-space trajectory calculator.
  *
  * Based on: xingwangyong/SeqEyes (C++)  src/KSpaceTrajectory.cpp
- *           pulseq/matlab/+mr/@Sequence/Sequence.m::calculateKspaceUnfunc()
+ *           pulseq/matlab/+mr/@Sequence/Sequence.m::calculateKspacePP()
  *
- * Key design (matching SeqEyes C++):
- *   1. Gradient series from decoded block waveforms.
+ * Key design:
+ *   1. Pulseq-compatible global gradient series from decoded block waveforms.
  *   2. Non-uniform time grid from gradient breakpoints + RF + ADC times.
- *   3. Midpoint integration on the non-uniform grid.
- *   4. RF corrections via running offset dk:
- *        Excitation  -> dk = -k
- *        Refocusing  -> dk = -2*k - dk
+ *   3. Midpoint-exact integration on the non-uniform piecewise-linear grid.
+ *   4. Numerically stable RF-local trajectory state:
+ *        Excitation  -> k = 0
+ *        Refocusing  -> k = -k
  *   5. NaN marker BEFORE excitation index (clean plot break).
  *   6. No 2pi factor - k-space in Hz/m (matching Pulseq convention).
  */
@@ -44,20 +44,22 @@ export interface KSpaceOptions {
     /**
      * Gradient waveform support points to include in the integration grid.
      *
-     * `endpoints` keeps the interactive viewer fast by using waveform bounds plus
-     * the native gradient raster. `all` matches SeqEyes Qt more closely for
-     * arbitrary/oversampled gradients and is intended for exports and CI baselines.
+     * `endpoints` keeps the interactive viewer fast by using event/discontinuity
+     * bounds plus the native gradient raster. `all` also inserts every waveform
+     * support point and is intended for exports and CI baselines.
      */
     gradientSupport?: 'endpoints' | 'all';
 }
 
+interface GradientSeries {
+    times: number[];
+    values: number[];
+    requiredSupport: number[];
+}
+
 const TRAJECTORY_TIME_ACCURACY_SEC = 1e-10;
 const GRADIENT_ENDPOINT_TOLERANCE_SEC = 1e-12;
-
-function canonicalTrajectoryTime(timeSec: number): number {
-    return TRAJECTORY_TIME_ACCURACY_SEC
-        * Math.round(timeSec / TRAJECTORY_TIME_ACCURACY_SEC);
-}
+const POLYNOMIAL_SUPPORT_EPSILON_SEC = 1e-12;
 
 export function calculateKspace(
     blocks: DecodedBlock[],
@@ -76,7 +78,6 @@ export function calculateKspace(
 
     // ---- Pass 1: count total ADC samples & collect RF/ADC events & gradient support points ----
     const excT: number[] = [], refT: number[] = [];
-    const gradTimes: number[] = [];
     let totalAdcSamples = 0;
     for (const b of blocks) {
         if (b.adc) totalAdcSamples += b.adc.numSamples;
@@ -91,9 +92,6 @@ export function calculateKspace(
     let adcIdx = 0;
 
     for (const b of blocks) {
-        collectGradientSupport(b.gx, gradTimes, gradientSupport);
-        collectGradientSupport(b.gy, gradTimes, gradientSupport);
-        collectGradientSupport(b.gz, gradTimes, gradientSupport);
         if (b.rf) {
             const iso = Number.isFinite(b.rf.centerTime)
                 ? b.rf.centerTime
@@ -111,13 +109,18 @@ export function calculateKspace(
         }
     }
 
+    // Match Pulseq's waveform assembly before integrating. In particular, keep
+    // the support on either side of event gaps instead of asking one block
+    // lookup at one deduplicated timestamp to represent both sides.
+    const gradientSeries = buildGlobalGradientSeries(blocks, GR, totalDuration);
+
     // ---- Pass 2: build non-uniform time grid (memory‑safe: sort+dedup array) ----
     // Use a sorted-array dedup instead of Set to avoid V8's ~16.7M Set size limit.
     // Only essential points are included: selected gradient support, RF centres,
     // ADC sample times, block boundaries, and a uniform raster grid.
     const cand: number[] = [];
     const pushC = (t: number) => { if (isFinite(t) && t >= -tacc) cand.push(Math.max(0, tacc * Math.round(t/tacc))); };
-    for (const t of gradTimes) pushC(t);
+    for (const series of gradientSeries) collectSeriesSupport(series, gradientSupport, pushC);
     for (const t of excT) { pushC(t); pushC(t - RF); pushC(t - 2 * RF); }
     for (const t of refT) { pushC(t); pushC(t - RF); }
     for (const t of adcT) pushC(t);
@@ -138,62 +141,65 @@ export function calculateKspace(
     if (N < 2) return null;
     if (_options?.maxGridPoints && N > _options.maxGridPoints) return null;
 
-    // ---- Pass 3: evaluate gradient at each grid point ----
+    // ---- Pass 3: evaluate the assembled piecewise-linear gradients ----
     const gx = new Float64Array(N), gy = new Float64Array(N), gz = new Float64Array(N);
-    // Build block edges for fast block lookup
-    const edges: number[] = [0];
-    let cum = 0;
-    for (const b of blocks) {
-        cum += b.duration;
-        edges.push(canonicalTrajectoryTime(cum));
-    }
+    const cursors = [0, 0, 0];
     for (let i = 0; i < N; i++) {
         const t = grid[i];
-        const bi = blockIdx(t, edges);
-        if (bi >= 0 && bi < blocks.length) {
-            const block = blocks[bi];
-            const localX = gradVal(block.gx, t);
-            const localY = gradVal(block.gy, t);
-            const localZ = gradVal(block.gz, t);
-            const rotated = rotateGradient(block, localX, localY, localZ);
-            gx[i] = rotated[0];
-            gy[i] = rotated[1];
-            gz[i] = rotated[2];
-        }
+        gx[i] = sampleSeries(gradientSeries[0], t, cursors, 0);
+        gy[i] = sampleSeries(gradientSeries[1], t, cursors, 1);
+        gz[i] = sampleSeries(gradientSeries[2], t, cursors, 2);
     }
 
-    // ---- Pass 4: midpoint integration ----
-    const kx = new Float64Array(N), ky = new Float64Array(N), kz = new Float64Array(N);
-    for (let i = 1; i < N; i++) {
-        const dt = grid[i] - grid[i-1];
-        if (dt <= 0) { kx[i] = kx[i-1]; ky[i] = ky[i-1]; kz[i] = kz[i-1]; continue; }
-        const gxm = 0.5*(gx[i-1]+gx[i]), gym = 0.5*(gy[i-1]+gy[i]), gzm = 0.5*(gz[i-1]+gz[i]);
-        kx[i] = kx[i-1] + gxm*dt; ky[i] = ky[i-1] + gym*dt; kz[i] = kz[i-1] + gzm*dt;
-    }
-
-    // ---- Pass 5: RF corrections via dk offset ----
+    // ---- Pass 4: resolve RF event indices ----
     const eIdx: number[] = [], rIdx: number[] = [];
     for (const t of excT) { const i = timeIdx(t, grid); if (i >= 0) eIdx.push(i); }
     for (const t of refT) { const i = timeIdx(t, grid); if (i >= 0) rIdx.push(i); }
     eIdx.sort((a,b)=>a-b); rIdx.sort((a,b)=>a-b);
+    const excitationAt = new Uint8Array(N);
+    const refocusingAt = new Uint8Array(N);
+    for (const i of eIdx) excitationAt[i] = 1;
+    for (const i of rIdx) refocusingAt[i] = 1;
 
-    const bounds = [0];
-    for (const i of eIdx) bounds.push(i);
-    for (const i of rIdx) bounds.push(i);
-    bounds.push(N-1);
-    bounds.sort((a,b)=>a-b);
-    const bUniq = [bounds[0]];
-    for (let i = 1; i < bounds.length; i++) if (bounds[i] !== bUniq[bUniq.length-1]) bUniq.push(bounds[i]);
-
-    let dkX = -kx[0], dkY = -ky[0], dkZ = -kz[0];
-    let pE = 0, pR = 0;
-    for (let s = 0; s < bUniq.length-1; s++) {
-        const st = bUniq[s], en = bUniq[s+1];
-        if (pE < eIdx.length && eIdx[pE] === st) { dkX = -kx[st]; dkY = -ky[st]; dkZ = -kz[st]; pE++; }
-        else if (pR < rIdx.length && rIdx[pR] === st) { dkX = -2*kx[st] - dkX; dkY = -2*ky[st] - dkY; dkZ = -2*kz[st] - dkZ; pR++; }
-        for (let j = st; j < en; j++) { kx[j] += dkX; ky[j] += dkY; kz[j] += dkZ; }
+    // ---- Pass 5: integrate the RF-local effective trajectory ----
+    //
+    // The former implementation first accumulated a raw trajectory over the
+    // entire sequence and then applied a large `dk` offset at every RF event.
+    // That is algebraically correct, but long echo/spoke trains subtract nearly
+    // equal large values and amplify floating-point error. Integrating the
+    // effective state directly is equivalent:
+    //   excitation  -> reset to zero
+    //   refocusing  -> negate the current state
+    // Subsequent physical-gradient increments are unchanged. Kahan compensation
+    // limits accumulation error within each RF epoch.
+    const kx = new Float64Array(N), ky = new Float64Array(N), kz = new Float64Array(N);
+    let cx = 0, cy = 0, cz = 0;
+    if (refocusingAt[0] && !excitationAt[0]) {
+        kx[0] = -kx[0]; ky[0] = -ky[0]; kz[0] = -kz[0];
     }
-    kx[N-1] += dkX; ky[N-1] += dkY; kz[N-1] += dkZ;
+    for (let i = 1; i < N; i++) {
+        const dt = grid[i] - grid[i-1];
+        if (dt <= 0) { kx[i] = kx[i-1]; ky[i] = ky[i-1]; kz[i] = kz[i-1]; continue; }
+        const dx = 0.5*(gx[i-1]+gx[i])*dt;
+        const dy = 0.5*(gy[i-1]+gy[i])*dt;
+        const dz = 0.5*(gz[i-1]+gz[i])*dt;
+        const yx = dx - cx, yy = dy - cy, yz = dz - cz;
+        const nx = kx[i-1] + yx, ny = ky[i-1] + yy, nz = kz[i-1] + yz;
+        cx = (nx - kx[i-1]) - yx;
+        cy = (ny - ky[i-1]) - yy;
+        cz = (nz - kz[i-1]) - yz;
+        kx[i] = nx; ky[i] = ny; kz[i] = nz;
+
+        // Match Pulseq's precedence when an excitation and refocusing map to
+        // the same canonical trajectory time.
+        if (excitationAt[i]) {
+            kx[i] = 0; ky[i] = 0; kz[i] = 0;
+            cx = 0; cy = 0; cz = 0;
+        } else if (refocusingAt[i]) {
+            kx[i] = -kx[i]; ky[i] = -ky[i]; kz[i] = -kz[i];
+            cx = -cx; cy = -cy; cz = -cz;
+        }
+    }
 
     // ---- Pass 6: NaN before excitation for clean plot breaks ----
     const kxP = new Float64Array(kx), kyP = new Float64Array(ky), kzP = new Float64Array(kz);
@@ -208,22 +214,168 @@ export function calculateKspace(
 }
 
 // ---- helpers ----
-/** Collect selected time points from a gradient waveform.
- *  The full waveform is evaluated via `gradVal` interpolation. The interactive
- *  path can use only endpoints, while export/CI can include every support point
- *  to match SeqEyes Qt's trajectory integration more closely. */
-function collectGradientSupport(
-    g: DecodedGradWaveform|undefined,
-    support: number[],
+function collectSeriesSupport(
+    series: GradientSeries,
     mode: 'endpoints' | 'all',
+    push: (time: number) => void,
 ): void {
-    if (!g || g.type === 'none' || !g.timePoints || g.timePoints.length < 2) return;
+    if (series.times.length < 2) return;
     if (mode === 'all') {
-        for (let i = 0; i < g.timePoints.length; i++) support.push(g.timePoints[i]);
+        for (const time of series.times) push(time);
         return;
     }
-    support.push(g.timePoints[0], g.timePoints[g.timePoints.length - 1]);
+    for (const time of series.requiredSupport) push(time);
 }
+
+function buildGlobalGradientSeries(
+    blocks: DecodedBlock[],
+    gradientRaster: number,
+    totalDuration: number,
+): [GradientSeries, GradientSeries, GradientSeries] {
+    const output: [GradientSeries, GradientSeries, GradientSeries] = [
+        { times: [], values: [], requiredSupport: [] },
+        { times: [], values: [], requiredSupport: [] },
+        { times: [], values: [], requiredSupport: [] },
+    ];
+
+    for (const block of blocks) {
+        for (let axis = 0; axis < 3; axis++) {
+            const piece = physicalGradientPiece(block, axis);
+            if (piece.times.length) appendGradientPiece(output[axis], piece, gradientRaster);
+        }
+    }
+
+    for (const series of output) {
+        if (!series.times.length) continue;
+        const first = series.times[0];
+        const last = series.times[series.times.length - 1];
+        if (first > 0) {
+            series.times.unshift(-POLYNOMIAL_SUPPORT_EPSILON_SEC, first - POLYNOMIAL_SUPPORT_EPSILON_SEC);
+            series.values.unshift(0, 0);
+            series.requiredSupport.push(-POLYNOMIAL_SUPPORT_EPSILON_SEC, first - POLYNOMIAL_SUPPORT_EPSILON_SEC);
+        }
+        if (last < totalDuration) {
+            series.times.push(last + POLYNOMIAL_SUPPORT_EPSILON_SEC, totalDuration + POLYNOMIAL_SUPPORT_EPSILON_SEC);
+            series.values.push(0, 0);
+            series.requiredSupport.push(last + POLYNOMIAL_SUPPORT_EPSILON_SEC, totalDuration + POLYNOMIAL_SUPPORT_EPSILON_SEC);
+        }
+    }
+    return output;
+}
+
+function physicalGradientPiece(block: DecodedBlock, axis: number): GradientSeries {
+    const gradients = [block.gx, block.gy, block.gz];
+    const hasGradient = gradients.some(g => g && g.type !== 'none' && g.timePoints.length >= 2);
+    if (!hasGradient) return { times: [], values: [], requiredSupport: [] };
+
+    // Without a rotation, retain the decoded support exactly. This is the
+    // common path and matches Pulseq's per-axis waveform pieces.
+    if (!block.rotation?.values) {
+        const gradient = gradients[axis];
+        if (!gradient || gradient.type === 'none' || gradient.timePoints.length < 2) {
+            return { times: [], values: [], requiredSupport: [] };
+        }
+        return {
+            times: Array.from(gradient.timePoints),
+            values: Array.from(gradient.waveform),
+            requiredSupport: [],
+        };
+    }
+
+    // A rotation can mix differently sampled logical axes. Evaluate their union
+    // so the rotated physical component remains piecewise linear.
+    const times: number[] = [];
+    for (const gradient of gradients) {
+        if (!gradient || gradient.type === 'none') continue;
+        for (const time of gradient.timePoints) times.push(time);
+    }
+    times.sort((a, b) => a - b);
+    const uniqueTimes: number[] = [];
+    for (const time of times) {
+        if (!uniqueTimes.length || time - uniqueTimes[uniqueTimes.length - 1] > GRADIENT_ENDPOINT_TOLERANCE_SEC) {
+            uniqueTimes.push(time);
+        }
+    }
+    return {
+        times: uniqueTimes,
+        values: uniqueTimes.map(time => {
+            const rotated = rotateGradient(
+                block,
+                gradVal(block.gx, time),
+                gradVal(block.gy, time),
+                gradVal(block.gz, time),
+            );
+            return rotated[axis];
+        }),
+        requiredSupport: [],
+    };
+}
+
+function appendGradientPiece(
+    target: GradientSeries,
+    piece: GradientSeries,
+    gradientRaster: number,
+): void {
+    if (!piece.times.length) return;
+    target.requiredSupport.push(piece.times[0], piece.times[piece.times.length - 1]);
+    if (!target.times.length) {
+        target.times.push(...piece.times);
+        target.values.push(...piece.values);
+        return;
+    }
+
+    const lastIndex = target.times.length - 1;
+    const previousTime = target.times[lastIndex];
+    const firstTime = piece.times[0];
+    if (previousTime + gradientRaster < firstTime) {
+        if (target.values[lastIndex] !== 0) {
+            if (Math.abs(target.values[lastIndex]) > 1e-6) {
+                target.times.push(previousTime + gradientRaster * 0.5);
+                target.values.push(0);
+                target.requiredSupport.push(previousTime + gradientRaster * 0.5);
+            } else {
+                target.values[lastIndex] = 0;
+            }
+        }
+        if (piece.values[0] !== 0) {
+            if (Math.abs(piece.values[0]) > 1e-6) {
+                target.times.push(firstTime - gradientRaster * 0.5);
+                target.values.push(0);
+                target.requiredSupport.push(firstTime - gradientRaster * 0.5);
+            } else {
+                piece.values[0] = 0;
+            }
+        }
+    }
+
+    let start = 0;
+    const currentLast = target.times[target.times.length - 1];
+    while (start < piece.times.length && piece.times[start] <= currentLast) start++;
+    for (let i = start; i < piece.times.length; i++) {
+        target.times.push(piece.times[i]);
+        target.values.push(piece.values[i]);
+    }
+}
+
+function sampleSeries(
+    series: GradientSeries,
+    time: number,
+    cursors: number[],
+    axis: number,
+): number {
+    const n = series.times.length;
+    if (!n || time < series.times[0] || time > series.times[n - 1]) return 0;
+    let cursor = Math.min(cursors[axis], n - 2);
+    while (cursor + 1 < n && series.times[cursor + 1] < time) cursor++;
+    cursors[axis] = cursor;
+    if (cursor + 1 >= n) return series.values[n - 1];
+    const t0 = series.times[cursor], t1 = series.times[cursor + 1];
+    const v0 = series.values[cursor], v1 = series.values[cursor + 1];
+    if (time <= t0 || t1 <= t0) return v0;
+    if (time >= t1) return v1;
+    return v0 + (v1 - v0) * (time - t0) / (t1 - t0);
+}
+
 function gradVal(g: DecodedGradWaveform|undefined, t: number): number {
     if (!g || g.type === 'none') return 0;
     const tp = g.timePoints, wf = g.waveform;
@@ -237,11 +389,6 @@ function gradVal(g: DecodedGradWaveform|undefined, t: number): number {
     while(hi-lo>1){const m=(lo+hi)>>1;if(tp[m]<=t)lo=m;else hi=m;}
     const s=tp[hi]-tp[lo];if(s<=0)return wf[lo];
     return wf[lo]+(wf[hi]-wf[lo])*(t-tp[lo])/s;
-}
-function blockIdx(t: number, edges: number[]): number {
-    let lo=0,hi=edges.length-1;
-    while(lo<hi){const m=(lo+hi)>>1;if(edges[m]<=t+1e-12)lo=m+1;else hi=m;}
-    return Math.max(0,lo-1);
 }
 function timeIdx(t: number, g: number[]): number {
     let lo=0,hi=g.length;

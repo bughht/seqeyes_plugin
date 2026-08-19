@@ -17,6 +17,7 @@ import type {
     RFEntry, TrapGradEntry, ArbitraryGradEntry, ADCEntry, ExtensionEntry, BlockEntry,
 } from './types';
 import { ExtType, VER_PRE_14 } from './types';
+import { classifyRfUses } from './rfClassification';
 
 // ─── Constants ───────────────────────────────────────────────────────────
 
@@ -97,6 +98,7 @@ export function decodeBlockRange(
     }
 
     const decoded: DecodedBlock[] = [];
+    const classifiedRfUses = classifyRfUses(seq);
     for (let i = s; i < e; i++) {
         const block = seq.blocks[i];
         const dur = blockDurationSeconds(seq, block);
@@ -104,7 +106,7 @@ export function decodeBlockRange(
 
         if (block.rfId > 0) {
             const rf = seq.rfs.get(block.rfId);
-            if (rf) db.rf = decodeRF(seq, rf, cumulative, dur);
+            if (rf) db.rf = decodeRF(seq, rf, cumulative, dur, classifiedRfUses[i]);
         }
         db.gx = decodeGradient(seq, block.gxId, cumulative, dur, 'gx');
         db.gy = decodeGradient(seq, block.gyId, cumulative, dur, 'gy');
@@ -157,7 +159,13 @@ function blockDurationSeconds(seq: PulseqSequence, block: BlockEntry): number {
 
 // ─── RF decoding ──────────────────────────────────────────────────────────
 
-function decodeRF(seq: PulseqSequence, rf: RFEntry, blockStart: number, _blockDur: number): DecodedRFWaveform {
+function decodeRF(
+    seq: PulseqSequence,
+    rf: RFEntry,
+    blockStart: number,
+    _blockDur: number,
+    classifiedUse: string,
+): DecodedRFWaveform {
     const raster = seq.rasterTimes.rfRaster;
     const rfDelay = rf.delay * 1e-6;
     const rfStart = blockStart + rfDelay;
@@ -205,18 +213,7 @@ function decodeRF(seq: PulseqSequence, rf: RFEntry, blockStart: number, _blockDu
         ? blockStart + rfDelay + rf.center * 1e-6
         : estimateRfPeakTime(t, amp, rfStart, duration);
 
-    // Estimate flip angle to classify RF use when metadata is missing (pre‑v1.5)
-    let use = rf.use || '';
-    if (!use || use === 'u') {
-        // Integrate RF magnitude to get flip angle in degrees: FA = 360 × ∫ mag(t) dt
-        let faDeg = 0;
-        for (let i = 1; i < n; i++) {
-            const dt = t[i] - t[i - 1];
-            faDeg += 360 * (amp[i] + amp[i - 1]) * 0.5 * dt;
-        }
-        // Classify: ≤ 100° → excitation, ≥ 120° → refocusing, else → excitation (safe default)
-        use = faDeg >= 120 ? 'r' : 'e';
-    }
+    const use = classifiedUse || 'u';
 
     return {
         blockIndex: rf.id,

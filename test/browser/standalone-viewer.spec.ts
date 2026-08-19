@@ -30,6 +30,8 @@ interface DebugState {
   lastDrawDurationMs: number;
   drawCount: number;
   m1ReferenceMode: string;
+  m1DetailActive: boolean;
+  derivedDetailMaxViewSec: number;
   title: string;
 }
 
@@ -577,6 +579,24 @@ test('uses ranges for coarse M1 tooltips and point values after detailed-window 
   ), { timeout: 20_000 }).not.toContain('∈[');
 });
 
+test('replaces coarse M1 with budgeted viewport detail when TR metadata is unavailable', async ({ page }) => {
+  await page.goto('/?debug=1');
+  await openSequenceText(page, 'no-tr-large.seq', syntheticNoTrLargeSequence());
+  const initial = await debugState(page);
+  expect(initial.derivedDetailMaxViewSec).toBeCloseTo(10, 6);
+
+  await page.evaluate(() => window.__seqeyesDebug.setView(10, 10.1));
+  const m1Legend = page.locator('#legend .li').filter({ hasText: 'M1x' });
+  await m1Legend.click();
+  await expect(m1Legend).not.toHaveClass(/off/, { timeout: 20_000 });
+  await expect.poll(async () => (await debugState(page)).m1DetailActive, {
+    timeout: 20_000,
+  }).toBe(true);
+  await expect.poll(async () => (await debugState(page)).notices.join(' '), {
+    timeout: 20_000,
+  }).toContain('current view is detailed');
+});
+
 async function loadViewer(page: Page, sequencePath: string): Promise<void> {
   await page.goto('/?debug=1');
   await openSequence(page, sequencePath);
@@ -772,6 +792,34 @@ shape_id 4
 num_samples 2
 0
 10000
+`;
+}
+
+function syntheticNoTrLargeSequence(): string {
+  const blocks = Array.from({ length: 210 }, (_, index) => (
+    `${index + 1} 10000 0 1 0 0 ${index === 0 ? 1 : 0} 0`
+  ));
+  return `# Synthetic no-TR detailed-M1 regression fixture
+[VERSION]
+major 1
+minor 4
+revision 0
+
+[DEFINITIONS]
+AdcRasterTime 1e-7
+BlockDurationRaster 1e-5
+GradientRasterTime 1e-5
+Name no_tr_large
+RadiofrequencyRasterTime 1e-6
+
+[BLOCKS]
+${blocks.join('\n')}
+
+[TRAP]
+1 1000 1000 98000 1000 0
+
+[ADC]
+1 8000001 100 0 0 0
 `;
 }
 

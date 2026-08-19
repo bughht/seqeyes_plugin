@@ -9,6 +9,26 @@ import { parseSequenceBytes } from '../../src/pulseq/sequenceReader';
 import type { DecodedBlock, DecodedGradWaveform } from '../../src/pulseq/types';
 
 describe('k-space gradient boundary equivalence', () => {
+  it('preserves one-sided support across a zero-gradient gap', () => {
+    const raster = 10e-6;
+    const first = gradient('gx', [0, 10e-6], [100_000, 100_000]);
+    const second = gradient('gx', [40e-6, 50e-6, 60e-6], [200_000, 200_000, 0]);
+    const blocks = [
+      block(1, 0, 20e-6, first),
+      block(2, 20e-6, 20e-6, zeroGradient('gx', 20e-6, 20e-6)),
+      block(3, 40e-6, 20e-6, second),
+    ];
+
+    for (const gradientSupport of ['endpoints', 'all'] as const) {
+      const result = calculateKspace(blocks, raster, 60e-6, 0, { gradientSupport });
+
+      expect(result).not.toBeNull();
+      // Pulseq inserts a half-raster ramp to/from zero around the gap:
+      // 1.0 + 0.25 + 0.5 + 2.0 + 1.0 = 4.75 1/m.
+      expect(result!.ktraj[0][result!.ktraj[0].length - 1]).toBeCloseTo(4.75, 12);
+    }
+  });
+
   it('preserves repeated narrow arbitrary-gradient areas despite accumulated time drift', () => {
     const raster = 10e-6;
     const duration = 480e-6;
@@ -81,6 +101,47 @@ describe('k-space gradient boundary equivalence', () => {
       }
     }
   });
+
+  it('matches Pulseq MATLAB summaries for HASTE and TSE in both calculation modes', () => {
+    const fixtureDirectory = join(__dirname, '..', 'seqeyes_demo_seq_files');
+    const expected = {
+      writeHASTE: {
+        first: [-247.27493243718664, -31.250016000000009, 0.00048051200110421632],
+        middle: [247.27492400502524, 105.46876800000217, -0.00062707635515835136],
+        last: [247.2749240052508, 246.0931199999998, -0.00062707738834433258],
+      },
+      writeTSE: {
+        first: [-496.49543173346319, -468.75024000003515, 0.00048051215708255768],
+        middle: [496.49547748774057, 496.09439999957812, -0.00062707520555704832],
+        last: [496.49547752237413, -472.65696000076423, -0.00062715122476220131],
+      },
+    };
+
+    for (const id of Object.keys(expected) as Array<keyof typeof expected>) {
+      const path = join(fixtureDirectory, `${id}.seq`);
+      const sequence = parseSequenceBytes(readFileSync(path), path);
+      const blocks = decodeAllBlocks(sequence);
+      for (const gradientSupport of ['endpoints', 'all'] as const) {
+        const result = calculateKspace(
+          blocks,
+          sequence.rasterTimes.gradientRaster,
+          getTotalDuration(sequence),
+          0,
+          { rfRaster: sequence.rasterTimes.rfRaster, gradientSupport },
+        );
+        expect(result).not.toBeNull();
+        const summary = summarizeCheckpoints(result!);
+        for (const field of ['first', 'middle', 'last'] as const) {
+          summary[field].forEach((value, axis) => {
+            expect(
+              Math.abs(value - expected[id][field][axis]),
+              `${id} ${gradientSupport} ${field} axis ${axis}`,
+            ).toBeLessThanOrEqual(1e-5);
+          });
+        }
+      }
+    }
+  });
 });
 
 function summarize(result: NonNullable<ReturnType<typeof calculateKspace>>) {
@@ -96,6 +157,17 @@ function summarize(result: NonNullable<ReturnType<typeof calculateKspace>>) {
     last: vector(count - 1),
     min: bounds('min'),
     max: bounds('max'),
+  };
+}
+
+function summarizeCheckpoints(result: NonNullable<ReturnType<typeof calculateKspace>>) {
+  const count = result.t_adc.length;
+  const middle = Math.floor((count - 1) / 2);
+  const vector = (index: number) => result.ktraj_adc.map(axis => axis[index]);
+  return {
+    first: vector(0),
+    middle: vector(middle),
+    last: vector(count - 1),
   };
 }
 

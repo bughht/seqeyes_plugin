@@ -28,6 +28,7 @@ import {
 } from '../pulseq/pns';
 import { selectM1WindowBlocks, selectPnsWindowBlocks } from '../pulseq/derivedWindow';
 import {
+    derivedDetailViewLimitSec,
     estimateDerivedCost,
     estimateKspaceCost,
     estimateKspacePeakMemoryBytes,
@@ -306,6 +307,10 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                         teTimeSec: timing.teTimeSec,
                         hasExplicitTE: timing.hasExplicitTE,
                         rfUseGuessed: timing.rfUseGuessed,
+                        derivedDetailMaxViewSec: derivedDetailViewLimitSec(
+                            seq.rasterTimes.gradientRaster,
+                            timing.trTimeSec,
+                        ),
                     },
                     blockPositions,
                     notices: sequenceNotices,

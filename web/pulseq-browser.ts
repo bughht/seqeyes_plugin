@@ -15,6 +15,7 @@ export { calculateM1, calculateM1Coarse } from '../src/pulseq/m1';
 export { calculatePns, calculatePnsCoarse, parsePnsHardwareAsc, safePnsModel } from '../src/pulseq/pns';
 export { selectM1WindowBlocks, selectPnsWindowBlocks } from '../src/pulseq/derivedWindow';
 export {
+    derivedDetailViewLimitSec,
     estimateDerivedCost,
     estimateKspaceCost,
     estimateKspacePeakMemoryBytes,
