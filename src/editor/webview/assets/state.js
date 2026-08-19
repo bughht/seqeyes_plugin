@@ -245,6 +245,16 @@ function applySerializedKspace(payload){
   }
 }
 
+/* Report a load that did not arrive. Clearing the previous sequence matters as
+   much as the message: the progress overlay reaches "Ready" either way, so
+   leaving stale blocks on screen would read as a successful load. */
+function showSequenceLoadFailure(message){
+  BL=[];waveformOverview=null;blockPos=[];mmCache=null;
+  setViewerNotice('sequence',message);
+  setExportButtonEnabled(false);
+  draw();drawMinimap();
+}
+
 /* ── Data reception ───────────────────────────────────────────────────── */
 window.addEventListener('message',function(e){
   var m=e.data;
@@ -267,7 +277,13 @@ window.addEventListener('message',function(e){
     return;
   }
   if(m.type==='sequenceData'){
-    BL=m.blocks||[];TD=m.totalDuration||0;GR=m.gradRaster||1e-5;
+    try{
+      BL=unpackSequenceBlocks(m.blocks,m.sampleTimes,m.sampleValues,m.sampleCount||0);
+    }catch(err){
+      showSequenceLoadFailure('Failed to load the sequence waveforms: '+(err&&err.message||err)+'.');
+      return;
+    }
+    TD=m.totalDuration||0;GR=m.gradRaster||1e-5;
     setViewerNotice('sequence',m.notices&&m.notices.length?m.notices.join(' '):null);
     setViewerNotice('kspaceOverrideFailure',null);setKspaceSafetyWarning(m.kspaceSafety||null);
     setViewerNotice('m1',null);setViewerNotice('pns',null);setViewerNotice('pnsThreshold',null);
@@ -285,6 +301,8 @@ window.addEventListener('message',function(e){
     if(seqTiming&&seqTiming.trTimeSec>0){fitToFirstTR();}else{fit();}
     draw();drawKs();drawMinimap();
     setExportButtonEnabled(true);
+  }else if(m.type==='loadError'){
+    showSequenceLoadFailure(m.message||'The sequence could not be loaded.');
   }else if(m.type==='kspaceData'){
     applySerializedKspace(m.kspace);finishDangerousKspaceCalculation(null);drawKs();
     if(typeof kOpen!=='undefined'&&!kOpen)document.getElementById('kbtn').click();

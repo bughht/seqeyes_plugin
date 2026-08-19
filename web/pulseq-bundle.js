@@ -54,7 +54,7 @@ var Pulseq = (() => {
   });
 
   // package.json
-  var version = "0.2.12";
+  var version = "0.2.13";
 
   // src/pulseq/decompressor.ts
   function decompressShape(compressed, numSamples) {
@@ -3342,7 +3342,16 @@ var Pulseq = (() => {
     kspaceRasterSamples: 12e6,
     kspaceAdcSamples: 8e6,
     kspaceGridCandidates: 18e6,
-    derivedRasterSamples: 2e6
+    derivedRasterSamples: 2e6,
+    /**
+     * Ceiling on the display samples one sequence load may carry to the VS Code
+     * webview, counted as (time, amplitude) pairs across every RF and gradient
+     * waveform. At 12 bytes per pair this bounds the shared binary buffers at
+     * roughly 137 MiB in the extension host and again in the renderer.
+     * Per-waveform detail is reduced uniformly once a sequence would exceed it,
+     * because the alternative is an allocation neither process can satisfy.
+     */
+    displayTransportSamples: 12e6
   });
   function derivedDetailViewLimitSec(gradientRaster, trTimeSec, maxRasterSamples = INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples) {
     if (!(gradientRaster > 0) || !(maxRasterSamples > 0)) return 0;

@@ -520,16 +520,40 @@ function waveformMagnitudeMetrics(time,values){
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
-   Serialisation — mirrors seqEditorProvider.ts serializeBlocks
+   Serialisation — produces the block shape the shared renderer reads.
+   The VS Code extension builds the same shape in src/editor/blockTransport.ts,
+   but has to pack the samples into binary buffers to cross its process
+   boundary; here the arrays go straight into BL in this same heap.
    ═══════════════════════════════════════════════════════════════════════ */
-var MAX_PTS=500;
-function serializeBlocks(blocks){
+var MAX_PTS=500,MIN_PTS=8;
+/* Per-waveform detail is capped so that a very large sequence cannot ask for
+   more display samples than the heap can hold. Mirrors the budget the VS Code
+   transport applies in src/editor/blockTransport.ts; the estimate here uses the
+   raw sample counts, which bound what the reductions can emit. */
+function selectDisplayPointCap(blocks){
+  var budget=Pulseq.INTERACTIVE_COMPUTE_LIMITS.displayTransportSamples,cap=MAX_PTS;
+  for(var attempt=0;attempt<8;attempt++){
+    var total=0;
+    for(var i=0;i<blocks.length;i++){
+      var b=blocks[i];
+      if(b.rf)total+=2*Math.min(b.rf.timePoints.length,cap);
+      if(b.gx)total+=Math.min(b.gx.timePoints.length,cap);
+      if(b.gy)total+=Math.min(b.gy.timePoints.length,cap);
+      if(b.gz)total+=Math.min(b.gz.timePoints.length,cap);
+    }
+    if(total<=budget||cap<=MIN_PTS)return cap;
+    cap=Math.max(MIN_PTS,Math.min(cap-1,Math.floor(cap*(budget/total))));
+  }
+  return cap;
+}
+function serializeBlocks(blocks,cap){
+  cap=cap||MAX_PTS;
   return blocks.map(function(b){
     var o={i:b.index,s:b.startTime,d:b.duration};
     if(b.rf){
-      var displayM=downsampleWaveform(b.rf.timePoints,b.rf.magnitude,MAX_PTS);
+      var displayM=downsampleWaveform(b.rf.timePoints,b.rf.magnitude,cap);
       var magnitudeMetrics=waveformMagnitudeMetrics(b.rf.timePoints,b.rf.magnitude);
-      var rawP=downsample(b.rf.phase,MAX_PTS);
+      var rawP=downsample(b.rf.phase,cap);
       o.rf={
         s:b.rf.startTime,d:b.rf.duration,
         t:displayM.time,
@@ -537,22 +561,22 @@ function serializeBlocks(blocks){
         pk:magnitudeMetrics.peak,
         ar:magnitudeMetrics.area,
         bp:magnitudeMetrics.blockPulse,
-        pt:downsample(b.rf.timePoints,MAX_PTS),
+        pt:downsample(b.rf.timePoints,cap),
         p:rawP?rawP.map(function(v){return((v%(2*Math.PI))+2*Math.PI)%(2*Math.PI)}):null,
         a:b.rf.amplitude,fo:b.rf.freqOffset,po:b.rf.phaseOffset,
         u:b.rf.use||'u'
       };
     }
-    if(b.gx)o.gx=serializeGrad(b.gx);
-    if(b.gy)o.gy=serializeGrad(b.gy);
-    if(b.gz)o.gz=serializeGrad(b.gz);
+    if(b.gx)o.gx=serializeGrad(b.gx,cap);
+    if(b.gy)o.gy=serializeGrad(b.gy,cap);
+    if(b.gz)o.gz=serializeGrad(b.gz,cap);
     if(b.adc)o.adc={s:b.adc.startTime,n:b.adc.numSamples,dw:b.adc.dwell,d:b.adc.delay,fo:b.adc.freqOffset,po:b.adc.phaseOffset};
     if(b.triggers&&b.triggers.length)o.trg=b.triggers.map(function(t){return{s:t.startTime,c:t.channel,d:t.delay,dr:t.duration}});
     return o;
   });
 }
-function serializeGrad(g){
-  var display=downsampleWaveform(g.timePoints,g.waveform,MAX_PTS);
+function serializeGrad(g,cap){
+  var display=downsampleWaveform(g.timePoints,g.waveform,cap||MAX_PTS);
   return {s:g.startTime,d:g.duration,t:display.time,w:display.values,a:g.amplitude,ty:g.type,ch:g.channel};
 }
 function applyKspaceResult(ks){
@@ -595,7 +619,11 @@ function loadSequenceSource(sourceBytes,fileName,parseSource){
     TD=blocks.length>0?blocks[blocks.length-1].startTime+blocks[blocks.length-1].duration:0;
     GR=seq.rasterTimes.gradientRaster;RR=seq.rasterTimes.rfRaster;AR=seq.rasterTimes.adcRaster;BR=seq.rasterTimes.blockDurationRaster;
     derivedDetailMaxViewSec=Pulseq.derivedDetailViewLimitSec(GR,timing.trTimeSec);
-    BL=serializeBlocks(blocks);
+    var displayCap=selectDisplayPointCap(blocks);
+    BL=serializeBlocks(blocks,displayCap);
+    setViewerNotice('displayDetail',displayCap<MAX_PTS
+      ?'Large sequence: waveform detail was reduced to '+displayCap+' points per event (normally '+MAX_PTS+') to stay inside the display memory budget.'
+      :null);
     waveformOverview=createWaveformOverview(BL);
     m1Data=null;m1WindowData=null;m1WindowPending=null;pnsData=null;pnsWindowData=null;pnsWindowPending=null;chVis[7]=false;chVis[8]=false;chVis[9]=false;chVis[10]=false;buildLegend();
 
