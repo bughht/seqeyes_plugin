@@ -1,17 +1,13 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { createContext, runInContext } from 'node:vm';
-
 import { describe, expect, it } from 'vitest';
 
 import { MAX_DISPLAY_PTS, packBlocks } from '../../src/editor/blockTransport';
-import { decodeAllBlocks } from '../../src/pulseq/decoder';
-import { downsampleM4 } from '../../src/pulseq/displayDownsampling';
-import { parseSequenceBytes } from '../../src/pulseq/sequenceReader';
-import type { DecodedBlock } from '../../src/pulseq/types';
-
-const ASSETS = join(__dirname, '..', '..', 'src', 'editor', 'webview', 'assets');
-const FIXTURES = join(__dirname, '..', 'seqeyes_demo_seq_files');
+import {
+    loadBlocks,
+    loadWebviewAssets,
+    packAndUnpack,
+    serializeInlineBlocks,
+    type UnpackApi,
+} from './blockTransportFixtures';
 
 /**
  * The renderer only ever indexes a waveform array and asks for its length, so
@@ -20,99 +16,41 @@ const FIXTURES = join(__dirname, '..', 'seqeyes_demo_seq_files');
  * both shapes of the same sequence and require identical results — that is what
  * makes the binary transport safe to hand to unchanged drawing code.
  */
-interface RenderApi {
-  createWaveformOverview: (blocks: unknown[]) => any;
-  selectWaveformOverview: (
-    overview: unknown, startBlock: number, endBlock: number, maxBuckets: number,
-  ) => { first: number; last: number };
-  waveformVisiblePointCount: (
-    overview: unknown, key: string, startBlock: number, endBlock: number,
-  ) => number;
-  forEachWaveformPoint: (
-    time: ArrayLike<number>, values: ArrayLike<number>, maxPoints: number,
-    visit: (time: number, value: number) => void,
-  ) => number;
-  binRfEvents: (
-    series: unknown, viewStart: number, viewEnd: number,
-    pixelCount: number, widePixelThreshold: number,
-  ) => any;
-  unpackSequenceBlocks: (
-    envelope: unknown[], timeBuffer: unknown, valueBuffer: unknown, sampleCount: number,
-  ) => Array<Record<string, any>>;
+interface RenderApi extends UnpackApi {
+    createWaveformOverview: (blocks: unknown[]) => any;
+    selectWaveformOverview: (
+        overview: unknown, startBlock: number, endBlock: number, maxBuckets: number,
+    ) => { first: number; last: number };
+    waveformVisiblePointCount: (
+        overview: unknown, key: string, startBlock: number, endBlock: number,
+    ) => number;
+    forEachWaveformPoint: (
+        time: ArrayLike<number>, values: ArrayLike<number>, maxPoints: number,
+        visit: (time: number, value: number) => void,
+    ) => number;
+    binRfEvents: (
+        series: unknown, viewStart: number, viewEnd: number,
+        pixelCount: number, widePixelThreshold: number,
+    ) => any;
 }
 
 function loadRenderApi(): RenderApi {
-  const context = createContext({
-    Float64Array, Float32Array, Int32Array, Uint32Array, ArrayBuffer,
-    Infinity, isFinite, Math, Error,
-  });
-  for (const file of ['block-transport.js', 'derived-series.js']) {
-    runInContext(readFileSync(join(ASSETS, file), 'utf8'), context);
-  }
-  return context as unknown as RenderApi;
-}
-
-function loadBlocks(fixture: string): DecodedBlock[] {
-  const bytes = readFileSync(join(FIXTURES, fixture));
-  return decodeAllBlocks(parseSequenceBytes(new Uint8Array(bytes), fixture));
-}
-
-/** The plain-array block shape the standalone web app hands to the renderer. */
-function serializeInline(blocks: DecodedBlock[]): Array<Record<string, any>> {
-  const uniform = (values: ArrayLike<number>): number[] => {
-    const n = values.length;
-    if (n <= MAX_DISPLAY_PTS) return Array.from(values);
-    const step = n / MAX_DISPLAY_PTS;
-    return Array.from({ length: MAX_DISPLAY_PTS }, (_, k) => values[Math.floor(k * step)]);
-  };
-  const wrap = (value: number): number => ((value % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
-  return blocks.map(b => {
-    const o: Record<string, any> = { i: b.index, s: b.startTime, d: b.duration };
-    if (b.rf) {
-      const magnitude = downsampleM4(b.rf.timePoints, b.rf.magnitude, MAX_DISPLAY_PTS);
-      o.rf = {
-        s: b.rf.startTime, d: b.rf.duration,
-        t: magnitude.time, m: magnitude.values,
-        pt: uniform(b.rf.timePoints), p: uniform(b.rf.phase).map(wrap),
-        a: b.rf.amplitude, fo: b.rf.freqOffset, po: b.rf.phaseOffset, u: b.rf.use || 'u',
-      };
-    }
-    for (const key of ['gx', 'gy', 'gz'] as const) {
-      const grad = b[key];
-      if (!grad) continue;
-      const display = downsampleM4(grad.timePoints, grad.waveform, MAX_DISPLAY_PTS);
-      o[key] = {
-        s: grad.startTime, d: grad.duration, t: display.time, w: display.values,
-        a: grad.amplitude, ty: grad.type, ch: grad.channel,
-      };
-    }
-    if (b.adc) {
-      o.adc = {
-        s: b.adc.startTime, n: b.adc.numSamples, dw: b.adc.dwell,
-        d: b.adc.delay, fo: b.adc.freqOffset, po: b.adc.phaseOffset,
-      };
-    }
-    return o;
-  });
-}
-
-function unpackViaTransport(api: RenderApi, blocks: DecodedBlock[]): Array<Record<string, any>> {
-  const packed = packBlocks(blocks);
-  expect(packed.pointsPerWaveform).toBe(MAX_DISPLAY_PTS);
-  return api.unpackSequenceBlocks(
-    JSON.parse(JSON.stringify(packed.blocks)),
-    packed.sampleTimes,
-    packed.sampleValues,
-    packed.sampleCount,
-  );
+    return loadWebviewAssets<RenderApi>(['block-transport.js', 'derived-series.js']);
 }
 
 describe.each(['epi.seq', 'writeSpiral.seq', 'writeTSE.seq'])('renderer over packed blocks (%s)', (fixture) => {
+  it('packs this fixture at full detail, so both shapes are comparable', () => {
+    // The equivalence tests below assume neither shape was decimated further
+    // than the other; a fixture that tripped the transfer budget would compare
+    // a reduced packing against a full-detail inline one.
+    expect(packBlocks(loadBlocks(fixture)).pointsPerWaveform).toBe(MAX_DISPLAY_PTS);
+  });
+
   it('builds an identical waveform overview from typed-array views', () => {
     const api = loadRenderApi();
     const blocks = loadBlocks(fixture);
-    const packedView = api.createWaveformOverview(unpackViaTransport(api, blocks));
-    const inlineView = api.createWaveformOverview(serializeInline(blocks));
+    const packedView = api.createWaveformOverview(packAndUnpack(api, blocks));
+    const inlineView = api.createWaveformOverview(serializeInlineBlocks(blocks));
 
     expect(packedView.blockCount).toBe(inlineView.blockCount);
     expect(packedView.levels.length).toBe(inlineView.levels.length);
@@ -146,8 +84,8 @@ describe.each(['epi.seq', 'writeSpiral.seq', 'writeTSE.seq'])('renderer over pac
   it('emits the same visible point counts and level selection', () => {
     const api = loadRenderApi();
     const blocks = loadBlocks(fixture);
-    const packedView = api.createWaveformOverview(unpackViaTransport(api, blocks));
-    const inlineView = api.createWaveformOverview(serializeInline(blocks));
+    const packedView = api.createWaveformOverview(packAndUnpack(api, blocks));
+    const inlineView = api.createWaveformOverview(serializeInlineBlocks(blocks));
 
     for (const key of ['rf', 'phase', 'gx', 'gy', 'gz', 'adc']) {
       expect(api.waveformVisiblePointCount(packedView, key, 0, blocks.length))
@@ -168,8 +106,8 @@ describe.each(['epi.seq', 'writeSpiral.seq', 'writeTSE.seq'])('renderer over pac
   it('walks gradient waveforms to the same reduced point count', () => {
     const api = loadRenderApi();
     const blocks = loadBlocks(fixture);
-    const packed = unpackViaTransport(api, blocks);
-    const inline = serializeInline(blocks);
+    const packed = packAndUnpack(api, blocks);
+    const inline = serializeInlineBlocks(blocks);
 
     let compared = 0;
     for (let index = 0; index < blocks.length; index++) {
@@ -200,8 +138,8 @@ describe.each(['epi.seq', 'writeSpiral.seq', 'writeTSE.seq'])('renderer over pac
   it('bins RF events identically', () => {
     const api = loadRenderApi();
     const blocks = loadBlocks(fixture);
-    const packedEvents = api.createWaveformOverview(unpackViaTransport(api, blocks)).rfEvents;
-    const inlineEvents = api.createWaveformOverview(serializeInline(blocks)).rfEvents;
+    const packedEvents = api.createWaveformOverview(packAndUnpack(api, blocks)).rfEvents;
+    const inlineEvents = api.createWaveformOverview(serializeInlineBlocks(blocks)).rfEvents;
 
     expect(packedEvents.count).toBe(inlineEvents.count);
     const duration = blocks.length

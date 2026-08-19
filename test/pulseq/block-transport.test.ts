@@ -1,92 +1,15 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { createContext, runInContext } from 'node:vm';
-
 import { describe, expect, it } from 'vitest';
 
 import { estimateEnvelopeJsonBytes, MAX_DISPLAY_PTS, packBlocks } from '../../src/editor/blockTransport';
 import { INTERACTIVE_COMPUTE_LIMITS } from '../../src/pulseq/computeBudget';
 import { downsampleM4 } from '../../src/pulseq/displayDownsampling';
-import { decodeAllBlocks } from '../../src/pulseq/decoder';
-import { parseSequenceBytes } from '../../src/pulseq/sequenceReader';
 import type { DecodedBlock } from '../../src/pulseq/types';
-
-const FIXTURES = join(__dirname, '..', 'seqeyes_demo_seq_files');
-
-interface UnpackApi {
-  unpackSequenceBlocks: (
-    envelope: unknown[],
-    timeBuffer: unknown,
-    valueBuffer: unknown,
-    sampleCount: number,
-  ) => Array<Record<string, any>>;
-}
-
-/** Load the unpacker the webview actually ships, not a re-implementation. */
-function loadUnpackApi(): UnpackApi {
-  const source = readFileSync(
-    join(__dirname, '..', '..', 'src', 'editor', 'webview', 'assets', 'block-transport.js'),
-    'utf8',
-  );
-  const context = createContext({ Float64Array, Float32Array, ArrayBuffer, Math, Error });
-  runInContext(source, context);
-  return context as unknown as UnpackApi;
-}
-
-function loadBlocks(fixture: string): DecodedBlock[] {
-  const bytes = readFileSync(join(FIXTURES, fixture));
-  return decodeAllBlocks(parseSequenceBytes(new Uint8Array(bytes), fixture));
-}
-
-/**
- * Reproduce the transfer VS Code performs: JSON for the envelope, raw binary
- * for the buffers.  A regression that let samples leak back into the envelope
- * would survive an in-process round trip but not this one.
- */
-function transfer(packed: ReturnType<typeof packBlocks>) {
-  return {
-    envelope: JSON.parse(JSON.stringify(packed.blocks)) as unknown[],
-    times: packed.sampleTimes,
-    values: packed.sampleValues,
-    envelopeJson: JSON.stringify(packed.blocks),
-  };
-}
-
-/**
- * Size of the all-inline JSON payload this transport replaced — the shape the
- * standalone web app still builds in its own heap, and the one the extension
- * used to push through postMessage.
- */
-function inlineJsonBytes(blocks: DecodedBlock[]): number {
-  const uniform = (values: ArrayLike<number>): number[] => {
-    const n = values.length;
-    if (n <= MAX_DISPLAY_PTS) return Array.from(values);
-    const step = n / MAX_DISPLAY_PTS;
-    return Array.from({ length: MAX_DISPLAY_PTS }, (_, k) => values[Math.floor(k * step)]);
-  };
-  return JSON.stringify(blocks.map(b => {
-    const o: Record<string, unknown> = { i: b.index, s: b.startTime, d: b.duration };
-    if (b.rf) {
-      const magnitude = downsampleM4(b.rf.timePoints, b.rf.magnitude, MAX_DISPLAY_PTS);
-      o.rf = {
-        s: b.rf.startTime, d: b.rf.duration, t: magnitude.time, m: magnitude.values,
-        pk: 0, ar: 0, bp: false,
-        pt: uniform(b.rf.timePoints), p: uniform(b.rf.phase),
-        a: b.rf.amplitude, fo: b.rf.freqOffset, po: b.rf.phaseOffset, u: b.rf.use || 'u',
-      };
-    }
-    for (const key of ['gx', 'gy', 'gz'] as const) {
-      const grad = b[key];
-      if (!grad) continue;
-      const display = downsampleM4(grad.timePoints, grad.waveform, MAX_DISPLAY_PTS);
-      o[key] = {
-        s: grad.startTime, d: grad.duration, t: display.time, w: display.values,
-        a: grad.amplitude, ty: grad.type, ch: grad.channel,
-      };
-    }
-    return o;
-  })).length;
-}
+import {
+    inlineJsonBytes,
+    loadBlocks,
+    loadUnpackApi,
+    transfer,
+} from './blockTransportFixtures';
 
 describe('packed block transport', () => {
   it('round-trips waveform samples through the binary buffers', () => {

@@ -245,6 +245,16 @@ function applySerializedKspace(payload){
   }
 }
 
+/* Report a load that did not arrive. Clearing the previous sequence matters as
+   much as the message: the progress overlay reaches "Ready" either way, so
+   leaving stale blocks on screen would read as a successful load. */
+function showSequenceLoadFailure(message){
+  BL=[];waveformOverview=null;blockPos=[];mmCache=null;
+  setViewerNotice('sequence',message);
+  setExportButtonEnabled(false);
+  draw();drawMinimap();
+}
+
 /* ── Data reception ───────────────────────────────────────────────────── */
 window.addEventListener('message',function(e){
   var m=e.data;
@@ -270,11 +280,7 @@ window.addEventListener('message',function(e){
     try{
       BL=unpackSequenceBlocks(m.blocks,m.sampleTimes,m.sampleValues,m.sampleCount||0);
     }catch(err){
-      // Do not fall through with the previous sequence still on screen.
-      BL=[];waveformOverview=null;blockPos=[];mmCache=null;
-      setViewerNotice('sequence','Failed to load the sequence waveforms: '+(err&&err.message||err)+'.');
-      setExportButtonEnabled(false);
-      draw();drawMinimap();
+      showSequenceLoadFailure('Failed to load the sequence waveforms: '+(err&&err.message||err)+'.');
       return;
     }
     TD=m.totalDuration||0;GR=m.gradRaster||1e-5;
@@ -296,12 +302,7 @@ window.addEventListener('message',function(e){
     draw();drawKs();drawMinimap();
     setExportButtonEnabled(true);
   }else if(m.type==='loadError'){
-    // The extension host could not deliver the sequence. Say so instead of
-    // leaving an empty diagram behind a progress bar that reached "Ready".
-    BL=[];waveformOverview=null;blockPos=[];mmCache=null;
-    setViewerNotice('sequence',m.message||'The sequence could not be loaded.');
-    setExportButtonEnabled(false);
-    draw();drawMinimap();
+    showSequenceLoadFailure(m.message||'The sequence could not be loaded.');
   }else if(m.type==='kspaceData'){
     applySerializedKspace(m.kspace);finishDangerousKspaceCalculation(null);drawKs();
     if(typeof kOpen!=='undefined'&&!kOpen)document.getElementById('kbtn').click();

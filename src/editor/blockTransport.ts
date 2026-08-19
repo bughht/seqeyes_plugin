@@ -32,7 +32,7 @@ export const MAX_DISPLAY_PTS = 500;
  * renderer itself will draw, so reducing further would buy memory without
  * buying any additional fidelity on screen.
  */
-export const MIN_DISPLAY_PTS = 8;
+const MIN_DISPLAY_PTS = 8;
 
 const TAU = 2 * Math.PI;
 
@@ -252,7 +252,7 @@ function packGrad(grad: DecodedGradWaveform, ref: PairRef): Record<string, unkno
 }
 
 /** Peak, |area| and flat-top detection, measured on the undecimated pulse. */
-export function waveformMagnitudeMetrics(
+function waveformMagnitudeMetrics(
     time: Float64Array | number[],
     values: Float64Array | number[],
 ): { peak: number; area: number; blockPulse: boolean } {
