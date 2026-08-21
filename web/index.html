@@ -67,7 +67,7 @@
 <button id="openBseqBtn" class="matlab-only" title="Open another local .bseq file">📂 Open .bseq</button>
 <button id="openUrlBtn" class="web-url-only" title="Open a .seq or .bseq file from a web link">🌐 URL</button>
 <button id="exportKspaceBtn" title="Export ADC k-space trajectory and metadata" disabled>Export</button><div class="sep"></div>
-<button id="pnsBtn" title="Select or replace the ASC profile used for PNS prediction">Select PNS ASC file</button><div class="sep"></div>
+<button id="pnsBtn" title="Load a Siemens ASC profile for PNS prediction and acoustic resonance bands">Load ASC (PNS/Acoustic)</button><div class="sep"></div>
 <button id="zi" title="Zoom In (scroll wheel)">+</button>
 <button id="zo" title="Zoom Out">−</button>
 <button id="zf" title="Fit All">Fit</button>
@@ -79,7 +79,7 @@
 <div class="sep"></div>
 <label class="li" id="bbt" title="Toggle block boundary lines"><input type="checkbox" id="bbc" style="margin:0;cursor:pointer"><span style="font-size:11px;color:var(--fg)">Blocks</span></label>
 <div class="sep"></div><div class="lg" id="legend"></div>
-<button id="kbtn" title="Toggle K-Space View" style="margin-left:4px">K-Space</button>
+<button id="panelBtn" type="button" aria-pressed="false" title="Show the k-space trajectory" style="margin-left:4px">K-Space / Spectrum</button>
 <span class="cur" id="cur">← hover for time</span>
 </div>
 <div id="viewerNotice" role="status" aria-live="polite"></div>
@@ -87,7 +87,7 @@
   <div id="kspaceSafetyCard" role="dialog" aria-modal="true" aria-labelledby="kspaceSafetyTitle" aria-describedby="kspaceSafetyText">
     <div id="kspaceSafetyTitle">K-space safety limit</div>
     <div id="kspaceSafetyText"></div>
-    <div id="kspaceSafetyActions"><button id="kspaceSafetyAcknowledge" type="button">Acknowledge</button><button id="kspaceSafetyProceed" type="button">Calculate anyway (dangerous)</button></div>
+    <div id="kspaceSafetyActions"><button id="kspaceSafetyAcknowledge" type="button">Acknowledge</button><button id="kspaceSafetySpectrogram" type="button" title="The spectrogram is scoped to the visible window, so it stays affordable here">Show spectrogram instead</button><button id="kspaceSafetyProceed" type="button">Calculate anyway (dangerous)</button></div>
   </div>
 </div>
 <!-- Progress overlay -->
@@ -96,7 +96,69 @@
 <div id="mmap"><canvas id="mmc"></canvas></div>
 <div id="main">
 <div id="left"><div id="cc"><canvas id="mc"></canvas><canvas id="moc" aria-hidden="true"></canvas><div id="tt"></div></div></div>
-<div id="right"><div class="handle" id="khandle"></div><canvas id="kg"></canvas><canvas id="kc"></canvas><div id="rc"><button id="krst" title="Reset view">↺</button><button id="kax" title="Toggle projection">Prj</button><button id="kunit" title="Toggle k-space unit (1/m ↔ rad/m)">Unit: 1/m</button><div style="display:flex;align-items:center;gap:2px;margin-top:4px"><span style="font-size:9px;color:var(--lb)">Size</span><input type="range" id="kdot" min="1" max="12" value="2" style="width:50px;accent-color:var(--adc)" title="ADC marker size"></div></div></div>
+<div id="right"><div class="handle" id="khandle"></div>
+<div id="kpane"><canvas id="kg"></canvas><canvas id="kc"></canvas><div id="rc"><button id="krst" title="Reset view">↺</button><button id="kax" title="Toggle projection">Prj</button><button id="kunit" title="Toggle k-space unit (1/m ↔ rad/m)">Unit: 1/m</button><div style="display:flex;align-items:center;gap:2px;margin-top:4px"><span style="font-size:9px;color:var(--lb)">Size</span><input type="range" id="kdot" min="1" max="12" value="2" style="width:50px;accent-color:var(--adc)" title="ADC marker size"></div></div></div>
+<div id="spane">
+  <div id="sgTools">
+    <button id="sgPlay" type="button" class="sg-glyph" aria-label="Play simulated gradient sound" title="Play the simulated gradient sound for the visible window (simulated, not calibrated)">▶</button>
+    <button id="sgStop" type="button" class="sg-glyph" aria-label="Stop playback" title="Stop playback">■</button>
+    <button id="sgMute" type="button" class="sg-glyph" aria-pressed="false" aria-label="Mute" title="Mute">🔊</button>
+    <input type="range" id="sgVol" min="0" max="100" value="70" aria-label="Volume" title="Volume">
+    <div class="sep"></div>
+    <select id="sgCmap" aria-label="Colormap" title="Colormap"></select>
+    <select id="sgSource" aria-label="Spectrum source" title="Analyse gradient amplitude G, or its slew rate dG/dt">
+      <option value="G" selected>G</option>
+      <option value="dGdt">dG/dt</option>
+    </select>
+    <div class="sep"></div>
+    <span class="ulbl">f</span>
+    <input type="number" id="sgFMin" min="0" step="50" value="0" aria-label="Minimum frequency in hertz" title="Lowest displayed frequency (Hz)">
+    <span class="ulbl">–</span>
+    <input type="number" id="sgFMax" min="1" step="50" value="3000" aria-label="Maximum frequency in hertz" title="Highest computed frequency (Hz)">
+    <button id="sgFit" type="button" title="Reset the frequency range to 0–3000 Hz">Fit f</button>
+    <div class="sep"></div>
+    <span class="ulbl">Win</span>
+    <select id="sgWin" aria-label="Analysis window length" title="Analysis window length; Auto trades time against frequency resolution for the current view">
+      <option value="0" selected>Auto</option>
+      <option value="64">64</option>
+      <option value="128">128</option>
+      <option value="256">256</option>
+      <option value="512">512</option>
+      <option value="1024">1024</option>
+      <option value="2048">2048</option>
+    </select>
+    <span class="ulbl">Ovl</span>
+    <select id="sgOverlap" aria-label="Window overlap" title="Fraction of each window shared with its neighbour">
+      <option value="0">0%</option>
+      <option value="0.5">50%</option>
+      <option value="0.75" selected>75%</option>
+      <option value="0.875">87.5%</option>
+    </select>
+    <span class="ulbl">Pad</span>
+    <select id="sgOversample" aria-label="Zero-padding factor" title="Zero-padding factor: finer bin spacing, same true resolution">
+      <option value="1">1×</option>
+      <option value="2">2×</option>
+      <option value="3" selected>3×</option>
+      <option value="4">4×</option>
+    </select>
+    <div class="sep"></div>
+    <button id="sgWlReset" type="button" title="Reset window/level to automatic (or middle-double-click the spectrogram)">Auto W/L</button>
+    <button id="sgWlWider" type="button" aria-label="Widen the display window" title="Widen the display window">W+</button>
+    <button id="sgWlNarrower" type="button" aria-label="Narrow the display window" title="Narrow the display window">W−</button>
+    <button id="sgWlUp" type="button" aria-label="Raise the display level" title="Raise the display level">L+</button>
+    <button id="sgWlDown" type="button" aria-label="Lower the display level" title="Lower the display level">L−</button>
+    <div class="sep"></div>
+    <button id="sgMarkerClear" type="button" title="Clear the time marker (Esc)">Clear marker</button>
+    <div class="lg" id="sgLegend"></div>
+  </div>
+  <div id="sgBody">
+    <div id="sgPane"><canvas id="sgImg" aria-hidden="true"></canvas><canvas id="sgOvl" tabindex="0" aria-label="Gradient spectrogram: right-click to place a time marker, middle-drag for window and level"></canvas><div id="sgBusy" aria-hidden="true"></div></div>
+    <div id="sgSplit" role="separator" aria-label="Resize the spectrogram and spectrum panes"></div>
+    <div id="spPane"><canvas id="spCanvas" aria-label="Frequency spectrum at the marker"></canvas></div>
+  </div>
+  <div id="sgReadout" role="status" aria-live="off"></div>
+</div>
+</div>
 </div>
 
 <!-- Pulseq parser bundle + shared webview rendering (built by esbuild) -->
@@ -272,15 +334,21 @@ function applyLayoutMode(){
     handle.style.setProperty('height','5px','important');
     handle.style.setProperty('bottom','auto','important');
     if(rc)rc.style.setProperty('flex-direction','row','important');
-    if(typeof kOpen!=='undefined'&&kOpen){right.style.setProperty('height','300px','important');}
+    if(panelOpen){right.style.setProperty('height',panelStoredSize('seqeyes.panelHeight',300)+'px','important');}
   }else{
     main.style.cssText='';left.style.cssText='';right.style.cssText='';handle.style.cssText='';
     if(rc)rc.style.cssText='';
-    if(typeof kOpen!=='undefined'&&kOpen){right.style.width='500px';}
+    if(panelOpen){right.style.width=panelStoredSize('seqeyes.panelWidth',500)+'px';}
   }
 }
+function panelStoredSize(key,fallback){try{var v=parseFloat(localStorage.getItem(key));return isFinite(v)?v:fallback;}catch(_){return fallback;}}
 function refreshLayout(){
-  if(detectLayoutMode()){applyLayoutMode();rs();if(typeof drawKs==='function')drawKs();if(typeof drawMinimap==='function')drawMinimap();}
+  if(detectLayoutMode()){
+    applyLayoutMode();rs();
+    if(typeof drawKs==='function')drawKs();
+    if(typeof drawMinimap==='function')drawMinimap();
+    SeqEyesPanel.onLayoutChanged();
+  }
 }
 applyLayoutMode();
 var _mainEl=document.getElementById('main');
@@ -327,6 +395,7 @@ function clampView(){
   if(!isFinite(dur)||dur<=0)dur=TD;
   dur=Math.max(minDur,Math.min(TD,dur));sc=pw/dur;
   var maxOx=Math.max(0,TD-dur);if(!isFinite(ox))ox=0;ox=Math.max(0,Math.min(ox,maxOx));
+  SeqEyesPanel.onViewChanged();
 }
 function zoomAt(screenX,zf){
   if(!isFinite(zf)||zf<=0)return false;
@@ -372,6 +441,7 @@ function rs(){
   mmCanvas.style.width=mr.width+'px';mmCanvas.style.height=mr.height+'px';
   mmCtx.setTransform(dpr,0,0,dpr,0,0);
   draw();drawMinimap();
+  SeqEyesPanel.onViewChanged();
 }
 window.addEventListener('resize',rs);new ResizeObserver(rs).observe(cc);
 
@@ -593,7 +663,7 @@ function requestDangerousKspaceCalculation(){
       var ks=Pulseq.calculateKspace(decodedBlocks,GR,TD,0,{rfRaster:RR});
       if(!ks)throw new Error('The calculation did not produce a trajectory.');
       applyKspaceResult(ks);finishDangerousKspaceCalculation(null);showProgress('done',100,'K-space ready');
-      if(typeof kOpen!=='undefined'&&!kOpen)document.getElementById('kbtn').click();
+      SeqEyesPanel.showKspaceIfClosed();
     }catch(err){finishDangerousKspaceCalculation(err.message||String(err));showProgress('done',100,'K-space failed');}
   },50);
 }
@@ -672,6 +742,7 @@ function loadSequenceSource(sourceBytes,fileName,parseSource){
     setExportButtonEnabled(true);
     document.title='SeqEyes: '+name.replace(/\.(?:seq|bseq)$/i,'');
     if(splash)splash.style.display='none';
+    SeqEyesPanel.onSequenceLoaded();
     return true;
   }catch(err){
     alert('Error loading sequence: '+(err.message||String(err)));
@@ -1183,11 +1254,24 @@ document.getElementById('ascInput').onchange=function(){
     pnsBusy=true;if(pnsBtn)pnsBtn.disabled=true;
     reader.onload=function(){
       try{
-        pnsHardware=Pulseq.parsePnsHardwareAsc(reader.result);
-        calculatePnsWithFallback();
+        /* Parse PNS and acoustic resonances independently: one file may
+           carry only one of them, and failing PNS must not discard bands. */
+        var profile=Pulseq.parseAscProfile(reader.result);
+        applyAscProfile(file.name,profile);
+        if(profile.pns){
+          pnsHardware=profile.pns;
+          calculatePnsWithFallback();
+        }else{
+          pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
+          if(!profile.acoustic.length){
+            setViewerNotice('pns','PNS calculation failed: '+(profile.pnsError||'no coefficients in this ASC.')+' Zoom in to inspect waveform detail.');
+          }else{
+            setViewerNotice('pns',null);
+          }
+        }
       }catch(err){
         pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
-        setViewerNotice('pns','PNS calculation failed: '+(err.message||String(err))+' Zoom in to inspect waveform detail.');
+        setViewerNotice('pns','ASC could not be read: '+(err.message||String(err)));
       }
     };
     reader.onerror=function(){
@@ -1247,10 +1331,23 @@ function draw(){
   drawCursorOverlay();
 }
 
+var panelMarkerTimeSec=NaN;
+/* Mirror of the spectrogram panel marker (R9). */
+function drawPanelMarker(w,h){
+  if(!isFinite(panelMarkerTimeSec))return;
+  var mx=t2x(panelMarkerTimeSec);
+  if(mx<M.l||mx>w-M.r)return;
+  var color=getComputedStyle(document.body).getPropertyValue('--cr').trim();
+  moctx.save();
+  moctx.globalAlpha=0.45;moctx.strokeStyle=color;moctx.lineWidth=1;moctx.setLineDash([2,4]);
+  moctx.beginPath();moctx.moveTo(mx,M.t);moctx.lineTo(mx,h-M.b);moctx.stroke();
+  moctx.restore();
+}
 function drawCursorOverlay(){
   viewerCursorDrawCount++;
   var dpr=window.devicePixelRatio||1,w=moc.width/dpr,h=moc.height/dpr;
   moctx.clearRect(0,0,w,h);
+  drawPanelMarker(w,h);
   if(!cursorActive)return;var cx=t2x(cursorT);
   if(cx<M.l||cx>w-M.r)return;
   var color=getComputedStyle(document.body).getPropertyValue('--cr').trim();
@@ -1982,6 +2079,7 @@ function applyThemeChoice(value,persist){
   if(themeSelect&&themeSelect.value!==value)themeSelect.value=value;
   if(persist)storageSet("seqeyes.theme",value);
   mmCache=null;draw();drawKs();drawMinimap();
+  SeqEyesPanel.onThemeChanged();
 }
 if(themeSelect){
   var savedTheme=storageGet("seqeyes.theme")||"system";
@@ -2042,27 +2140,9 @@ function uploadKSpaceGPU(){
 }
 
 /* ── K-space toggle ───────────────────────────────────────────────────── */
-document.getElementById("kbtn").onclick=function(){
-  if((!kAdc||!kAdc[0]||!kAdc[0].length)&&typeof showKspaceSafetyDialog==='function'&&showKspaceSafetyDialog())return;
-  if(typeof refreshLayout==='function')refreshLayout();
-  kOpen=!kOpen;var p=document.getElementById("right");
-  if(kOpen){
-    p.classList.add("open");
-    if(typeof layoutMode!=='undefined'&&layoutMode==='vertical'){
-      p.style.setProperty('height','300px','important');
-      p.style.setProperty('width','100%','important');
-    }else{p.style.width='500px';}
-    this.textContent="K ✕";kAutoFit=true;
-  }else{
-    p.classList.remove("open");
-    if(typeof layoutMode!=='undefined'&&layoutMode==='vertical'){
-      p.style.setProperty('height','0','important');
-    }else{p.style.width='';}
-    this.textContent="K Space";
-  }
-  if(kOpen){requestAnimationFrame(function(){drawKs_init();});}
-  else{requestAnimationFrame(function(){resizeKc();drawKs();});}
-};
+/* The panel toggle lives in panel.js (shared bundle); this host supplies the
+   adapter at the bottom of this file. `kOpen` stays the local flag the
+   k-space drawing code reads, and the adapter keeps it in sync. */
 document.getElementById("kax").textContent="3D";
 document.getElementById("krst").onclick=function(){
   kView="3d";document.getElementById("kax").textContent="3D";
@@ -2365,11 +2445,108 @@ function parseCSSColor(c){
   return[0.26,0.83,0.96];
 }
 
+/* ── Analysis panel host adapter (standalone web / MATLAB) ─────────────
+   Compute runs in-page through Pulseq.*; everything else mirrors the VS
+   Code adapter in state.js. Installing replaces the bundle-side adapter
+   without re-binding any DOM, so panel.js is shared, not duplicated. */
+function applyAscProfile(fileName,profile){
+  var bands=(profile&&profile.acoustic)||[];
+  SeqEyesPanel.setAcousticBands(bands);
+  setViewerNotice('asc',(profile&&profile.notice)||null);
+  if(!pnsBtn)return;
+  var stem=String(fileName||'').replace(/\.[^.]*$/,'');
+  pnsBtn.textContent=stem?('ASC: '+stem):'Load ASC (PNS/Acoustic)';
+  pnsBtn.title='Loaded '+(fileName||'profile')+' \u2014 '
+    +((profile&&profile.pns)?'PNS coefficients':'no PNS coefficients')+', '
+    +(bands.length?bands.length+' acoustic band'+(bands.length===1?'':'s'):'no acoustic resonance table')
+    +'. Click to load a different profile.';
+}
+
+window.SeqEyesPanelHost={
+  getView:function(){var d=visibleDuration();return{startSec:ox,endSec:ox+d,totalDuration:TD};},
+  getLayoutMode:function(){return layoutMode;},
+  getGradientRaster:function(){return GR;},
+  getTimeUnit:function(){return timeUnit;},
+  getWaveformLeftMargin:function(){return M.l;},
+  refreshLayout:function(){refreshLayout();},
+  hasKspaceData:function(){return !!(kAdc&&kAdc[0]&&kAdc[0].length);},
+  showKspaceSafetyDialog:function(){return typeof showKspaceSafetyDialog==='function'?showKspaceSafetyDialog():false;},
+  onKspaceShown:function(){kOpen=true;kAutoFit=true;drawKs_init();},
+  onKspaceHidden:function(){kOpen=false;resizeKc();drawKs();},
+  setNotice:function(key,message){setViewerNotice(key,message);},
+  setWaveformMarker:function(timeSec){
+    panelMarkerTimeSec=(timeSec===null||timeSec===undefined)?NaN:timeSec;
+    drawCursorOverlay();
+  },
+  requestSpectrogram:function(requestId,startSec,endSec,params){
+    if(!decodedBlocks||!decodedBlocks.length){
+      SeqEyesPanel.deliverSpectrogramError(requestId,'Open a Pulseq sequence first.');
+      return;
+    }
+    var estimate=Pulseq.estimateSpectrogramCost({
+      startSec:startSec,endSec:endSec,gradientRaster:GR,
+      fMaxHz:params.fMaxHz,windowSamples:params.windowSamples||512,
+      overlap:params.overlap,oversample:params.oversample,targetColumns:params.targetColumns
+    });
+    var refusal=Pulseq.spectrogramBudgetRefusal(estimate);
+    if(refusal){SeqEyesPanel.deliverSpectrogramError(requestId,refusal);return;}
+    /* Deferred by a task so the busy state paints before the main thread
+       blocks on the transform (D5: main thread first, with budgets). */
+    setTimeout(function(){
+      try{
+        var options={};
+        for(var key in params)if(Object.prototype.hasOwnProperty.call(params,key))options[key]=params[key];
+        options.startSec=startSec;options.endSec=endSec;
+        var spec=Pulseq.computeGradientSpectrogram(selectPanelWindowBlocks(startSec,endSec),GR,options);
+        SeqEyesPanel.deliverSpectrogram(requestId,spec);
+      }catch(err){
+        SeqEyesPanel.deliverSpectrogramError(requestId,err.message||String(err));
+      }
+    },0);
+  },
+  requestAudio:function(requestId,startSec,endSec,options){
+    if(!decodedBlocks||!decodedBlocks.length){
+      SeqEyesPanel.deliverAudioError(requestId,'Open a Pulseq sequence first.');
+      return;
+    }
+    var sampleRate=options.sampleRate||44100;
+    var refusal=Pulseq.audioBudgetRefusal(Pulseq.estimateAudioCost(startSec,endSec,sampleRate));
+    if(refusal){SeqEyesPanel.deliverAudioError(requestId,refusal);return;}
+    setTimeout(function(){
+      try{
+        var sound=Pulseq.synthesizeGradientSound(selectPanelWindowBlocks(startSec,endSec),{
+          startSec:startSec,endSec:endSec,sampleRate:sampleRate,
+          channelWeights:options.channelWeights,source:options.source
+        });
+        SeqEyesPanel.deliverAudio(requestId,{
+          sampleRate:sound.sampleRate,startSec:sound.startSec,endSec:sound.endSec,
+          silent:sound.silent,left:sound.left,right:sound.right
+        });
+      }catch(err){
+        SeqEyesPanel.deliverAudioError(requestId,err.message||String(err));
+      }
+    },0);
+  }
+};
+
+/* Blocks overlapping the window, padded so the decimation filter and any
+   block straddling an edge still see real waveform. */
+function selectPanelWindowBlocks(startSec,endSec){
+  if(!decodedBlocks||!decodedBlocks.length)return [];
+  var pad=Math.max((endSec-startSec)*0.05,0.05);
+  var from=startSec-pad,to=endSec+pad;
+  return decodedBlocks.filter(function(block){
+    return block.startTime+block.duration>=from&&block.startTime<=to;
+  });
+}
+
+SeqEyesPanel.install(window.SeqEyesPanelHost);
+
 if(location.search.indexOf("debug=1")>=0){
   window.__seqeyesDebug={
     state:function(){
       var adcCount=(kAdc&&kAdc[0])?kAdc[0].length:0;
-      return{blocks:BL.length,totalDuration:TD,offset:ox,scale:sc,visibleDuration:visibleDuration(),minRasterTime:minRasterTime(),kOpen:kOpen,kView:kView,kRotX:kRotX,kRotY:kRotY,kScale:kScl,adcCount:adcCount,exportEnabled:!!(exportBtn&&!exportBtn.disabled),derivedRenderPoints:derivedRenderPointCount,derivedEnvelopeCurves:derivedEnvelopeCurveCount,derivedRawCurves:derivedRawCurveCount,waveformOverviewActive:waveformOverviewActive,rfRenderPoints:rfRenderPointCount,rfRawCurves:rfRawCurveCount,rfReducedCurves:rfReducedCurveCount,rfOverviewBuckets:rfOverviewBucketCount,notices:Object.keys(viewerNotices).map(function(k){return viewerNotices[k];}),lastDrawDurationMs:lastDrawDurationMs,drawCount:viewerDrawCount,cursorDrawCount:viewerCursorDrawCount,kTrajectoryDrawCount:kSpaceTrajectoryDrawCount,kOverlayDrawCount:kSpaceOverlayDrawCount,m1ReferenceMode:m1ReferenceMode,m1DetailActive:!!m1WindowData,derivedDetailMaxViewSec:derivedDetailMaxViewSec,title:document.title};
+      return{blocks:BL.length,totalDuration:TD,offset:ox,scale:sc,visibleDuration:visibleDuration(),minRasterTime:minRasterTime(),kOpen:kOpen,kView:kView,kRotX:kRotX,kRotY:kRotY,kScale:kScl,adcCount:adcCount,exportEnabled:!!(exportBtn&&!exportBtn.disabled),derivedRenderPoints:derivedRenderPointCount,derivedEnvelopeCurves:derivedEnvelopeCurveCount,derivedRawCurves:derivedRawCurveCount,waveformOverviewActive:waveformOverviewActive,rfRenderPoints:rfRenderPointCount,rfRawCurves:rfRawCurveCount,rfReducedCurves:rfReducedCurveCount,rfOverviewBuckets:rfOverviewBucketCount,notices:Object.keys(viewerNotices).map(function(k){return viewerNotices[k];}),lastDrawDurationMs:lastDrawDurationMs,drawCount:viewerDrawCount,cursorDrawCount:viewerCursorDrawCount,kTrajectoryDrawCount:kSpaceTrajectoryDrawCount,kOverlayDrawCount:kSpaceOverlayDrawCount,m1ReferenceMode:m1ReferenceMode,m1DetailActive:!!m1WindowData,derivedDetailMaxViewSec:derivedDetailMaxViewSec,panelMode:panelMode,panelOpen:panelOpen,title:document.title};
     },
     hoverPoint:function(){
       var t=(kAdcTime&&kAdcTime.length)?kAdcTime[Math.floor(kAdcTime.length/2)]:TD*0.5;

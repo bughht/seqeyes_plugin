@@ -59,7 +59,7 @@ test('records standalone web load and interaction performance', async ({ page, b
   metrics.readyToWaveformNonblankMs = performance.now() - waveformStart;
 
   const kspaceStart = performance.now();
-  await page.locator('#kbtn').click();
+  await page.locator('#panelBtn').click();
   await expect(page.locator('#right')).toHaveClass(/open/);
   await expectCanvasVaried(page.locator('#kc'));
   metrics.kspaceOpenToNonblankMs = performance.now() - kspaceStart;

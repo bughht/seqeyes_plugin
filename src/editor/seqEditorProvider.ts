@@ -21,20 +21,32 @@ import { calculateM1, calculateM1Coarse, type CoarseM1Data, type M1Data } from '
 import {
     calculatePns,
     calculatePnsCoarse,
-    parsePnsHardwareAsc,
     type CoarsePnsResult,
     type PnsHardware,
     type PnsResult,
 } from '../pulseq/pns';
 import { selectM1WindowBlocks, selectPnsWindowBlocks } from '../pulseq/derivedWindow';
 import {
+    computeGradientSpectrogram,
+    type GradientSpectrogram,
+} from '../pulseq/gradSpectrum';
+import { synthesizeGradientSound } from '../pulseq/gradientSound';
+import {
+    parseAscProfile,
+    type AcousticResonance,
+} from '../pulseq/acousticAsc';
+import {
+    audioBudgetRefusal,
     derivedDetailViewLimitSec,
+    estimateAudioCost,
     estimateDerivedCost,
     estimateKspaceCost,
     estimateKspacePeakMemoryBytes,
+    estimateSpectrogramCost,
     formatMemorySize,
     formatSampleCount,
     INTERACTIVE_COMPUTE_LIMITS,
+    spectrogramBudgetRefusal,
 } from '../pulseq/computeBudget';
 import { downsampleM4 } from '../pulseq/displayDownsampling';
 import { exportKspaceArtifactsFromBytes } from '../pulseq/kspaceExport';
@@ -151,6 +163,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
         let activeRfRaster = 0;
         let activeTotalDuration = 0;
         let activePnsHardware: PnsHardware | undefined;
+        let activeAcousticBands: AcousticResonance[] = [];
 
         const derivedNeedsCoarseFallback = (): boolean => {
             const estimate = estimateDerivedCost(activeBlocks, activeGradientRaster);
@@ -456,13 +469,13 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                 }
             } else if (msg.command === 'openPnsAsc') {
                 if (!activeBlocks.length || activeGradientRaster <= 0) {
-                    panel.webview.postMessage({ type: 'pnsError', message: 'Load a sequence before calculating PNS.' });
+                    panel.webview.postMessage({ type: 'pnsError', message: 'Load a sequence before loading an ASC profile.' });
                     return;
                 }
                 const uris = await vscode.window.showOpenDialog({
                     canSelectMany: false,
                     filters: { 'Siemens ASC Profiles': ['asc'], 'All Files': ['*'] },
-                    title: 'Open Siemens ASC Profile For PNS Prediction',
+                    title: 'Open Siemens ASC Profile (PNS Prediction and Acoustic Resonances)',
                 });
                 if (!uris || uris.length === 0) {
                     if (activePnsHardware) {
@@ -475,10 +488,31 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                 }
                 try {
                     const ascText = await readAscProfileText(uris[0]);
-                    const hardware = parsePnsHardwareAsc(ascText);
-                    activePnsHardware = hardware;
-                    const pns = calculatePnsForDisplay(hardware);
-                    panel.webview.postMessage({ type: 'pnsData', pns: serializePns(pns) });
+                    // Parse both concerns independently: after the button rename the
+                    // same picker must still succeed for a file that carries only one
+                    // of them, and failing PNS must not discard acoustic bands.
+                    const profile = parseAscProfile(ascText);
+                    activeAcousticBands = profile.acoustic;
+                    panel.webview.postMessage({
+                        type: 'ascProfileData',
+                        fileName: uriFileName(uris[0]),
+                        acoustic: profile.acoustic,
+                        hasPns: !!profile.pns,
+                        notice: profile.notice,
+                    });
+                    if (profile.pns) {
+                        activePnsHardware = profile.pns;
+                        const pns = calculatePnsForDisplay(profile.pns);
+                        panel.webview.postMessage({ type: 'pnsData', pns: serializePns(pns) });
+                    } else if (!profile.acoustic.length) {
+                        panel.webview.postMessage({
+                            type: 'pnsError',
+                            message: profile.pnsError
+                                ?? 'This ASC contains neither PNS coefficients nor acoustic resonances.',
+                        });
+                    } else {
+                        panel.webview.postMessage({ type: 'pnsSelectionCancelled' });
+                    }
                 } catch (err) {
                     panel.webview.postMessage({
                         type: 'pnsError',
@@ -528,6 +562,108 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                         pns: { valid: false, error: err instanceof Error ? err.message : String(err) },
                     });
                 }
+            } else if (msg.command === 'calculateSpectrogram') {
+                const requestId = msg.requestId;
+                if (!activeBlocks.length || activeGradientRaster <= 0) {
+                    panel.webview.postMessage({
+                        type: 'spectrogramError',
+                        requestId,
+                        message: 'Load a sequence before calculating the spectrogram.',
+                    });
+                    return;
+                }
+                const params = msg.params ?? {};
+                const startSec = Number(msg.startSec);
+                const endSec = Number(msg.endSec);
+                const estimate = estimateSpectrogramCost({
+                    startSec,
+                    endSec,
+                    gradientRaster: activeGradientRaster,
+                    fMaxHz: Number(params.fMaxHz) || 3000,
+                    windowSamples: Number(params.windowSamples) || 512,
+                    overlap: Number(params.overlap) || 0.75,
+                    oversample: Number(params.oversample) || 3,
+                    targetColumns: Number(params.targetColumns) || 256,
+                });
+                // Unlike k-space there is no dangerous override here: the
+                // spectrogram is scoped to the visible window, so the remedy is
+                // always to zoom in rather than to risk the extension host.
+                const refusal = spectrogramBudgetRefusal(estimate);
+                if (refusal) {
+                    panel.webview.postMessage({ type: 'spectrogramError', requestId, message: refusal });
+                    return;
+                }
+                try {
+                    const spectrogram = computeGradientSpectrogram(
+                        selectWindowBlocks(activeBlocks, startSec, endSec),
+                        activeGradientRaster,
+                        { ...params, startSec, endSec },
+                    );
+                    panel.webview.postMessage({
+                        type: 'spectrogramData',
+                        requestId,
+                        spectrogram: serializeSpectrogram(spectrogram),
+                    });
+                } catch (err) {
+                    panel.webview.postMessage({
+                        type: 'spectrogramError',
+                        requestId,
+                        message: err instanceof Error ? err.message : String(err),
+                    });
+                }
+            } else if (msg.command === 'synthesizeGradientSound') {
+                const requestId = msg.requestId;
+                if (!activeBlocks.length) {
+                    panel.webview.postMessage({
+                        type: 'gradientSoundError',
+                        requestId,
+                        message: 'Load a sequence before playing the gradient sound.',
+                    });
+                    return;
+                }
+                const startSec = Number(msg.startSec);
+                const endSec = Number(msg.endSec);
+                const sampleRate = Number(msg.sampleRate) || 44100;
+                const audioRefusal = audioBudgetRefusal(estimateAudioCost(startSec, endSec, sampleRate));
+                if (audioRefusal) {
+                    panel.webview.postMessage({ type: 'gradientSoundError', requestId, message: audioRefusal });
+                    return;
+                }
+                try {
+                    const sound = synthesizeGradientSound(
+                        selectWindowBlocks(activeBlocks, startSec, endSec),
+                        {
+                            startSec,
+                            endSec,
+                            sampleRate,
+                            channelWeights: msg.channelWeights,
+                            source: msg.source === 'dGdt' ? 'dGdt' : 'G',
+                        },
+                    );
+                    panel.webview.postMessage({
+                        type: 'gradientSoundData',
+                        requestId,
+                        sampleRate: sound.sampleRate,
+                        n: sound.n,
+                        startSec: sound.startSec,
+                        endSec: sound.endSec,
+                        silent: sound.silent,
+                        leftB64: encodeF32B64(sound.left),
+                        rightB64: encodeF32B64(sound.right),
+                    });
+                } catch (err) {
+                    panel.webview.postMessage({
+                        type: 'gradientSoundError',
+                        requestId,
+                        message: err instanceof Error ? err.message : String(err),
+                    });
+                }
+            } else if (msg.command === 'requestAcousticBands') {
+                panel.webview.postMessage({
+                    type: 'ascProfileData',
+                    acoustic: activeAcousticBands,
+                    hasPns: !!activePnsHardware,
+                });
             }
         });
     }
@@ -911,9 +1047,56 @@ function upperBoundNumeric(values: ArrayLike<number>, target: number): number {
     return lo;
 }
 
+/**
+ * Blocks overlapping a window, so the spectrogram and the sound synthesis walk
+ * a handful of blocks instead of the whole sequence on every pan.
+ *
+ * The window is padded by one block on each side because the decimation filter
+ * reads real waveform outside the requested range (never zeros — see
+ * decimator.ts), and because a block straddling the edge still contributes.
+ */
+function selectWindowBlocks(blocks: DecodedBlock[], startSec: number, endSec: number): DecodedBlock[] {
+    if (!blocks.length) return blocks;
+    const span = Math.max(0, endSec - startSec);
+    const pad = Math.max(span * 0.05, 0.05);
+    const from = startSec - pad;
+    const to = endSec + pad;
+    return blocks.filter(block => block.startTime + block.duration >= from && block.startTime <= to);
+}
+
+/** Spectrogram matrices travel as base64 Float32, mirroring serializePns. */
+function serializeSpectrogram(spec: GradientSpectrogram): Record<string, unknown> {
+    return {
+        nTime: spec.nTime,
+        nFreq: spec.nFreq,
+        tStartSec: spec.tStartSec,
+        tStepSec: spec.tStepSec,
+        fStartHz: spec.fStartHz,
+        fStepHz: spec.fStepHz,
+        dtResolutionSec: spec.dtResolutionSec,
+        dfResolutionHz: spec.dfResolutionHz,
+        unit: spec.unit,
+        source: spec.source,
+        gxB64: encodeF32B64(spec.data.gx),
+        gyB64: encodeF32B64(spec.data.gy),
+        gzB64: encodeF32B64(spec.data.gz),
+        rssB64: encodeF32B64(spec.data.rss),
+        minValue: spec.minValue,
+        maxValue: spec.maxValue,
+        decimationFactor: spec.decimationFactor,
+        decimatedRateHz: spec.decimatedRateHz,
+        windowSamples: spec.windowSamples,
+        hopSamples: spec.hopSamples,
+        fftPoints: spec.fftPoints,
+        requestedStartSec: spec.requestedStartSec,
+        requestedEndSec: spec.requestedEndSec,
+        warnings: spec.warnings,
+    };
+}
+
 /** Encode a Float64Array (or number[]) as a base64‑encoded Float32 blob.
  *  Uses Node's Buffer for efficient base64 conversion. */
-function encodeF32B64(data: Float64Array | number[]): string {
+function encodeF32B64(data: Float64Array | Float32Array | number[]): string {
     const f32 = new Float32Array(data);
     return Buffer.from(f32.buffer).toString('base64');
 }

@@ -8,7 +8,7 @@
 <button id="zr" title="Reset">↺</button><div class="sep"></div>
 <span id="tbMore">
 <button id="exportKspaceBtn" title="Export ADC k-space trajectory and metadata" disabled>Export</button>
-<button id="pnsBtn" title="Select or replace the ASC profile used for PNS prediction">PNS ASC</button><div class="sep"></div>
+<button id="pnsBtn" title="Load a Siemens ASC profile for PNS prediction and acoustic resonance bands">Load ASC (PNS/Acoustic)</button><div class="sep"></div>
 <span class="ulbl">Theme:</span><select id="theme"><option value="system">System</option><option value="onelight">One Light</option><option value="onedark">One Dark</option><option value="dracula">Dracula</option><option value="nord">Nord</option><option value="githublight">GitHub Light</option><option value="github">GitHub</option></select>
 <div class="sep"></div>
 <span class="ulbl">Time:</span><select id="tu"><option value="s">s</option><option value="ms" selected>ms</option><option value="us">µs</option></select>
@@ -17,7 +17,7 @@
 <label class="li" id="bbt" title="Toggle block boundary lines"><input type="checkbox" id="bbc" style="margin:0;cursor:pointer"><span style="font-size:11px;color:var(--fg)">Blocks</span></label>
 </span>
 <div class="sep"></div><div class="lg" id="legend"></div>
-<button id="kbtn" title="Toggle K-Space View" style="margin-left:4px">K-Space</button>
+<button id="panelBtn" type="button" aria-pressed="false" title="Show the k-space trajectory" style="margin-left:4px">K-Space / Spectrum</button>
 <span class="cur" id="cur">← hover for time</span>
 </div>
 <div id="viewerNotice" role="status" aria-live="polite"></div>
@@ -27,6 +27,7 @@
     <div id="kspaceSafetyText"></div>
     <div id="kspaceSafetyActions">
       <button id="kspaceSafetyAcknowledge" type="button">Acknowledge</button>
+      <button id="kspaceSafetySpectrogram" type="button" title="The spectrogram is scoped to the visible window, so it stays affordable here">Show spectrogram instead</button>
       <button id="kspaceSafetyProceed" type="button">Calculate anyway (dangerous)</button>
     </div>
   </div>
@@ -42,10 +43,72 @@
 </div>
 <!-- ── Minimap overview strip (like VS Code's code minimap) ── -->
 <div id="mmap"><canvas id="mmc"></canvas></div>
-<!-- Main split: waveforms | k-space -->
+<!-- Main split: waveforms | analysis panel (k-space or spectrogram) -->
 <div id="main">
 <div id="left"><div id="cc"><canvas id="mc"></canvas><canvas id="moc" aria-hidden="true"></canvas><div id="tt"></div></div></div>
-<div id="right"><div class="handle" id="khandle"></div><canvas id="kg"></canvas><canvas id="kc"></canvas><div id="rc"><button id="krst" title="Reset view">↺</button><button id="kax" title="Toggle projection">Prj</button><button id="kunit" title="Toggle k-space unit (1/m ↔ rad/m)">Unit: 1/m</button><div style="display:flex;align-items:center;gap:2px;margin-top:4px"><span style="font-size:9px;color:var(--lb)">Size</span><input type="range" id="kdot" min="1" max="12" value="2" style="width:50px;accent-color:var(--adc)" title="ADC marker size"></div></div></div>
+<div id="right"><div class="handle" id="khandle"></div>
+<div id="kpane"><canvas id="kg"></canvas><canvas id="kc"></canvas><div id="rc"><button id="krst" title="Reset view">↺</button><button id="kax" title="Toggle projection">Prj</button><button id="kunit" title="Toggle k-space unit (1/m ↔ rad/m)">Unit: 1/m</button><div style="display:flex;align-items:center;gap:2px;margin-top:4px"><span style="font-size:9px;color:var(--lb)">Size</span><input type="range" id="kdot" min="1" max="12" value="2" style="width:50px;accent-color:var(--adc)" title="ADC marker size"></div></div></div>
+<div id="spane">
+  <div id="sgTools">
+    <button id="sgPlay" type="button" class="sg-glyph" aria-label="Play simulated gradient sound" title="Play the simulated gradient sound for the visible window (simulated, not calibrated)">▶</button>
+    <button id="sgStop" type="button" class="sg-glyph" aria-label="Stop playback" title="Stop playback">■</button>
+    <button id="sgMute" type="button" class="sg-glyph" aria-pressed="false" aria-label="Mute" title="Mute">🔊</button>
+    <input type="range" id="sgVol" min="0" max="100" value="70" aria-label="Volume" title="Volume">
+    <div class="sep"></div>
+    <select id="sgCmap" aria-label="Colormap" title="Colormap"></select>
+    <select id="sgSource" aria-label="Spectrum source" title="Analyse gradient amplitude G, or its slew rate dG/dt">
+      <option value="G" selected>G</option>
+      <option value="dGdt">dG/dt</option>
+    </select>
+    <div class="sep"></div>
+    <span class="ulbl">f</span>
+    <input type="number" id="sgFMin" min="0" step="50" value="0" aria-label="Minimum frequency in hertz" title="Lowest displayed frequency (Hz)">
+    <span class="ulbl">–</span>
+    <input type="number" id="sgFMax" min="1" step="50" value="3000" aria-label="Maximum frequency in hertz" title="Highest computed frequency (Hz)">
+    <button id="sgFit" type="button" title="Reset the frequency range to 0–3000 Hz">Fit f</button>
+    <div class="sep"></div>
+    <span class="ulbl">Win</span>
+    <select id="sgWin" aria-label="Analysis window length" title="Analysis window length; Auto trades time against frequency resolution for the current view">
+      <option value="0" selected>Auto</option>
+      <option value="64">64</option>
+      <option value="128">128</option>
+      <option value="256">256</option>
+      <option value="512">512</option>
+      <option value="1024">1024</option>
+      <option value="2048">2048</option>
+    </select>
+    <span class="ulbl">Ovl</span>
+    <select id="sgOverlap" aria-label="Window overlap" title="Fraction of each window shared with its neighbour">
+      <option value="0">0%</option>
+      <option value="0.5">50%</option>
+      <option value="0.75" selected>75%</option>
+      <option value="0.875">87.5%</option>
+    </select>
+    <span class="ulbl">Pad</span>
+    <select id="sgOversample" aria-label="Zero-padding factor" title="Zero-padding factor: finer bin spacing, same true resolution">
+      <option value="1">1×</option>
+      <option value="2">2×</option>
+      <option value="3" selected>3×</option>
+      <option value="4">4×</option>
+    </select>
+    <div class="sep"></div>
+    <button id="sgWlReset" type="button" title="Reset window/level to automatic (or middle-double-click the spectrogram)">Auto W/L</button>
+    <button id="sgWlWider" type="button" aria-label="Widen the display window" title="Widen the display window">W+</button>
+    <button id="sgWlNarrower" type="button" aria-label="Narrow the display window" title="Narrow the display window">W−</button>
+    <button id="sgWlUp" type="button" aria-label="Raise the display level" title="Raise the display level">L+</button>
+    <button id="sgWlDown" type="button" aria-label="Lower the display level" title="Lower the display level">L−</button>
+    <div class="sep"></div>
+    <button id="sgMarkerClear" type="button" title="Clear the time marker (Esc)">Clear marker</button>
+    <div class="lg" id="sgLegend"></div>
+  </div>
+  <div id="sgBody">
+    <div id="sgPane"><canvas id="sgImg" aria-hidden="true"></canvas><canvas id="sgOvl" tabindex="0" aria-label="Gradient spectrogram: right-click to place a time marker, middle-drag for window and level"></canvas><div id="sgBusy" aria-hidden="true"></div></div>
+    <div id="sgSplit" role="separator" aria-label="Resize the spectrogram and spectrum panes"></div>
+    <div id="spPane"><canvas id="spCanvas" aria-label="Frequency spectrum at the marker"></canvas></div>
+  </div>
+  <div id="sgReadout" role="status" aria-live="off"></div>
+</div>
+</div>
 </div>
 <!-- Hidden file input for standalone web mode -->
 <input type="file" id="fileInput" accept=".seq,.bseq" style="display:none">

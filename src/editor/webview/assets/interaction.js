@@ -309,3 +309,12 @@ function sampleGradAtTime(g,t){
 function fmtG(g,t){var a=gradConv(sampleGradAtTime(g,t));return a.toFixed(1)+' '+gradUnitStr()+' ('+g.ty+')';}
 new MutationObserver(function(){mmCache=null;draw();drawKs();drawMinimap();}).observe(document.body,{attributes:true,attributeFilter:['class']});
 rs();
+
+/* The analysis panel is wired last: it needs the toolbar, both sub-panes and
+   the host adapter to exist. web/index.html installs its own adapter over
+   this one — install() swaps the host without re-binding the DOM. */
+SeqEyesPanel.install(window.SeqEyesPanelHost);
+/* Deferred by one macrotask so web/index.html, whose inline IIFE runs after
+   this bundle, has installed its own adapter before the persisted mode is
+   restored against it. */
+setTimeout(function(){SeqEyesPanel.restoreMode();},0);

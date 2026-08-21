@@ -13,6 +13,30 @@ export { decodeAllBlocks, getTotalDuration } from '../src/pulseq/decoder';
 export { calculateKspace } from '../src/pulseq/kspace';
 export { calculateM1, calculateM1Coarse } from '../src/pulseq/m1';
 export { calculatePns, calculatePnsCoarse, parsePnsHardwareAsc, safePnsModel } from '../src/pulseq/pns';
+export { parseAscText } from '../src/pulseq/ascText';
+export {
+    countBandsOutsideRange,
+    describeAscProfile,
+    isEmptyAscProfile,
+    parseAcousticResonancesAsc,
+    parseAscProfile,
+} from '../src/pulseq/acousticAsc';
+export {
+    computeGradientSpectrogram,
+    computeGradientSpectrumAverage,
+    computeGradientSpectrumSlice,
+    computeGradSpectrumParity,
+    resolveSpectrogramParams,
+    spectrogramColumnAt,
+    spectrogramRowFrequency,
+} from '../src/pulseq/gradSpectrum';
+export { synthesizeGradientSound } from '../src/pulseq/gradientSound';
+export {
+    differentiateUniform,
+    physicalGradientValueAt,
+    resamplePhysicalGradients,
+    rotateGradient,
+} from '../src/pulseq/physicalGradients';
 export { selectM1WindowBlocks, selectPnsWindowBlocks } from '../src/pulseq/derivedWindow';
 export {
     derivedDetailViewLimitSec,
@@ -22,6 +46,10 @@ export {
     formatMemorySize,
     formatSampleCount,
     INTERACTIVE_COMPUTE_LIMITS,
+    audioBudgetRefusal,
+    estimateAudioCost,
+    estimateSpectrogramCost,
+    spectrogramBudgetRefusal,
 } from '../src/pulseq/computeBudget';
 export { detectSequenceTiming } from '../src/pulseq/trdetect';
 export {
@@ -33,4 +61,7 @@ export {
 export type { KSpaceData } from '../src/pulseq/kspace';
 export type { CoarseM1Data, M1Data } from '../src/pulseq/m1';
 export type { CoarsePnsResult, PnsHardware, PnsResult } from '../src/pulseq/pns';
+export type { AcousticResonance, AscProfile } from '../src/pulseq/acousticAsc';
+export type { GradientSpectrogram, SpectrogramParams } from '../src/pulseq/gradSpectrum';
+export type { GradientSound } from '../src/pulseq/gradientSound';
 export type { DecodedBlock, DecodedGradWaveform } from '../src/pulseq/types';

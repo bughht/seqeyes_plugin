@@ -63,6 +63,7 @@ function clearThemeClasses(){
 function redrawAfterThemeChange(){
   mmCache=null;
   draw();drawKs();drawMinimap();
+  if(typeof SeqEyesPanel!=='undefined')SeqEyesPanel.onThemeChanged();
 }
 function applyThemeChoice(value,persist){
   if(!value)value="system";
@@ -176,34 +177,10 @@ function uploadKSpaceGPU(){
 /* ═══════════════════════════════════════════════════════════════════════
    Toggle / View cycle / Canvas sizing
    ═══════════════════════════════════════════════════════════════════════ */
-document.getElementById("kbtn").onclick=function(){
-  if((!kAdc||!kAdc[0]||!kAdc[0].length)&&typeof showKspaceSafetyDialog==='function'&&showKspaceSafetyDialog())return;
-  // Ensure layout class is in sync before toggling
-  if(typeof refreshLayout==='function')refreshLayout();
-  kOpen=!kOpen;
-  var p=document.getElementById("right");
-  if(kOpen){
-    p.classList.add("open");
-    if(typeof layoutMode!=='undefined'&&layoutMode==='vertical'){
-      // In vertical mode, apply height via inline !important to match applyLayoutMode
-      p.style.setProperty('height','300px','important');
-      p.style.setProperty('width','100%','important');
-    }else{
-      p.style.width='500px';
-    }
-    this.textContent="K Space ✕";kAutoFit=true;
-  }else{
-    p.classList.remove("open");
-    if(typeof layoutMode!=='undefined'&&layoutMode==='vertical'){
-      p.style.setProperty('height','0','important');
-    }else{
-      p.style.width='';
-    }
-    this.textContent="K Space";
-  }
-  if(kOpen){requestAnimationFrame(function(){drawKs_init();});}
-  else{requestAnimationFrame(function(){resizeKc();drawKs();});}
-};
+/* The panel toggle moved to panel.js: one button now cycles
+   off -> k-space -> spectrogram -> off, and only the off -> k-space
+   transition passes through the safety gate. `kOpen` is still the flag the
+   drawing and interaction code reads, and panel.js keeps it in sync. */
 document.getElementById("kax").textContent="3D";
 document.getElementById("krst").onclick=function(){
   kView="3d";
@@ -349,7 +326,7 @@ kCanvas.addEventListener("wheel",function(e){e.preventDefault();
 },{passive:false});
 
 window.addEventListener("mousemove",function(e){
-  if(!kDragging||!kDragPrev||!kOpen)return;
+  if(!kDragging||!kDragPrev||!kOpen||panelMode!=="kspace")return;
   var dx=e.clientX-kDragPrev.x, dy=e.clientY-kDragPrev.y;
   kDragPrev={x:e.clientX,y:e.clientY};
   if(kView!=="3d"){kView="3d";document.getElementById("kax").textContent="3D";}
@@ -387,7 +364,7 @@ kCanvas.addEventListener("touchstart",function(e){
   e.preventDefault();
 },{passive:false});
 kCanvas.addEventListener("touchmove",function(e){
-  if(!_kTouchActive||!_kTouchPrev||!kOpen)return;
+  if(!_kTouchActive||!_kTouchPrev||!kOpen||panelMode!=="kspace")return;
   if(kView!=="3d"){kView="3d";document.getElementById("kax").textContent="3D";}
   if(e.touches.length===1&&_kTouchBtn===0){
     // 1‑finger rotate
@@ -446,7 +423,7 @@ document.getElementById("khandle").addEventListener("touchstart",function(e){
   e.preventDefault();e.stopPropagation();
 },{passive:false});
 window.addEventListener("mousemove",function(e){
-  if(!kResizing)return;
+  if(!kResizing||!panelOpen)return;
   var p=document.getElementById("right");
   var vertical=(typeof layoutMode!=='undefined'&&layoutMode==='vertical');
   if(vertical){
@@ -458,10 +435,11 @@ window.addEventListener("mousemove",function(e){
     kResizeStart=e.clientX;
     p.style.width=kResizeW+"px";p.style.transition="none";
   }
-  resizeKc();drawKs();
+  persistPanelSize();
+  panelHandleResize();
 });
 window.addEventListener("touchmove",function(e){
-  if(!kResizing||e.touches.length!==1)return;
+  if(!kResizing||!panelOpen||e.touches.length!==1)return;
   var p=document.getElementById("right");
   var vertical=(typeof layoutMode!=='undefined'&&layoutMode==='vertical');
   if(vertical){
@@ -473,7 +451,8 @@ window.addEventListener("touchmove",function(e){
     kResizeStart=e.touches[0].clientX;
     p.style.width=kResizeW+"px";p.style.transition="none";
   }
-  resizeKc();drawKs();
+  persistPanelSize();
+  panelHandleResize();
 },{passive:false});
 window.addEventListener("mouseup",function(){
   if(kResizing){
@@ -494,6 +473,15 @@ window.addEventListener("touchend",function(){
   }
 });
 window.addEventListener("resize",function(){if(kOpen){resizeKc();drawKs();}});
+
+/* The panel size is shared by both panes, so it is stored once and
+   applyLayoutMode()/setPanelMode() read it back on every open. */
+function persistPanelSize(){
+  try{
+    if(typeof layoutMode!=='undefined'&&layoutMode==='vertical')localStorage.setItem('seqeyes.panelHeight',String(kResizeH));
+    else localStorage.setItem('seqeyes.panelWidth',String(kResizeW));
+  }catch(_){/* private mode */}
+}
 
 /* ═══════════════════════════════════════════════════════════════════════
    Nice tick spacing

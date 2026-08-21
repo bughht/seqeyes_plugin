@@ -219,7 +219,7 @@ test('offers an explicit dangerous K-space override from the desktop warning', a
   await expect(dialog.locator('#kspaceSafetyProceed')).toContainText('dangerous');
   await dialog.locator('#kspaceSafetyProceed').click();
   await expect(dialog).toBeHidden({ timeout: 20_000 });
-  await expect(page.locator('#kbtn')).toHaveText('K ✕', { timeout: 20_000 });
+  await expect(page.locator('#panelBtn')).toHaveText('K-Space ▸ Spectrogram', { timeout: 20_000 });
   expect((await debugState(page)).adcCount).toBeGreaterThan(0);
 });
 
@@ -237,7 +237,7 @@ test('uses a modal instead of a long K-space warning in a mobile browser', async
   await expect(page.locator('#viewerNotice')).toBeHidden();
   await dialog.locator('#kspaceSafetyAcknowledge').click();
   await expect(dialog).toBeHidden();
-  await page.locator('#kbtn').click();
+  await page.locator('#panelBtn').click();
   await expect(dialog).toBeVisible();
 });
 
@@ -506,7 +506,7 @@ test('calculates M1 lazily and accepts a synthetic ASC profile for PNS', async (
 
   const pnsLegend = page.locator('#legend .li').filter({ hasText: 'PNS' });
   await expect(pnsLegend).toHaveClass(/off/);
-  await expect(page.locator('#pnsBtn')).toHaveText('Select PNS ASC file');
+  await expect(page.locator('#pnsBtn')).toHaveText('Load ASC (PNS/Acoustic)');
   const chooserPromise = page.waitForEvent('filechooser');
   await page.locator('#pnsBtn').click();
   const chooser = await chooserPromise;
@@ -647,7 +647,7 @@ async function openSequenceFromUrl(page: Page, url: string): Promise<void> {
 async function openKspace(page: Page): Promise<void> {
   const right = page.locator('#right');
   const state = await debugState(page);
-  if (!state.kOpen) await page.locator('#kbtn').click();
+  if (!state.kOpen) await page.locator('#panelBtn').click();
   await expect(right).toHaveClass(/open/);
   await expect.poll(async () => (await debugState(page)).kOpen).toBe(true);
   await expect.poll(async () => {
