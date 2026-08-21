@@ -15,7 +15,8 @@
  *   6. No 2pi factor - k-space in Hz/m (matching Pulseq convention).
  */
 
-import type { DecodedBlock, DecodedGradWaveform } from './types';
+import type { DecodedBlock } from './types';
+import { physicalGradientPiece, type GradientSeries } from './physicalGradients';
 
 export interface KSpaceData {
     ktraj: Float64Array[];      // [kx, ky, kz]  [Hz/m]
@@ -51,14 +52,7 @@ export interface KSpaceOptions {
     gradientSupport?: 'endpoints' | 'all';
 }
 
-interface GradientSeries {
-    times: number[];
-    values: number[];
-    requiredSupport: number[];
-}
-
 const TRAJECTORY_TIME_ACCURACY_SEC = 1e-10;
-const GRADIENT_ENDPOINT_TOLERANCE_SEC = 1e-12;
 const POLYNOMIAL_SUPPORT_EPSILON_SEC = 1e-12;
 
 export function calculateKspace(
@@ -263,54 +257,6 @@ function buildGlobalGradientSeries(
     return output;
 }
 
-function physicalGradientPiece(block: DecodedBlock, axis: number): GradientSeries {
-    const gradients = [block.gx, block.gy, block.gz];
-    const hasGradient = gradients.some(g => g && g.type !== 'none' && g.timePoints.length >= 2);
-    if (!hasGradient) return { times: [], values: [], requiredSupport: [] };
-
-    // Without a rotation, retain the decoded support exactly. This is the
-    // common path and matches Pulseq's per-axis waveform pieces.
-    if (!block.rotation?.values) {
-        const gradient = gradients[axis];
-        if (!gradient || gradient.type === 'none' || gradient.timePoints.length < 2) {
-            return { times: [], values: [], requiredSupport: [] };
-        }
-        return {
-            times: Array.from(gradient.timePoints),
-            values: Array.from(gradient.waveform),
-            requiredSupport: [],
-        };
-    }
-
-    // A rotation can mix differently sampled logical axes. Evaluate their union
-    // so the rotated physical component remains piecewise linear.
-    const times: number[] = [];
-    for (const gradient of gradients) {
-        if (!gradient || gradient.type === 'none') continue;
-        for (const time of gradient.timePoints) times.push(time);
-    }
-    times.sort((a, b) => a - b);
-    const uniqueTimes: number[] = [];
-    for (const time of times) {
-        if (!uniqueTimes.length || time - uniqueTimes[uniqueTimes.length - 1] > GRADIENT_ENDPOINT_TOLERANCE_SEC) {
-            uniqueTimes.push(time);
-        }
-    }
-    return {
-        times: uniqueTimes,
-        values: uniqueTimes.map(time => {
-            const rotated = rotateGradient(
-                block,
-                gradVal(block.gx, time),
-                gradVal(block.gy, time),
-                gradVal(block.gz, time),
-            );
-            return rotated[axis];
-        }),
-        requiredSupport: [],
-    };
-}
-
 function appendGradientPiece(
     target: GradientSeries,
     piece: GradientSeries,
@@ -376,20 +322,6 @@ function sampleSeries(
     return v0 + (v1 - v0) * (time - t0) / (t1 - t0);
 }
 
-function gradVal(g: DecodedGradWaveform|undefined, t: number): number {
-    if (!g || g.type === 'none') return 0;
-    const tp = g.timePoints, wf = g.waveform;
-    if (!tp || tp.length < 2) return 0;
-    const first = tp[0], last = tp[tp.length - 1];
-    if (t < first - GRADIENT_ENDPOINT_TOLERANCE_SEC
-        || t > last + GRADIENT_ENDPOINT_TOLERANCE_SEC) return 0;
-    if (t <= first + GRADIENT_ENDPOINT_TOLERANCE_SEC) return wf[0];
-    if (t >= last - GRADIENT_ENDPOINT_TOLERANCE_SEC) return wf[wf.length - 1];
-    let lo=0,hi=tp.length-1;
-    while(hi-lo>1){const m=(lo+hi)>>1;if(tp[m]<=t)lo=m;else hi=m;}
-    const s=tp[hi]-tp[lo];if(s<=0)return wf[lo];
-    return wf[lo]+(wf[hi]-wf[lo])*(t-tp[lo])/s;
-}
 function timeIdx(t: number, g: number[]): number {
     let lo=0,hi=g.length;
     while(lo<hi){const m=(lo+hi)>>1;if(g[m]<t-1e-12)lo=m+1;else hi=m;}
@@ -404,37 +336,4 @@ function interp(d: Float64Array, g: number[], t: number): number {
     const i0=lo-1,i1=lo,dt=g[i1]-g[i0];
     if(dt<=0)return d[i1];
     return d[i0]+(d[i1]-d[i0])*(t-g[i0])/dt;
-}
-
-function rotateGradient(block: DecodedBlock, gx: number, gy: number, gz: number): [number, number, number] {
-    const values = block.rotation?.values;
-    if (!values) return [gx, gy, gz];
-
-    if (values.length === 4) {
-        const [w, x, y, z] = values;
-        const r00 = 1 - 2 * y * y - 2 * z * z;
-        const r01 = 2 * x * y - 2 * w * z;
-        const r02 = 2 * x * z + 2 * w * y;
-        const r10 = 2 * x * y + 2 * w * z;
-        const r11 = 1 - 2 * x * x - 2 * z * z;
-        const r12 = 2 * y * z - 2 * w * x;
-        const r20 = 2 * x * z - 2 * w * y;
-        const r21 = 2 * y * z + 2 * w * x;
-        const r22 = 1 - 2 * x * x - 2 * y * y;
-        return [
-            r00 * gx + r01 * gy + r02 * gz,
-            r10 * gx + r11 * gy + r12 * gz,
-            r20 * gx + r21 * gy + r22 * gz,
-        ];
-    }
-
-    if (values.length === 9) {
-        return [
-            values[0] * gx + values[1] * gy + values[2] * gz,
-            values[3] * gx + values[4] * gy + values[5] * gz,
-            values[6] * gx + values[7] * gy + values[8] * gz,
-        ];
-    }
-
-    return [gx, gy, gz];
 }
