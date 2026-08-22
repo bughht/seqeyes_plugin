@@ -461,6 +461,37 @@ test('shows a readout with the achieved time and frequency resolution', async ({
   await expect(readout).toContainText('view average');
 });
 
+test('resizes the spectrogram canvases from the outer panel handle', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+
+  const before = await canvasSize(page.locator('#sgImg'));
+  expect(before.width).toBeGreaterThan(0);
+
+  const handle = await requireBox(page.locator('#khandle'));
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+  await page.mouse.down();
+  for (let i = 1; i <= 10; i++) {
+    await page.mouse.move(handle.x + handle.width / 2 - i * 12, handle.y + handle.height / 2);
+  }
+  await page.mouse.up();
+
+  // The handle used to drive only the k-space pane, leaving the spectrogram
+  // canvases at their old size (and drawing into a hidden pane).
+  await expect.poll(async () => (await canvasSize(page.locator('#sgImg'))).width, { timeout: 10_000 })
+    .toBeGreaterThan(before.width);
+  await expect.poll(async () => (await canvasSize(page.locator('#spCanvas'))).width, { timeout: 10_000 })
+    .toBeGreaterThan(0);
+  await expectCanvasVaried(page.locator('#sgImg'));
+
+  // And the new size survives a reload.
+  await page.reload();
+  await expect.poll(() => page.evaluate(() => window.SeqEyesDev.panelMode()), { timeout: 10_000 })
+    .toBe('spectrogram');
+  await expect.poll(async () => (await requireBox(page.locator('#right'))).width, { timeout: 10_000 })
+    .toBeGreaterThan(520);
+});
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 async function loadViewer(page: Page, fixturePath: string): Promise<void> {
@@ -541,6 +572,13 @@ async function opaquePixelCount(locator: Locator): Promise<number> {
     let count = 0;
     for (let i = 3; i < image.length; i += 4) if (image[i] > 8) count++;
     return count;
+  });
+}
+
+async function canvasSize(locator: Locator): Promise<{ width: number; height: number }> {
+  return await locator.evaluate((element) => {
+    const canvas = element as HTMLCanvasElement;
+    return { width: canvas.width, height: canvas.height };
   });
 }
 

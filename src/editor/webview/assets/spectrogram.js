@@ -471,7 +471,7 @@ function sgDrawSpectrum(context) {
   if (width <= 0 || height <= 0) return null;
 
   var rotated = context.orientation === 'vertical';
-  var rect = sgSpectrumRect(width, height, rotated ? context.leftMargin : context.leftMargin);
+  var rect = sgSpectrumRect(width, height, context.leftMargin);
   var lb = (css.getPropertyValue('--lb') || '#888').trim();
   var ax = (css.getPropertyValue('--ax') || '#aaa').trim();
 

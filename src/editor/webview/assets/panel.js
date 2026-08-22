@@ -718,8 +718,10 @@ var SeqEyesPanel = (function () {
     if (SeqEyesAudio.getState() === 'paused' && audioWindow
       && Math.abs(audioWindow.startSec - range.startSec) < 1e-9
       && Math.abs(audioWindow.endSec - range.endSec) < 1e-9) {
-      startPlayheadLoop();
+      // play() before the loop: the loop exits immediately unless the audio
+      // is already reporting itself as playing.
       SeqEyesAudio.play(SeqEyesAudio.currentBufferOffsetSec(), playbackLengthSec(range));
+      startPlayheadLoop();
       syncTransport();
       return;
     }

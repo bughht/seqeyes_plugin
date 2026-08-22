@@ -2318,7 +2318,11 @@ kCanvas.addEventListener("touchcancel",function(){
 });
 
 /* ── Resize handle ───────────────────────────────────────────────────── */
-var kResizing=false, kResizeStart=0, kResizeW=500, kResizeH=300;
+/* Seeded from storage, not from the 500/300 defaults: the panel size now
+   survives a reload, so starting a drag from the default would snap the panel
+   back to it before the first mouse move is applied. */
+var kResizing=false, kResizeStart=0,
+    kResizeW=panelStoredWidth(), kResizeH=panelStoredHeight();
 document.getElementById("khandle").addEventListener("mousedown",function(e){
   kResizing=true;
   if(typeof layoutMode!=='undefined'&&layoutMode==='vertical')kResizeStart=e.clientY;
@@ -3156,7 +3160,7 @@ function sgDrawSpectrum(context) {
   if (width <= 0 || height <= 0) return null;
 
   var rotated = context.orientation === 'vertical';
-  var rect = sgSpectrumRect(width, height, rotated ? context.leftMargin : context.leftMargin);
+  var rect = sgSpectrumRect(width, height, context.leftMargin);
   var lb = (css.getPropertyValue('--lb') || '#888').trim();
   var ax = (css.getPropertyValue('--ax') || '#aaa').trim();
 
@@ -4330,8 +4334,10 @@ var SeqEyesPanel = (function () {
     if (SeqEyesAudio.getState() === 'paused' && audioWindow
       && Math.abs(audioWindow.startSec - range.startSec) < 1e-9
       && Math.abs(audioWindow.endSec - range.endSec) < 1e-9) {
-      startPlayheadLoop();
+      // play() before the loop: the loop exits immediately unless the audio
+      // is already reporting itself as playing.
       SeqEyesAudio.play(SeqEyesAudio.currentBufferOffsetSec(), playbackLengthSec(range));
+      startPlayheadLoop();
       syncTransport();
       return;
     }

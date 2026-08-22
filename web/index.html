@@ -2296,7 +2296,21 @@ kCanvas.addEventListener("touchcancel",function(){
 });
 
 /* ── K-space resize handle ────────────────────────────────────────────── */
-var kResizing=false,kResizeStart=0,kResizeW=500,kResizeH=300;
+/* The shared panelHandleResize() dispatches to the bundle's k-space drawing
+   code; this host has its own, so it overrides the dispatcher. */
+function panelHandleResize(){
+  if(panelMode==='spectrogram')SeqEyesPanel.onPanelResized();
+  else{resizeKc();drawKs();}
+}
+function persistPanelSize(){
+  try{
+    if(typeof layoutMode!=='undefined'&&layoutMode==='vertical')localStorage.setItem('seqeyes.panelHeight',String(kResizeH));
+    else localStorage.setItem('seqeyes.panelWidth',String(kResizeW));
+  }catch(_){/* private mode */}
+}
+/* Seeded from storage: the panel size survives a reload, so starting a drag
+   from the default would snap the panel back to it. */
+var kResizing=false,kResizeStart=0,kResizeW=panelStoredSize('seqeyes.panelWidth',500),kResizeH=panelStoredSize('seqeyes.panelHeight',300);
 document.getElementById("khandle").addEventListener("mousedown",function(e){
   kResizing=true;
   if(typeof layoutMode!=='undefined'&&layoutMode==='vertical')kResizeStart=e.clientY;
@@ -2310,7 +2324,7 @@ document.getElementById("khandle").addEventListener("touchstart",function(e){
   e.preventDefault();e.stopPropagation();
 },{passive:false});
 window.addEventListener("mousemove",function(e){
-  if(!kResizing)return;var p=document.getElementById("right");
+  if(!kResizing||!panelOpen)return;var p=document.getElementById("right");
   var vertical=(typeof layoutMode!=='undefined'&&layoutMode==='vertical');
   if(vertical){
     kResizeH=Math.max(120,Math.min(800,kResizeH-(e.clientY-kResizeStart)));
@@ -2320,10 +2334,11 @@ window.addEventListener("mousemove",function(e){
     kResizeW=Math.max(200,Math.min(1200,kResizeW-(e.clientX-kResizeStart)));
     kResizeStart=e.clientX;p.style.width=kResizeW+"px";p.style.transition="none";
   }
-  resizeKc();drawKs();
+  persistPanelSize();
+  panelHandleResize();
 });
 window.addEventListener("touchmove",function(e){
-  if(!kResizing||e.touches.length!==1)return;
+  if(!kResizing||!panelOpen||e.touches.length!==1)return;
   var p=document.getElementById("right");
   var vertical=(typeof layoutMode!=='undefined'&&layoutMode==='vertical');
   if(vertical){
@@ -2335,7 +2350,8 @@ window.addEventListener("touchmove",function(e){
     kResizeStart=e.touches[0].clientX;
     p.style.width=kResizeW+"px";p.style.transition="none";
   }
-  resizeKc();drawKs();
+  persistPanelSize();
+  panelHandleResize();
 },{passive:false});
 window.addEventListener("mouseup",function(){
   if(kResizing){kResizing=false;

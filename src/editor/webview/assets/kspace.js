@@ -409,7 +409,11 @@ kCanvas.addEventListener("touchcancel",function(){
 });
 
 /* ── Resize handle ───────────────────────────────────────────────────── */
-var kResizing=false, kResizeStart=0, kResizeW=500, kResizeH=300;
+/* Seeded from storage, not from the 500/300 defaults: the panel size now
+   survives a reload, so starting a drag from the default would snap the panel
+   back to it before the first mouse move is applied. */
+var kResizing=false, kResizeStart=0,
+    kResizeW=panelStoredWidth(), kResizeH=panelStoredHeight();
 document.getElementById("khandle").addEventListener("mousedown",function(e){
   kResizing=true;
   if(typeof layoutMode!=='undefined'&&layoutMode==='vertical')kResizeStart=e.clientY;
