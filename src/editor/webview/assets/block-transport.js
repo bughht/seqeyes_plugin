@@ -59,3 +59,53 @@ function attachGradientSamples(gradient,times,values){
   gradient.t=times.subarray(gradient.o,gradient.o+gradient.n);
   gradient.w=values.subarray(gradient.o,gradient.o+gradient.n);
 }
+
+/* ── Base64 Float32 payloads ─────────────────────────────────────────────
+   K-space ADC arrays, PNS series, spectrogram matrices and audio buffers all
+   cross the VS Code boundary this way: Float32 is enough precision for every
+   one of them, and base64 is roughly a third the size of the JSON numbers. */
+
+/** Decode a base64 Float32 blob into a typed array of `n` values. */
+function decodeB64F32(b64,n){
+  var bin=atob(b64),len=bin.length,b=new Uint8Array(len);
+  for(var i=0;i<len;i++)b[i]=bin.charCodeAt(i);
+  return new Float32Array(b.buffer,0,n);
+}
+
+/** Rehydrate a serialized spectrogram into the shape panel.js renders. */
+function deserializeSpectrogram(payload){
+  if(!payload)return null;
+  var cells=payload.nTime*payload.nFreq;
+  return{
+    nTime:payload.nTime,nFreq:payload.nFreq,
+    tStartSec:payload.tStartSec,tStepSec:payload.tStepSec,
+    fStartHz:payload.fStartHz,fStepHz:payload.fStepHz,
+    dtResolutionSec:payload.dtResolutionSec,dfResolutionHz:payload.dfResolutionHz,
+    unit:payload.unit,source:payload.source,
+    data:{
+      gx:decodeB64F32(payload.gxB64,cells),
+      gy:decodeB64F32(payload.gyB64,cells),
+      gz:decodeB64F32(payload.gzB64,cells),
+      rss:decodeB64F32(payload.rssB64,cells)
+    },
+    minValue:payload.minValue,maxValue:payload.maxValue,
+    decimationFactor:payload.decimationFactor,decimatedRateHz:payload.decimatedRateHz,
+    windowSamples:payload.windowSamples,hopSamples:payload.hopSamples,fftPoints:payload.fftPoints,
+    requestedStartSec:payload.requestedStartSec,requestedEndSec:payload.requestedEndSec,
+    warnings:payload.warnings||[]
+  };
+}
+
+/** Rehydrate a serialized stereo gradient-sound buffer. */
+function deserializeGradientSound(payload){
+  if(!payload)return null;
+  return{
+    sampleRate:payload.sampleRate,
+    n:payload.n,
+    startSec:payload.startSec,
+    endSec:payload.endSec,
+    silent:!!payload.silent,
+    left:decodeB64F32(payload.leftB64,payload.n),
+    right:decodeB64F32(payload.rightB64,payload.n)
+  };
+}

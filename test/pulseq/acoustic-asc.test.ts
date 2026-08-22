@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -191,5 +194,48 @@ describe('band range reporting', () => {
     expect(countBandsOutsideRange(bands, 0, 3000)).toBe(1);
     expect(countBandsOutsideRange(bands, 0, 5000)).toBe(0);
     expect(countBandsOutsideRange(bands, 1000, 3000)).toBe(2);
+  });
+});
+
+describe('vendored ASC fixtures', () => {
+  // The fixtures are synthetic; see test/asc/README.md for provenance.
+  const read = (name: string): string =>
+    readFileSync(join(__dirname, '..', 'asc', name), 'utf8');
+
+  it('reads both concerns from the combined profile', () => {
+    const profile = parseAscProfile(read('synthetic_combined.asc'));
+
+    expect(profile.pns?.valid).toBe(true);
+    expect(profile.notice).toBeUndefined();
+    // The zero-frequency padding entry is dropped, and .CarNS. is excluded.
+    expect(profile.acoustic).toEqual([
+      { freqHz: 590, bwHz: 120 },
+      { freqHz: 1140, bwHz: 220 },
+    ]);
+    expect(profile.pns?.x.stimLimit).toBe(26);
+  });
+
+  it('keeps acoustic bands from an acoustic-only profile', () => {
+    const profile = parseAscProfile(read('synthetic_acoustic_only.asc'));
+
+    expect(profile.pns).toBeUndefined();
+    expect(profile.acoustic).toHaveLength(3);
+    expect(profile.acoustic[2]).toEqual({ freqHz: 1980, bwHz: 160 });
+    expect(profile.notice).toMatch(/PNS coefficients are missing/);
+  });
+
+  it('keeps PNS from a PNS-only profile', () => {
+    const profile = parseAscProfile(read('synthetic_pns_only.asc'));
+
+    expect(profile.pns?.valid).toBe(true);
+    expect(profile.acoustic).toEqual([]);
+    expect(profile.notice).toMatch(/no acoustic resonance table/);
+  });
+
+  it('never presents a synthetic fixture as scanner data', () => {
+    // A guard on the fixtures themselves: every one must say what it is.
+    for (const name of ['synthetic_combined.asc', 'synthetic_acoustic_only.asc', 'synthetic_pns_only.asc']) {
+      expect(read(name)).toContain('NOT SCANNER DATA');
+    }
   });
 });

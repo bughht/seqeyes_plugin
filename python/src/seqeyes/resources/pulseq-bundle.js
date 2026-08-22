@@ -3455,6 +3455,12 @@ var Pulseq = (() => {
     while (p < n) p *= 2;
     return p;
   }
+  function previousPowerOfTwo(n) {
+    if (n <= 1) return 1;
+    let p = 1;
+    while (p * 2 <= n) p *= 2;
+    return p;
+  }
   function getTwiddles(n) {
     const cached = twiddleCache.get(n);
     if (cached) return cached;
@@ -3808,6 +3814,7 @@ var Pulseq = (() => {
   // src/pulseq/gradSpectrum.ts
   var GAMMA_HZ_PER_M_PER_MT_PER_M = 42576;
   var GAMMA_HZ_PER_M_PER_T_PER_M = 42576e3;
+  var MIN_WINDOW_SAMPLES = 32;
   var DEFAULT_SPECTROGRAM_PARAMS = Object.freeze({
     source: "G",
     fMinHz: 0,
@@ -3833,11 +3840,11 @@ var Pulseq = (() => {
     };
   }
   function chooseWindowSamples(params, decimatedDt, viewDurationSec, warnings) {
-    if (params.windowSamples > 0) return clamp(params.windowSamples, 32, 4096);
+    if (params.windowSamples > 0) return clamp(params.windowSamples, MIN_WINDOW_SAMPLES, 4096);
     const dfTarget = Math.max(20, (params.fMaxHz - params.fMinHz) / 64);
-    let nwin = clamp(nextPowerOfTwo(Math.round(1 / (dfTarget * decimatedDt))), 32, 4096);
+    let nwin = clamp(nextPowerOfTwo(Math.round(1 / (dfTarget * decimatedDt))), MIN_WINDOW_SAMPLES, 4096);
     if (nwin * decimatedDt > viewDurationSec / 3) {
-      const shrunk = clamp(nextPowerOfTwo(Math.floor(viewDurationSec / (3 * decimatedDt))), 32, 4096);
+      const shrunk = clamp(previousPowerOfTwo(Math.floor(viewDurationSec / (3 * decimatedDt))), MIN_WINDOW_SAMPLES, 4096);
       if (shrunk < nwin) {
         nwin = shrunk;
         const achievedDf = 1 / (nwin * decimatedDt);
@@ -3868,9 +3875,9 @@ var Pulseq = (() => {
     const coreSamples = Math.max(1, Math.floor(viewDuration / raster + 1e-9) + 1);
     const nDecimated = decimatedLength(coreSamples, plan.factor);
     let windowSamples = chooseWindowSamples(params, decimatedDt, viewDuration, warnings);
+    const tooShort = nDecimated < MIN_WINDOW_SAMPLES;
     if (windowSamples > nDecimated) {
-      windowSamples = clamp(nextPowerOfTwo(Math.max(32, nDecimated)) / 2, 32, 4096);
-      if (windowSamples > nDecimated) windowSamples = Math.max(1, nDecimated);
+      windowSamples = clamp(previousPowerOfTwo(nDecimated), MIN_WINDOW_SAMPLES, 4096);
     }
     let hop = Math.max(1, Math.round(windowSamples * (1 - params.overlap)));
     let columns = nDecimated >= windowSamples ? Math.floor((nDecimated - windowSamples) / hop) + 1 : 0;
@@ -3895,7 +3902,7 @@ var Pulseq = (() => {
         warnings
       );
     }
-    if (columns <= 0) {
+    if (tooShort || columns <= 0) {
       warnings.push("The visible window is shorter than one analysis window. Zoom out to see a spectrogram.");
       return emptySpectrogram(
         params,

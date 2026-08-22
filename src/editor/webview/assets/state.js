@@ -368,14 +368,7 @@ window.addEventListener('message',function(e){
   }else if(m.type==='spectrogramError'){
     SeqEyesPanel.deliverSpectrogramError(m.requestId,m.message);
   }else if(m.type==='gradientSoundData'){
-    SeqEyesPanel.deliverAudio(m.requestId,{
-      sampleRate:m.sampleRate,
-      startSec:m.startSec,
-      endSec:m.endSec,
-      silent:!!m.silent,
-      left:decodeB64F32(m.leftB64,m.n),
-      right:decodeB64F32(m.rightB64,m.n)
-    });
+    SeqEyesPanel.deliverAudio(m.requestId,deserializeGradientSound(m));
   }else if(m.type==='gradientSoundError'){
     SeqEyesPanel.deliverAudioError(m.requestId,m.message);
   }
@@ -402,32 +395,10 @@ function setAscButtonLabel(fileName,bandCount,hasPns){
     +'. Click to load a different profile.';
 }
 
-/* Spectrogram matrices travel as base64 Float32, mirroring serializePns. */
-function deserializeSpectrogram(payload){
-  if(!payload)return null;
-  var cells=payload.nTime*payload.nFreq;
-  return{
-    nTime:payload.nTime,nFreq:payload.nFreq,
-    tStartSec:payload.tStartSec,tStepSec:payload.tStepSec,
-    fStartHz:payload.fStartHz,fStepHz:payload.fStepHz,
-    dtResolutionSec:payload.dtResolutionSec,dfResolutionHz:payload.dfResolutionHz,
-    unit:payload.unit,source:payload.source,
-    data:{
-      gx:decodeB64F32(payload.gxB64,cells),
-      gy:decodeB64F32(payload.gyB64,cells),
-      gz:decodeB64F32(payload.gzB64,cells),
-      rss:decodeB64F32(payload.rssB64,cells)
-    },
-    minValue:payload.minValue,maxValue:payload.maxValue,
-    decimationFactor:payload.decimationFactor,decimatedRateHz:payload.decimatedRateHz,
-    windowSamples:payload.windowSamples,hopSamples:payload.hopSamples,fftPoints:payload.fftPoints,
-    requestedStartSec:payload.requestedStartSec,requestedEndSec:payload.requestedEndSec,
-    warnings:payload.warnings||[]
-  };
-}
 
-/* ── Base64 → Float32Array decoder ─────────────────────────────────── */
-function decodeB64F32(b64,n){var bin=atob(b64),len=bin.length,b=new Uint8Array(len);for(var i=0;i<len;i++)b[i]=bin.charCodeAt(i);return new Float32Array(b.buffer,0,n);}
+/* decodeB64F32, deserializeSpectrogram and deserializeGradientSound live in
+   block-transport.js, which loads first and stays DOM-free so the tests can
+   run the shipped decoders directly. */
 
 
 /* ── Global amplitude ranges ──────────────────────────────────────────── */

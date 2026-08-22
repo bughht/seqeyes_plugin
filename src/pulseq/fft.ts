@@ -32,6 +32,14 @@ export function nextPowerOfTwo(n: number): number {
     return p;
 }
 
+/** Largest power of two not exceeding `n`. */
+export function previousPowerOfTwo(n: number): number {
+    if (n <= 1) return 1;
+    let p = 1;
+    while (p * 2 <= n) p *= 2;
+    return p;
+}
+
 function getTwiddles(n: number): TwiddleTable {
     const cached = twiddleCache.get(n);
     if (cached) return cached;

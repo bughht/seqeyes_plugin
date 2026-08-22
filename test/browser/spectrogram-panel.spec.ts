@@ -381,9 +381,11 @@ test('offers the spectrogram as a way out of the k-space safety dialog', async (
 test('advances the playhead and the spectrum slice from the audio clock', async ({ page }) => {
   await loadViewer(page, fixtures.gre);
   await openSpectrogram(page);
-  // A window comfortably over 250 ms, so playback runs straight through
-  // instead of looping (D4) and the playhead is strictly monotonic.
-  await page.evaluate(() => window.__seqeyesDebug.setView(0, 0.4));
+  // Long enough that playback neither loops (D4 kicks in under 250 ms) nor
+  // reaches the end of the buffer while the test is still stepping its clock:
+  // the injected clock controls the reported position, but the real
+  // AudioContext still ends the source on its own schedule.
+  await page.evaluate(() => window.__seqeyesDebug.setView(0, 1.5));
   await settlePanel(page);
 
   // A fake clock keeps CI off a real audio device while still exercising the
@@ -416,7 +418,7 @@ test('advances the playhead and the spectrum slice from the audio clock', async 
 test('stops playback when the panel leaves spectrogram mode', async ({ page }) => {
   await loadViewer(page, fixtures.gre);
   await openSpectrogram(page);
-  await page.evaluate(() => window.__seqeyesDebug.setView(0, 0.4));
+  await page.evaluate(() => window.__seqeyesDebug.setView(0, 1.5));
   await settlePanel(page);
 
   await page.evaluate(() => {

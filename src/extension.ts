@@ -11,7 +11,9 @@
 import * as vscode from 'vscode';
 import {
     SeqEditorProvider,
+    computeSpectrogramForTest,
     exportKspaceToDirectoryForTest,
+    loadAscProfileForTest,
     getSeqEyesDiagnosticState,
     resetSeqEyesDiagnosticState,
 } from './editor/seqEditorProvider';
@@ -50,6 +52,15 @@ export function activate(context: vscode.ExtensionContext): void {
         context.subscriptions.push(
             vscode.commands.registerCommand('seqeyes.test.getState', () => getSeqEyesDiagnosticState()),
             vscode.commands.registerCommand('seqeyes.test.resetState', () => resetSeqEyesDiagnosticState()),
+            vscode.commands.registerCommand(
+                'seqeyes.test.computeSpectrogram',
+                async (sourceUri: vscode.Uri, startSec: number, endSec: number, params?: Record<string, unknown>) =>
+                    await computeSpectrogramForTest(sourceUri, startSec, endSec, params),
+            ),
+            vscode.commands.registerCommand(
+                'seqeyes.test.loadAscProfile',
+                async (sourceUri: vscode.Uri) => await loadAscProfileForTest(sourceUri),
+            ),
             vscode.commands.registerCommand(
                 'seqeyes.test.exportKspace',
                 async (sourceUri: vscode.Uri, outputDir: vscode.Uri) => {

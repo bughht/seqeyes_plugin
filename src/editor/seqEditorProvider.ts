@@ -26,10 +26,7 @@ import {
     type PnsResult,
 } from '../pulseq/pns';
 import { selectM1WindowBlocks, selectPnsWindowBlocks } from '../pulseq/derivedWindow';
-import {
-    computeGradientSpectrogram,
-    type GradientSpectrogram,
-} from '../pulseq/gradSpectrum';
+import { computeGradientSpectrogram } from '../pulseq/gradSpectrum';
 import { synthesizeGradientSound } from '../pulseq/gradientSound';
 import {
     parseAscProfile,
@@ -57,6 +54,7 @@ import {
     packBlocks,
 } from './blockTransport';
 import { getWebviewContent } from './webviewContent';
+import { serializeGradientSound, serializeSpectrogram } from './spectrogramTransport';
 import type { DecodedBlock } from '../pulseq/types';
 
 // ─── Constants ────────────────────────────────────────────────────────────
@@ -88,6 +86,27 @@ export interface SeqEyesDiagnosticState {
     lastError?: SeqEyesDiagnosticErrorState;
 }
 
+export interface SeqEyesDiagnosticSpectrogramResult {
+    nTime: number;
+    nFreq: number;
+    tStartSec: number;
+    tStepSec: number;
+    unit: string;
+    decimationFactor: number;
+    maxValue: number;
+    /** Bytes of the serialized message, so an accidental JSON blow-up shows. */
+    payloadBytes: number;
+    warnings: string[];
+}
+
+export interface SeqEyesDiagnosticAscResult {
+    hasPns: boolean;
+    pnsError?: string;
+    acousticCount: number;
+    acousticError?: string;
+    notice?: string;
+}
+
 export interface SeqEyesDiagnosticExportResult {
     ktrajAdcUri: string;
     metadataUri: string;
@@ -105,6 +124,58 @@ export function resetSeqEyesDiagnosticState(): void {
     delete diagnosticState.activeUri;
     delete diagnosticState.lastLoad;
     delete diagnosticState.lastError;
+}
+
+/**
+ * Run the `calculateSpectrogram` message path end to end, without a live
+ * webview. The E2E suite cannot post messages into a webview it does not own,
+ * so this exercises exactly the host-side work that handler does — decode,
+ * window selection, compute, serialize — and returns a summary to assert on.
+ */
+export async function computeSpectrogramForTest(
+    sourceUri: vscode.Uri,
+    startSec: number,
+    endSec: number,
+    params?: Record<string, unknown>,
+): Promise<SeqEyesDiagnosticSpectrogramResult> {
+    const bytes = await vscode.workspace.fs.readFile(sourceUri);
+    const sequence = parseSequenceBytes(bytes, uriFileName(sourceUri));
+    const blocks = decodeAllBlocks(sequence);
+    const spectrogram = computeGradientSpectrogram(
+        selectWindowBlocks(blocks, startSec, endSec),
+        sequence.rasterTimes.gradientRaster,
+        { ...(params ?? {}), startSec, endSec },
+    );
+    const payload = serializeSpectrogram(spectrogram);
+    return {
+        nTime: spectrogram.nTime,
+        nFreq: spectrogram.nFreq,
+        tStartSec: spectrogram.tStartSec,
+        tStepSec: spectrogram.tStepSec,
+        unit: spectrogram.unit,
+        decimationFactor: spectrogram.decimationFactor,
+        maxValue: spectrogram.maxValue,
+        payloadBytes: JSON.stringify(payload).length,
+        warnings: spectrogram.warnings,
+    };
+}
+
+/**
+ * Run the ASC side of the `openPnsAsc` handler, including `$include`
+ * resolution, and report all four outcomes of the partial-success contract.
+ */
+export async function loadAscProfileForTest(
+    sourceUri: vscode.Uri,
+): Promise<SeqEyesDiagnosticAscResult> {
+    const text = await readAscProfileText(sourceUri);
+    const profile = parseAscProfile(text);
+    return {
+        hasPns: !!profile.pns,
+        pnsError: profile.pnsError,
+        acousticCount: profile.acoustic.length,
+        acousticError: profile.acousticError,
+        notice: profile.notice,
+    };
 }
 
 export async function exportKspaceToDirectoryForTest(
@@ -643,13 +714,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     panel.webview.postMessage({
                         type: 'gradientSoundData',
                         requestId,
-                        sampleRate: sound.sampleRate,
-                        n: sound.n,
-                        startSec: sound.startSec,
-                        endSec: sound.endSec,
-                        silent: sound.silent,
-                        leftB64: encodeF32B64(sound.left),
-                        rightB64: encodeF32B64(sound.right),
+                        ...serializeGradientSound(sound),
                     });
                 } catch (err) {
                     panel.webview.postMessage({
@@ -1062,36 +1127,6 @@ function selectWindowBlocks(blocks: DecodedBlock[], startSec: number, endSec: nu
     const from = startSec - pad;
     const to = endSec + pad;
     return blocks.filter(block => block.startTime + block.duration >= from && block.startTime <= to);
-}
-
-/** Spectrogram matrices travel as base64 Float32, mirroring serializePns. */
-function serializeSpectrogram(spec: GradientSpectrogram): Record<string, unknown> {
-    return {
-        nTime: spec.nTime,
-        nFreq: spec.nFreq,
-        tStartSec: spec.tStartSec,
-        tStepSec: spec.tStepSec,
-        fStartHz: spec.fStartHz,
-        fStepHz: spec.fStepHz,
-        dtResolutionSec: spec.dtResolutionSec,
-        dfResolutionHz: spec.dfResolutionHz,
-        unit: spec.unit,
-        source: spec.source,
-        gxB64: encodeF32B64(spec.data.gx),
-        gyB64: encodeF32B64(spec.data.gy),
-        gzB64: encodeF32B64(spec.data.gz),
-        rssB64: encodeF32B64(spec.data.rss),
-        minValue: spec.minValue,
-        maxValue: spec.maxValue,
-        decimationFactor: spec.decimationFactor,
-        decimatedRateHz: spec.decimatedRateHz,
-        windowSamples: spec.windowSamples,
-        hopSamples: spec.hopSamples,
-        fftPoints: spec.fftPoints,
-        requestedStartSec: spec.requestedStartSec,
-        requestedEndSec: spec.requestedEndSec,
-        warnings: spec.warnings,
-    };
 }
 
 /** Encode a Float64Array (or number[]) as a base64‑encoded Float32 blob.

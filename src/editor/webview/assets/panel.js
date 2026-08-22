@@ -75,6 +75,9 @@ var SeqEyesPanel = (function () {
   var cache = [];
   var computeCount = 0;         // asserted by the perf tests
   var renderCount = 0;
+  var requestStartedAt = 0;     // performance.now() when the request issued
+  var lastRedrawMs = 0;         // issue -> painted, excluding the debounce
+  var redrawSamples = [];
 
   var audioRequestId = 0;
   var pendingAudioId = 0;
@@ -325,6 +328,9 @@ var SeqEyesPanel = (function () {
     pendingRequestId = ++requestId;
     setBusy(true);
     computeCount++;
+    // Measured from here rather than from the view change: the 120 ms
+    // debounce is a deliberate wait, not redraw cost.
+    requestStartedAt = now();
     h.requestSpectrogram(pendingRequestId, view.startSec, view.endSec, {
       source: params.source,
       fMinHz: 0,                       // always compute from DC; fMin only crops
@@ -371,6 +377,16 @@ var SeqEyesPanel = (function () {
     hotBands = sgDetectHotBands(spec, acousticBands, windowLevel, 'rss');
     publishNotices();
     render();
+    if (requestStartedAt) {
+      lastRedrawMs = now() - requestStartedAt;
+      requestStartedAt = 0;
+      redrawSamples.push(lastRedrawMs);
+      if (redrawSamples.length > 64) redrawSamples.shift();
+    }
+  }
+
+  function now() {
+    return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
   }
 
   function clampFrequencyRange() {
@@ -1443,6 +1459,8 @@ var SeqEyesPanel = (function () {
         busy: busy,
         computeCount: computeCount,
         renderCount: renderCount,
+        lastRedrawMs: lastRedrawMs,
+        redrawSamples: redrawSamples.slice(),
         splitRatio: splitRatio(),
         colormap: colormapName,
         source: params.source,

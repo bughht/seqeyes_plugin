@@ -37,6 +37,7 @@ import {
 import {
     hannWindow,
     nextPowerOfTwo,
+    previousPowerOfTwo,
     realFFTMagnitude,
     realFFTPairMagnitude,
     windowCoherentGain,
@@ -120,6 +121,9 @@ export interface GradientSpectrogram {
     warnings: string[];
 }
 
+/** Shortest analysis window that still carries usable spectral information. */
+export const MIN_WINDOW_SAMPLES = 32;
+
 export const DEFAULT_SPECTROGRAM_PARAMS: SpectrogramParams = Object.freeze({
     source: 'G',
     fMinHz: 0,
@@ -162,13 +166,16 @@ export function chooseWindowSamples(
     // An explicit override is honoured as given. The FFT only needs its
     // zero-padded length to be a power of two, and rounding the *window* would
     // silently change the analysis duration a caller asked for exactly.
-    if (params.windowSamples > 0) return clamp(params.windowSamples, 32, 4096);
+    if (params.windowSamples > 0) return clamp(params.windowSamples, MIN_WINDOW_SAMPLES, 4096);
 
     const dfTarget = Math.max(20, (params.fMaxHz - params.fMinHz) / 64);
-    let nwin = clamp(nextPowerOfTwo(Math.round(1 / (dfTarget * decimatedDt))), 32, 4096);
+    let nwin = clamp(nextPowerOfTwo(Math.round(1 / (dfTarget * decimatedDt))), MIN_WINDOW_SAMPLES, 4096);
 
     if (nwin * decimatedDt > viewDurationSec / 3) {
-        const shrunk = clamp(nextPowerOfTwo(Math.floor(viewDurationSec / (3 * decimatedDt))), 32, 4096);
+        // Round *down* to a power of two: rounding up would leave the window
+        // longer than a third of the view, which is the very thing this branch
+        // exists to prevent.
+        const shrunk = clamp(previousPowerOfTwo(Math.floor(viewDurationSec / (3 * decimatedDt))), MIN_WINDOW_SAMPLES, 4096);
         if (shrunk < nwin) {
             nwin = shrunk;
             const achievedDf = 1 / (nwin * decimatedDt);
@@ -215,9 +222,12 @@ export function computeGradientSpectrogram(
     const nDecimated = decimatedLength(coreSamples, plan.factor);
 
     let windowSamples = chooseWindowSamples(params, decimatedDt, viewDuration, warnings);
+    // Below the 32-sample floor there is no spectrum to speak of, and clamping
+    // the window down to whatever fits would emit a degenerate one-column
+    // result that reads as data. Refuse instead, and say why.
+    const tooShort = nDecimated < MIN_WINDOW_SAMPLES;
     if (windowSamples > nDecimated) {
-        windowSamples = clamp(nextPowerOfTwo(Math.max(32, nDecimated)) / 2, 32, 4096);
-        if (windowSamples > nDecimated) windowSamples = Math.max(1, nDecimated);
+        windowSamples = clamp(previousPowerOfTwo(nDecimated), MIN_WINDOW_SAMPLES, 4096);
     }
 
     let hop = Math.max(1, Math.round(windowSamples * (1 - params.overlap)));
@@ -238,7 +248,7 @@ export function computeGradientSpectrogram(
         return emptySpectrogram(params, startSec, endSec, plan.factor, decimatedRate,
             windowSamples, hop, fftPoints, decimatedDt, warnings);
     }
-    if (columns <= 0) {
+    if (tooShort || columns <= 0) {
         warnings.push('The visible window is shorter than one analysis window. Zoom out to see a spectrogram.');
         return emptySpectrogram(params, startSec, endSec, plan.factor, decimatedRate,
             windowSamples, hop, fftPoints, decimatedDt, warnings);

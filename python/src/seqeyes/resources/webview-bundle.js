@@ -63,6 +63,56 @@ function attachGradientSamples(gradient,times,values){
   gradient.w=values.subarray(gradient.o,gradient.o+gradient.n);
 }
 
+/* ── Base64 Float32 payloads ─────────────────────────────────────────────
+   K-space ADC arrays, PNS series, spectrogram matrices and audio buffers all
+   cross the VS Code boundary this way: Float32 is enough precision for every
+   one of them, and base64 is roughly a third the size of the JSON numbers. */
+
+/** Decode a base64 Float32 blob into a typed array of `n` values. */
+function decodeB64F32(b64,n){
+  var bin=atob(b64),len=bin.length,b=new Uint8Array(len);
+  for(var i=0;i<len;i++)b[i]=bin.charCodeAt(i);
+  return new Float32Array(b.buffer,0,n);
+}
+
+/** Rehydrate a serialized spectrogram into the shape panel.js renders. */
+function deserializeSpectrogram(payload){
+  if(!payload)return null;
+  var cells=payload.nTime*payload.nFreq;
+  return{
+    nTime:payload.nTime,nFreq:payload.nFreq,
+    tStartSec:payload.tStartSec,tStepSec:payload.tStepSec,
+    fStartHz:payload.fStartHz,fStepHz:payload.fStepHz,
+    dtResolutionSec:payload.dtResolutionSec,dfResolutionHz:payload.dfResolutionHz,
+    unit:payload.unit,source:payload.source,
+    data:{
+      gx:decodeB64F32(payload.gxB64,cells),
+      gy:decodeB64F32(payload.gyB64,cells),
+      gz:decodeB64F32(payload.gzB64,cells),
+      rss:decodeB64F32(payload.rssB64,cells)
+    },
+    minValue:payload.minValue,maxValue:payload.maxValue,
+    decimationFactor:payload.decimationFactor,decimatedRateHz:payload.decimatedRateHz,
+    windowSamples:payload.windowSamples,hopSamples:payload.hopSamples,fftPoints:payload.fftPoints,
+    requestedStartSec:payload.requestedStartSec,requestedEndSec:payload.requestedEndSec,
+    warnings:payload.warnings||[]
+  };
+}
+
+/** Rehydrate a serialized stereo gradient-sound buffer. */
+function deserializeGradientSound(payload){
+  if(!payload)return null;
+  return{
+    sampleRate:payload.sampleRate,
+    n:payload.n,
+    startSec:payload.startSec,
+    endSec:payload.endSec,
+    silent:!!payload.silent,
+    left:decodeB64F32(payload.leftB64,payload.n),
+    right:decodeB64F32(payload.rightB64,payload.n)
+  };
+}
+
 
 /* ══ state.js ══ */
 /* ═══════════════════════════════════════════════════════════════════════
@@ -435,14 +485,7 @@ window.addEventListener('message',function(e){
   }else if(m.type==='spectrogramError'){
     SeqEyesPanel.deliverSpectrogramError(m.requestId,m.message);
   }else if(m.type==='gradientSoundData'){
-    SeqEyesPanel.deliverAudio(m.requestId,{
-      sampleRate:m.sampleRate,
-      startSec:m.startSec,
-      endSec:m.endSec,
-      silent:!!m.silent,
-      left:decodeB64F32(m.leftB64,m.n),
-      right:decodeB64F32(m.rightB64,m.n)
-    });
+    SeqEyesPanel.deliverAudio(m.requestId,deserializeGradientSound(m));
   }else if(m.type==='gradientSoundError'){
     SeqEyesPanel.deliverAudioError(m.requestId,m.message);
   }
@@ -469,32 +512,10 @@ function setAscButtonLabel(fileName,bandCount,hasPns){
     +'. Click to load a different profile.';
 }
 
-/* Spectrogram matrices travel as base64 Float32, mirroring serializePns. */
-function deserializeSpectrogram(payload){
-  if(!payload)return null;
-  var cells=payload.nTime*payload.nFreq;
-  return{
-    nTime:payload.nTime,nFreq:payload.nFreq,
-    tStartSec:payload.tStartSec,tStepSec:payload.tStepSec,
-    fStartHz:payload.fStartHz,fStepHz:payload.fStepHz,
-    dtResolutionSec:payload.dtResolutionSec,dfResolutionHz:payload.dfResolutionHz,
-    unit:payload.unit,source:payload.source,
-    data:{
-      gx:decodeB64F32(payload.gxB64,cells),
-      gy:decodeB64F32(payload.gyB64,cells),
-      gz:decodeB64F32(payload.gzB64,cells),
-      rss:decodeB64F32(payload.rssB64,cells)
-    },
-    minValue:payload.minValue,maxValue:payload.maxValue,
-    decimationFactor:payload.decimationFactor,decimatedRateHz:payload.decimatedRateHz,
-    windowSamples:payload.windowSamples,hopSamples:payload.hopSamples,fftPoints:payload.fftPoints,
-    requestedStartSec:payload.requestedStartSec,requestedEndSec:payload.requestedEndSec,
-    warnings:payload.warnings||[]
-  };
-}
 
-/* ── Base64 → Float32Array decoder ─────────────────────────────────── */
-function decodeB64F32(b64,n){var bin=atob(b64),len=bin.length,b=new Uint8Array(len);for(var i=0;i<len;i++)b[i]=bin.charCodeAt(i);return new Float32Array(b.buffer,0,n);}
+/* decodeB64F32, deserializeSpectrogram and deserializeGradientSound live in
+   block-transport.js, which loads first and stays DOM-free so the tests can
+   run the shipped decoders directly. */
 
 
 /* ── Global amplitude ranges ──────────────────────────────────────────── */
@@ -3666,6 +3687,9 @@ var SeqEyesPanel = (function () {
   var cache = [];
   var computeCount = 0;         // asserted by the perf tests
   var renderCount = 0;
+  var requestStartedAt = 0;     // performance.now() when the request issued
+  var lastRedrawMs = 0;         // issue -> painted, excluding the debounce
+  var redrawSamples = [];
 
   var audioRequestId = 0;
   var pendingAudioId = 0;
@@ -3916,6 +3940,9 @@ var SeqEyesPanel = (function () {
     pendingRequestId = ++requestId;
     setBusy(true);
     computeCount++;
+    // Measured from here rather than from the view change: the 120 ms
+    // debounce is a deliberate wait, not redraw cost.
+    requestStartedAt = now();
     h.requestSpectrogram(pendingRequestId, view.startSec, view.endSec, {
       source: params.source,
       fMinHz: 0,                       // always compute from DC; fMin only crops
@@ -3962,6 +3989,16 @@ var SeqEyesPanel = (function () {
     hotBands = sgDetectHotBands(spec, acousticBands, windowLevel, 'rss');
     publishNotices();
     render();
+    if (requestStartedAt) {
+      lastRedrawMs = now() - requestStartedAt;
+      requestStartedAt = 0;
+      redrawSamples.push(lastRedrawMs);
+      if (redrawSamples.length > 64) redrawSamples.shift();
+    }
+  }
+
+  function now() {
+    return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
   }
 
   function clampFrequencyRange() {
@@ -5034,6 +5071,8 @@ var SeqEyesPanel = (function () {
         busy: busy,
         computeCount: computeCount,
         renderCount: renderCount,
+        lastRedrawMs: lastRedrawMs,
+        redrawSamples: redrawSamples.slice(),
         splitRatio: splitRatio(),
         colormap: colormapName,
         source: params.source,
