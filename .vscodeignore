@@ -13,6 +13,9 @@ test/**
 test-results/**
 playwright-report/**
 performance-results/**
+# Local Python test/run caches: junk that has no business in a published VSIX.
+**/__pycache__/**
+**/.pytest_cache/**
 matlab/**
 web/**
 images/*.svg
