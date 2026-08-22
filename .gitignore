@@ -6,7 +6,11 @@ out/
 dist/
 *.vsix
 *.mltbx
+# Real scanner ASC profiles are vendor configuration data and must never be
+# committed. The only exception is test/asc/, whose files are synthetic,
+# hand-written for tests, and documented as such in test/asc/README.md.
 *.asc
+!test/asc/*.asc
 .vscode-test/
 .vscode/
 test-results/

@@ -25,17 +25,27 @@ var Pulseq = (() => {
   __export(pulseq_browser_exports, {
     INTERACTIVE_COMPUTE_LIMITS: () => INTERACTIVE_COMPUTE_LIMITS,
     PACKAGE_VERSION: () => PACKAGE_VERSION,
+    audioBudgetRefusal: () => audioBudgetRefusal,
     calculateKspace: () => calculateKspace,
     calculateM1: () => calculateM1,
     calculateM1Coarse: () => calculateM1Coarse,
     calculatePns: () => calculatePns,
     calculatePnsCoarse: () => calculatePnsCoarse,
+    computeGradSpectrumParity: () => computeGradSpectrumParity,
+    computeGradientSpectrogram: () => computeGradientSpectrogram,
+    computeGradientSpectrumAverage: () => computeGradientSpectrumAverage,
+    computeGradientSpectrumSlice: () => computeGradientSpectrumSlice,
+    countBandsOutsideRange: () => countBandsOutsideRange,
     decodeAllBlocks: () => decodeAllBlocks,
     derivedDetailViewLimitSec: () => derivedDetailViewLimitSec,
+    describeAscProfile: () => describeAscProfile,
     detectSequenceTiming: () => detectSequenceTiming,
+    differentiateUniform: () => differentiateUniform,
+    estimateAudioCost: () => estimateAudioCost,
     estimateDerivedCost: () => estimateDerivedCost,
     estimateKspaceCost: () => estimateKspaceCost,
     estimateKspacePeakMemoryBytes: () => estimateKspacePeakMemoryBytes,
+    estimateSpectrogramCost: () => estimateSpectrogramCost,
     exportKspaceArtifacts: () => exportKspaceArtifacts,
     exportKspaceArtifactsFromBytes: () => exportKspaceArtifactsFromBytes,
     exportKspaceArtifactsFromSequence: () => exportKspaceArtifactsFromSequence,
@@ -44,17 +54,29 @@ var Pulseq = (() => {
     formatTrajectoryText: () => formatTrajectoryText,
     getTotalDuration: () => getTotalDuration,
     hasPulseqBinaryMagic: () => hasPulseqBinaryMagic,
+    isEmptyAscProfile: () => isEmptyAscProfile,
+    parseAcousticResonancesAsc: () => parseAcousticResonancesAsc,
+    parseAscProfile: () => parseAscProfile,
+    parseAscText: () => parseAscText,
     parsePnsHardwareAsc: () => parsePnsHardwareAsc,
     parseSequenceBinary: () => parseSequenceBinary,
     parseSequenceBytes: () => parseSequenceBytes,
     parseSequenceText: () => parseSequenceText,
+    physicalGradientValueAt: () => physicalGradientValueAt,
+    resamplePhysicalGradients: () => resamplePhysicalGradients,
+    resolveSpectrogramParams: () => resolveSpectrogramParams,
+    rotateGradient: () => rotateGradient,
     safePnsModel: () => safePnsModel,
     selectM1WindowBlocks: () => selectM1WindowBlocks,
-    selectPnsWindowBlocks: () => selectPnsWindowBlocks
+    selectPnsWindowBlocks: () => selectPnsWindowBlocks,
+    spectrogramBudgetRefusal: () => spectrogramBudgetRefusal,
+    spectrogramColumnAt: () => spectrogramColumnAt,
+    spectrogramRowFrequency: () => spectrogramRowFrequency,
+    synthesizeGradientSound: () => synthesizeGradientSound
   });
 
   // package.json
-  var version = "0.2.13";
+  var version = "0.3.0";
 
   // src/pulseq/decompressor.ts
   function decompressShape(compressed, numSamples) {
@@ -1866,9 +1888,158 @@ var Pulseq = (() => {
     return items.find((item) => item.id === id);
   }
 
+  // src/pulseq/physicalGradients.ts
+  var GRADIENT_ENDPOINT_TOLERANCE_SEC = 1e-12;
+  function rotateGradient(block, gx, gy, gz) {
+    const values = block.rotation?.values;
+    if (!values) return [gx, gy, gz];
+    if (values.length === 4) {
+      const [w, x, y, z] = values;
+      const r00 = 1 - 2 * y * y - 2 * z * z;
+      const r01 = 2 * x * y - 2 * w * z;
+      const r02 = 2 * x * z + 2 * w * y;
+      const r10 = 2 * x * y + 2 * w * z;
+      const r11 = 1 - 2 * x * x - 2 * z * z;
+      const r12 = 2 * y * z - 2 * w * x;
+      const r20 = 2 * x * z - 2 * w * y;
+      const r21 = 2 * y * z + 2 * w * x;
+      const r22 = 1 - 2 * x * x - 2 * y * y;
+      return [
+        r00 * gx + r01 * gy + r02 * gz,
+        r10 * gx + r11 * gy + r12 * gz,
+        r20 * gx + r21 * gy + r22 * gz
+      ];
+    }
+    if (values.length === 9) {
+      return [
+        values[0] * gx + values[1] * gy + values[2] * gz,
+        values[3] * gx + values[4] * gy + values[5] * gz,
+        values[6] * gx + values[7] * gy + values[8] * gz
+      ];
+    }
+    return [gx, gy, gz];
+  }
+  function gradientValueAt(g, t) {
+    if (!g || g.type === "none") return 0;
+    const tp = g.timePoints, wf = g.waveform;
+    if (!tp || tp.length < 2) return 0;
+    const first = tp[0], last = tp[tp.length - 1];
+    if (t < first - GRADIENT_ENDPOINT_TOLERANCE_SEC || t > last + GRADIENT_ENDPOINT_TOLERANCE_SEC) return 0;
+    if (t <= first + GRADIENT_ENDPOINT_TOLERANCE_SEC) return wf[0];
+    if (t >= last - GRADIENT_ENDPOINT_TOLERANCE_SEC) return wf[wf.length - 1];
+    let lo = 0, hi = tp.length - 1;
+    while (hi - lo > 1) {
+      const m = lo + hi >> 1;
+      if (tp[m] <= t) lo = m;
+      else hi = m;
+    }
+    const s = tp[hi] - tp[lo];
+    if (s <= 0) return wf[lo];
+    return wf[lo] + (wf[hi] - wf[lo]) * (t - tp[lo]) / s;
+  }
+  function physicalGradientValueAt(block, axis, t) {
+    if (!block.rotation?.values) {
+      const gradient = [block.gx, block.gy, block.gz][axis];
+      return gradientValueAt(gradient, t);
+    }
+    const rotated = rotateGradient(
+      block,
+      gradientValueAt(block.gx, t),
+      gradientValueAt(block.gy, t),
+      gradientValueAt(block.gz, t)
+    );
+    return rotated[axis];
+  }
+  function physicalGradientPiece(block, axis) {
+    const gradients = [block.gx, block.gy, block.gz];
+    const hasGradient = gradients.some((g) => g && g.type !== "none" && g.timePoints.length >= 2);
+    if (!hasGradient) return { times: [], values: [], requiredSupport: [] };
+    if (!block.rotation?.values) {
+      const gradient = gradients[axis];
+      if (!gradient || gradient.type === "none" || gradient.timePoints.length < 2) {
+        return { times: [], values: [], requiredSupport: [] };
+      }
+      return {
+        times: Array.from(gradient.timePoints),
+        values: Array.from(gradient.waveform),
+        requiredSupport: []
+      };
+    }
+    const times = [];
+    for (const gradient of gradients) {
+      if (!gradient || gradient.type === "none") continue;
+      for (const time of gradient.timePoints) times.push(time);
+    }
+    times.sort((a, b) => a - b);
+    const uniqueTimes = [];
+    for (const time of times) {
+      if (!uniqueTimes.length || time - uniqueTimes[uniqueTimes.length - 1] > GRADIENT_ENDPOINT_TOLERANCE_SEC) {
+        uniqueTimes.push(time);
+      }
+    }
+    return {
+      times: uniqueTimes,
+      values: uniqueTimes.map((time) => {
+        const rotated = rotateGradient(
+          block,
+          gradientValueAt(block.gx, time),
+          gradientValueAt(block.gy, time),
+          gradientValueAt(block.gz, time)
+        );
+        return rotated[axis];
+      }),
+      requiredSupport: []
+    };
+  }
+  function resamplePhysicalGradients(blocks, options) {
+    const startSec = Number.isFinite(options.startSec) ? options.startSec : 0;
+    const endSec = Number.isFinite(options.endSec) ? options.endSec : startSec;
+    const dt = options.dt && options.dt > 0 ? options.dt : options.sampleRate && options.sampleRate > 0 ? 1 / options.sampleRate : 0;
+    if (!(dt > 0)) throw new Error("resamplePhysicalGradients requires a positive dt or sampleRate.");
+    const span = Math.max(0, endSec - startSec);
+    const n = options.sampleCount !== void 0 && Number.isFinite(options.sampleCount) ? Math.max(0, Math.floor(options.sampleCount)) : Math.max(1, Math.floor(span / dt + 1e-9) + 1);
+    const gx = new Float32Array(n);
+    const gy = new Float32Array(n);
+    const gz = new Float32Array(n);
+    if (!n) return { t0: startSec, dt, n, gx, gy, gz };
+    const sorted = blocks.filter((block) => Number.isFinite(block.startTime)).sort((a, b) => a.startTime - b.startTime);
+    if (!sorted.length) return { t0: startSec, dt, n, gx, gy, gz };
+    let cursor = 0;
+    for (let i = 0; i < n; i++) {
+      const t = startSec + i * dt;
+      while (cursor + 1 < sorted.length && sorted[cursor + 1].startTime <= t) cursor++;
+      const block = sorted[cursor];
+      if (t < block.startTime - GRADIENT_ENDPOINT_TOLERANCE_SEC || t > block.startTime + block.duration + GRADIENT_ENDPOINT_TOLERANCE_SEC) continue;
+      const lx = gradientValueAt(block.gx, t);
+      const ly = gradientValueAt(block.gy, t);
+      const lz = gradientValueAt(block.gz, t);
+      if (lx === 0 && ly === 0 && lz === 0) continue;
+      if (!block.rotation?.values) {
+        gx[i] = lx;
+        gy[i] = ly;
+        gz[i] = lz;
+      } else {
+        const rotated = rotateGradient(block, lx, ly, lz);
+        gx[i] = rotated[0];
+        gy[i] = rotated[1];
+        gz[i] = rotated[2];
+      }
+    }
+    return { t0: startSec, dt, n, gx, gy, gz };
+  }
+  function differentiateUniform(values, dt) {
+    const n = values.length;
+    const out = new Float32Array(n);
+    if (n < 2 || !(dt > 0)) return out;
+    out[0] = (values[1] - values[0]) / dt;
+    out[n - 1] = (values[n - 1] - values[n - 2]) / dt;
+    const inv = 1 / (2 * dt);
+    for (let i = 1; i < n - 1; i++) out[i] = (values[i + 1] - values[i - 1]) * inv;
+    return out;
+  }
+
   // src/pulseq/kspace.ts
   var TRAJECTORY_TIME_ACCURACY_SEC = 1e-10;
-  var GRADIENT_ENDPOINT_TOLERANCE_SEC = 1e-12;
   var POLYNOMIAL_SUPPORT_EPSILON_SEC = 1e-12;
   function calculateKspace(blocks, gradientRaster, totalDuration, trajectoryDelay = 0, _options) {
     if (!blocks.length || !gradientRaster || gradientRaster <= 0) return null;
@@ -2053,47 +2224,6 @@ var Pulseq = (() => {
     }
     return output;
   }
-  function physicalGradientPiece(block, axis) {
-    const gradients = [block.gx, block.gy, block.gz];
-    const hasGradient = gradients.some((g) => g && g.type !== "none" && g.timePoints.length >= 2);
-    if (!hasGradient) return { times: [], values: [], requiredSupport: [] };
-    if (!block.rotation?.values) {
-      const gradient = gradients[axis];
-      if (!gradient || gradient.type === "none" || gradient.timePoints.length < 2) {
-        return { times: [], values: [], requiredSupport: [] };
-      }
-      return {
-        times: Array.from(gradient.timePoints),
-        values: Array.from(gradient.waveform),
-        requiredSupport: []
-      };
-    }
-    const times = [];
-    for (const gradient of gradients) {
-      if (!gradient || gradient.type === "none") continue;
-      for (const time of gradient.timePoints) times.push(time);
-    }
-    times.sort((a, b) => a - b);
-    const uniqueTimes = [];
-    for (const time of times) {
-      if (!uniqueTimes.length || time - uniqueTimes[uniqueTimes.length - 1] > GRADIENT_ENDPOINT_TOLERANCE_SEC) {
-        uniqueTimes.push(time);
-      }
-    }
-    return {
-      times: uniqueTimes,
-      values: uniqueTimes.map((time) => {
-        const rotated = rotateGradient(
-          block,
-          gradVal(block.gx, time),
-          gradVal(block.gy, time),
-          gradVal(block.gz, time)
-        );
-        return rotated[axis];
-      }),
-      requiredSupport: []
-    };
-  }
   function appendGradientPiece(target, piece, gradientRaster) {
     if (!piece.times.length) return;
     target.requiredSupport.push(piece.times[0], piece.times[piece.times.length - 1]);
@@ -2146,24 +2276,6 @@ var Pulseq = (() => {
     if (time >= t1) return v1;
     return v0 + (v1 - v0) * (time - t0) / (t1 - t0);
   }
-  function gradVal(g, t) {
-    if (!g || g.type === "none") return 0;
-    const tp = g.timePoints, wf = g.waveform;
-    if (!tp || tp.length < 2) return 0;
-    const first = tp[0], last = tp[tp.length - 1];
-    if (t < first - GRADIENT_ENDPOINT_TOLERANCE_SEC || t > last + GRADIENT_ENDPOINT_TOLERANCE_SEC) return 0;
-    if (t <= first + GRADIENT_ENDPOINT_TOLERANCE_SEC) return wf[0];
-    if (t >= last - GRADIENT_ENDPOINT_TOLERANCE_SEC) return wf[wf.length - 1];
-    let lo = 0, hi = tp.length - 1;
-    while (hi - lo > 1) {
-      const m = lo + hi >> 1;
-      if (tp[m] <= t) lo = m;
-      else hi = m;
-    }
-    const s = tp[hi] - tp[lo];
-    if (s <= 0) return wf[lo];
-    return wf[lo] + (wf[hi] - wf[lo]) * (t - tp[lo]) / s;
-  }
   function timeIdx(t, g) {
     let lo = 0, hi = g.length;
     while (lo < hi) {
@@ -2188,35 +2300,6 @@ var Pulseq = (() => {
     const i0 = lo - 1, i1 = lo, dt = g[i1] - g[i0];
     if (dt <= 0) return d[i1];
     return d[i0] + (d[i1] - d[i0]) * (t - g[i0]) / dt;
-  }
-  function rotateGradient(block, gx, gy, gz) {
-    const values = block.rotation?.values;
-    if (!values) return [gx, gy, gz];
-    if (values.length === 4) {
-      const [w, x, y, z] = values;
-      const r00 = 1 - 2 * y * y - 2 * z * z;
-      const r01 = 2 * x * y - 2 * w * z;
-      const r02 = 2 * x * z + 2 * w * y;
-      const r10 = 2 * x * y + 2 * w * z;
-      const r11 = 1 - 2 * x * x - 2 * z * z;
-      const r12 = 2 * y * z - 2 * w * x;
-      const r20 = 2 * x * z - 2 * w * y;
-      const r21 = 2 * y * z + 2 * w * x;
-      const r22 = 1 - 2 * x * x - 2 * y * y;
-      return [
-        r00 * gx + r01 * gy + r02 * gz,
-        r10 * gx + r11 * gy + r12 * gz,
-        r20 * gx + r21 * gy + r22 * gz
-      ];
-    }
-    if (values.length === 9) {
-      return [
-        values[0] * gx + values[1] * gy + values[2] * gz,
-        values[3] * gx + values[4] * gy + values[5] * gz,
-        values[6] * gx + values[7] * gy + values[8] * gz
-      ];
-    }
-    return [gx, gy, gz];
   }
 
   // src/pulseq/boundedSeries.ts
@@ -2830,6 +2913,50 @@ var Pulseq = (() => {
     return [m0, m1];
   }
 
+  // src/pulseq/ascText.ts
+  var ASC_LINE = /^\s*([A-Za-z0-9_.[\]]+?)(?:\[(\d+)])?\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*$/;
+  var ASC_INCLUDE_MESSAGE = "ASC contains $include directives. Use a combined ASC profile in the web viewer, or open it through the VS Code extension so companion ASC files can be resolved.";
+  function parseAscText(text) {
+    const scalar = /* @__PURE__ */ new Map();
+    const array = /* @__PURE__ */ new Map();
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#") || line.startsWith("###")) continue;
+      if (/^\$include\b/i.test(line)) throw new Error(ASC_INCLUDE_MESSAGE);
+      const match = ASC_LINE.exec(line);
+      if (!match) continue;
+      const key = match[1].trim();
+      const index = match[2] === void 0 ? -1 : Number.parseInt(match[2], 10);
+      const value = Number(match[3]);
+      if (!Number.isFinite(value)) continue;
+      if (index >= 0) {
+        const values = array.get(key) ?? [];
+        values[index] = value;
+        array.set(key, values);
+      } else {
+        scalar.set(key, value);
+      }
+    }
+    return { scalar, array };
+  }
+  function findArray(asc, key) {
+    const exact = asc.array.get(key);
+    if (exact) return exact;
+    const keyNorm = normalizeAscKey(key);
+    const chosen = [...asc.array.keys()].filter((candidate) => normalizeAscKey(candidate) === keyNorm && !candidate.toLowerCase().includes(".carns.")).sort()[0];
+    return chosen ? asc.array.get(chosen) : void 0;
+  }
+  function findScalar(asc, key) {
+    const exact = asc.scalar.get(key);
+    if (exact !== void 0) return exact;
+    const keyNorm = normalizeAscKey(key);
+    const chosen = [...asc.scalar.keys()].filter((candidate) => normalizeAscKey(candidate) === keyNorm && !candidate.toLowerCase().includes(".carns.")).sort()[0];
+    return chosen ? asc.scalar.get(chosen) : void 0;
+  }
+  function normalizeAscKey(key) {
+    return key.trim().replace(/\[\d+]/g, "");
+  }
+
   // src/pulseq/pns.ts
   var GAMMA_HZ_PER_T = 42576e3;
   var TIME_EPS3 = 1e-15;
@@ -3146,32 +3273,6 @@ var Pulseq = (() => {
       pnsNorm: new Float64Array()
     };
   }
-  function parseAscText(text) {
-    const scalar = /* @__PURE__ */ new Map();
-    const array = /* @__PURE__ */ new Map();
-    const re = /^\s*([A-Za-z0-9_.[\]]+?)(?:\[(\d+)])?\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*$/;
-    for (const rawLine of text.split(/\r?\n/)) {
-      const line = rawLine.trim();
-      if (!line || line.startsWith("#") || line.startsWith("###")) continue;
-      if (/^\$include\b/i.test(line)) {
-        throw new Error("ASC contains $include directives. Use a combined ASC profile in the web viewer, or open it through the VS Code extension so companion ASC files can be resolved.");
-      }
-      const match = re.exec(line);
-      if (!match) continue;
-      const key = match[1].trim();
-      const index = match[2] === void 0 ? -1 : Number.parseInt(match[2], 10);
-      const value = Number(match[3]);
-      if (!Number.isFinite(value)) continue;
-      if (index >= 0) {
-        const values = array.get(key) ?? [];
-        values[index] = value;
-        array.set(key, values);
-      } else {
-        scalar.set(key, value);
-      }
-    }
-    return { scalar, array };
-  }
   function resolvePnsPrefix(asc) {
     if (asc.array.has("flGSWDTauX")) return "";
     if (asc.array.has("GradPatSup.Phys.PNS.flGSWDTauX")) return "GradPatSup.Phys.PNS.";
@@ -3208,23 +3309,6 @@ var Pulseq = (() => {
       stimThreshold,
       gScale
     };
-  }
-  function findArray(asc, key) {
-    const exact = asc.array.get(key);
-    if (exact) return exact;
-    const keyNorm = normalizeAscKey(key);
-    const chosen = [...asc.array.keys()].filter((candidate) => normalizeAscKey(candidate) === keyNorm && !candidate.toLowerCase().includes(".carns.")).sort()[0];
-    return chosen ? asc.array.get(chosen) : void 0;
-  }
-  function findScalar(asc, key) {
-    const exact = asc.scalar.get(key);
-    if (exact !== void 0) return exact;
-    const keyNorm = normalizeAscKey(key);
-    const chosen = [...asc.scalar.keys()].filter((candidate) => normalizeAscKey(candidate) === keyNorm && !candidate.toLowerCase().includes(".carns.")).sort()[0];
-    return chosen ? asc.scalar.get(chosen) : void 0;
-  }
-  function normalizeAscKey(key) {
-    return key.trim().replace(/\[\d+]/g, "");
   }
   function hasValidWeights(hw) {
     return Math.abs(hw.a1 + hw.a2 + hw.a3 - 1) <= 0.01 && hw.stimLimit > 0;
@@ -3283,58 +3367,296 @@ var Pulseq = (() => {
     };
   }
 
-  // src/pulseq/derivedWindow.ts
-  function selectM1WindowBlocks(blocks, startSec, endSec) {
-    const displayStartSec = finiteMin(startSec, endSec);
-    const displayEndSec = finiteMax(startSec, endSec, displayStartSec);
-    let calculationStartSec = displayStartSec;
-    for (const block of blocks) {
-      const center = block.rf?.centerTime;
-      if (center === void 0 || center > displayStartSec) continue;
-      const use = (block.rf?.use || "").toLowerCase();
-      if (use === "e") calculationStartSec = Math.min(center, block.startTime);
+  // src/pulseq/acousticAsc.ts
+  var FREQUENCY_KEYS = [
+    "aflGCAcousticResonanceFrequency",
+    "asGPAParameters[0].sGCParameters.aflAcousticResonanceFrequency"
+  ];
+  var BANDWIDTH_KEYS = [
+    "aflGCAcousticResonanceBandwidth",
+    "asGPAParameters[0].sGCParameters.aflAcousticResonanceBandwidth"
+  ];
+  function parseAcousticResonancesAsc(text) {
+    return acousticResonancesFrom(parseAscText(text));
+  }
+  function findArrayWithPrefix(asc, key) {
+    const direct = findArray(asc, key);
+    if (direct) return { values: direct, prefix: "" };
+    const normalized = normalizeAscKey(key);
+    const candidate = [...asc.array.keys()].filter((name) => {
+      const plain2 = normalizeAscKey(name);
+      return plain2 !== normalized && plain2.endsWith(`.${normalized}`) && !name.toLowerCase().includes(".carns.");
+    }).sort()[0];
+    if (!candidate) return void 0;
+    const values = asc.array.get(candidate);
+    if (!values) return void 0;
+    const plain = normalizeAscKey(candidate);
+    return { values, prefix: plain.slice(0, plain.length - normalized.length) };
+  }
+  function acousticResonancesFrom(asc) {
+    for (let i = 0; i < FREQUENCY_KEYS.length; i++) {
+      const found = findArrayWithPrefix(asc, FREQUENCY_KEYS[i]);
+      if (!found) continue;
+      const frequencies = found.values;
+      const bandwidths = findArray(asc, `${found.prefix}${BANDWIDTH_KEYS[i]}`) ?? findArray(asc, BANDWIDTH_KEYS[i]) ?? [];
+      const bands = [];
+      for (let index = 0; index < frequencies.length; index++) {
+        const freqHz = frequencies[index];
+        if (!Number.isFinite(freqHz) || freqHz <= 0) continue;
+        const raw = bandwidths[index];
+        const bwHz = Number.isFinite(raw) && raw > 0 ? raw : 0;
+        bands.push({ freqHz, bwHz });
+      }
+      if (bands.length) return bands.sort((a, b) => a.freqHz - b.freqHz);
     }
-    return {
-      blocks: overlappingBlocks(blocks, calculationStartSec, displayEndSec),
-      calculationStartSec,
-      displayStartSec,
-      displayEndSec
+    return [];
+  }
+  function parseAscProfile(text) {
+    const asc = parseAscText(text);
+    let pns;
+    let pnsError;
+    try {
+      pns = parsePnsHardwareAsc(text);
+    } catch (err) {
+      pnsError = err instanceof Error ? err.message : String(err);
+    }
+    const acoustic = acousticResonancesFrom(asc);
+    const acousticError = acoustic.length ? void 0 : "This ASC has no acoustic resonance table (aflGCAcousticResonanceFrequency or asGPAParameters[0].sGCParameters.aflAcousticResonanceFrequency).";
+    return { pns, pnsError, acoustic, acousticError, notice: describeAscProfile(pns, acoustic) };
+  }
+  function describeAscProfile(pns, acoustic) {
+    if (pns && acoustic.length) return void 0;
+    if (pns) return "PNS coefficients loaded. This ASC has no acoustic resonance table.";
+    if (acoustic.length) {
+      return `Acoustic resonances loaded (${acoustic.length} band${acoustic.length === 1 ? "" : "s"}). PNS coefficients are missing from this ASC.`;
+    }
+    return "This ASC contains neither PNS coefficients nor acoustic resonances.";
+  }
+  function isEmptyAscProfile(profile) {
+    return !profile.pns && profile.acoustic.length === 0;
+  }
+  function countBandsOutsideRange(bands, fMinHz, fMaxHz) {
+    let outside = 0;
+    for (const band of bands) {
+      if (band.freqHz < fMinHz || band.freqHz > fMaxHz) outside++;
+    }
+    return outside;
+  }
+
+  // src/pulseq/fft.ts
+  var twiddleCache = /* @__PURE__ */ new Map();
+  var hannCache = /* @__PURE__ */ new Map();
+  function isPowerOfTwo(n) {
+    return n > 0 && (n & n - 1) === 0;
+  }
+  function nextPowerOfTwo(n) {
+    if (n <= 1) return 1;
+    let p = 1;
+    while (p < n) p *= 2;
+    return p;
+  }
+  function previousPowerOfTwo(n) {
+    if (n <= 1) return 1;
+    let p = 1;
+    while (p * 2 <= n) p *= 2;
+    return p;
+  }
+  function getTwiddles(n) {
+    const cached = twiddleCache.get(n);
+    if (cached) return cached;
+    if (!isPowerOfTwo(n)) throw new Error(`FFT size must be a power of two, got ${n}`);
+    const cos = new Float64Array(n / 2);
+    const sin = new Float64Array(n / 2);
+    for (let i = 0; i < n / 2; i++) {
+      const angle = -2 * Math.PI * i / n;
+      cos[i] = Math.cos(angle);
+      sin[i] = Math.sin(angle);
+    }
+    const bits = Math.round(Math.log2(n));
+    const reverse = new Uint32Array(n);
+    for (let i = 0; i < n; i++) {
+      let r = 0;
+      for (let b = 0; b < bits; b++) if (i & 1 << b) r |= 1 << bits - 1 - b;
+      reverse[i] = r;
+    }
+    const table = { cos, sin, reverse };
+    twiddleCache.set(n, table);
+    return table;
+  }
+  function fftInPlace(re, im, n) {
+    const { cos, sin, reverse } = getTwiddles(n);
+    for (let i = 0; i < n; i++) {
+      const j = reverse[i];
+      if (j > i) {
+        let tmp = re[i];
+        re[i] = re[j];
+        re[j] = tmp;
+        tmp = im[i];
+        im[i] = im[j];
+        im[j] = tmp;
+      }
+    }
+    for (let size = 2; size <= n; size *= 2) {
+      const half = size / 2;
+      const step = n / size;
+      for (let start = 0; start < n; start += size) {
+        for (let k = 0; k < half; k++) {
+          const twiddleIndex = k * step;
+          const wr = cos[twiddleIndex];
+          const wi = sin[twiddleIndex];
+          const a = start + k;
+          const b = a + half;
+          const xr = re[b] * wr - im[b] * wi;
+          const xi = re[b] * wi + im[b] * wr;
+          re[b] = re[a] - xr;
+          im[b] = im[a] - xi;
+          re[a] += xr;
+          im[a] += xi;
+        }
+      }
+    }
+  }
+  function realFFTPairMagnitude(a, b, n, scratchRe, scratchIm, outA, outB) {
+    for (let i = 0; i < n; i++) {
+      scratchRe[i] = a[i];
+      scratchIm[i] = b[i];
+    }
+    fftInPlace(scratchRe, scratchIm, n);
+    const half = n >> 1;
+    for (let k = 0; k <= half; k++) {
+      const j = (n - k) % n;
+      const zr = scratchRe[k], zi = scratchIm[k];
+      const cr = scratchRe[j], ci = -scratchIm[j];
+      const ar = 0.5 * (zr + cr);
+      const ai = 0.5 * (zi + ci);
+      const br = 0.5 * (zi - ci);
+      const bi = -0.5 * (zr - cr);
+      outA[k] = Math.sqrt(ar * ar + ai * ai);
+      outB[k] = Math.sqrt(br * br + bi * bi);
+    }
+  }
+  function realFFTMagnitude(a, n, scratchRe, scratchIm, out) {
+    for (let i = 0; i < n; i++) {
+      scratchRe[i] = a[i];
+      scratchIm[i] = 0;
+    }
+    fftInPlace(scratchRe, scratchIm, n);
+    const half = n >> 1;
+    for (let k = 0; k <= half; k++) {
+      const re = scratchRe[k], im = scratchIm[k];
+      out[k] = Math.sqrt(re * re + im * im);
+    }
+  }
+  function hannWindow(n) {
+    const cached = hannCache.get(n);
+    if (cached) return cached;
+    const w = new Float64Array(n);
+    for (let i = 0; i < n; i++) w[i] = 0.5 * (1 - Math.cos(2 * Math.PI * (i + 1) / n));
+    hannCache.set(n, w);
+    return w;
+  }
+  function windowCoherentGain(w) {
+    let sum = 0;
+    for (let i = 0; i < w.length; i++) sum += w[i];
+    return sum;
+  }
+
+  // src/pulseq/decimator.ts
+  var DECIMATION_STOPBAND_DB = 80;
+  var planCache = /* @__PURE__ */ new Map();
+  function besselI0(x) {
+    let sum = 1;
+    let term = 1;
+    const halfX = x / 2;
+    for (let k = 1; k < 60; k++) {
+      term *= halfX / k * (halfX / k);
+      sum += term;
+      if (term < sum * 1e-17) break;
+    }
+    return sum;
+  }
+  function kaiserBeta(attenuationDb) {
+    if (attenuationDb > 50) return 0.1102 * (attenuationDb - 8.7);
+    if (attenuationDb >= 21) {
+      return 0.5842 * Math.pow(attenuationDb - 21, 0.4) + 0.07886 * (attenuationDb - 21);
+    }
+    return 0;
+  }
+  function designKaiserLowpass(cutoffNorm, numTaps, attenuationDb = DECIMATION_STOPBAND_DB) {
+    const n = numTaps % 2 === 0 ? numTaps + 1 : numTaps;
+    const beta = kaiserBeta(attenuationDb);
+    const denominator = besselI0(beta);
+    const mid = (n - 1) / 2;
+    const taps = new Float64Array(n);
+    let sum = 0;
+    for (let i = 0; i < n; i++) {
+      const k = i - mid;
+      const sinc = k === 0 ? 2 * cutoffNorm : Math.sin(2 * Math.PI * cutoffNorm * k) / (Math.PI * k);
+      const ratio = mid === 0 ? 0 : k / mid;
+      const window = besselI0(beta * Math.sqrt(Math.max(0, 1 - ratio * ratio))) / denominator;
+      taps[i] = sinc * window;
+      sum += taps[i];
+    }
+    if (sum !== 0) for (let i = 0; i < n; i++) taps[i] /= sum;
+    return taps;
+  }
+  function kaiserTapCount(transitionNorm, attenuationDb) {
+    const dOmega = 2 * Math.PI * Math.max(1e-6, transitionNorm);
+    return Math.ceil((attenuationDb - 8) / (2.285 * dOmega)) + 1;
+  }
+  function planDecimation(sampleRateHz, fMaxHz) {
+    if (!(sampleRateHz > 0) || !(fMaxHz > 0)) return identityPlan();
+    const factor = Math.max(1, Math.floor(sampleRateHz / (2.5 * fMaxHz) + 1e-9));
+    if (factor <= 1) return identityPlan();
+    const decimatedRate = sampleRateHz / factor;
+    const cutoffNorm = 0.45 * decimatedRate / sampleRateHz;
+    const key = `${factor}|${cutoffNorm.toFixed(9)}|${fMaxHz.toFixed(3)}`;
+    const cached = planCache.get(key);
+    if (cached) return cached;
+    const transitionNorm = Math.max(1e-4, 1 / (2 * factor) - fMaxHz / sampleRateHz);
+    const numTaps = Math.max(8 * factor + 1, kaiserTapCount(transitionNorm, DECIMATION_STOPBAND_DB));
+    const taps = designKaiserLowpass(cutoffNorm, numTaps);
+    const plan = {
+      factor,
+      taps,
+      delaySamples: (taps.length - 1) / 2,
+      padSamples: taps.length
     };
+    planCache.set(key, plan);
+    return plan;
   }
-  function selectPnsWindowBlocks(blocks, startSec, endSec, hardware) {
-    const displayStartSec = finiteMin(startSec, endSec);
-    const displayEndSec = finiteMax(startSec, endSec, displayStartSec);
-    const longestTauMs = Math.max(
-      hardware.x.tau1Ms,
-      hardware.x.tau2Ms,
-      hardware.x.tau3Ms,
-      hardware.y.tau1Ms,
-      hardware.y.tau2Ms,
-      hardware.y.tau3Ms,
-      hardware.z.tau1Ms,
-      hardware.z.tau2Ms,
-      hardware.z.tau3Ms
-    );
-    const calculationStartSec = Math.max(0, displayStartSec - longestTauMs * 4 / 1e3);
-    return {
-      blocks: overlappingBlocks(blocks, calculationStartSec, displayEndSec),
-      calculationStartSec,
-      displayStartSec,
-      displayEndSec
-    };
+  function identityPlan() {
+    return { factor: 1, taps: new Float64Array(0), delaySamples: 0, padSamples: 0 };
   }
-  function overlappingBlocks(blocks, startSec, endSec) {
-    return blocks.filter((block) => block.startTime + block.duration > startSec && block.startTime <= endSec);
+  function decimatePadded(input, plan, padSamples, outCount) {
+    const out = new Float32Array(Math.max(0, outCount));
+    if (!out.length) return out;
+    if (plan.factor === 1) {
+      for (let j = 0; j < out.length; j++) {
+        const idx = padSamples + j;
+        out[j] = idx >= 0 && idx < input.length ? input[idx] : 0;
+      }
+      return out;
+    }
+    const taps = plan.taps;
+    const nTaps = taps.length;
+    const delay = plan.delaySamples;
+    const n = input.length;
+    for (let j = 0; j < out.length; j++) {
+      const center = padSamples + j * plan.factor + delay;
+      let acc = 0;
+      for (let k = 0; k < nTaps; k++) {
+        const idx = center - k;
+        if (idx < 0 || idx >= n) continue;
+        acc += taps[k] * input[idx];
+      }
+      out[j] = acc;
+    }
+    return out;
   }
-  function finiteMin(a, b) {
-    const aa = Number.isFinite(a) ? a : 0;
-    const bb = Number.isFinite(b) ? b : aa;
-    return Math.max(0, Math.min(aa, bb));
-  }
-  function finiteMax(a, b, fallback) {
-    const aa = Number.isFinite(a) ? a : fallback;
-    const bb = Number.isFinite(b) ? b : aa;
-    return Math.max(fallback, Math.max(aa, bb));
+  function decimatedLength(coreSamples, factor) {
+    if (coreSamples <= 0) return 0;
+    return Math.floor((coreSamples - 1) / Math.max(1, factor)) + 1;
   }
 
   // src/pulseq/computeBudget.ts
@@ -3351,7 +3673,18 @@ var Pulseq = (() => {
      * Per-waveform detail is reduced uniformly once a sequence would exceed it,
      * because the alternative is an allocation neither process can satisfy.
      */
-    displayTransportSamples: 12e6
+    displayTransportSamples: 12e6,
+    /**
+     * Gradient spectrogram ceilings. Unlike k-space these are never offered
+     * as a dangerous override: the spectrogram is scoped to the visible
+     * window, so the remedy is always "zoom in" rather than "risk the host".
+     */
+    spectrogramColumns: 1024,
+    spectrogramFftPoints: 16384,
+    spectrogramTotalCells: 4e6,
+    spectrogramInputSamples: 8e6,
+    /** 120 s of stereo audio at 44.1 kHz. */
+    audioSamples: 54e5
   });
   function derivedDetailViewLimitSec(gradientRaster, trTimeSec, maxRasterSamples = INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples) {
     if (!(gradientRaster > 0) || !(maxRasterSamples > 0)) return 0;
@@ -3425,6 +3758,559 @@ var Pulseq = (() => {
     }
     if (safeBytes >= kib) return `${(safeBytes / kib).toFixed(1)} KiB`;
     return `${Math.round(safeBytes)} bytes`;
+  }
+  function estimateSpectrogramCost(input) {
+    const span = Math.max(0, (Number.isFinite(input.endSec) ? input.endSec : 0) - (Number.isFinite(input.startSec) ? input.startSec : 0));
+    const raster = input.gradientRaster > 0 ? input.gradientRaster : 1e-5;
+    const inputSamples = Math.max(1, Math.floor(span / raster) + 1);
+    const sampleRate = 1 / raster;
+    const fMax = input.fMaxHz > 0 ? input.fMaxHz : 3e3;
+    const decimationFactor = Math.max(1, Math.floor(sampleRate / (2.5 * fMax)));
+    const decimatedSamples = Math.floor((inputSamples - 1) / decimationFactor) + 1;
+    const windowSamples = input.windowSamples > 0 ? input.windowSamples : 512;
+    const overlap = Number.isFinite(input.overlap) ? Math.min(0.95, Math.max(0, input.overlap)) : 0.75;
+    const hop = Math.max(1, Math.round(windowSamples * (1 - overlap)));
+    const naturalColumns = Math.max(1, Math.floor((decimatedSamples - windowSamples) / hop) + 1);
+    const targetColumns = input.targetColumns > 0 ? input.targetColumns : 256;
+    const columns = Math.min(naturalColumns, targetColumns, INTERACTIVE_COMPUTE_LIMITS.spectrogramColumns);
+    const oversample = input.oversample > 0 ? input.oversample : 3;
+    let fftPoints = 1;
+    while (fftPoints < windowSamples * oversample) fftPoints *= 2;
+    const bins = fftPoints / 2 + 1;
+    return {
+      inputSamples,
+      decimatedSamples,
+      columns,
+      fftPoints,
+      totalCells: columns * bins * 4,
+      decimationFactor
+    };
+  }
+  function spectrogramBudgetRefusal(estimate) {
+    if (estimate.inputSamples > INTERACTIVE_COMPUTE_LIMITS.spectrogramInputSamples) {
+      return `Zoom in to compute the spectrogram: the visible window needs ${formatSampleCount(estimate.inputSamples)} gradient samples.`;
+    }
+    if (estimate.totalCells > INTERACTIVE_COMPUTE_LIMITS.spectrogramTotalCells) {
+      return `Zoom in or widen the frequency resolution: this spectrogram would need ${formatSampleCount(estimate.totalCells)} cells.`;
+    }
+    if (estimate.fftPoints > INTERACTIVE_COMPUTE_LIMITS.spectrogramFftPoints) {
+      return `Reduce the window length or zero-padding: a ${estimate.fftPoints}-point FFT exceeds the interactive limit.`;
+    }
+    return null;
+  }
+  function estimateAudioCost(startSec, endSec, sampleRate) {
+    const fs = sampleRate > 0 ? sampleRate : 44100;
+    const durationSec = Math.max(0, (Number.isFinite(endSec) ? endSec : 0) - (Number.isFinite(startSec) ? startSec : 0));
+    const frames = Math.floor(durationSec * fs + 1e-9) + 1;
+    return { sampleRate: fs, frames, totalSamples: frames * 2, durationSec };
+  }
+  function audioBudgetRefusal(estimate) {
+    if (estimate.totalSamples > INTERACTIVE_COMPUTE_LIMITS.audioSamples) {
+      return `The visible window is ${estimate.durationSec.toFixed(1)} s of audio, beyond the 120 s playback limit. Zoom in to play a shorter stretch.`;
+    }
+    return null;
+  }
+
+  // src/pulseq/gradSpectrum.ts
+  var GAMMA_HZ_PER_M_PER_MT_PER_M = 42576;
+  var GAMMA_HZ_PER_M_PER_T_PER_M = 42576e3;
+  var MIN_WINDOW_SAMPLES = 32;
+  var DEFAULT_SPECTROGRAM_PARAMS = Object.freeze({
+    source: "G",
+    fMinHz: 0,
+    fMaxHz: 3e3,
+    windowSamples: 0,
+    overlap: 0.75,
+    oversample: 3,
+    targetColumns: 256,
+    normalize: true
+  });
+  function resolveSpectrogramParams(params) {
+    const merged = { ...DEFAULT_SPECTROGRAM_PARAMS, ...params ?? {} };
+    const fMaxHz = clamp(finite(merged.fMaxHz, 3e3), 1, 5e6);
+    return {
+      source: merged.source === "dGdt" ? "dGdt" : "G",
+      fMinHz: clamp(finite(merged.fMinHz, 0), 0, fMaxHz - 1),
+      fMaxHz,
+      windowSamples: Math.max(0, Math.floor(finite(merged.windowSamples, 0))),
+      overlap: clamp(finite(merged.overlap, 0.75), 0, 0.9375),
+      oversample: clamp(Math.round(finite(merged.oversample, 3)), 1, 4),
+      targetColumns: clamp(Math.round(finite(merged.targetColumns, 256)), 64, 512),
+      normalize: merged.normalize !== false
+    };
+  }
+  function chooseWindowSamples(params, decimatedDt, viewDurationSec, warnings) {
+    if (params.windowSamples > 0) return clamp(params.windowSamples, MIN_WINDOW_SAMPLES, 4096);
+    const dfTarget = Math.max(20, (params.fMaxHz - params.fMinHz) / 64);
+    let nwin = clamp(nextPowerOfTwo(Math.round(1 / (dfTarget * decimatedDt))), MIN_WINDOW_SAMPLES, 4096);
+    if (nwin * decimatedDt > viewDurationSec / 3) {
+      const shrunk = clamp(previousPowerOfTwo(Math.floor(viewDurationSec / (3 * decimatedDt))), MIN_WINDOW_SAMPLES, 4096);
+      if (shrunk < nwin) {
+        nwin = shrunk;
+        const achievedDf = 1 / (nwin * decimatedDt);
+        warnings.push(`Short view: frequency resolution is limited to ${formatHz(achievedDf)}.`);
+      }
+    }
+    return nwin;
+  }
+  function computeGradientSpectrogram(blocks, gradientRaster, options) {
+    const params = resolveSpectrogramParams(options);
+    const warnings = [];
+    const raster = gradientRaster > 0 ? gradientRaster : 1e-5;
+    const startSec = finite(options.startSec, 0);
+    const endSec = Math.max(startSec, finite(options.endSec, startSec));
+    const viewDuration = endSec - startSec;
+    const sampleRate = 1 / raster;
+    const nyquist = sampleRate / 2;
+    if (params.fMaxHz > nyquist) {
+      warnings.push(
+        `f max was reduced to the gradient-raster Nyquist frequency (${formatHz(nyquist)}).`
+      );
+      params.fMaxHz = nyquist;
+      params.fMinHz = Math.min(params.fMinHz, Math.max(0, nyquist - 1));
+    }
+    const plan = planDecimation(sampleRate, params.fMaxHz);
+    const decimatedDt = raster * plan.factor;
+    const decimatedRate = 1 / decimatedDt;
+    const coreSamples = Math.max(1, Math.floor(viewDuration / raster + 1e-9) + 1);
+    const nDecimated = decimatedLength(coreSamples, plan.factor);
+    let windowSamples = chooseWindowSamples(params, decimatedDt, viewDuration, warnings);
+    const tooShort = nDecimated < MIN_WINDOW_SAMPLES;
+    if (windowSamples > nDecimated) {
+      windowSamples = clamp(previousPowerOfTwo(nDecimated), MIN_WINDOW_SAMPLES, 4096);
+    }
+    let hop = Math.max(1, Math.round(windowSamples * (1 - params.overlap)));
+    let columns = nDecimated >= windowSamples ? Math.floor((nDecimated - windowSamples) / hop) + 1 : 0;
+    if (columns > params.targetColumns) {
+      hop = Math.max(1, Math.ceil((nDecimated - windowSamples) / Math.max(1, params.targetColumns - 1)));
+      columns = Math.floor((nDecimated - windowSamples) / hop) + 1;
+    }
+    const fftPoints = nextPowerOfTwo(windowSamples * params.oversample);
+    const dfBin = decimatedRate / fftPoints;
+    if (!blocks.length) {
+      warnings.push("No sequence is loaded.");
+      return emptySpectrogram(
+        params,
+        startSec,
+        endSec,
+        plan.factor,
+        decimatedRate,
+        windowSamples,
+        hop,
+        fftPoints,
+        decimatedDt,
+        warnings
+      );
+    }
+    if (tooShort || columns <= 0) {
+      warnings.push("The visible window is shorter than one analysis window. Zoom out to see a spectrogram.");
+      return emptySpectrogram(
+        params,
+        startSec,
+        endSec,
+        plan.factor,
+        decimatedRate,
+        windowSamples,
+        hop,
+        fftPoints,
+        decimatedDt,
+        warnings
+      );
+    }
+    const padSamples = plan.padSamples;
+    const totalSamples = coreSamples + 2 * padSamples;
+    const window = resamplePhysicalGradients(blocks, {
+      startSec: startSec - padSamples * raster,
+      endSec: startSec + (coreSamples + padSamples - 1) * raster,
+      dt: raster,
+      sampleCount: totalSamples
+    });
+    let sx = window.gx, sy = window.gy, sz = window.gz;
+    if (params.source === "dGdt") {
+      sx = differentiateUniform(sx, raster);
+      sy = differentiateUniform(sy, raster);
+      sz = differentiateUniform(sz, raster);
+    }
+    const dx = decimatePadded(sx, plan, padSamples, nDecimated);
+    const dy = decimatePadded(sy, plan, padSamples, nDecimated);
+    const dz = decimatePadded(sz, plan, padSamples, nDecimated);
+    const binLow = Math.max(0, Math.floor(params.fMinHz / dfBin));
+    const binHigh = Math.min(fftPoints / 2, Math.ceil(params.fMaxHz / dfBin));
+    const nFreq = Math.max(1, binHigh - binLow + 1);
+    const cells = columns * nFreq;
+    const gxOut = new Float32Array(cells);
+    const gyOut = new Float32Array(cells);
+    const gzOut = new Float32Array(cells);
+    const rssOut = new Float32Array(cells);
+    const w = hannWindow(windowSamples);
+    const gain = params.normalize ? windowCoherentGain(w) : 1;
+    const invGain = gain > 0 ? 1 / gain : 1;
+    const unitScale = params.source === "dGdt" ? 1 / GAMMA_HZ_PER_M_PER_T_PER_M : 1 / GAMMA_HZ_PER_M_PER_MT_PER_M;
+    const frameA = new Float64Array(fftPoints);
+    const frameB = new Float64Array(fftPoints);
+    const frameC = new Float64Array(fftPoints);
+    const scratchRe = new Float64Array(fftPoints);
+    const scratchIm = new Float64Array(fftPoints);
+    const magA = new Float64Array(fftPoints / 2 + 1);
+    const magB = new Float64Array(fftPoints / 2 + 1);
+    const magC = new Float64Array(fftPoints / 2 + 1);
+    let minValue = Number.POSITIVE_INFINITY;
+    let maxValue = 0;
+    for (let col = 0; col < columns; col++) {
+      const offset = col * hop;
+      prepareFrame(frameA, dx, offset, windowSamples, w, fftPoints);
+      prepareFrame(frameB, dy, offset, windowSamples, w, fftPoints);
+      prepareFrame(frameC, dz, offset, windowSamples, w, fftPoints);
+      realFFTPairMagnitude(frameA, frameB, fftPoints, scratchRe, scratchIm, magA, magB);
+      realFFTMagnitude(frameC, fftPoints, scratchRe, scratchIm, magC);
+      for (let bin = binLow; bin <= binHigh; bin++) {
+        const row = bin - binLow;
+        const index = row * columns + col;
+        const vx = magA[bin] * invGain * unitScale;
+        const vy = magB[bin] * invGain * unitScale;
+        const vz = magC[bin] * invGain * unitScale;
+        const vr = Math.sqrt(vx * vx + vy * vy + vz * vz);
+        gxOut[index] = vx;
+        gyOut[index] = vy;
+        gzOut[index] = vz;
+        rssOut[index] = vr;
+        if (vr > maxValue) maxValue = vr;
+        if (vr < minValue) minValue = vr;
+      }
+    }
+    if (!Number.isFinite(minValue)) minValue = 0;
+    if (maxValue <= 0) warnings.push("No gradient activity in the visible window.");
+    const tStartSec = startSec + windowSamples / 2 * decimatedDt;
+    const tStepSec = hop * decimatedDt;
+    return {
+      nTime: columns,
+      nFreq,
+      tStartSec,
+      tStepSec,
+      fStartHz: binLow * dfBin,
+      fStepHz: dfBin,
+      dtResolutionSec: windowSamples * decimatedDt,
+      dfResolutionHz: decimatedRate / windowSamples,
+      unit: params.source === "dGdt" ? "T/m/s" : "mT/m",
+      source: params.source,
+      data: { gx: gxOut, gy: gyOut, gz: gzOut, rss: rssOut },
+      minValue,
+      maxValue,
+      decimationFactor: plan.factor,
+      decimatedRateHz: decimatedRate,
+      windowSamples,
+      hopSamples: hop,
+      fftPoints,
+      requestedStartSec: startSec,
+      requestedEndSec: endSec,
+      warnings
+    };
+  }
+  function prepareFrame(frame, source, offset, windowSamples, w, fftPoints) {
+    let mean = 0;
+    for (let i = 0; i < windowSamples; i++) mean += source[offset + i];
+    mean /= windowSamples;
+    for (let i = 0; i < windowSamples; i++) frame[i] = (source[offset + i] - mean) * w[i];
+    for (let i = windowSamples; i < fftPoints; i++) frame[i] = 0;
+  }
+  function emptySpectrogram(params, startSec, endSec, decimationFactor, decimatedRate, windowSamples, hop, fftPoints, decimatedDt, warnings) {
+    return {
+      nTime: 0,
+      nFreq: 0,
+      tStartSec: startSec,
+      tStepSec: hop * decimatedDt,
+      fStartHz: params.fMinHz,
+      fStepHz: decimatedRate / fftPoints,
+      dtResolutionSec: windowSamples * decimatedDt,
+      dfResolutionHz: decimatedRate / windowSamples,
+      unit: params.source === "dGdt" ? "T/m/s" : "mT/m",
+      source: params.source,
+      data: {
+        gx: new Float32Array(0),
+        gy: new Float32Array(0),
+        gz: new Float32Array(0),
+        rss: new Float32Array(0)
+      },
+      minValue: 0,
+      maxValue: 0,
+      decimationFactor,
+      decimatedRateHz: decimatedRate,
+      windowSamples,
+      hopSamples: hop,
+      fftPoints,
+      requestedStartSec: startSec,
+      requestedEndSec: endSec,
+      warnings
+    };
+  }
+  function spectrogramColumnAt(spec, timeSec) {
+    if (spec.nTime <= 0) return -1;
+    if (!(spec.tStepSec > 0)) return 0;
+    const raw = Math.round((timeSec - spec.tStartSec) / spec.tStepSec);
+    return clamp(raw, 0, spec.nTime - 1);
+  }
+  function computeGradientSpectrumSlice(spec, timeSec) {
+    const col = spectrogramColumnAt(spec, timeSec);
+    if (col < 0) return null;
+    const gx = new Float32Array(spec.nFreq);
+    const gy = new Float32Array(spec.nFreq);
+    const gz = new Float32Array(spec.nFreq);
+    const rss = new Float32Array(spec.nFreq);
+    for (let row = 0; row < spec.nFreq; row++) {
+      const index = row * spec.nTime + col;
+      gx[row] = spec.data.gx[index];
+      gy[row] = spec.data.gy[index];
+      gz[row] = spec.data.gz[index];
+      rss[row] = spec.data.rss[index];
+    }
+    return { columnIndex: col, timeSec: spec.tStartSec + col * spec.tStepSec, gx, gy, gz, rss };
+  }
+  function computeGradientSpectrumAverage(spec) {
+    if (spec.nTime <= 0 || spec.nFreq <= 0) return null;
+    const gx = new Float32Array(spec.nFreq);
+    const gy = new Float32Array(spec.nFreq);
+    const gz = new Float32Array(spec.nFreq);
+    const rss = new Float32Array(spec.nFreq);
+    for (let row = 0; row < spec.nFreq; row++) {
+      let ax = 0, ay = 0, az = 0;
+      const base = row * spec.nTime;
+      for (let col = 0; col < spec.nTime; col++) {
+        const vx = spec.data.gx[base + col];
+        const vy = spec.data.gy[base + col];
+        const vz = spec.data.gz[base + col];
+        ax += vx * vx;
+        ay += vy * vy;
+        az += vz * vz;
+      }
+      const rx = Math.sqrt(ax / spec.nTime);
+      const ry = Math.sqrt(ay / spec.nTime);
+      const rz = Math.sqrt(az / spec.nTime);
+      gx[row] = rx;
+      gy[row] = ry;
+      gz[row] = rz;
+      rss[row] = Math.sqrt(rx * rx + ry * ry + rz * rz);
+    }
+    return {
+      columnIndex: -1,
+      timeSec: spec.tStartSec + (spec.nTime - 1) * spec.tStepSec / 2,
+      gx,
+      gy,
+      gz,
+      rss
+    };
+  }
+  function spectrogramRowFrequency(spec, row) {
+    return spec.fStartHz + row * spec.fStepHz;
+  }
+  function computeGradSpectrumParity(blocks, gradientRaster, totalDurationSec, options = {}) {
+    const raster = gradientRaster > 0 ? gradientRaster : 1e-5;
+    const fMax = options.fMaxHz && options.fMaxHz > 0 ? options.fMaxHz : 3e3;
+    const os = options.oversample && options.oversample > 0 ? options.oversample : 3;
+    const nwin = options.windowSamples && options.windowSamples > 0 ? options.windowSamples : 5e3;
+    const sampleRate = 1 / raster;
+    const n = Math.max(1, Math.floor(totalDurationSec / raster + 1e-9) + 1);
+    const window = resamplePhysicalGradients(blocks, {
+      startSec: 0,
+      endSec: totalDurationSec,
+      dt: raster,
+      sampleCount: n
+    });
+    const nfft = nextPowerOfTwo(nwin * os);
+    const df = sampleRate / nfft;
+    const maxBin = Math.min(nfft / 2, Math.floor(fMax / df));
+    const bins = maxBin + 1;
+    const stagger = Math.floor(nwin / 2);
+    const segments = n >= nwin ? Math.floor((n - nwin) / stagger) + 1 : 0;
+    const frequencyHz = new Float64Array(bins);
+    for (let k = 0; k < bins; k++) frequencyHz[k] = k * df;
+    const accX = new Float64Array(bins);
+    const accY = new Float64Array(bins);
+    const accZ = new Float64Array(bins);
+    const rss = new Float64Array(bins);
+    if (segments <= 0) {
+      return { frequencyHz, gx: accX, gy: accY, gz: accZ, rss, segments: 0 };
+    }
+    const w = hannWindow(nwin);
+    const frameA = new Float64Array(nfft);
+    const frameB = new Float64Array(nfft);
+    const frameC = new Float64Array(nfft);
+    const scratchRe = new Float64Array(nfft);
+    const scratchIm = new Float64Array(nfft);
+    const magA = new Float64Array(nfft / 2 + 1);
+    const magB = new Float64Array(nfft / 2 + 1);
+    const magC = new Float64Array(nfft / 2 + 1);
+    for (let seg = 0; seg < segments; seg++) {
+      const offset = seg * stagger;
+      prepareFrame(frameA, window.gx, offset, nwin, w, nfft);
+      prepareFrame(frameB, window.gy, offset, nwin, w, nfft);
+      prepareFrame(frameC, window.gz, offset, nwin, w, nfft);
+      realFFTPairMagnitude(frameA, frameB, nfft, scratchRe, scratchIm, magA, magB);
+      realFFTMagnitude(frameC, nfft, scratchRe, scratchIm, magC);
+      for (let k = 0; k < bins; k++) {
+        accX[k] += magA[k] * magA[k];
+        accY[k] += magB[k] * magB[k];
+        accZ[k] += magC[k] * magC[k];
+      }
+    }
+    for (let k = 0; k < bins; k++) {
+      accX[k] = Math.sqrt(accX[k] / segments);
+      accY[k] = Math.sqrt(accY[k] / segments);
+      accZ[k] = Math.sqrt(accZ[k] / segments);
+      rss[k] = Math.sqrt(accX[k] * accX[k] + accY[k] * accY[k] + accZ[k] * accZ[k]);
+    }
+    return { frequencyHz, gx: accX, gy: accY, gz: accZ, rss, segments };
+  }
+  function clamp(value, lo, hi) {
+    return Math.max(lo, Math.min(hi, value));
+  }
+  function finite(value, fallback) {
+    return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  }
+  function formatHz(value) {
+    if (!Number.isFinite(value)) return "\u2014";
+    if (value >= 1e3) return `${(value / 1e3).toFixed(2)} kHz`;
+    if (value >= 10) return `${value.toFixed(0)} Hz`;
+    return `${value.toFixed(1)} Hz`;
+  }
+
+  // src/pulseq/gradientSound.ts
+  var DEFAULT_AUDIO_SAMPLE_RATE = 44100;
+  var AUDIO_PEAK = 0.95;
+  function gaussianSmoothingKernel(sampleRate) {
+    const half = Math.max(1, Math.round(sampleRate / 6e3));
+    const len = half * 2 + 1;
+    const std = (len - 1) / 5;
+    const mid = (len - 1) / 2;
+    const kernel = new Float64Array(len);
+    let sum = 0;
+    for (let i = 0; i < len; i++) {
+      const z = (i - mid) / std;
+      kernel[i] = Math.exp(-0.5 * z * z);
+      sum += kernel[i];
+    }
+    if (sum > 0) for (let i = 0; i < len; i++) kernel[i] /= sum;
+    return kernel;
+  }
+  function convolveSame(signal, kernel) {
+    const n = signal.length;
+    const k = kernel.length;
+    const half = (k - 1) / 2;
+    const out = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      let acc = 0;
+      for (let j = 0; j < k; j++) {
+        const idx = i + half - j;
+        if (idx < 0 || idx >= n) continue;
+        acc += kernel[j] * signal[idx];
+      }
+      out[i] = acc;
+    }
+    return out;
+  }
+  function synthesizeGradientSound(blocks, options) {
+    const warnings = [];
+    const sampleRate = options.sampleRate && options.sampleRate > 0 ? options.sampleRate : DEFAULT_AUDIO_SAMPLE_RATE;
+    const startSec = Number.isFinite(options.startSec) ? options.startSec : 0;
+    const endSec = Math.max(startSec, Number.isFinite(options.endSec) ? options.endSec : startSec);
+    const dt = 1 / sampleRate;
+    const n = Math.floor((endSec - startSec) * sampleRate + 1e-9) + 1;
+    const weights = options.channelWeights ?? [1, 1, 1];
+    const wx = Number.isFinite(weights[0]) ? weights[0] : 1;
+    const wy = Number.isFinite(weights[1]) ? weights[1] : 1;
+    const wz = Number.isFinite(weights[2]) ? weights[2] : 1;
+    const window = resamplePhysicalGradients(blocks, {
+      startSec,
+      endSec,
+      dt,
+      sampleCount: n
+    });
+    let gx = window.gx, gy = window.gy, gz = window.gz;
+    if (options.source === "dGdt") {
+      gx = differentiateUniform(gx, dt);
+      gy = differentiateUniform(gy, dt);
+      gz = differentiateUniform(gz, dt);
+    }
+    let left = new Float32Array(n);
+    let right = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      left[i] = wx * gx[i] + 0.5 * wz * gz[i];
+      right[i] = wy * gy[i] + 0.5 * wz * gz[i];
+    }
+    const kernel = gaussianSmoothingKernel(sampleRate);
+    left = convolveSame(left, kernel);
+    right = convolveSame(right, kernel);
+    let rawPeak = 0;
+    for (let i = 0; i < n; i++) {
+      const l = Math.abs(left[i]);
+      const r = Math.abs(right[i]);
+      if (l > rawPeak) rawPeak = l;
+      if (r > rawPeak) rawPeak = r;
+    }
+    const silent = !(rawPeak > 0);
+    if (silent) {
+      warnings.push("No gradient activity in this window \u2014 nothing to play.");
+    } else {
+      const scale = AUDIO_PEAK / rawPeak;
+      for (let i = 0; i < n; i++) {
+        left[i] *= scale;
+        right[i] *= scale;
+      }
+    }
+    return { sampleRate, n, left, right, startSec, endSec, rawPeak, silent, warnings };
+  }
+
+  // src/pulseq/derivedWindow.ts
+  function selectM1WindowBlocks(blocks, startSec, endSec) {
+    const displayStartSec = finiteMin(startSec, endSec);
+    const displayEndSec = finiteMax(startSec, endSec, displayStartSec);
+    let calculationStartSec = displayStartSec;
+    for (const block of blocks) {
+      const center = block.rf?.centerTime;
+      if (center === void 0 || center > displayStartSec) continue;
+      const use = (block.rf?.use || "").toLowerCase();
+      if (use === "e") calculationStartSec = Math.min(center, block.startTime);
+    }
+    return {
+      blocks: overlappingBlocks(blocks, calculationStartSec, displayEndSec),
+      calculationStartSec,
+      displayStartSec,
+      displayEndSec
+    };
+  }
+  function selectPnsWindowBlocks(blocks, startSec, endSec, hardware) {
+    const displayStartSec = finiteMin(startSec, endSec);
+    const displayEndSec = finiteMax(startSec, endSec, displayStartSec);
+    const longestTauMs = Math.max(
+      hardware.x.tau1Ms,
+      hardware.x.tau2Ms,
+      hardware.x.tau3Ms,
+      hardware.y.tau1Ms,
+      hardware.y.tau2Ms,
+      hardware.y.tau3Ms,
+      hardware.z.tau1Ms,
+      hardware.z.tau2Ms,
+      hardware.z.tau3Ms
+    );
+    const calculationStartSec = Math.max(0, displayStartSec - longestTauMs * 4 / 1e3);
+    return {
+      blocks: overlappingBlocks(blocks, calculationStartSec, displayEndSec),
+      calculationStartSec,
+      displayStartSec,
+      displayEndSec
+    };
+  }
+  function overlappingBlocks(blocks, startSec, endSec) {
+    return blocks.filter((block) => block.startTime + block.duration > startSec && block.startTime <= endSec);
+  }
+  function finiteMin(a, b) {
+    const aa = Number.isFinite(a) ? a : 0;
+    const bb = Number.isFinite(b) ? b : aa;
+    return Math.max(0, Math.min(aa, bb));
+  }
+  function finiteMax(a, b, fallback) {
+    const aa = Number.isFinite(a) ? a : fallback;
+    const bb = Number.isFinite(b) ? b : aa;
+    return Math.max(fallback, Math.max(aa, bb));
   }
 
   // src/pulseq/trdetect.ts

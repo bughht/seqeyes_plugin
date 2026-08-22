@@ -170,9 +170,9 @@ function applyLayoutMode(){
     handle.style.setProperty('height','5px','important');
     handle.style.setProperty('bottom','auto','important');
     if(rc){rc.style.setProperty('flex-direction','row','important');}
-    // If kspace is open, apply open height inline
-    if(typeof kOpen!=='undefined'&&kOpen){
-      right.style.setProperty('height','300px','important');
+    // If the analysis panel is open, apply open height inline
+    if(panelOpen){
+      right.style.setProperty('height',panelStoredHeight()+'px','important');
     }
   }else{
     // Remove all inline !important overrides — base CSS takes over
@@ -181,18 +181,23 @@ function applyLayoutMode(){
     right.style.cssText='';
     handle.style.cssText='';
     if(rc)rc.style.cssText='';
-    // If kspace is open, restore width
-    if(typeof kOpen!=='undefined'&&kOpen){
-      right.style.width='500px';
+    // If the analysis panel is open, restore width
+    if(panelOpen){
+      right.style.width=panelStoredWidth()+'px';
     }
   }
 }
+function panelStoredWidth(){try{var v=parseFloat(localStorage.getItem('seqeyes.panelWidth'));return isFinite(v)?v:500;}catch(_){return 500;}}
+function panelStoredHeight(){try{var v=parseFloat(localStorage.getItem('seqeyes.panelHeight'));return isFinite(v)?v:300;}catch(_){return 300;}}
 function refreshLayout(){
   if(detectLayoutMode()){
     applyLayoutMode();
     rs();
     if(typeof drawKs==='function')drawKs();
     if(typeof drawMinimap==='function')drawMinimap();
+    // The split direction is inverted relative to the dock (R5), and the
+    // ratio is persisted per orientation, so the panel re-reads both here.
+    if(typeof SeqEyesPanel!=='undefined')SeqEyesPanel.onLayoutChanged();
   }
 }
 applyLayoutMode();
@@ -301,11 +306,12 @@ window.addEventListener('message',function(e){
     if(seqTiming&&seqTiming.trTimeSec>0){fitToFirstTR();}else{fit();}
     draw();drawKs();drawMinimap();
     setExportButtonEnabled(true);
+    SeqEyesPanel.onSequenceLoaded();
   }else if(m.type==='loadError'){
     showSequenceLoadFailure(m.message||'The sequence could not be loaded.');
   }else if(m.type==='kspaceData'){
     applySerializedKspace(m.kspace);finishDangerousKspaceCalculation(null);drawKs();
-    if(typeof kOpen!=='undefined'&&!kOpen)document.getElementById('kbtn').click();
+    SeqEyesPanel.showKspaceIfClosed();
   }else if(m.type==='kspaceError'){
     finishDangerousKspaceCalculation(m.message||'Unknown error.');
   }else if(m.type==='m1Data'){
@@ -355,11 +361,44 @@ window.addEventListener('message',function(e){
     setViewerNotice('pns',(m.message||'PNS calculation failed.')+(m.message&&/zoom in/i.test(m.message)?'':' Zoom in to inspect waveform detail.'));
   }else if(m.type==='pnsSelectionCancelled'){
     pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
+  }else if(m.type==='ascProfileData'){
+    applyAscProfile(m);
+  }else if(m.type==='spectrogramData'){
+    SeqEyesPanel.deliverSpectrogram(m.requestId,deserializeSpectrogram(m.spectrogram));
+  }else if(m.type==='spectrogramError'){
+    SeqEyesPanel.deliverSpectrogramError(m.requestId,m.message);
+  }else if(m.type==='gradientSoundData'){
+    SeqEyesPanel.deliverAudio(m.requestId,deserializeGradientSound(m));
+  }else if(m.type==='gradientSoundError'){
+    SeqEyesPanel.deliverAudioError(m.requestId,m.message);
   }
 });
 
-/* ── Base64 → Float32Array decoder ─────────────────────────────────── */
-function decodeB64F32(b64,n){var bin=atob(b64),len=bin.length,b=new Uint8Array(len);for(var i=0;i<len;i++)b[i]=bin.charCodeAt(i);return new Float32Array(b.buffer,0,n);}
+/* Acoustic bands and the ASC button label are shared by both hosts, so the
+   handling lives beside the message plumbing rather than in panel.js. */
+function applyAscProfile(payload){
+  pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
+  var bands=payload.acoustic||[];
+  SeqEyesPanel.setAcousticBands(bands);
+  setAscButtonLabel(payload.fileName,bands.length,!!payload.hasPns);
+  setViewerNotice('asc',payload.notice||null);
+}
+
+function setAscButtonLabel(fileName,bandCount,hasPns){
+  if(!pnsBtn)return;
+  if(!fileName){pnsBtn.textContent='Load ASC (PNS/Acoustic)';return;}
+  var stem=String(fileName).replace(/\.[^.]*$/,'');
+  pnsBtn.textContent='ASC: '+stem;
+  pnsBtn.title='Loaded '+fileName+' \u2014 '
+    +(hasPns?'PNS coefficients':'no PNS coefficients')+', '
+    +(bandCount?bandCount+' acoustic band'+(bandCount===1?'':'s'):'no acoustic resonance table')
+    +'. Click to load a different profile.';
+}
+
+
+/* decodeB64F32, deserializeSpectrogram and deserializeGradientSound live in
+   block-transport.js, which loads first and stays DOM-free so the tests can
+   run the shipped decoders directly. */
 
 
 /* ── Global amplitude ranges ──────────────────────────────────────────── */
@@ -695,6 +734,7 @@ function rs(){
   mmCanvas.style.width=mr.width+'px';mmCanvas.style.height=mr.height+'px';
   mmCtx.setTransform(dpr,0,0,dpr,0,0);
   draw();drawMinimap();
+  notifyPanelViewChanged();
 }
 window.addEventListener('resize',rs);new ResizeObserver(rs).observe(cc);
 
@@ -727,6 +767,14 @@ function clampView(){
   var maxOx=Math.max(0,TD-dur);
   if(!isFinite(ox))ox=0;
   ox=Math.max(0,Math.min(ox,maxOx));
+  notifyPanelViewChanged();
+}
+
+/* Every pan/zoom path ends in clampView(), so this is the single place the
+   spectrogram needs to learn that its time window moved (R4). */
+function notifyPanelViewChanged(){
+  if(typeof SeqEyesPanel==='undefined'||!SeqEyesPanel)return;
+  SeqEyesPanel.onViewChanged();
 }
 function zoomAt(screenX,zf){
   if(!isFinite(zf)||zf<=0)return false;
@@ -757,3 +805,37 @@ function fitToFirstTR(){
   ox=Math.max(0,-trDur*0.1);  // small negative offset for left padding
   clampView();
 }
+
+/* ── Analysis panel host adapter (VS Code webview) ──────────────────────
+   panel.js reads the host only through this object, which is what lets
+   web/index.html swap in its own without duplicating the panel code. */
+window.SeqEyesPanelHost={
+  getView:function(){var d=visibleDuration();return{startSec:ox,endSec:ox+d,totalDuration:TD};},
+  getLayoutMode:function(){return layoutMode;},
+  getGradientRaster:function(){return GR;},
+  getTimeUnit:function(){return timeUnit;},
+  getWaveformLeftMargin:function(){return M.l;},
+  refreshLayout:function(){refreshLayout();},
+  hasKspaceData:function(){return !!(kAdc&&kAdc[0]&&kAdc[0].length);},
+  showKspaceSafetyDialog:function(){
+    return typeof showKspaceSafetyDialog==='function'?showKspaceSafetyDialog():false;
+  },
+  onKspaceShown:function(){kAutoFit=true;drawKs_init();},
+  onKspaceHidden:function(){resizeKc();drawKs();},
+  setNotice:function(key,message){setViewerNotice(key,message);},
+  setWaveformMarker:function(timeSec){
+    panelMarkerTimeSec=(timeSec===null||timeSec===undefined)?NaN:timeSec;
+    drawCursorOverlay();
+  },
+  requestSpectrogram:function(requestId,startSec,endSec,params){
+    if(!vscApi)return;
+    vscApi.postMessage({command:'calculateSpectrogram',requestId:requestId,startSec:startSec,endSec:endSec,params:params});
+  },
+  requestAudio:function(requestId,startSec,endSec,options){
+    if(!vscApi)return;
+    vscApi.postMessage({
+      command:'synthesizeGradientSound',requestId:requestId,startSec:startSec,endSec:endSec,
+      sampleRate:options.sampleRate,channelWeights:options.channelWeights,source:options.source
+    });
+  }
+};

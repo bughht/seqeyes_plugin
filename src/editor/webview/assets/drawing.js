@@ -1,3 +1,4 @@
+var panelMarkerTimeSec=NaN;
 /* ═══════════════════════════════════════════════════════════════════════
    Main draw loop
    ═══════════════════════════════════════════════════════════════════════ */
@@ -23,6 +24,7 @@ function drawCursorOverlay(){
   viewerCursorDrawCount++;
   var dpr=window.devicePixelRatio||1,w=moc.width/dpr,h=moc.height/dpr;
   moctx.clearRect(0,0,w,h);
+  drawPanelMarker(w,h);
   if(!cursorActive)return;var cx=t2x(cursorT);
   if(cx<M.l||cx>w-M.r)return;
   var color=getComputedStyle(document.body).getPropertyValue('--cr').trim();
@@ -31,6 +33,19 @@ function drawCursorOverlay(){
   moctx.fillStyle=color;moctx.font='10px monospace';moctx.textAlign='center';
   var label=fmtT(timeConv(cursorT)),tw=moctx.measureText(label).width;
   moctx.fillText(label,Math.max(M.l+tw/2+4,Math.min(cx,w-M.r-tw/2-4)),M.t-1);
+}
+
+/* Mirror of the spectrogram panel marker (R9): a faint dashed line so the
+   operator can see which part of the sequence the spectrum belongs to. */
+function drawPanelMarker(w,h){
+  if(typeof panelMarkerTimeSec==='undefined'||!isFinite(panelMarkerTimeSec))return;
+  var mx=t2x(panelMarkerTimeSec);
+  if(mx<M.l||mx>w-M.r)return;
+  var color=getComputedStyle(document.body).getPropertyValue('--cr').trim();
+  moctx.save();
+  moctx.globalAlpha=0.45;moctx.strokeStyle=color;moctx.lineWidth=1;moctx.setLineDash([2,4]);
+  moctx.beginPath();moctx.moveTo(mx,M.t);moctx.lineTo(mx,h-M.b);moctx.stroke();
+  moctx.restore();
 }
 
 /* ── Zero lines & grid ────────────────────────────────────────────────── */

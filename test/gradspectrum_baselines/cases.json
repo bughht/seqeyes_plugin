@@ -1,0 +1,28 @@
+[
+  {
+    "id": "v151_gre",
+    "description": "Pulseq v1.5.1 gradient echo demo",
+    "sequencePath": "v151_gre/seq/writeGradientEcho.seq",
+    "baselinePath": "v151_gre/baseline/gradspectrum.txt",
+    "sequenceSha256": "25f5d37d4d44554785bf99f3280a3883b4df6e7ff443ade591896004cca7a05a",
+    "fMaxHz": 3000,
+    "oversample": 3,
+    "windowSamples": 5000,
+    "thresholds": {
+      "relative": 0.001
+    }
+  },
+  {
+    "id": "v151_spiral",
+    "description": "Pulseq v1.5.1 spiral demo",
+    "sequencePath": "v151_spiral/seq/writeSpiral.seq",
+    "baselinePath": "v151_spiral/baseline/gradspectrum.txt",
+    "sequenceSha256": "17069755984a869b3afa315cdcea55f54a7653ff549c918031f0f51184158d6e",
+    "fMaxHz": 3000,
+    "oversample": 3,
+    "windowSamples": 5000,
+    "thresholds": {
+      "relative": 0.001
+    }
+  }
+]

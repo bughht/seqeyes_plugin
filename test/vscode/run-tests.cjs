@@ -16,6 +16,10 @@ async function main() {
   copyFixture(repoRoot, workspacePath, 'test/seqeyes_demo_seq_files/writeEpi.seq', 'writeEpi.seq');
   copyFixture(repoRoot, workspacePath, 'test/seq/spiral_inout.seq', 'spiral_inout.seq');
   copyFixture(repoRoot, workspacePath, 'test/pulseq/binary/gre.bseq', 'gre.bseq');
+  copyFixture(repoRoot, workspacePath, 'test/asc/synthetic_combined.asc', 'combined.asc');
+  copyFixture(repoRoot, workspacePath, 'test/asc/synthetic_acoustic_only.asc', 'acoustic_only.asc');
+  copyFixture(repoRoot, workspacePath, 'test/asc/synthetic_pns_only.asc', 'pns_only.asc');
+  fs.writeFileSync(path.join(workspacePath, 'empty.asc'), 'someOtherKey = 1\n', 'utf8');
   fs.writeFileSync(path.join(workspacePath, 'invalid.seq'), 'This is not a Pulseq sequence.\n', 'utf8');
   fs.writeFileSync(path.join(workspacePath, 'invalid.bseq'), 'This is not a binary Pulseq sequence.\n', 'utf8');
 

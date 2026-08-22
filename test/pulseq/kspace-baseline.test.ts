@@ -67,8 +67,14 @@ describe('SeqEyes k-space ADC baselines', () => {
   });
 });
 
+/**
+ * Line endings are normalised before hashing so the fixture guard survives a
+ * checkout with `core.autocrlf=true`. Without this the guard fails on Windows
+ * for a reason unrelated to the trajectory, which silently disables it exactly
+ * where it is meant to protect k-space refactors.
+ */
 function readFixture(relativePath: string): string {
-  return readFileSync(join(baselineDir, relativePath), 'utf8');
+  return readFileSync(join(baselineDir, relativePath), 'utf8').replace(/\r\n/g, '\n');
 }
 
 function sha256Hex(text: string): string {

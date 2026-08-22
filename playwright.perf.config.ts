@@ -2,7 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './test/performance',
-  testMatch: /browser-performance\.spec\.ts/,
+  testMatch: /browser-performance\.spec\.ts$/,
   timeout: 90_000,
   expect: { timeout: 10_000 },
   fullyParallel: false,

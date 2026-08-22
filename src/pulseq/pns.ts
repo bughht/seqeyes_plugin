@@ -1,6 +1,10 @@
 import type { DecodedBlock, DecodedGradWaveform } from './types';
 import { BoundedSeriesBuilder, type BoundedSeries } from './boundedSeries';
 import { createDecodedGradientSampler, decodedGradientTimeRange } from './gradientSampler';
+import { findArray, findScalar, normalizeAscKey, parseAscText, type ParsedAscValues } from './ascText';
+
+export { parseAscText, findArray, findScalar, normalizeAscKey };
+export type { ParsedAscValues };
 
 export const GAMMA_HZ_PER_T = 42.576e6;
 
@@ -46,11 +50,6 @@ export interface CoarsePnsResult {
     z: BoundedSeries;
     norm: BoundedSeries;
     warnings: string[];
-}
-
-interface ParsedAscValues {
-    scalar: Map<string, number>;
-    array: Map<string, number[]>;
 }
 
 interface GradientSeries {
@@ -419,33 +418,6 @@ function invalidPns(error: string): PnsResult {
     };
 }
 
-function parseAscText(text: string): ParsedAscValues {
-    const scalar = new Map<string, number>();
-    const array = new Map<string, number[]>();
-    const re = /^\s*([A-Za-z0-9_.[\]]+?)(?:\[(\d+)])?\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*$/;
-    for (const rawLine of text.split(/\r?\n/)) {
-        const line = rawLine.trim();
-        if (!line || line.startsWith('#') || line.startsWith('###')) continue;
-        if (/^\$include\b/i.test(line)) {
-            throw new Error('ASC contains $include directives. Use a combined ASC profile in the web viewer, or open it through the VS Code extension so companion ASC files can be resolved.');
-        }
-        const match = re.exec(line);
-        if (!match) continue;
-        const key = match[1].trim();
-        const index = match[2] === undefined ? -1 : Number.parseInt(match[2], 10);
-        const value = Number(match[3]);
-        if (!Number.isFinite(value)) continue;
-        if (index >= 0) {
-            const values = array.get(key) ?? [];
-            values[index] = value;
-            array.set(key, values);
-        } else {
-            scalar.set(key, value);
-        }
-    }
-    return { scalar, array };
-}
-
 function resolvePnsPrefix(asc: ParsedAscValues): string {
     if (asc.array.has('flGSWDTauX')) return '';
     if (asc.array.has('GradPatSup.Phys.PNS.flGSWDTauX')) return 'GradPatSup.Phys.PNS.';
@@ -495,30 +467,6 @@ function getAxisHardware(
         stimThreshold,
         gScale,
     };
-}
-
-function findArray(asc: ParsedAscValues, key: string): number[] | undefined {
-    const exact = asc.array.get(key);
-    if (exact) return exact;
-    const keyNorm = normalizeAscKey(key);
-    const chosen = [...asc.array.keys()]
-        .filter(candidate => normalizeAscKey(candidate) === keyNorm && !candidate.toLowerCase().includes('.carns.'))
-        .sort()[0];
-    return chosen ? asc.array.get(chosen) : undefined;
-}
-
-function findScalar(asc: ParsedAscValues, key: string): number | undefined {
-    const exact = asc.scalar.get(key);
-    if (exact !== undefined) return exact;
-    const keyNorm = normalizeAscKey(key);
-    const chosen = [...asc.scalar.keys()]
-        .filter(candidate => normalizeAscKey(candidate) === keyNorm && !candidate.toLowerCase().includes('.carns.'))
-        .sort()[0];
-    return chosen ? asc.scalar.get(chosen) : undefined;
-}
-
-function normalizeAscKey(key: string): string {
-    return key.trim().replace(/\[\d+]/g, '');
 }
 
 function hasValidWeights(hw: PnsAxisHardware): boolean {

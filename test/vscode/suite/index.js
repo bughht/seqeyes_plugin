@@ -13,6 +13,10 @@ async function run() {
   const invalidUri = vscode.Uri.file(path.join(workspacePath, 'invalid.seq'));
   const invalidBinaryUri = vscode.Uri.file(path.join(workspacePath, 'invalid.bseq'));
   const exportDir = vscode.Uri.file(path.join(workspacePath, 'exports'));
+  const combinedAscUri = vscode.Uri.file(path.join(workspacePath, 'combined.asc'));
+  const acousticAscUri = vscode.Uri.file(path.join(workspacePath, 'acoustic_only.asc'));
+  const pnsAscUri = vscode.Uri.file(path.join(workspacePath, 'pns_only.asc'));
+  const emptyAscUri = vscode.Uri.file(path.join(workspacePath, 'empty.asc'));
 
   await step('activate extension', async () => {
     const extension = vscode.extensions.all.find((item) => item.packageJSON?.name === 'seqeyes-web');
@@ -67,6 +71,81 @@ async function run() {
     const metadata = JSON.parse(await readText(vscode.Uri.parse(result.metadataUri)));
     assert.equal(metadata.sequenceName, 'gre.bseq');
     assert.equal(metadata.adcSampleCount, 4096);
+  });
+
+  await step('compute a gradient spectrogram over a view window', async () => {
+    // The command reads the sequence itself, exactly as the message handler
+    // does; re-opening an already-open editor would not re-fire a load anyway.
+    const result = await vscode.commands.executeCommand(
+      'seqeyes.test.computeSpectrogram', spiralUri, 0, 0.2, { fMaxHz: 3000 },
+    );
+    assert.ok(result, 'spectrogram command should return a summary');
+    assert.ok(result.nTime > 1, 'spectrogram should have multiple time columns');
+    assert.ok(result.nFreq > 1, 'spectrogram should have multiple frequency bins');
+    assert.equal(result.unit, 'mT/m');
+    assert.ok(result.decimationFactor > 1, 'anti-aliased decimation should be in effect');
+    assert.ok(result.maxValue > 0, 'spiral fixture should carry gradient energy');
+    // Column centres stay inside the requested window.
+    assert.ok(result.tStartSec >= 0, 'first column should start inside the window');
+    assert.ok(result.tStartSec + (result.nTime - 1) * result.tStepSec <= 0.2 + 1e-9,
+      'last column should end inside the window');
+    // The base64 transport is what keeps this deliverable over postMessage.
+    assert.ok(result.payloadBytes < 8 * 1024 * 1024, 'serialized spectrogram should stay well under the JSON ceiling');
+
+    const state = await vscode.commands.executeCommand('seqeyes.test.getState');
+    assert.equal(state.lastError, undefined, 'spectrogram compute should not record an extension-host error');
+  });
+
+  await step('reports a quiet window as quiet rather than averaging it away', async () => {
+    // spiral_inout has a long TR: 0-0.2 s carries the readout, 0.2-1.0 s is
+    // silent. A whole-sequence average would blend the two; a view-windowed
+    // spectrogram must show the gap as a gap. This is the feature’s premise.
+    const quiet = await vscode.commands.executeCommand(
+      'seqeyes.test.computeSpectrogram', spiralUri, 0.2, 0.4, { fMaxHz: 3000 },
+    );
+    assert.ok(quiet.nTime > 1, 'a quiet window still has columns');
+    assert.equal(quiet.maxValue, 0, 'a quiet window must read as zero energy');
+    assert.ok(quiet.warnings.some((warning) => /No gradient activity/.test(warning)),
+      'the empty window should say so');
+  });
+
+  await step('declines a window shorter than one analysis window', async () => {
+    // View-scoped work gets no dangerous override: the remedy is always to
+    // zoom, so this returns an explained empty result rather than throwing.
+    let error;
+    const result = await vscode.commands.executeCommand(
+      'seqeyes.test.computeSpectrogram', spiralUri, 0, 0.0001, { fMaxHz: 3000 },
+    ).catch((err) => { error = err; return undefined; });
+    assert.equal(error, undefined, 'a too-short window should not throw');
+    assert.ok(result, 'a too-short window should still return a summary');
+    assert.equal(result.nTime, 0, 'a window shorter than one analysis window has no columns');
+    assert.ok(result.warnings.length > 0, 'the refusal should be explained in warnings');
+  });
+
+  await step('load ASC profiles with independent PNS and acoustic outcomes', async () => {
+    const combined = await vscode.commands.executeCommand(
+      'seqeyes.test.loadAscProfile', combinedAscUri);
+    assert.equal(combined.hasPns, true);
+    assert.equal(combined.acousticCount, 2);
+    assert.equal(combined.notice, undefined, 'a complete profile needs no notice');
+
+    const acoustic = await vscode.commands.executeCommand(
+      'seqeyes.test.loadAscProfile', acousticAscUri);
+    assert.equal(acoustic.hasPns, false, 'acoustic-only ASC has no PNS coefficients');
+    assert.equal(acoustic.acousticCount, 3, 'acoustic bands must survive the PNS failure');
+    assert.match(acoustic.notice, /PNS coefficients are missing/);
+
+    const pnsOnly = await vscode.commands.executeCommand(
+      'seqeyes.test.loadAscProfile', pnsAscUri);
+    assert.equal(pnsOnly.hasPns, true);
+    assert.equal(pnsOnly.acousticCount, 0);
+    assert.match(pnsOnly.notice, /no acoustic resonance table/);
+
+    const empty = await vscode.commands.executeCommand(
+      'seqeyes.test.loadAscProfile', emptyAscUri);
+    assert.equal(empty.hasPns, false);
+    assert.equal(empty.acousticCount, 0);
+    assert.match(empty.notice, /neither PNS coefficients nor acoustic resonances/);
   });
 
   await step('invalid fixture reports parse error without crashing host', async () => {

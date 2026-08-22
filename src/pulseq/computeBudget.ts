@@ -19,6 +19,17 @@ export const INTERACTIVE_COMPUTE_LIMITS = Object.freeze({
      * because the alternative is an allocation neither process can satisfy.
      */
     displayTransportSamples: 12_000_000,
+    /**
+     * Gradient spectrogram ceilings. Unlike k-space these are never offered
+     * as a dangerous override: the spectrogram is scoped to the visible
+     * window, so the remedy is always "zoom in" rather than "risk the host".
+     */
+    spectrogramColumns: 1024,
+    spectrogramFftPoints: 16_384,
+    spectrogramTotalCells: 4_000_000,
+    spectrogramInputSamples: 8_000_000,
+    /** 120 s of stereo audio at 44.1 kHz. */
+    audioSamples: 5_400_000,
 });
 
 export interface KspaceCostEstimate {
@@ -144,4 +155,113 @@ export function formatMemorySize(bytes: number): string {
     }
     if (safeBytes >= kib) return `${(safeBytes / kib).toFixed(1)} KiB`;
     return `${Math.round(safeBytes)} bytes`;
+}
+
+export interface SpectrogramCostEstimate {
+    /** Pre-decimation raster samples the requested window needs. */
+    inputSamples: number;
+    /** Post-decimation sample count. */
+    decimatedSamples: number;
+    /** Spectrogram columns the current hop produces. */
+    columns: number;
+    /** Zero-padded FFT length. */
+    fftPoints: number;
+    /** Cells across the four stored matrices (gx, gy, gz, rss). */
+    totalCells: number;
+    /** Integer decimation factor the plan will use. */
+    decimationFactor: number;
+}
+
+export interface SpectrogramCostInput {
+    startSec: number;
+    endSec: number;
+    gradientRaster: number;
+    fMaxHz: number;
+    windowSamples: number;
+    overlap: number;
+    oversample: number;
+    targetColumns: number;
+}
+
+/**
+ * Cheap pre-flight estimate for one spectrogram request.
+ *
+ * Deliberately mirrors the real pipeline’s arithmetic rather than guessing:
+ * the window/hop rule in `gradSpectrum.ts` decides the column count, and the
+ * refusal notice quotes the number this function returns.
+ */
+export function estimateSpectrogramCost(input: SpectrogramCostInput): SpectrogramCostEstimate {
+    const span = Math.max(0, (Number.isFinite(input.endSec) ? input.endSec : 0)
+        - (Number.isFinite(input.startSec) ? input.startSec : 0));
+    const raster = input.gradientRaster > 0 ? input.gradientRaster : 1e-5;
+    const inputSamples = Math.max(1, Math.floor(span / raster) + 1);
+    const sampleRate = 1 / raster;
+    const fMax = input.fMaxHz > 0 ? input.fMaxHz : 3000;
+    const decimationFactor = Math.max(1, Math.floor(sampleRate / (2.5 * fMax)));
+    const decimatedSamples = Math.floor((inputSamples - 1) / decimationFactor) + 1;
+
+    const windowSamples = input.windowSamples > 0 ? input.windowSamples : 512;
+    const overlap = Number.isFinite(input.overlap) ? Math.min(0.95, Math.max(0, input.overlap)) : 0.75;
+    const hop = Math.max(1, Math.round(windowSamples * (1 - overlap)));
+    const naturalColumns = Math.max(1, Math.floor((decimatedSamples - windowSamples) / hop) + 1);
+    const targetColumns = input.targetColumns > 0 ? input.targetColumns : 256;
+    const columns = Math.min(naturalColumns, targetColumns, INTERACTIVE_COMPUTE_LIMITS.spectrogramColumns);
+
+    const oversample = input.oversample > 0 ? input.oversample : 3;
+    let fftPoints = 1;
+    while (fftPoints < windowSamples * oversample) fftPoints *= 2;
+    const bins = fftPoints / 2 + 1;
+
+    return {
+        inputSamples,
+        decimatedSamples,
+        columns,
+        fftPoints,
+        totalCells: columns * bins * 4,
+        decimationFactor,
+    };
+}
+
+/**
+ * Reason the spectrogram request is refused, or `null` when it is affordable.
+ * The message never offers an override — see the limits block above.
+ */
+export function spectrogramBudgetRefusal(estimate: SpectrogramCostEstimate): string | null {
+    if (estimate.inputSamples > INTERACTIVE_COMPUTE_LIMITS.spectrogramInputSamples) {
+        return `Zoom in to compute the spectrogram: the visible window needs ${formatSampleCount(estimate.inputSamples)} gradient samples.`;
+    }
+    if (estimate.totalCells > INTERACTIVE_COMPUTE_LIMITS.spectrogramTotalCells) {
+        return `Zoom in or widen the frequency resolution: this spectrogram would need ${formatSampleCount(estimate.totalCells)} cells.`;
+    }
+    if (estimate.fftPoints > INTERACTIVE_COMPUTE_LIMITS.spectrogramFftPoints) {
+        return `Reduce the window length or zero-padding: a ${estimate.fftPoints}-point FFT exceeds the interactive limit.`;
+    }
+    return null;
+}
+
+export interface AudioCostEstimate {
+    sampleRate: number;
+    frames: number;
+    /** Frames across both channels — what `audioSamples` bounds. */
+    totalSamples: number;
+    durationSec: number;
+}
+
+export function estimateAudioCost(
+    startSec: number,
+    endSec: number,
+    sampleRate: number,
+): AudioCostEstimate {
+    const fs = sampleRate > 0 ? sampleRate : 44100;
+    const durationSec = Math.max(0, (Number.isFinite(endSec) ? endSec : 0) - (Number.isFinite(startSec) ? startSec : 0));
+    const frames = Math.floor(durationSec * fs + 1e-9) + 1;
+    return { sampleRate: fs, frames, totalSamples: frames * 2, durationSec };
+}
+
+/** Refusal reason for an audio request, or `null` when it fits. */
+export function audioBudgetRefusal(estimate: AudioCostEstimate): string | null {
+    if (estimate.totalSamples > INTERACTIVE_COMPUTE_LIMITS.audioSamples) {
+        return `The visible window is ${estimate.durationSec.toFixed(1)} s of audio, beyond the 120 s playback limit. Zoom in to play a shorter stretch.`;
+    }
+    return null;
 }

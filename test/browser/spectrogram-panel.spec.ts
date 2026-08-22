@@ -1,0 +1,608 @@
+import { resolve } from 'node:path';
+
+import { expect, test, type Locator, type Page } from '@playwright/test';
+
+interface PanelState {
+  mode: 'off' | 'kspace' | 'spectrogram';
+  open: boolean;
+  busy: boolean;
+  computeCount: number;
+  renderCount: number;
+  splitRatio: number;
+  colormap: string;
+  source: string;
+  fMin: number;
+  fMax: number;
+  windowLevel: { width: number; level: number };
+  windowLevelAuto: boolean;
+  markerTimeSec: number;
+  playheadTimeSec: number;
+  bands: number;
+  hotBands: number;
+  audioState: string;
+  audioAvailable: boolean;
+  tStartSec: number | null;
+  tEndSec: number | null;
+  viewStartSec: number;
+  viewEndSec: number;
+  nTime: number;
+  nFreq: number;
+  dtResolutionSec: number | null;
+  dfResolutionHz: number | null;
+  decimationFactor: number | null;
+  warnings: string[];
+  error: string | null;
+}
+
+declare global {
+  interface Window {
+    SeqEyesDev: {
+      panelMode(): string;
+      setPanelMode(mode: string): string;
+      spectrogramState(): PanelState;
+      spectrumAtMarker(): { columnIndex: number; timeSec: number; rss: number[] } | null;
+      setMarkerTime(t: number): void;
+      acousticBands(): { freqHz: number; bwHz: number }[];
+      setAcousticBands(bands: { freqHz: number; bwHz: number }[]): void;
+      audioState(): { state: string; playing: boolean; currentTimeSec: number; hasBuffer: boolean };
+      setAudioClock(fn: (() => number) | null): void;
+      setSplitRatio(r: number): void;
+      getSplitRatio(): number;
+    };
+    __seqeyesDebug: {
+      state(): { kOpen: boolean; totalDuration: number; panelMode: string };
+      setView(start: number, end: number): boolean;
+      showKspaceSafetyWarning(message: string): void;
+    };
+    __seqeyesTestClock?: number;
+  }
+}
+
+const fixtures = {
+  gre: resolve('test/kspace_baselines/v151_gre/seq/writeGradientEcho.seq'),
+  spiral: resolve('test/kspace_baselines/v151_spiral/seq/writeSpiral.seq'),
+};
+
+/** An ASC carrying acoustic resonances but no PNS coefficients (§8.2). */
+function acousticOnlyAsc(): string {
+  return [
+    'aflGCAcousticResonanceFrequency[0] = 550.0',
+    'aflGCAcousticResonanceBandwidth[0] = 100.0',
+    'aflGCAcousticResonanceFrequency[1] = 1150.0',
+    'aflGCAcousticResonanceBandwidth[1] = 220.0',
+    '',
+  ].join('\n');
+}
+
+const consoleFailures = new WeakMap<Page, string[]>();
+
+test.beforeEach(async ({ page }) => {
+  const failures: string[] = [];
+  consoleFailures.set(page, failures);
+  page.on('console', (message) => {
+    if (message.type() === 'error') failures.push(message.text());
+  });
+  page.on('pageerror', (error) => failures.push(error.message));
+});
+
+test.afterEach(async ({ page }) => {
+  expect(consoleFailures.get(page) ?? []).toEqual([]);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('cycles the panel button through k-space, spectrogram and closed', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  const button = page.locator('#panelBtn');
+  const right = page.locator('#right');
+
+  await expect(button).toHaveText('K-Space / Spectrum');
+  await expect(button).toHaveAttribute('aria-pressed', 'false');
+  await expect(right).not.toHaveClass(/open/);
+
+  await button.click();
+  await expect(button).toHaveText('K-Space ▸ Spectrogram');
+  await expect(button).toHaveAttribute('aria-pressed', 'true');
+  await expect(right).toHaveClass(/open/);
+  await expect(page.locator('#kpane')).toHaveClass(/on/);
+  await expect(page.locator('#spane')).not.toHaveClass(/on/);
+
+  await button.click();
+  await expect(button).toHaveText('Spectrogram ✕');
+  await expect(button).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#spane')).toHaveClass(/on/);
+  await expect(page.locator('#kpane')).not.toHaveClass(/on/);
+
+  await button.click();
+  await expect(button).toHaveText('K-Space / Spectrum');
+  await expect(button).toHaveAttribute('aria-pressed', 'false');
+  await expect(right).not.toHaveClass(/open/);
+});
+
+test('restores the persisted panel mode across a reload', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+
+  await page.reload();
+  await expect.poll(() => page.evaluate(() => window.SeqEyesDev.panelMode()), { timeout: 10_000 })
+    .toBe('spectrogram');
+  await expect(page.locator('#panelBtn')).toHaveText('Spectrogram ✕');
+});
+
+test('renders a spectrogram whose time range tracks the visible window', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+
+  const initial = await panelState(page);
+  expect(initial.nTime).toBeGreaterThan(0);
+  expect(initial.nFreq).toBeGreaterThan(0);
+  expect(initial.decimationFactor).toBeGreaterThan(1);
+  await expectCanvasVaried(page.locator('#sgImg'));
+
+  const total = (await page.evaluate(() => window.__seqeyesDebug.state())).totalDuration;
+  await page.evaluate((duration) => window.__seqeyesDebug.setView(duration * 0.3, duration * 0.4), total);
+  await settlePanel(page);
+
+  const wide = await panelState(page);
+  expect(wide.viewStartSec).toBeCloseTo(total * 0.3, 6);
+  expect(wide.viewEndSec).toBeCloseTo(total * 0.4, 6);
+  // Column centres sit inside the requested window.
+  expect(wide.tStartSec).toBeGreaterThanOrEqual(wide.viewStartSec - 1e-9);
+  expect(wide.tEndSec).toBeLessThanOrEqual(wide.viewEndSec + 1e-9);
+  // The auto rule keeps at least ~3 independent windows in view (§6.4).
+  expect(wide.dtResolutionSec!).toBeLessThanOrEqual((wide.viewEndSec - wide.viewStartSec) / 3 + 1e-9);
+
+  // Zooming further in trades frequency resolution for time resolution.
+  await page.evaluate((duration) => window.__seqeyesDebug.setView(duration * 0.3, duration * 0.32), total);
+  await settlePanel(page);
+  const narrow = await panelState(page);
+  expect(narrow.dtResolutionSec!).toBeLessThan(wide.dtResolutionSec!);
+  expect(narrow.dfResolutionHz!).toBeGreaterThan(wide.dfResolutionHz!);
+  expect(narrow.warnings.some(warning => warning.startsWith('Short view'))).toBe(true);
+});
+
+test('serves an unchanged view from cache instead of recomputing', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+
+  const total = (await page.evaluate(() => window.__seqeyesDebug.state())).totalDuration;
+  await page.evaluate((duration) => window.__seqeyesDebug.setView(duration * 0.2, duration * 0.5), total);
+  await settlePanel(page);
+
+  const before = (await panelState(page)).computeCount;
+  // Away and back: the second view is a cache hit.
+  await page.evaluate((duration) => window.__seqeyesDebug.setView(duration * 0.6, duration * 0.9), total);
+  await expect.poll(async () => (await panelState(page)).computeCount, { timeout: 15_000 })
+    .toBeGreaterThan(before);
+  await settlePanel(page);
+  const afterMove = (await panelState(page)).computeCount;
+
+  await page.evaluate((duration) => window.__seqeyesDebug.setView(duration * 0.2, duration * 0.5), total);
+  await page.waitForTimeout(500);
+  expect((await panelState(page)).computeCount).toBe(afterMove);
+});
+
+test('adjusts window and level on middle-drag without recomputing', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+  await expectCanvasVaried(page.locator('#sgImg'));
+  await settlePanel(page);
+
+  const before = await panelState(page);
+  const beforePixels = await samplePixels(page.locator('#sgImg'));
+  const box = await requireBox(page.locator('#sgOvl'));
+
+  await page.mouse.move(box.x + box.width * 0.6, box.y + box.height * 0.5);
+  await page.mouse.down({ button: 'middle' });
+  for (let i = 1; i <= 30; i++) {
+    await page.mouse.move(
+      box.x + box.width * 0.6 - i * 2,
+      box.y + box.height * 0.5 + i * 1.5,
+    );
+  }
+  await page.mouse.up({ button: 'middle' });
+
+  const after = await panelState(page);
+  expect(after.windowLevelAuto).toBe(false);
+  expect(after.windowLevel.width).not.toBeCloseTo(before.windowLevel.width, 3);
+  // Window/level is a LUT re-index, never a recompute.
+  expect(after.computeCount).toBe(before.computeCount);
+  expect(await samplePixels(page.locator('#sgImg'))).not.toEqual(beforePixels);
+
+  await page.locator('#sgWlReset').click();
+  await expect.poll(async () => (await panelState(page)).windowLevelAuto).toBe(true);
+  await expect.poll(async () => (await panelState(page)).windowLevel.width)
+    .toBeCloseTo(before.windowLevel.width, 3);
+});
+
+test('places a marker on right-click and fills the four spectrum traces', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+  await expectCanvasVaried(page.locator('#sgImg'));
+
+  // With no marker the second pane shows the view average, never nothing.
+  const averaged = await page.evaluate(() => window.SeqEyesDev.spectrumAtMarker());
+  expect(averaged).not.toBeNull();
+  expect(averaged!.columnIndex).toBe(-1);
+
+  const box = await requireBox(page.locator('#sgOvl'));
+  await page.mouse.click(box.x + box.width * 0.65, box.y + box.height * 0.5, { button: 'right' });
+
+  const state = await panelState(page);
+  expect(Number.isFinite(state.markerTimeSec)).toBe(true);
+  expect(state.markerTimeSec).toBeGreaterThan(state.viewStartSec);
+  expect(state.markerTimeSec).toBeLessThan(state.viewEndSec);
+
+  const slice = await page.evaluate(() => window.SeqEyesDev.spectrumAtMarker());
+  expect(slice).not.toBeNull();
+  expect(slice!.columnIndex).toBeGreaterThanOrEqual(0);
+  expect(slice!.rss.length).toBe(state.nFreq);
+  await expectCanvasVaried(page.locator('#spCanvas'));
+
+  // Escape clears the marker and returns the pane to the view average.
+  await page.locator('#sgOvl').press('Escape');
+  await expect.poll(async () => Number.isFinite((await panelState(page)).markerTimeSec)).toBe(false);
+  const cleared = await page.evaluate(() => window.SeqEyesDev.spectrumAtMarker());
+  expect(cleared!.columnIndex).toBe(-1);
+});
+
+test('draws acoustic bands on both sub-panes and labels the ASC button', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+  await expectCanvasVaried(page.locator('#sgImg'));
+
+  await expect(page.locator('#pnsBtn')).toHaveText('Load ASC (PNS/Acoustic)');
+  const chooserPromise = page.waitForEvent('filechooser');
+  await page.locator('#pnsBtn').click();
+  const chooser = await chooserPromise;
+  await chooser.setFiles({
+    name: 'acoustic-only.asc',
+    mimeType: 'text/plain',
+    buffer: Buffer.from(acousticOnlyAsc()),
+  });
+
+  await expect.poll(async () => (await panelState(page)).bands, { timeout: 15_000 }).toBe(2);
+  await expect(page.locator('#pnsBtn')).toHaveText('ASC: acoustic-only');
+  // Acoustic-only: PNS is reported missing, but the bands still load.
+  await expect(page.locator('#viewerNotice')).toContainText('PNS coefficients are missing');
+
+  await expect(page.locator('#sgLegend .li').filter({ hasText: 'Acoustic bands (2)' })).toBeVisible();
+  await expectCanvasVaried(page.locator('#sgOvl'));
+  await expectCanvasVaried(page.locator('#spCanvas'));
+
+  const bands = await page.evaluate(() => window.SeqEyesDev.acousticBands());
+  expect(bands).toEqual([{ freqHz: 550, bwHz: 100 }, { freqHz: 1150, bwHz: 220 }]);
+});
+
+test('reports bands that fall outside the displayed frequency range', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+
+  await page.evaluate(() => window.SeqEyesDev.setAcousticBands([
+    { freqHz: 550, bwHz: 100 },
+    { freqHz: 8000, bwHz: 300 },
+  ]));
+
+  await expect(page.locator('#viewerNotice'))
+    .toContainText('1 resonance band is outside the displayed frequency range');
+});
+
+test('changes the colormap without recomputing the matrix', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+  await expectCanvasVaried(page.locator('#sgImg'));
+  await settlePanel(page);
+
+  const before = await panelState(page);
+  const beforePixels = await samplePixels(page.locator('#sgImg'));
+  expect(before.colormap).toBe('viridis');
+
+  await page.locator('#sgCmap').selectOption('magma');
+  await expect.poll(async () => (await panelState(page)).colormap).toBe('magma');
+  expect((await panelState(page)).computeCount).toBe(before.computeCount);
+  await expect.poll(async () => await samplePixels(page.locator('#sgImg')))
+    .not.toEqual(beforePixels);
+});
+
+test('recomputes when the frequency ceiling or the source changes', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+  await settlePanel(page);
+
+  const baseline = await panelState(page);
+  expect(baseline.fMax).toBeCloseTo(3000, 3);
+
+  await page.locator('#sgFMax').fill('1500');
+  await page.locator('#sgFMax').press('Enter');
+  await expect.poll(async () => (await panelState(page)).fMax, { timeout: 15_000 }).toBeCloseTo(1500, 3);
+  // A lower ceiling means more aggressive decimation.
+  await expect.poll(async () => (await panelState(page)).decimationFactor, { timeout: 15_000 })
+    .toBeGreaterThan(baseline.decimationFactor!);
+
+  await page.locator('#sgSource').selectOption('dGdt');
+  await expect.poll(async () => (await panelState(page)).source, { timeout: 15_000 }).toBe('dGdt');
+  await expectCanvasVaried(page.locator('#sgImg'));
+
+  await page.locator('#sgFit').click();
+  await expect.poll(async () => (await panelState(page)).fMax, { timeout: 15_000 }).toBeCloseTo(3000, 3);
+});
+
+test('persists the split ratio and flips its direction with the orientation', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+
+  expect((await panelState(page)).splitRatio).toBeCloseTo(0.75, 3);   // 3:1 default
+
+  await page.evaluate(() => window.SeqEyesDev.setSplitRatio(0.5));
+  await expect.poll(async () => (await panelState(page)).splitRatio).toBeCloseTo(0.5, 3);
+  const landscapeHeights = await paneSizes(page);
+  // Docked right: the panes stack, so the split runs up/down.
+  expect(landscapeHeights.spectrogram.width).toBeCloseTo(landscapeHeights.spectrum.width, 0);
+  expect(landscapeHeights.spectrogram.height).toBeGreaterThan(0);
+
+  await page.setViewportSize({ width: 700, height: 1000 });
+  await expect.poll(async () => await page.evaluate(() => document.body.classList.contains('layout-vertical')),
+    { timeout: 10_000 }).toBe(true);
+  await page.waitForTimeout(400);
+  const portraitSizes = await paneSizes(page);
+  // Docked bottom: the panes sit side by side, so the split runs left/right.
+  expect(portraitSizes.spectrogram.height).toBeCloseTo(portraitSizes.spectrum.height, 0);
+  expect(portraitSizes.spectrogram.width).toBeGreaterThan(0);
+  // Each orientation keeps its own ratio; portrait has not been set, so 3:1.
+  expect((await panelState(page)).splitRatio).toBeCloseTo(0.75, 3);
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect.poll(async () => (await panelState(page)).splitRatio, { timeout: 10_000 })
+    .toBeCloseTo(0.5, 3);
+});
+
+test('offers the spectrogram as a way out of the k-space safety dialog', async ({ page }) => {
+  await page.goto('/?debug=1');
+  await page.locator('#splash').evaluate(element => { (element as HTMLElement).style.display = 'none'; });
+  await page.evaluate(() => {
+    window.__seqeyesDebug.showKspaceSafetyWarning(
+      'K-space was skipped for 20.0M raster samples. Estimated peak memory: approximately 2.7 GiB (host-dependent).',
+    );
+  });
+
+  await page.locator('#viewerNotice').locator('button', { hasText: 'Calculate anyway' }).click();
+  const dialog = page.locator('#kspaceSafetyOverlay');
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('#kspaceSafetySpectrogram')).toBeVisible();
+
+  await dialog.locator('#kspaceSafetySpectrogram').click();
+  await expect(dialog).toBeHidden();
+  // The spectrogram is view-windowed, so it stays reachable where k-space is not.
+  await expect.poll(() => page.evaluate(() => window.SeqEyesDev.panelMode())).toBe('spectrogram');
+  await expect(page.locator('#panelBtn')).toHaveText('Spectrogram ✕');
+});
+
+test('advances the playhead and the spectrum slice from the audio clock', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+  // Long enough that playback neither loops (D4 kicks in under 250 ms) nor
+  // reaches the end of the buffer while the test is still stepping its clock:
+  // the injected clock controls the reported position, but the real
+  // AudioContext still ends the source on its own schedule.
+  await page.evaluate(() => window.__seqeyesDebug.setView(0, 1.5));
+  await settlePanel(page);
+
+  // A fake clock keeps CI off a real audio device while still exercising the
+  // real AudioContext path: playback is driven by ctx.currentTime, not frames.
+  await page.evaluate(() => {
+    window.__seqeyesTestClock = 0;
+    window.SeqEyesDev.setAudioClock(() => window.__seqeyesTestClock!);
+  });
+
+  await page.locator('#sgPlay').click();
+  await expect.poll(async () => (await page.evaluate(() => window.SeqEyesDev.audioState())).hasBuffer,
+    { timeout: 20_000 }).toBe(true);
+  await expect.poll(async () => (await panelState(page)).audioState, { timeout: 10_000 }).toBe('playing');
+
+  const readings: number[] = [];
+  for (let i = 1; i <= 4; i++) {
+    await page.evaluate((seconds) => { window.__seqeyesTestClock = seconds; }, i * 0.02);
+    await page.waitForTimeout(120);
+    readings.push((await panelState(page)).playheadTimeSec);
+  }
+  for (let i = 1; i < readings.length; i++) {
+    expect(readings[i]).toBeGreaterThan(readings[i - 1]);
+  }
+
+  await page.locator('#sgStop').click();
+  await expect.poll(async () => (await panelState(page)).audioState).toBe('idle');
+  await expect.poll(async () => Number.isFinite((await panelState(page)).playheadTimeSec)).toBe(false);
+});
+
+test('stops playback when the panel leaves spectrogram mode', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+  await page.evaluate(() => window.__seqeyesDebug.setView(0, 1.5));
+  await settlePanel(page);
+
+  await page.evaluate(() => {
+    window.__seqeyesTestClock = 0;
+    window.SeqEyesDev.setAudioClock(() => window.__seqeyesTestClock!);
+  });
+  await page.locator('#sgPlay').click();
+  await expect.poll(async () => (await panelState(page)).audioState, { timeout: 20_000 }).toBe('playing');
+
+  await page.locator('#panelBtn').click();   // -> off
+  await expect.poll(async () => (await panelState(page)).audioState).toBe('idle');
+});
+
+test('mirrors the panel marker onto the waveform panel', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+  await settlePanel(page);
+
+  expect(await opaquePixelCount(page.locator('#moc'))).toBe(0);
+  const state = await panelState(page);
+  await page.evaluate((t) => window.SeqEyesDev.setMarkerTime(t),
+    (state.viewStartSec + state.viewEndSec) / 2);
+
+  await expect.poll(async () => await opaquePixelCount(page.locator('#moc')), { timeout: 10_000 })
+    .toBeGreaterThan(0);
+
+  await page.evaluate(() => window.SeqEyesDev.setMarkerTime(NaN));
+  await expect.poll(async () => await opaquePixelCount(page.locator('#moc'))).toBe(0);
+});
+
+test('shows a readout with the achieved time and frequency resolution', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+  await settlePanel(page);
+
+  const readout = page.locator('#sgReadout');
+  await expect(readout).toContainText('dt ');
+  await expect(readout).toContainText('df ');
+  await expect(readout).toContainText('mT/m');
+  await expect(readout).toContainText('view average');
+});
+
+test('resizes the spectrogram canvases from the outer panel handle', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+
+  const before = await canvasSize(page.locator('#sgImg'));
+  expect(before.width).toBeGreaterThan(0);
+
+  const handle = await requireBox(page.locator('#khandle'));
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+  await page.mouse.down();
+  for (let i = 1; i <= 10; i++) {
+    await page.mouse.move(handle.x + handle.width / 2 - i * 12, handle.y + handle.height / 2);
+  }
+  await page.mouse.up();
+
+  // The handle used to drive only the k-space pane, leaving the spectrogram
+  // canvases at their old size (and drawing into a hidden pane).
+  await expect.poll(async () => (await canvasSize(page.locator('#sgImg'))).width, { timeout: 10_000 })
+    .toBeGreaterThan(before.width);
+  await expect.poll(async () => (await canvasSize(page.locator('#spCanvas'))).width, { timeout: 10_000 })
+    .toBeGreaterThan(0);
+  await expectCanvasVaried(page.locator('#sgImg'));
+
+  // And the new size survives a reload.
+  await page.reload();
+  await expect.poll(() => page.evaluate(() => window.SeqEyesDev.panelMode()), { timeout: 10_000 })
+    .toBe('spectrogram');
+  await expect.poll(async () => (await requireBox(page.locator('#right'))).width, { timeout: 10_000 })
+    .toBeGreaterThan(520);
+});
+
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+async function loadViewer(page: Page, fixturePath: string): Promise<void> {
+  await page.goto('/?debug=1');
+  await page.locator('#fileInput').setInputFiles(fixturePath);
+  await expect(page.locator('#exportKspaceBtn')).toBeEnabled({ timeout: 60_000 });
+  await expect(page.locator('#splash')).toBeHidden({ timeout: 10_000 });
+  await expect(page.locator('#poverlay')).toBeHidden({ timeout: 10_000 });
+}
+
+async function openSpectrogram(page: Page): Promise<void> {
+  await page.evaluate(() => window.SeqEyesDev.setPanelMode('spectrogram'));
+  await expect(page.locator('#spane')).toHaveClass(/on/);
+  await expect(page.locator('#right')).toHaveClass(/open/);
+  await expect.poll(async () => (await panelState(page)).nTime, { timeout: 20_000 }).toBeGreaterThan(0);
+  await settlePanel(page);
+}
+
+/**
+ * Wait until the panel stops moving.
+ *
+ * Opening #right narrows #left, which genuinely changes the visible time
+ * window while the 250 ms width transition runs, so the spectrogram
+ * legitimately recomputes several times. Measurements taken mid-animation
+ * are measurements of a moving target, not of the feature.
+ */
+async function settlePanel(page: Page): Promise<void> {
+  await expect.poll(async () => {
+    const before = await panelState(page);
+    await page.waitForTimeout(400);
+    const after = await panelState(page);
+    const stable = !after.busy
+      && before.computeCount === after.computeCount
+      && before.viewStartSec === after.viewStartSec
+      && before.viewEndSec === after.viewEndSec;
+    return stable ? 'settled' : 'moving';
+  }, { timeout: 25_000 }).toBe('settled');
+}
+
+async function panelState(page: Page): Promise<PanelState> {
+  return await page.evaluate(() => window.SeqEyesDev.spectrogramState());
+}
+
+async function paneSizes(page: Page): Promise<{
+  spectrogram: { width: number; height: number };
+  spectrum: { width: number; height: number };
+}> {
+  const spectrogram = await requireBox(page.locator('#sgPane'));
+  const spectrum = await requireBox(page.locator('#spPane'));
+  return {
+    spectrogram: { width: spectrogram.width, height: spectrogram.height },
+    spectrum: { width: spectrum.width, height: spectrum.height },
+  };
+}
+
+async function samplePixels(locator: Locator): Promise<string> {
+  return await locator.evaluate((element) => {
+    const canvas = element as HTMLCanvasElement;
+    const context = canvas.getContext('2d');
+    if (!context || !canvas.width || !canvas.height) return '';
+    const image = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    const step = Math.max(4, (Math.floor(image.length / 4 / 400) * 4) || 4);
+    const parts: string[] = [];
+    for (let i = 0; i < image.length; i += step) {
+      parts.push(`${image[i]},${image[i + 1]},${image[i + 2]},${image[i + 3]}`);
+    }
+    return parts.join('|');
+  });
+}
+
+/** Non-transparent pixel count — finds thin overlay strokes a stride misses. */
+async function opaquePixelCount(locator: Locator): Promise<number> {
+  return await locator.evaluate((element) => {
+    const canvas = element as HTMLCanvasElement;
+    const context = canvas.getContext('2d');
+    if (!context || !canvas.width || !canvas.height) return 0;
+    const image = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    let count = 0;
+    for (let i = 3; i < image.length; i += 4) if (image[i] > 8) count++;
+    return count;
+  });
+}
+
+async function canvasSize(locator: Locator): Promise<{ width: number; height: number }> {
+  return await locator.evaluate((element) => {
+    const canvas = element as HTMLCanvasElement;
+    return { width: canvas.width, height: canvas.height };
+  });
+}
+
+async function expectCanvasVaried(locator: Locator): Promise<void> {
+  await expect.poll(async () => {
+    return await locator.evaluate((element) => {
+      const canvas = element as HTMLCanvasElement;
+      if (!canvas.width || !canvas.height) return false;
+      const context = canvas.getContext('2d');
+      if (!context) return false;
+      const image = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      let first = '';
+      for (let i = 0; i < image.length; i += 4) {
+        const key = `${image[i]},${image[i + 1]},${image[i + 2]},${image[i + 3]}`;
+        if (!first) first = key;
+        else if (key !== first) return true;
+      }
+      return false;
+    });
+  }, { timeout: 15_000 }).toBe(true);
+}
+
+async function requireBox(locator: Locator): Promise<{ x: number; y: number; width: number; height: number }> {
+  const box = await locator.boundingBox();
+  expect(box).not.toBeNull();
+  return box!;
+}
