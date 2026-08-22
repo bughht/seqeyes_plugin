@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
@@ -12,9 +12,12 @@ const demoFiles = findSeqFiles(demoDir);
 
 describe('SeqEyes demo sequence smoke coverage', () => {
   it('covers the copied SeqEyes demo sequence set', () => {
+    // findSeqFiles builds paths with path.join, so nested entries use the
+    // platform separator: a literal 'v142/...' never matches on Windows.
+    const posixPaths = demoFiles.map((file) => file.split(sep).join('/'));
     expect(demoFiles.length).toBeGreaterThanOrEqual(30);
-    expect(demoFiles.some((file) => file.endsWith('writeRadialGradientEcho_rotExt.seq'))).toBe(true);
-    expect(demoFiles.some((file) => file.endsWith('v142/writeGradientEcho.seq'))).toBe(true);
+    expect(posixPaths.some((file) => file.endsWith('writeRadialGradientEcho_rotExt.seq'))).toBe(true);
+    expect(posixPaths.some((file) => file.endsWith('v142/writeGradientEcho.seq'))).toBe(true);
   });
 
   it.each(demoFiles)('parses, decodes, and calculates finite k-space when ADC exists: %s', (relativePath) => {
