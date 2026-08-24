@@ -653,6 +653,7 @@ function applyKspaceResult(ks){
   kTraj=[ks.ktraj[0],ks.ktraj[1],ks.ktraj[2]];kTime=ks.t_ktraj;
   kAdc=[ks.ktraj_adc[0],ks.ktraj_adc[1],ks.ktraj_adc[2]];kAdcTime=ks.t_adc;
   uploadKSpaceGPU();drawKs();
+  if(typeof SeqEyesPanel!=='undefined'&&SeqEyesPanel.refreshKspace)SeqEyesPanel.refreshKspace();
 }
 function ensureDecodedBlocks(){
   if(!decodedBlocks&&currentSequence)decodedBlocks=Pulseq.decodeAllBlocks(currentSequence);
@@ -749,6 +750,7 @@ function loadSequenceSource(sourceBytes,fileName,parseSource){
     document.title='SeqEyes: '+name.replace(/\.(?:seq|bseq)$/i,'');
     if(splash)splash.style.display='none';
     SeqEyesPanel.onSequenceLoaded();
+    requestAnimationFrame(function(){refreshLayout();draw();drawKs();drawMinimap();});
     return true;
   }catch(err){
     alert('Error loading sequence: '+(err.message||String(err)));

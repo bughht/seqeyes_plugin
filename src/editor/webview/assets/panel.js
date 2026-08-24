@@ -1420,6 +1420,15 @@ var SeqEyesPanel = (function () {
     if (panelMode === 'off') setMode('kspace', { force: true });
   }
 
+  /** Re-run geometry after deferred k-space work releases the UI thread. */
+  function refreshKspace() {
+    if (panelMode !== 'kspace') return;
+    var h = activeHost();
+    applyPanelGeometry();
+    if (h && h.refreshLayout) h.refreshLayout();
+    if (h && h.onKspaceShown) requestAnimationFrame(function () { h.onKspaceShown(); });
+  }
+
   function install(newHost) {
     host = newHost || window.SeqEyesPanelHost || null;
     wire();
@@ -1436,6 +1445,7 @@ var SeqEyesPanel = (function () {
     cycle: cycle,
     restoreMode: restoreMode,
     showKspaceIfClosed: showKspaceIfClosed,
+    refreshKspace: refreshKspace,
     onViewChanged: onViewChanged,
     onSequenceLoaded: onSequenceLoaded,
     onThemeChanged: onThemeChanged,

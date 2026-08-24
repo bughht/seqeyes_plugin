@@ -312,11 +312,13 @@ window.addEventListener('message',function(e){
     draw();drawKs();drawMinimap();
     setExportButtonEnabled(true);
     SeqEyesPanel.onSequenceLoaded();
+    requestAnimationFrame(function(){refreshLayout();draw();drawKs();drawMinimap();});
   }else if(m.type==='loadError'){
     showSequenceLoadFailure(m.message||'The sequence could not be loaded.');
   }else if(m.type==='kspaceData'){
     applySerializedKspace(m.kspace);finishDangerousKspaceCalculation(null);drawKs();
     SeqEyesPanel.showKspaceIfClosed();
+    SeqEyesPanel.refreshKspace();
   }else if(m.type==='kspaceError'){
     finishDangerousKspaceCalculation(m.message||'Unknown error.');
   }else if(m.type==='m1Data'){
