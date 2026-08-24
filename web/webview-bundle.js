@@ -3509,6 +3509,7 @@ var SeqEyesAudio = (function () {
   function hasBuffer() { return !!buffer; }
 
   function bufferDurationSec() { return buffer ? buffer.duration : 0; }
+  function auditionDurationSec() { return playbackTotalSec; }
 
   /**
    * Start (or restart) playback at `offsetSec` into the buffer.
@@ -3651,6 +3652,7 @@ var SeqEyesAudio = (function () {
     load: load,
     hasBuffer: hasBuffer,
     bufferDurationSec: bufferDurationSec,
+    auditionDurationSec: auditionDurationSec,
     play: play,
     pause: pause,
     stop: stop,
@@ -3753,13 +3755,15 @@ var SeqEyesPanel = (function () {
 
   var audioRequestId = 0;
   var pendingAudioId = 0;
-  var audioWindow = null;       // {startSec, endSec, boundedPreview}
+  var audioWindow = null;       // buffered range plus the first-pass offset
   var playheadFrame = 0;
 
   var AUDIO_SAMPLE_RATE = 44100;
   var AUDIO_SAMPLE_VALUE_LIMIT = 5400000;
   var AUDIO_PREVIEW_MAX_SEC = 30;
   var AUDIO_FULL_RANGE_MAX_SEC = (AUDIO_SAMPLE_VALUE_LIMIT / 2 - 1) / AUDIO_SAMPLE_RATE;
+  var AUDIO_LOOP_THRESHOLD_SEC = 0.25;
+  var AUDIO_LOOP_TARGET_SEC = 1.0;
 
   var imageCache = null;
   var imageDirty = true;
@@ -4391,18 +4395,24 @@ var SeqEyesPanel = (function () {
   function audioRange() {
     var view = hostView();
     var tolerance = Math.max(1e-9, Math.abs(view.endSec - view.startSec) * 1e-9);
+    var viewSpan = view.endSec - view.startSec;
     var markerInside = isFinite(markerTimeSec)
       && markerTimeSec >= view.startSec - tolerance
       && markerTimeSec < view.endSec - tolerance;
     // Replaying at this view's endpoint wraps to its start. A retained position
     // still resumes normally when a moved viewport contains it in the interior.
-    var start = markerInside ? Math.max(view.startSec, markerTimeSec) : view.startSec;
+    var resumeStart = markerInside ? Math.max(view.startSec, markerTimeSec) : view.startSec;
+    // A short audition needs the complete visible buffer so only its first pass
+    // starts at the retained position; later repeats return to the window start.
+    var loops = viewSpan < AUDIO_LOOP_THRESHOLD_SEC;
+    var start = loops ? view.startSec : resumeStart;
     var requestedEnd = view.endSec;
     var boundedPreview = requestedEnd - start > AUDIO_FULL_RANGE_MAX_SEC;
     return {
       startSec: start,
       endSec: boundedPreview ? Math.min(requestedEnd, start + AUDIO_PREVIEW_MAX_SEC) : requestedEnd,
-      boundedPreview: boundedPreview
+      boundedPreview: boundedPreview,
+      initialOffsetSec: loops ? Math.max(0, resumeStart - start) : 0
     };
   }
 
@@ -4436,10 +4446,14 @@ var SeqEyesPanel = (function () {
     syncTransport();
   }
 
-  /** D4: a window shorter than 250 ms loops until roughly a second has run. */
+  /** D4: complete short-window repeats extend the audition to at least one second. */
   function playbackLengthSec(range) {
     var span = range.endSec - range.startSec;
-    return span < 0.25 ? Math.max(span, 1.0) : span;
+    var offset = Math.max(0, Math.min(span, range.initialOffsetSec || 0));
+    var firstPass = span - offset;
+    if (!(span < AUDIO_LOOP_THRESHOLD_SEC)) return firstPass;
+    var repeats = Math.max(0, Math.ceil((AUDIO_LOOP_TARGET_SEC - firstPass) / span - 1e-9));
+    return firstPass + repeats * span;
   }
 
   function deliverAudio(id, payload) {
@@ -4480,7 +4494,7 @@ var SeqEyesPanel = (function () {
       syncTransport();
       render();
     });
-    SeqEyesAudio.play(0, playbackLengthSec(range));
+    SeqEyesAudio.play(range.initialOffsetSec || 0, playbackLengthSec(range));
     startPlayheadLoop();
     syncTransport();
   }
@@ -5259,7 +5273,8 @@ window.SeqEyesDev.audioState = function () {
     playing: SeqEyesAudio.isPlaying(),
     currentTimeSec: SeqEyesAudio.currentTimeSec(),
     hasBuffer: SeqEyesAudio.hasBuffer(),
-    durationSec: SeqEyesAudio.bufferDurationSec()
+    durationSec: SeqEyesAudio.bufferDurationSec(),
+    auditionDurationSec: SeqEyesAudio.auditionDurationSec()
   };
 };
 window.SeqEyesDev.setAudioClock = function (fn) { SeqEyesAudio.setClock(fn); };

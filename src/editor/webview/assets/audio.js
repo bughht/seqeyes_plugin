@@ -100,6 +100,7 @@ var SeqEyesAudio = (function () {
   function hasBuffer() { return !!buffer; }
 
   function bufferDurationSec() { return buffer ? buffer.duration : 0; }
+  function auditionDurationSec() { return playbackTotalSec; }
 
   /**
    * Start (or restart) playback at `offsetSec` into the buffer.
@@ -242,6 +243,7 @@ var SeqEyesAudio = (function () {
     load: load,
     hasBuffer: hasBuffer,
     bufferDurationSec: bufferDurationSec,
+    auditionDurationSec: auditionDurationSec,
     play: play,
     pause: pause,
     stop: stop,

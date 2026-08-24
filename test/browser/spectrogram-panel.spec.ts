@@ -54,6 +54,7 @@ declare global {
         currentTimeSec: number;
         hasBuffer: boolean;
         durationSec: number;
+        auditionDurationSec: number;
       };
       setAudioClock(fn: (() => number) | null): void;
       setSplitRatio(r: number): void;
@@ -507,6 +508,44 @@ test('preserves short-window loop boundaries across pause and resume', async ({ 
   const resumed = await page.evaluate(() => window.SeqEyesDev.audioState());
   const expectedOffset = ((paused.markerTimeSec - rangeStart) + 0.06) % audio.durationSec;
   expect(resumed.currentTimeSec).toBeCloseTo(rangeStart + expectedOffset, 3);
+  await page.evaluate(() => window.SeqEyesPanel.stopPlayback());
+});
+
+test('resumes a short audition once, then repeats the complete visible window', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+  await page.evaluate(() => window.__seqeyesDebug.setView(0.2, 0.3));
+  await settlePanel(page);
+  await page.evaluate(() => {
+    window.SeqEyesDev.setMarkerTime(0.26);
+    window.__seqeyesTestClock = 0;
+    window.SeqEyesDev.setAudioClock(() => window.__seqeyesTestClock!);
+  });
+  const before = await panelState(page);
+
+  await page.locator('#sgPlay').click();
+  await expect.poll(async () => (await panelState(page)).audioState, { timeout: 20_000 }).toBe('playing');
+
+  const range = await panelState(page);
+  const audio = await page.evaluate(() => window.SeqEyesDev.audioState());
+  expect(range.audioWindowStartSec).toBeCloseTo(0.2, 9);
+  expect(range.audioWindowEndSec).toBeCloseTo(0.3, 9);
+  expect(audio.durationSec).toBeCloseTo(0.1, 3);
+  expect(audio.currentTimeSec).toBeCloseTo(before.markerTimeSec, 3);
+  const span = before.viewEndSec - before.viewStartSec;
+  const firstPass = before.viewEndSec - before.markerTimeSec;
+  const repeats = Math.ceil((1 - firstPass) / span - 1e-9);
+  expect(audio.auditionDurationSec).toBeCloseTo(firstPass + repeats * span, 3);
+
+  await page.evaluate(() => { window.__seqeyesTestClock = 0.03; });
+  expect((await page.evaluate(() => window.SeqEyesDev.audioState())).currentTimeSec)
+    .toBeCloseTo(before.markerTimeSec + 0.03, 3);
+
+  await page.evaluate(() => { window.__seqeyesTestClock = 0.05; });
+  const wrapped = before.viewStartSec
+    + ((before.markerTimeSec - before.viewStartSec + 0.05) % span);
+  expect((await page.evaluate(() => window.SeqEyesDev.audioState())).currentTimeSec)
+    .toBeCloseTo(wrapped, 3);
   await page.evaluate(() => window.SeqEyesPanel.stopPlayback());
 });
 
