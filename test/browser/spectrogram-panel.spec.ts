@@ -549,6 +549,28 @@ test('resumes a short audition once, then repeats the complete visible window', 
   await page.evaluate(() => window.SeqEyesPanel.stopPlayback());
 });
 
+test('wraps a resumed short audition to the window start on the browser audio clock', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+  await page.evaluate(() => window.__seqeyesDebug.setView(0.2, 0.3));
+  await settlePanel(page);
+  await page.evaluate(() => window.SeqEyesDev.setMarkerTime(0.26));
+  const before = await panelState(page);
+
+  await page.locator('#sgPlay').click();
+  await expect.poll(async () => (await panelState(page)).audioState, { timeout: 20_000 }).toBe('playing');
+
+  const positions: number[] = [];
+  for (let i = 0; i < 25; i++) {
+    positions.push((await page.evaluate(() => window.SeqEyesDev.audioState())).currentTimeSec);
+    await page.waitForTimeout(10);
+  }
+  expect(Math.max(...positions)).toBeGreaterThan(before.markerTimeSec + 0.02);
+  expect(Math.min(...positions)).toBeLessThan(before.markerTimeSec - 0.02);
+  expect(Math.min(...positions)).toBeGreaterThanOrEqual(before.viewStartSec - 0.002);
+  await page.evaluate(() => window.SeqEyesPanel.stopPlayback());
+});
+
 test('stops playback when the panel leaves spectrogram mode', async ({ page }) => {
   await loadViewer(page, fixtures.gre);
   await openSpectrogram(page);
