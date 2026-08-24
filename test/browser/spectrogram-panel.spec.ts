@@ -240,6 +240,43 @@ test('adjusts window and level on middle-drag without recomputing', async ({ pag
     .toBeCloseTo(before.windowLevel.width, 3);
 });
 
+test('centers Auto W/L on robust bounds and retains the prior scale for silent data', async ({ page }) => {
+  await page.goto('/?debug=1');
+  const result = await page.evaluate(() => {
+    const populated = new Float32Array(101);
+    populated.fill(1e-4, 0, 90);
+    populated.fill(1, 90);
+    const populatedSpec = {
+      nTime: 101,
+      nFreq: 1,
+      maxValue: 1,
+      data: { rss: populated },
+    };
+    const silentSpec = {
+      nTime: 4,
+      nFreq: 1,
+      maxValue: 0,
+      data: { rss: new Float32Array(4) },
+    };
+    const previous = { level: -23, width: 42 };
+    const autoWindowLevel = (window as any).sgAutoWindowLevel as (
+      spec: unknown,
+      key: string,
+      fallback: { level: number; width: number },
+    ) => { level: number; width: number };
+    return {
+      populated: autoWindowLevel(populatedSpec, 'rss', previous),
+      silent: autoWindowLevel(silentSpec, 'rss', previous),
+    };
+  });
+
+  // The robust interval is [-80, 0] dB. Its center is -40 dB; the old
+  // independent median calculation incorrectly centered this case at -80 dB.
+  expect(result.populated.level).toBeCloseTo(-40, 3);
+  expect(result.populated.width).toBeCloseTo(80, 3);
+  expect(result.silent).toEqual({ level: -23, width: 42 });
+});
+
 test('places a marker on right-click and fills the four spectrum traces', async ({ page }) => {
   await loadViewer(page, fixtures.gre);
   await openSpectrogram(page);

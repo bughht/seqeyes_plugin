@@ -2818,8 +2818,10 @@ function sgNiceTicks(lo, hi, target) {
  * matrix is half a million cells and sorting it on every first paint would be
  * the slowest step in the pipeline.
  */
-function sgAutoWindowLevel(spec, key) {
-  var fallback = { level: -40, width: 60 };
+function sgAutoWindowLevel(spec, key, previous) {
+  var fallback = previous && isFinite(previous.level) && isFinite(previous.width)
+    ? { level: previous.level, width: previous.width }
+    : { level: -40, width: 60 };
   if (!spec || !spec.nTime || !spec.nFreq) return fallback;
   var data = spec.data[key] || spec.data.rss;
   var n = data.length;
@@ -2836,9 +2838,10 @@ function sgAutoWindowLevel(spec, key) {
     var index = sgClamp(Math.round((samples.length - 1) * p), 0, samples.length - 1);
     return samples[index];
   }
-  var level = percentile(0.5);
-  var width = Math.max(6, percentile(0.995) - percentile(0.02));
-  return { level: level, width: width };
+  var lower = percentile(0.02);
+  var upper = percentile(0.995);
+  if (!(upper > lower + 1e-6)) return fallback;
+  return { level: (lower + upper) / 2, width: Math.max(6, upper - lower) };
 }
 
 /** Normalised display position of a magnitude under the current window/level. */
@@ -4115,7 +4118,7 @@ var SeqEyesPanel = (function () {
   function applySpectrogram(spec) {
     currentSpec = spec;
     currentView = { startSec: spec.requestedStartSec, endSec: spec.requestedEndSec };
-    if (windowLevelAuto) windowLevel = sgAutoWindowLevel(spec, 'rss');
+    if (windowLevelAuto) windowLevel = sgAutoWindowLevel(spec, 'rss', windowLevel);
     clampFrequencyRange();
     imageDirty = true;
     hotBands = sgDetectHotBands(spec, acousticBands, windowLevel, 'rss');
@@ -4414,7 +4417,7 @@ var SeqEyesPanel = (function () {
 
   function resetWindowLevel() {
     windowLevelAuto = true;
-    if (currentSpec) windowLevel = sgAutoWindowLevel(currentSpec, 'rss');
+    if (currentSpec) windowLevel = sgAutoWindowLevel(currentSpec, 'rss', windowLevel);
     imageDirty = true;
     if (currentSpec) hotBands = sgDetectHotBands(currentSpec, acousticBands, windowLevel, 'rss');
     render();

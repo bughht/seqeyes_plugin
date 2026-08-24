@@ -391,7 +391,7 @@ var SeqEyesPanel = (function () {
   function applySpectrogram(spec) {
     currentSpec = spec;
     currentView = { startSec: spec.requestedStartSec, endSec: spec.requestedEndSec };
-    if (windowLevelAuto) windowLevel = sgAutoWindowLevel(spec, 'rss');
+    if (windowLevelAuto) windowLevel = sgAutoWindowLevel(spec, 'rss', windowLevel);
     clampFrequencyRange();
     imageDirty = true;
     hotBands = sgDetectHotBands(spec, acousticBands, windowLevel, 'rss');
@@ -690,7 +690,7 @@ var SeqEyesPanel = (function () {
 
   function resetWindowLevel() {
     windowLevelAuto = true;
-    if (currentSpec) windowLevel = sgAutoWindowLevel(currentSpec, 'rss');
+    if (currentSpec) windowLevel = sgAutoWindowLevel(currentSpec, 'rss', windowLevel);
     imageDirty = true;
     if (currentSpec) hotBands = sgDetectHotBands(currentSpec, acousticBands, windowLevel, 'rss');
     render();
