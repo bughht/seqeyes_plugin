@@ -7,10 +7,12 @@
  *   2. Parses it via the Pulseq reader
  *   3. Detects TE/TR timing (from definitions or RF‑pulse estimation)
  *   4. Decodes all waveforms via the decoder
- *   5. Computes k‑space trajectory
- *   6. Packs the block data (see blockTransport.ts — scalars as JSON, waveform
+ *   5. Packs the block data (see blockTransport.ts — scalars as JSON, waveform
  *      samples as binary buffers) and sends it with timing metadata
- *   7. The webview renders an interactive Canvas diagram with minimap
+ *   6. The webview renders an interactive Canvas diagram with minimap
+ *
+ * K-space is deliberately calculated only when the analysis panel is opened,
+ * so initial waveform readiness does not wait for a derived result.
  */
 
 import * as vscode from 'vscode';
@@ -43,6 +45,7 @@ import {
     formatMemorySize,
     formatSampleCount,
     INTERACTIVE_COMPUTE_LIMITS,
+    kspaceExceedsInteractiveBudget,
     spectrogramBudgetRefusal,
 } from '../pulseq/computeBudget';
 import { downsampleM4 } from '../pulseq/displayDownsampling';
@@ -256,7 +259,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
             }
         };
 
-        // ── Core: parse, decode, compute k‑space, send ──
+        // ── Core: parse, decode, prepare waveforms, send ──
         const sendSequenceData = async (uri: vscode.Uri) => {
             try {
                 activeUri = uri;
@@ -284,35 +287,11 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     : 0;
                 activeTotalDuration = totalDur;
 
-                postProgress('kspace', 55, 'Computing k-space trajectory\u2026');
                 const sequenceNotices: string[] = [];
                 const kspaceEstimate = estimateKspaceCost(blocks, seq.rasterTimes.gradientRaster, totalDur);
                 const kspaceMemoryEstimate = formatMemorySize(estimateKspacePeakMemoryBytes(kspaceEstimate));
-                const kspaceOverBudget = (
-                    kspaceEstimate.rasterSamples > INTERACTIVE_COMPUTE_LIMITS.kspaceRasterSamples
-                    || kspaceEstimate.adcSamples > INTERACTIVE_COMPUTE_LIMITS.kspaceAdcSamples
-                    || kspaceEstimate.gridCandidatePoints > INTERACTIVE_COMPUTE_LIMITS.kspaceGridCandidates
-                );
-                let ks: KSpaceData | null = null;
-                let kspaceError: string | undefined;
+                const kspaceOverBudget = kspaceExceedsInteractiveBudget(kspaceEstimate);
                 let kspaceSafety: string | null = null;
-                if (!kspaceOverBudget) {
-                    try {
-                        ks = calculateKspace(
-                            blocks,
-                            seq.rasterTimes.gradientRaster,
-                            totalDur,
-                            0,
-                            {
-                                rfRaster: seq.rasterTimes.rfRaster,
-                                maxGridPoints: INTERACTIVE_COMPUTE_LIMITS.kspaceGridCandidates,
-                                maxAdcSamples: INTERACTIVE_COMPUTE_LIMITS.kspaceAdcSamples,
-                            },
-                        );
-                    } catch (err) {
-                        kspaceError = err instanceof Error ? err.message : String(err);
-                    }
-                }
                 if (kspaceOverBudget) {
                     kspaceSafety = (
                         'K-space was not calculated because this sequence exceeds the interactive safety budget '
@@ -320,10 +299,6 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                         + `${formatSampleCount(kspaceEstimate.adcSamples)} ADC samples). `
                         + `Estimated peak memory: approximately ${kspaceMemoryEstimate} (host-dependent).`
                     );
-                } else if (kspaceError) {
-                    sequenceNotices.push(`K-space calculation failed: ${kspaceError}. Zoom in to inspect waveform detail.`);
-                } else if (!ks) {
-                    sequenceNotices.push('K-space calculation did not complete. Zoom in to inspect waveform detail.');
                 }
 
                 postProgress('serialize', 85, 'Preparing data for display\u2026');
@@ -382,7 +357,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     rfRaster: seq.rasterTimes.rfRaster,
                     adcRaster: seq.rasterTimes.adcRaster,
                     blockRaster: seq.rasterTimes.blockDurationRaster,
-                    kspace: ks ? serializeKSpace(ks) : null,
+                    kspace: null,
                     kspaceSafety,
                     timing: {
                         trTimeSec: timing.trTimeSec,
@@ -418,9 +393,9 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     sequenceName: sourceName,
                     blockCount: seq.blocks.length,
                     totalDuration: totalDur,
-                    adcCount: ks?.t_adc.length ?? 0,
-                    kspaceSampleCount: ks?.t_ktraj.length ?? 0,
-                    hasKspace: !!ks,
+                    adcCount: kspaceEstimate.adcSamples,
+                    kspaceSampleCount: 0,
+                    hasKspace: false,
                     hasTiming: true,
                     panelTitle: panel.title,
                     loadedAt: new Date().toISOString(),
@@ -482,6 +457,47 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     if (!kspace) throw new Error('The calculation did not produce a trajectory.');
                     panel.webview.postMessage({ type: 'kspaceData', kspace: serializeKSpace(kspace) });
                     panel.webview.postMessage({ type: 'progress', phase: 'done', percent: 100, text: 'K-space ready' });
+                } catch (err) {
+                    panel.webview.postMessage({
+                        type: 'kspaceError',
+                        message: err instanceof Error ? err.message : String(err),
+                    });
+                    panel.webview.postMessage({ type: 'progress', phase: 'done', percent: 100, text: 'K-space failed' });
+                }
+            } else if (msg.command === 'calculateKspace') {
+                if (!activeBlocks.length || activeGradientRaster <= 0 || activeTotalDuration <= 0) {
+                    panel.webview.postMessage({ type: 'kspaceError', message: 'No sequence is loaded.' });
+                    return;
+                }
+                const estimate = estimateKspaceCost(activeBlocks, activeGradientRaster, activeTotalDuration);
+                if (kspaceExceedsInteractiveBudget(estimate)) {
+                    panel.webview.postMessage({
+                        type: 'kspaceError',
+                        message: 'K-space exceeds the interactive safety budget and requires explicit confirmation.',
+                    });
+                    return;
+                }
+                panel.webview.postMessage({ type: 'progress', phase: 'start', percent: 0, text: 'Calculating K-space…' });
+                try {
+                    const kspace = calculateKspace(
+                        activeBlocks,
+                        activeGradientRaster,
+                        activeTotalDuration,
+                        0,
+                        {
+                            rfRaster: activeRfRaster,
+                            maxGridPoints: INTERACTIVE_COMPUTE_LIMITS.kspaceGridCandidates,
+                            maxAdcSamples: INTERACTIVE_COMPUTE_LIMITS.kspaceAdcSamples,
+                        },
+                    );
+                    if (!kspace) throw new Error('The calculation did not produce a trajectory.');
+                    panel.webview.postMessage({ type: 'kspaceData', kspace: serializeKSpace(kspace) });
+                    panel.webview.postMessage({ type: 'progress', phase: 'done', percent: 100, text: 'K-space ready' });
+                    if (diagnosticState.lastLoad?.activeUri === activeUri.toString()) {
+                        diagnosticState.lastLoad.adcCount = kspace.t_adc.length;
+                        diagnosticState.lastLoad.kspaceSampleCount = kspace.t_ktraj.length;
+                        diagnosticState.lastLoad.hasKspace = true;
+                    }
                 } catch (err) {
                     panel.webview.postMessage({
                         type: 'kspaceError',

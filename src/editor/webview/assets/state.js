@@ -72,6 +72,11 @@ function requestDangerousKspaceCalculation(){
   if(!kspaceSafetyWarning||kspaceSafetyBusy)return;kspaceSafetyBusy=true;hideKspaceSafetyDialog();renderViewerNotices();
   if(vscApi)vscApi.postMessage({command:'calculateKspaceUnsafe'});
 }
+function requestKspaceCalculation(){
+  if(kspaceSafetyWarning||kspaceSafetyBusy||(kAdc&&kAdc[0]&&kAdc[0].length))return;
+  kspaceSafetyBusy=true;renderViewerNotices();
+  if(vscApi)vscApi.postMessage({command:'calculateKspace'});
+}
 function finishDangerousKspaceCalculation(error){
   kspaceSafetyBusy=false;
   if(!error){setViewerNotice('kspaceOverrideFailure',null);setKspaceSafetyWarning(null);return;}
@@ -817,6 +822,7 @@ window.SeqEyesPanelHost={
   getWaveformLeftMargin:function(){return M.l;},
   refreshLayout:function(){refreshLayout();},
   hasKspaceData:function(){return !!(kAdc&&kAdc[0]&&kAdc[0].length);},
+  requestKspace:function(){requestKspaceCalculation();},
   showKspaceSafetyDialog:function(){
     return typeof showKspaceSafetyDialog==='function'?showKspaceSafetyDialog():false;
   },

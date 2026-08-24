@@ -55,6 +55,7 @@ var Pulseq = (() => {
     getTotalDuration: () => getTotalDuration,
     hasPulseqBinaryMagic: () => hasPulseqBinaryMagic,
     isEmptyAscProfile: () => isEmptyAscProfile,
+    kspaceExceedsInteractiveBudget: () => kspaceExceedsInteractiveBudget,
     parseAcousticResonancesAsc: () => parseAcousticResonancesAsc,
     parseAscProfile: () => parseAscProfile,
     parseAscText: () => parseAscText,
@@ -3686,6 +3687,7 @@ var Pulseq = (() => {
     /** 120 s of stereo audio at 44.1 kHz. */
     audioSamples: 54e5
   });
+  var KSPACE_CONFIRMATION_MEMORY_BYTES = 1024 ** 3;
   function derivedDetailViewLimitSec(gradientRaster, trTimeSec, maxRasterSamples = INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples) {
     if (!(gradientRaster > 0) || !(maxRasterSamples > 0)) return 0;
     const sampleLimitedDuration = maxRasterSamples * gradientRaster / 2;
@@ -3715,6 +3717,9 @@ var Pulseq = (() => {
     const gridBytes = Math.max(0, estimate.gridCandidatePoints) * 96;
     const adcAndTransferBytes = Math.max(0, estimate.adcSamples) * 104;
     return Math.ceil(Math.min(Number.MAX_SAFE_INTEGER, (gridBytes + adcAndTransferBytes) * 1.25));
+  }
+  function kspaceExceedsInteractiveBudget(estimate) {
+    return estimate.rasterSamples > INTERACTIVE_COMPUTE_LIMITS.kspaceRasterSamples || estimate.adcSamples > INTERACTIVE_COMPUTE_LIMITS.kspaceAdcSamples || estimate.gridCandidatePoints > INTERACTIVE_COMPUTE_LIMITS.kspaceGridCandidates || estimateKspacePeakMemoryBytes(estimate) >= KSPACE_CONFIRMATION_MEMORY_BYTES;
   }
   function estimateDerivedCost(blocks, gradientRaster) {
     let firstGradientTime = Infinity;

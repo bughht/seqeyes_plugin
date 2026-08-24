@@ -46,6 +46,7 @@ export {
     formatMemorySize,
     formatSampleCount,
     INTERACTIVE_COMPUTE_LIMITS,
+    kspaceExceedsInteractiveBudget,
     audioBudgetRefusal,
     estimateAudioCost,
     estimateSpectrogramCost,

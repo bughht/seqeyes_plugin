@@ -69,6 +69,7 @@ test('renders GRE waveform, minimap, k-space panel, and enables export', async (
 
   await expectCanvasVaried(page.locator('#mc'));
   await expectCanvasVaried(page.locator('#mmc'));
+  expect((await debugState(page)).adcCount).toBe(0);
 
   await openKspace(page);
   await expectCanvasVaried(page.locator('#kc'));
@@ -160,6 +161,7 @@ test('loads a dropped official bseq fixture and exports it', async ({ page }) =>
   await page.goto('/?debug=1');
   await dropSequence(page, fixtures.binaryGre);
   await expectCanvasVaried(page.locator('#mc'));
+  expect((await debugState(page)).adcCount).toBe(0);
   await openKspace(page);
   await expectCanvasVaried(page.locator('#kc'));
 
@@ -654,6 +656,9 @@ async function openKspace(page: Page): Promise<void> {
     const box = await page.locator('#kc').boundingBox();
     return box ? Math.min(box.width, box.height) : 0;
   }, { timeout: 10_000 }).toBeGreaterThan(100);
+  await expect.poll(async () => (await debugState(page)).adcCount, {
+    timeout: 20_000,
+  }).toBeGreaterThan(0);
 }
 
 async function debugState(page: Page): Promise<DebugState> {

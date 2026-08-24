@@ -667,6 +667,23 @@ function requestDangerousKspaceCalculation(){
     }catch(err){finishDangerousKspaceCalculation(err.message||String(err));showProgress('done',100,'K-space failed');}
   },50);
 }
+function requestKspaceCalculation(){
+  if(kspaceSafetyWarning||kspaceSafetyBusy||(kAdc&&kAdc[0]&&kAdc[0].length))return;
+  if(!decodedBlocks||!decodedBlocks.length){finishDangerousKspaceCalculation('No sequence is loaded.');return;}
+  kspaceSafetyBusy=true;renderViewerNotices();showProgress('start',0,'Calculating K-space...');
+  setTimeout(function(){
+    try{
+      var limits=Pulseq.INTERACTIVE_COMPUTE_LIMITS;
+      var estimate=Pulseq.estimateKspaceCost(decodedBlocks,GR,TD);
+      if(Pulseq.kspaceExceedsInteractiveBudget(estimate))throw new Error('K-space exceeds the interactive safety budget and requires explicit confirmation.');
+      var ks=Pulseq.calculateKspace(decodedBlocks,GR,TD,0,{
+        rfRaster:RR,maxGridPoints:limits.kspaceGridCandidates,maxAdcSamples:limits.kspaceAdcSamples
+      });
+      if(!ks)throw new Error('The calculation did not produce a trajectory.');
+      applyKspaceResult(ks);finishDangerousKspaceCalculation(null);showProgress('done',100,'K-space ready');
+    }catch(err){finishDangerousKspaceCalculation(err.message||String(err));showProgress('done',100,'K-space failed');}
+  },50);
+}
 
 /* ═══════════════════════════════════════════════════════════════════════
    File loading (standalone — calls Pulseq bundle directly)
@@ -704,31 +721,18 @@ function loadSequenceSource(sourceBytes,fileName,parseSource){
       cum+=seq.blocks[i].dur*seq.rasterTimes.blockDurationRaster;
     }
 
-    showProgress('kspace',55,'Computing k-space...');
+    // K-space is derived on demand when its panel is opened. Initial waveform
+    // readiness must not wait for or retain the trajectory arrays.
     kTraj=null;kAdc=null;kTime=null;kAdcTime=null;
-    var limits=Pulseq.INTERACTIVE_COMPUTE_LIMITS;
     var kspaceEstimate=Pulseq.estimateKspaceCost(blocks,GR,TD);
     var kspaceMemoryEstimate=Pulseq.formatMemorySize(Pulseq.estimateKspacePeakMemoryBytes(kspaceEstimate));
-    var kspaceOverBudget=kspaceEstimate.rasterSamples>limits.kspaceRasterSamples||kspaceEstimate.adcSamples>limits.kspaceAdcSamples||kspaceEstimate.gridCandidatePoints>limits.kspaceGridCandidates;
-    var ks=null,kspaceError='';
-    if(!kspaceOverBudget){
-      try{ks=Pulseq.calculateKspace(blocks,GR,TD,0,{
-        rfRaster:RR,maxGridPoints:limits.kspaceGridCandidates,maxAdcSamples:limits.kspaceAdcSamples
-      });}catch(err){kspaceError=err.message||String(err);}
-    }
+    var kspaceOverBudget=Pulseq.kspaceExceedsInteractiveBudget(kspaceEstimate);
     if(kspaceOverBudget){
       setKspaceSafetyWarning('K-space was not calculated because this sequence exceeds the interactive safety budget ('+
         Pulseq.formatSampleCount(kspaceEstimate.rasterSamples)+' raster samples, '+
         Pulseq.formatSampleCount(kspaceEstimate.adcSamples)+' ADC samples). Estimated peak memory: approximately '+
         kspaceMemoryEstimate+' (host-dependent).');
-    }else if(kspaceError){
-      setViewerNotice('kspace','K-space calculation failed: '+kspaceError+'. Zoom in to inspect waveform detail.');
-    }else if(!ks){
-      setViewerNotice('kspace','K-space calculation did not complete. Zoom in to inspect waveform detail.');
     }
-    if(ks){
-      applyKspaceResult(ks);
-    }else{kTraj=null;kAdc=null;kTime=null;kAdcTime=null;}
 
     showProgress('done',100,'Ready');
     computeGlobalMax();
@@ -2486,6 +2490,7 @@ window.SeqEyesPanelHost={
   getWaveformLeftMargin:function(){return M.l;},
   refreshLayout:function(){refreshLayout();},
   hasKspaceData:function(){return !!(kAdc&&kAdc[0]&&kAdc[0].length);},
+  requestKspace:function(){requestKspaceCalculation();},
   showKspaceSafetyDialog:function(){return typeof showKspaceSafetyDialog==='function'?showKspaceSafetyDialog():false;},
   onKspaceShown:function(){kOpen=true;kAutoFit=true;drawKs_init();},
   onKspaceHidden:function(){kOpen=false;resizeKc();drawKs();},

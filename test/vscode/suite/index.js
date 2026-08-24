@@ -200,8 +200,8 @@ function assertLoadState(load, expectedName) {
   assert.ok(load.blockCount > 0, 'block count should be positive');
   assert.ok(load.totalDuration > 0, 'total duration should be positive');
   assert.ok(load.adcCount > 0, 'ADC count should be positive');
-  assert.ok(load.kspaceSampleCount > 0, 'k-space sample count should be positive');
-  assert.equal(load.hasKspace, true);
+  assert.equal(load.kspaceSampleCount, 0, 'initial load should not calculate k-space');
+  assert.equal(load.hasKspace, false);
   assert.equal(load.hasTiming, true);
 }
 

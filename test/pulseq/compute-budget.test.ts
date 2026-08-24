@@ -8,6 +8,8 @@ import {
   formatMemorySize,
   formatSampleCount,
   INTERACTIVE_COMPUTE_LIMITS,
+  KSPACE_CONFIRMATION_MEMORY_BYTES,
+  kspaceExceedsInteractiveBudget,
 } from '../../src/pulseq/computeBudget';
 import { calculateKspace } from '../../src/pulseq/kspace';
 import type { DecodedBlock, DecodedGradWaveform } from '../../src/pulseq/types';
@@ -37,6 +39,7 @@ describe('interactive calculation budgets', () => {
     });
     expect(estimateDerivedCost(blocks, 1e-5).rasterSamples).toBe(80_001);
     expect(estimateKspacePeakMemoryBytes(estimateKspaceCost(blocks, 1e-5, 1))).toBeGreaterThan(10 * 1024 * 1024);
+    expect(kspaceExceedsInteractiveBudget(estimateKspaceCost(blocks, 1e-5, 1))).toBe(false);
   });
 
   it('rejects oversized ADC and raster requests before proportional allocations', () => {
@@ -72,6 +75,17 @@ describe('interactive calculation budgets', () => {
     expect(formatSampleCount(9_250_001)).toBe('9.3 million');
     expect(formatMemorySize(2.5 * 1024 ** 3)).toBe('2.5 GiB');
     expect(formatMemorySize(512 * 1024 ** 2)).toBe('512 MiB');
+    expect(KSPACE_CONFIRMATION_MEMORY_BYTES).toBe(1024 ** 3);
+    expect(kspaceExceedsInteractiveBudget({
+      rasterSamples: 8_000_000,
+      adcSamples: 0,
+      gridCandidatePoints: 8_000_000,
+    })).toBe(false);
+    expect(kspaceExceedsInteractiveBudget({
+      rasterSamples: 9_000_000,
+      adcSamples: 0,
+      gridCandidatePoints: 9_000_000,
+    })).toBe(true);
   });
 
   it('allows sample-bounded detail without TR metadata and caps long-TR viewports', () => {

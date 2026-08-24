@@ -163,11 +163,10 @@ var SeqEyesPanel = (function () {
    * k-space is refused.
    */
   function setMode(mode, options) {
-    var opts = options || {};
     if (mode !== 'off' && mode !== 'kspace' && mode !== 'spectrogram') mode = 'off';
     var h = activeHost();
 
-    if (mode === 'kspace' && !opts.force) {
+    if (mode === 'kspace') {
       var noData = !h || !h.hasKspaceData || !h.hasKspaceData();
       if (noData && h && h.showKspaceSafetyDialog && h.showKspaceSafetyDialog()) return panelMode;
     }
@@ -192,6 +191,7 @@ var SeqEyesPanel = (function () {
     set('seqeyes.panelMode', mode);
 
     if (mode === 'kspace') {
+      if (h && h.requestKspace) h.requestKspace();
       if (h && h.onKspaceShown) requestAnimationFrame(function () { h.onKspaceShown(); });
     } else if (previous === 'kspace') {
       if (h && h.onKspaceHidden) requestAnimationFrame(function () { h.onKspaceHidden(); });
@@ -1379,6 +1379,11 @@ var SeqEyesPanel = (function () {
     stopPlayback();
     notice('spectrogram', null);
     notice('gradientSound', null);
+    if (panelMode === 'kspace') {
+      var h = activeHost();
+      var refused = h && h.showKspaceSafetyDialog && h.showKspaceSafetyDialog();
+      if (!refused && h && h.requestKspace) h.requestKspace();
+    }
     if (panelMode === 'spectrogram') requestSpectrogram(true);
   }
 

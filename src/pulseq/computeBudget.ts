@@ -32,6 +32,9 @@ export const INTERACTIVE_COMPUTE_LIMITS = Object.freeze({
     audioSamples: 5_400_000,
 });
 
+/** K-space at or above this estimate requires an explicit dangerous override. */
+export const KSPACE_CONFIRMATION_MEMORY_BYTES = 1024 ** 3;
+
 export interface KspaceCostEstimate {
     rasterSamples: number;
     adcSamples: number;
@@ -104,6 +107,14 @@ export function estimateKspacePeakMemoryBytes(estimate: KspaceCostEstimate): num
     const gridBytes = Math.max(0, estimate.gridCandidatePoints) * 96;
     const adcAndTransferBytes = Math.max(0, estimate.adcSamples) * 104;
     return Math.ceil(Math.min(Number.MAX_SAFE_INTEGER, (gridBytes + adcAndTransferBytes) * 1.25));
+}
+
+/** True when an interactive k-space request must not start automatically. */
+export function kspaceExceedsInteractiveBudget(estimate: KspaceCostEstimate): boolean {
+    return estimate.rasterSamples > INTERACTIVE_COMPUTE_LIMITS.kspaceRasterSamples
+        || estimate.adcSamples > INTERACTIVE_COMPUTE_LIMITS.kspaceAdcSamples
+        || estimate.gridCandidatePoints > INTERACTIVE_COMPUTE_LIMITS.kspaceGridCandidates
+        || estimateKspacePeakMemoryBytes(estimate) >= KSPACE_CONFIRMATION_MEMORY_BYTES;
 }
 
 /** Estimate the regular gradient-raster grid used by full-sequence M1/PNS. */

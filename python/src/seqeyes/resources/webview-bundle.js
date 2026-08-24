@@ -189,6 +189,11 @@ function requestDangerousKspaceCalculation(){
   if(!kspaceSafetyWarning||kspaceSafetyBusy)return;kspaceSafetyBusy=true;hideKspaceSafetyDialog();renderViewerNotices();
   if(vscApi)vscApi.postMessage({command:'calculateKspaceUnsafe'});
 }
+function requestKspaceCalculation(){
+  if(kspaceSafetyWarning||kspaceSafetyBusy||(kAdc&&kAdc[0]&&kAdc[0].length))return;
+  kspaceSafetyBusy=true;renderViewerNotices();
+  if(vscApi)vscApi.postMessage({command:'calculateKspace'});
+}
 function finishDangerousKspaceCalculation(error){
   kspaceSafetyBusy=false;
   if(!error){setViewerNotice('kspaceOverrideFailure',null);setKspaceSafetyWarning(null);return;}
@@ -934,6 +939,7 @@ window.SeqEyesPanelHost={
   getWaveformLeftMargin:function(){return M.l;},
   refreshLayout:function(){refreshLayout();},
   hasKspaceData:function(){return !!(kAdc&&kAdc[0]&&kAdc[0].length);},
+  requestKspace:function(){requestKspaceCalculation();},
   showKspaceSafetyDialog:function(){
     return typeof showKspaceSafetyDialog==='function'?showKspaceSafetyDialog():false;
   },
@@ -3779,11 +3785,10 @@ var SeqEyesPanel = (function () {
    * k-space is refused.
    */
   function setMode(mode, options) {
-    var opts = options || {};
     if (mode !== 'off' && mode !== 'kspace' && mode !== 'spectrogram') mode = 'off';
     var h = activeHost();
 
-    if (mode === 'kspace' && !opts.force) {
+    if (mode === 'kspace') {
       var noData = !h || !h.hasKspaceData || !h.hasKspaceData();
       if (noData && h && h.showKspaceSafetyDialog && h.showKspaceSafetyDialog()) return panelMode;
     }
@@ -3808,6 +3813,7 @@ var SeqEyesPanel = (function () {
     set('seqeyes.panelMode', mode);
 
     if (mode === 'kspace') {
+      if (h && h.requestKspace) h.requestKspace();
       if (h && h.onKspaceShown) requestAnimationFrame(function () { h.onKspaceShown(); });
     } else if (previous === 'kspace') {
       if (h && h.onKspaceHidden) requestAnimationFrame(function () { h.onKspaceHidden(); });
@@ -4995,6 +5001,11 @@ var SeqEyesPanel = (function () {
     stopPlayback();
     notice('spectrogram', null);
     notice('gradientSound', null);
+    if (panelMode === 'kspace') {
+      var h = activeHost();
+      var refused = h && h.showKspaceSafetyDialog && h.showKspaceSafetyDialog();
+      if (!refused && h && h.requestKspace) h.requestKspace();
+    }
     if (panelMode === 'spectrogram') requestSpectrogram(true);
   }
 
