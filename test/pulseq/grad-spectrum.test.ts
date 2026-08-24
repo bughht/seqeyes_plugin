@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  appendShortViewConfidenceWarnings,
   chooseWindowSamples,
   computeGradientSpectrogram,
   computeGradientSpectrumAverage,
@@ -364,6 +365,38 @@ describe('gradient spectrogram', () => {
     const cramped = chooseWindowSamples(params, decimatedDt, 0.01, warnings);
     expect(cramped).toBeLessThan(roomy);
     expect(warnings.some(w => w.startsWith('Short view'))).toBe(true);
+  });
+
+  it('warns when the 32-sample floor leaves fewer than three independent windows', () => {
+    const block = toneBlock('gx', 0.02, (t) => Math.sin(2 * Math.PI * 700 * t));
+    const automatic = computeGradientSpectrogram([block], RASTER, {
+      startSec: 0, endSec: 0.008, fMaxHz: 3000,
+    });
+    const explicit = computeGradientSpectrogram([block], RASTER, {
+      startSec: 0, endSec: 0.008, fMaxHz: 3000, windowSamples: 32,
+    });
+
+    expect(automatic.nTime).toBeGreaterThan(0);
+    expect(automatic.warnings.some(w => w.includes('only') && w.includes('independent analysis windows')))
+      .toBe(true);
+    expect(explicit.warnings.some(w => w.includes('only') && w.includes('independent analysis windows')))
+      .toBe(true);
+  });
+
+  it('grades independent-window and visible-TR context without refusing valid data', () => {
+    const strong: string[] = [];
+    appendShortViewConfidenceWarnings(strong, 0.008, 0.004, 0.003);
+    expect(strong.some(w => w.includes('only 2.0 independent'))).toBe(true);
+    expect(strong.some(w => w.includes('Only 2.7 TRs'))).toBe(true);
+
+    const advisory: string[] = [];
+    appendShortViewConfidenceWarnings(advisory, 0.016, 0.004);
+    expect(advisory.some(w => w.includes('4.0 independent'))).toBe(true);
+    expect(advisory.some(w => w.includes('high-variance'))).toBe(false);
+
+    const sufficient: string[] = [];
+    appendShortViewConfidenceWarnings(sufficient, 0.025, 0.004, 0.005);
+    expect(sufficient).toEqual([]);
   });
 
   it('reads a marker slice and a view-average slice from the same matrix', () => {

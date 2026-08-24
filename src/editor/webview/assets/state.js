@@ -829,6 +829,7 @@ window.SeqEyesPanelHost={
   getView:function(){var d=visibleDuration();return{startSec:ox,endSec:ox+d,totalDuration:TD};},
   getLayoutMode:function(){return layoutMode;},
   getGradientRaster:function(){return GR;},
+  getTrTimeSec:function(){return seqTiming&&seqTiming.trTimeSec>0?seqTiming.trTimeSec:0;},
   getTimeUnit:function(){return timeUnit;},
   getWaveformLeftMargin:function(){return M.l;},
   refreshLayout:function(){refreshLayout();},

@@ -151,6 +151,7 @@ test('renders a spectrogram whose time range tracks the visible window', async (
   expect(initial.nTime).toBeGreaterThan(0);
   expect(initial.nFreq).toBeGreaterThan(0);
   expect(initial.decimationFactor).toBeGreaterThan(1);
+  expect(initial.warnings.some(warning => warning.includes('TRs are visible'))).toBe(true);
   await expectCanvasVaried(page.locator('#sgImg'));
 
   const total = (await page.evaluate(() => window.__seqeyesDebug.state())).totalDuration;

@@ -344,7 +344,8 @@ var SeqEyesPanel = (function () {
       overlap: params.overlap,
       oversample: params.oversample,
       targetColumns: params.targetColumns,
-      normalize: params.normalize
+      normalize: params.normalize,
+      trTimeSec: h.getTrTimeSec ? h.getTrTimeSec() : 0
     });
   }
 

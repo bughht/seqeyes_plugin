@@ -80,6 +80,8 @@ export interface SpectrogramParams {
 export interface SpectrogramOptions extends Partial<SpectrogramParams> {
     startSec: number;
     endSec: number;
+    /** Optional repetition time used only for short-view confidence warnings. */
+    trTimeSec?: number;
 }
 
 export interface GradientSpectrogramMatrices {
@@ -254,6 +256,13 @@ export function computeGradientSpectrogram(
             windowSamples, hop, fftPoints, decimatedDt, warnings);
     }
 
+    appendShortViewConfidenceWarnings(
+        warnings,
+        viewDuration,
+        windowSamples * decimatedDt,
+        options.trTimeSec,
+    );
+
     // ── Resample the physical gradients, padded with real waveform ──────────
     const padSamples = plan.padSamples;
     const totalSamples = coreSamples + 2 * padSamples;
@@ -361,6 +370,40 @@ export function computeGradientSpectrogram(
         requestedEndSec: endSec,
         warnings,
     };
+}
+
+/** Warn when a populated matrix has too little independent temporal context. */
+export function appendShortViewConfidenceWarnings(
+    warnings: string[],
+    viewDurationSec: number,
+    analysisWindowSec: number,
+    trTimeSec?: number,
+): void {
+    if (viewDurationSec > 0 && analysisWindowSec > 0) {
+        const independentWindows = viewDurationSec / analysisWindowSec;
+        const count = formatContextCount(independentWindows);
+        if (independentWindows < 3) {
+            warnings.push(
+                `Limited context: only ${count} independent analysis windows fit. `
+                + 'Frequency peaks are high-variance and may change with window placement.',
+            );
+        } else if (independentWindows < 5) {
+            warnings.push(
+                `Limited context: ${count} independent analysis windows fit. `
+                + 'Frequency peaks may change with window placement.',
+            );
+        }
+    }
+    if (trTimeSec && trTimeSec > 0 && viewDurationSec / trTimeSec < 5) {
+        warnings.push(
+            `Only ${formatContextCount(viewDurationSec / trTimeSec)} TRs are visible. `
+            + 'This local spectrum may not represent the repeating sequence.',
+        );
+    }
+}
+
+function formatContextCount(value: number): string {
+    return value.toFixed(value < 10 ? 1 : 0);
 }
 
 function prepareFrame(

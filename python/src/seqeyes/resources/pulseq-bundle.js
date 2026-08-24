@@ -2244,8 +2244,12 @@ var Pulseq = (() => {
     };
   }
   function countSequenceWaveformSeries(seq) {
+    return countSequenceWaveformSeriesRange(seq, 0, seq.blocks.length);
+  }
+  function countSequenceWaveformSeriesRange(seq, start, end) {
     let count = 0;
-    for (const block of seq.blocks) {
+    for (let index = start; index < end; index++) {
+      const block = seq.blocks[index];
       if (block.rfId > 0 && seq.rfs.has(block.rfId)) count += 2;
       for (const id of [block.gxId, block.gyId, block.gzId]) {
         if (id > 0 && (seq.trapGrads.has(id) || seq.arbitraryGrads.has(id))) count++;
@@ -4237,6 +4241,12 @@ var Pulseq = (() => {
         warnings
       );
     }
+    appendShortViewConfidenceWarnings(
+      warnings,
+      viewDuration,
+      windowSamples * decimatedDt,
+      options.trTimeSec
+    );
     const padSamples = plan.padSamples;
     const totalSamples = coreSamples + 2 * padSamples;
     const window = resamplePhysicalGradients(blocks, {
@@ -4325,6 +4335,29 @@ var Pulseq = (() => {
       requestedEndSec: endSec,
       warnings
     };
+  }
+  function appendShortViewConfidenceWarnings(warnings, viewDurationSec, analysisWindowSec, trTimeSec) {
+    if (viewDurationSec > 0 && analysisWindowSec > 0) {
+      const independentWindows = viewDurationSec / analysisWindowSec;
+      const count = formatContextCount(independentWindows);
+      if (independentWindows < 3) {
+        warnings.push(
+          `Limited context: only ${count} independent analysis windows fit. Frequency peaks are high-variance and may change with window placement.`
+        );
+      } else if (independentWindows < 5) {
+        warnings.push(
+          `Limited context: ${count} independent analysis windows fit. Frequency peaks may change with window placement.`
+        );
+      }
+    }
+    if (trTimeSec && trTimeSec > 0 && viewDurationSec / trTimeSec < 5) {
+      warnings.push(
+        `Only ${formatContextCount(viewDurationSec / trTimeSec)} TRs are visible. This local spectrum may not represent the repeating sequence.`
+      );
+    }
+  }
+  function formatContextCount(value) {
+    return value.toFixed(value < 10 ? 1 : 0);
   }
   function prepareFrame(frame, source, offset, windowSamples, w, fftPoints) {
     let mean = 0;

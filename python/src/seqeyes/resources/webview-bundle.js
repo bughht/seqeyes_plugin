@@ -946,6 +946,7 @@ window.SeqEyesPanelHost={
   getView:function(){var d=visibleDuration();return{startSec:ox,endSec:ox+d,totalDuration:TD};},
   getLayoutMode:function(){return layoutMode;},
   getGradientRaster:function(){return GR;},
+  getTrTimeSec:function(){return seqTiming&&seqTiming.trTimeSec>0?seqTiming.trTimeSec:0;},
   getTimeUnit:function(){return timeUnit;},
   getWaveformLeftMargin:function(){return M.l;},
   refreshLayout:function(){refreshLayout();},
@@ -3977,7 +3978,8 @@ var SeqEyesPanel = (function () {
       overlap: params.overlap,
       oversample: params.oversample,
       targetColumns: params.targetColumns,
-      normalize: params.normalize
+      normalize: params.normalize,
+      trTimeSec: h.getTrTimeSec ? h.getTrTimeSec() : 0
     });
   }
 
