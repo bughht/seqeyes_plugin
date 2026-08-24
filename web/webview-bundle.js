@@ -4412,7 +4412,8 @@ var SeqEyesPanel = (function () {
       startSec: start,
       endSec: boundedPreview ? Math.min(requestedEnd, start + AUDIO_PREVIEW_MAX_SEC) : requestedEnd,
       boundedPreview: boundedPreview,
-      initialOffsetSec: loops ? Math.max(0, resumeStart - start) : 0
+      initialOffsetSec: loops ? Math.max(0, resumeStart - start) : 0,
+      repeatFullWindow: loops
     };
   }
 
@@ -4451,7 +4452,7 @@ var SeqEyesPanel = (function () {
     var span = range.endSec - range.startSec;
     var offset = Math.max(0, Math.min(span, range.initialOffsetSec || 0));
     var firstPass = span - offset;
-    if (!(span < AUDIO_LOOP_THRESHOLD_SEC)) return firstPass;
+    if (!range.repeatFullWindow) return firstPass;
     var repeats = Math.max(0, Math.ceil((AUDIO_LOOP_TARGET_SEC - firstPass) / span - 1e-9));
     return firstPass + repeats * span;
   }
@@ -4480,7 +4481,7 @@ var SeqEyesPanel = (function () {
       notice('gradientSound', 'Playing a ' + AUDIO_PREVIEW_MAX_SEC + ' s preview because the visible window exceeds the '
         + AUDIO_FULL_RANGE_MAX_SEC.toFixed(1) + ' s interactive audio limit. '
         + 'Simulated gradient sound — not calibrated.');
-    } else if (span < 0.25) {
+    } else if (range.repeatFullWindow) {
       notice('gradientSound', 'Window is ' + Math.round(span * 1000) + ' ms; looping. '
         + 'Simulated gradient sound — not calibrated.');
     } else {

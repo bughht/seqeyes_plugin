@@ -571,6 +571,48 @@ test('wraps a resumed short audition to the window start on the browser audio cl
   await page.evaluate(() => window.SeqEyesPanel.stopPlayback());
 });
 
+test('does not loop a short retained tail from a long visible window', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+  await page.evaluate(() => window.__seqeyesDebug.setView(0.2, 0.7));
+  await settlePanel(page);
+  await page.evaluate(() => window.SeqEyesDev.setMarkerTime(0.52));
+  const before = await panelState(page);
+
+  const snapshot = await page.evaluate(() => {
+    let captured: {
+      startSec: number;
+      endSec: number;
+      durationSec: number;
+      auditionDurationSec: number;
+    } | null = null;
+    window.SeqEyesPanelHost.requestAudio = (id, startSec, endSec) => {
+      const frames = Math.max(1, Math.round((endSec - startSec) * 44_100));
+      const left = new Float32Array(frames).fill(0.1);
+      const right = new Float32Array(frames).fill(-0.1);
+      window.SeqEyesPanel.deliverAudio(id, { sampleRate: 44_100, left, right, startSec });
+      const audio = window.SeqEyesDev.audioState();
+      captured = {
+        startSec,
+        endSec,
+        durationSec: audio.durationSec,
+        auditionDurationSec: audio.auditionDurationSec,
+      };
+    };
+    (document.getElementById('sgPlay') as HTMLButtonElement).click();
+    return captured;
+  });
+
+  expect(snapshot).not.toBeNull();
+  expect(snapshot!.startSec).toBeCloseTo(before.markerTimeSec, 3);
+  expect(snapshot!.endSec).toBeCloseTo(before.viewEndSec, 9);
+  const tail = before.viewEndSec - before.markerTimeSec;
+  expect(tail).toBeLessThan(0.25);
+  expect(snapshot!.durationSec).toBeCloseTo(tail, 3);
+  expect(snapshot!.auditionDurationSec).toBeCloseTo(tail, 3);
+  await page.evaluate(() => window.SeqEyesPanel.stopPlayback());
+});
+
 test('stops playback when the panel leaves spectrogram mode', async ({ page }) => {
   await loadViewer(page, fixtures.gre);
   await openSpectrogram(page);
