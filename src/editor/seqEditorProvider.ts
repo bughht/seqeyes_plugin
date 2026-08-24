@@ -60,8 +60,10 @@ import { detectSequenceTiming } from '../pulseq/trdetect';
 import {
     estimateEnvelopeJsonBytes,
     MAX_V8_STRING_LENGTH,
+    packSequenceBlockRange,
     packSequenceBlocks,
 } from './blockTransport';
+import { ByteBoundedLru } from './windowDetailCache';
 import { getWebviewContent } from './webviewContent';
 import { serializeGradientSound, serializeSpectrogram } from './spectrogramTransport';
 import type { DecodedBlock, PulseqSequence } from '../pulseq/types';
@@ -69,6 +71,8 @@ import type { DecodedBlock, PulseqSequence } from '../pulseq/types';
 // ─── Constants ────────────────────────────────────────────────────────────
 
 const VIEW_TYPE = 'seqeyes.sequenceViewer';
+const WINDOW_DETAIL_CACHE_BYTES = 64 * 1024 * 1024;
+const WINDOW_DETAIL_BLOCK_LIMIT = 20_000;
 
 export interface SeqEyesDiagnosticLoadState {
     activeUri: string;
@@ -246,6 +250,21 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
         let activeTotalDuration = 0;
         let activePnsHardware: PnsHardware | undefined;
         let activeAcousticBands: AcousticResonance[] = [];
+        let sequenceGeneration = 0;
+        const waveformDetailCache = new ByteBoundedLru<ReturnType<typeof packSequenceBlockRange>>(
+            WINDOW_DETAIL_CACHE_BYTES,
+        );
+
+        const activeWindowBlockRange = (startSec: number, endSec: number): { start: number; end: number } => {
+            if (!activeSequence || !activeDecodeContext) return { start: 0, end: 0 };
+            const starts = activeDecodeContext.blockStartTimes;
+            const pad = Math.max((endSec - startSec) * 0.05, 0.05);
+            let start = lowerBoundNumeric(starts, startSec - pad) - 1;
+            let end = lowerBoundNumeric(starts, endSec + pad) + 1;
+            start = Math.max(0, Math.min(start, activeSequence.blocks.length));
+            end = Math.max(start, Math.min(end, activeSequence.blocks.length));
+            return { start, end };
+        };
 
         const allActiveBlocks = (): DecodedBlock[] => {
             if (!activeBlocks.length && activeSequence) activeBlocks = decodeAllBlocks(activeSequence);
@@ -254,12 +273,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
 
         const activeWindowBlocks = (startSec: number, endSec: number): DecodedBlock[] => {
             if (!activeSequence || !activeDecodeContext) return [];
-            const starts = activeDecodeContext.blockStartTimes;
-            const pad = Math.max((endSec - startSec) * 0.05, 0.05);
-            let start = lowerBoundNumeric(starts, startSec - pad) - 1;
-            let end = lowerBoundNumeric(starts, endSec + pad) + 1;
-            start = Math.max(0, Math.min(start, activeSequence.blocks.length));
-            end = Math.max(start, Math.min(end, activeSequence.blocks.length));
+            const { start, end } = activeWindowBlockRange(startSec, endSec);
             return decodeBlockRange(activeSequence, start, end, activeDecodeContext);
         };
 
@@ -286,6 +300,8 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
         // ── Core: parse, decode, prepare waveforms, send ──
         const sendSequenceData = async (uri: vscode.Uri) => {
             try {
+                sequenceGeneration++;
+                waveformDetailCache.clear();
                 activeUri = uri;
                 diagnosticState.activeUri = uri.toString();
                 const postProgress = (phase: string, percent: number, text: string) => {
@@ -371,6 +387,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                 // host cannot serialise; awaiting would deadlock the open.
                 const delivery = panel.webview.postMessage({
                     type: 'sequenceData',
+                    sequenceGeneration,
                     blocks: packed.blocks,
                     sampleTimes: packed.sampleTimes,
                     sampleValues: packed.sampleValues,
@@ -463,6 +480,66 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                 }
             } else if (msg.command === 'exportKspace') {
                 await this._exportKspace(activeUri);
+            } else if (msg.command === 'requestWaveformDetail') {
+                const requestId = Number(msg.requestId);
+                const requestedGeneration = Number(msg.sequenceGeneration);
+                if (!activeSequence || !activeDecodeContext || requestedGeneration !== sequenceGeneration) {
+                    panel.webview.postMessage({
+                        type: 'waveformDetailError',
+                        requestId,
+                        sequenceGeneration: requestedGeneration,
+                        message: 'The waveform detail request belongs to an inactive sequence.',
+                    });
+                    return;
+                }
+                const startSec = Number(msg.startSec);
+                const endSec = Number(msg.endSec);
+                const { start, end } = activeWindowBlockRange(startSec, endSec);
+                if (!(endSec > startSec) || end - start > WINDOW_DETAIL_BLOCK_LIMIT) {
+                    panel.webview.postMessage({
+                        type: 'waveformDetailError',
+                        requestId,
+                        sequenceGeneration,
+                        message: 'This waveform detail window is too large. Zoom in further.',
+                    });
+                    return;
+                }
+                const requestedCap = Math.max(8, Math.min(500, Math.floor(Number(msg.pointsPerWaveform) || 500)));
+                const cacheKey = `${sequenceGeneration}:${start}:${end}:${requestedCap}`;
+                try {
+                    let packed = waveformDetailCache.get(cacheKey);
+                    if (!packed) {
+                        packed = packSequenceBlockRange(
+                            activeSequence,
+                            start,
+                            end,
+                            activeDecodeContext,
+                            requestedCap,
+                        );
+                        const retainedBytes = packed.sampleTimes.byteLength + packed.sampleValues.byteLength
+                            + estimateEnvelopeJsonBytes(packed.blocks);
+                        waveformDetailCache.set(cacheKey, packed, retainedBytes);
+                    }
+                    panel.webview.postMessage({
+                        type: 'waveformDetailData',
+                        requestId,
+                        sequenceGeneration,
+                        startBlock: start,
+                        endBlock: end,
+                        blocks: packed.blocks,
+                        sampleTimes: packed.sampleTimes,
+                        sampleValues: packed.sampleValues,
+                        sampleCount: packed.sampleCount,
+                        pointsPerWaveform: packed.pointsPerWaveform,
+                    });
+                } catch (err) {
+                    panel.webview.postMessage({
+                        type: 'waveformDetailError',
+                        requestId,
+                        sequenceGeneration,
+                        message: err instanceof Error ? err.message : String(err),
+                    });
+                }
             } else if (msg.command === 'calculateKspaceUnsafe') {
                 if (!activeSequence || activeGradientRaster <= 0 || activeTotalDuration <= 0) {
                     panel.webview.postMessage({ type: 'kspaceError', message: 'No sequence is loaded.' });

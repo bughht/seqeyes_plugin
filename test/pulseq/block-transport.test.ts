@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { estimateEnvelopeJsonBytes, MAX_DISPLAY_PTS, packBlocks, packSequenceBlocks } from '../../src/editor/blockTransport';
+import {
+  estimateEnvelopeJsonBytes,
+  MAX_DISPLAY_PTS,
+  packBlocks,
+  packSequenceBlockRange,
+  packSequenceBlocks,
+} from '../../src/editor/blockTransport';
 import { estimateKspaceCost, estimateSequenceKspaceCost, INTERACTIVE_COMPUTE_LIMITS } from '../../src/pulseq/computeBudget';
 import { downsampleM4 } from '../../src/pulseq/displayDownsampling';
 import type { DecodedBlock } from '../../src/pulseq/types';
@@ -84,6 +90,25 @@ describe('packed block transport', () => {
     expect(estimateSequenceKspaceCost(sequence, 0.116)).toEqual(
       estimateKspaceCost(decoded, sequence.rasterTimes.gradientRaster, 0.116),
     );
+  });
+
+  it('packs indexed viewport ranges with offsets local to the response', () => {
+    const sequence = loadSequence('writeEpiRS.seq');
+    const decoded = loadBlocks('writeEpiRS.seq');
+    const start = 4;
+    const end = Math.min(decoded.length, 17);
+    const expected = packBlocks(decoded.slice(start, end));
+    const detail = packSequenceBlockRange(sequence, start, end);
+
+    expect(detail.blocks).toEqual(expected.blocks);
+    expect(new Float64Array(detail.sampleTimes)).toEqual(new Float64Array(expected.sampleTimes));
+    expect(new Float32Array(detail.sampleValues)).toEqual(new Float32Array(expected.sampleValues));
+  });
+
+  it('refuses a viewport whose minimum detail exceeds its sample ceiling', () => {
+    const sequence = loadSequence('writeEpiRS.seq');
+    expect(() => packSequenceBlockRange(sequence, 0, sequence.blocks.length, undefined, 500, 1))
+      .toThrow(/zoom in further/);
   });
 
   it('keeps waveform samples out of the JSON envelope', () => {

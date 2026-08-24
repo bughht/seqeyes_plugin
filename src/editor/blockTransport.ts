@@ -33,7 +33,10 @@ export const MAX_DISPLAY_PTS = 500;
  * renderer itself will draw, so reducing further would buy memory without
  * buying any additional fidelity on screen.
  */
-const MIN_DISPLAY_PTS = 8;
+export const MIN_DISPLAY_PTS = 8;
+
+/** A detail request may use at most this many aligned time/value pairs. */
+export const WINDOW_DETAIL_SAMPLE_LIMIT = 2_000_000;
 
 const TAU = 2 * Math.PI;
 
@@ -200,6 +203,45 @@ export function packSequenceBlocks(seq: PulseqSequence, batchSize = 512): Packed
     };
 }
 
+/**
+ * Decode and pack one indexed block range for viewport detail.
+ *
+ * The caller resolves the time window through `SequenceDecodeContext`; this
+ * function enforces a separate sample ceiling so a fit-all request cannot
+ * accidentally recreate the initial all-sequence payload.
+ */
+export function packSequenceBlockRange(
+    seq: PulseqSequence,
+    startBlock: number,
+    endBlock: number,
+    context = createSequenceDecodeContext(seq),
+    requestedCap = MAX_DISPLAY_PTS,
+    sampleLimit = WINDOW_DETAIL_SAMPLE_LIMIT,
+): PackedBlocks {
+    const start = Math.max(0, Math.min(seq.blocks.length, Math.floor(startBlock)));
+    const end = Math.max(start, Math.min(seq.blocks.length, Math.ceil(endBlock)));
+    const seriesCount = countSequenceWaveformSeriesRange(seq, start, end);
+    const safeSampleLimit = Number.isFinite(sampleLimit) && sampleLimit >= 0
+        ? Math.floor(sampleLimit)
+        : WINDOW_DETAIL_SAMPLE_LIMIT;
+    const safeRequestedCap = Number.isFinite(requestedCap) && requestedCap > 0
+        ? Math.floor(requestedCap)
+        : MAX_DISPLAY_PTS;
+    if (seriesCount * MIN_DISPLAY_PTS > safeSampleLimit) {
+        throw new Error(
+            `The waveform detail window needs at least ${seriesCount * MIN_DISPLAY_PTS} samples; zoom in further.`,
+        );
+    }
+    const cap = seriesCount > 0
+        ? Math.max(
+            MIN_DISPLAY_PTS,
+            Math.min(MAX_DISPLAY_PTS, safeRequestedCap, Math.floor(safeSampleLimit / seriesCount)),
+        )
+        : MAX_DISPLAY_PTS;
+    const decoded = decodeBlockRange(seq, start, end, context);
+    return packBlocksAtCap(decoded, cap);
+}
+
 function packBlocksAtCap(blocks: DecodedBlock[], cap: number, knownTotal?: number): PackedBlocks {
     const total = knownTotal ?? countSamples(blocks, cap);
     const times = new Float64Array(total);
@@ -232,8 +274,13 @@ function packBlocksAtCap(blocks: DecodedBlock[], cap: number, knownTotal?: numbe
 }
 
 function countSequenceWaveformSeries(seq: PulseqSequence): number {
+    return countSequenceWaveformSeriesRange(seq, 0, seq.blocks.length);
+}
+
+function countSequenceWaveformSeriesRange(seq: PulseqSequence, start: number, end: number): number {
     let count = 0;
-    for (const block of seq.blocks) {
+    for (let index = start; index < end; index++) {
+        const block = seq.blocks[index];
         if (block.rfId > 0 && seq.rfs.has(block.rfId)) count += 2;
         for (const id of [block.gxId, block.gyId, block.gzId]) {
             if (id > 0 && (seq.trapGrads.has(id) || seq.arbitraryGrads.has(id))) count++;
