@@ -432,7 +432,7 @@ var SeqEyesPanel = (function () {
       messages.push('Gradient energy falls inside a forbidden acoustic band (advisory: '
         + 'this compares against the current display window, and is not a compliance check).');
     }
-    notice('spectrogram', messages.length ? messages.join(' ') : null);
+    notice('spectrogram', messages.length ? messages : null);
   }
 
   /* ── Rendering ────────────────────────────────────────────────────── */
@@ -1391,7 +1391,10 @@ var SeqEyesPanel = (function () {
 
   function onViewChanged() {
     if (panelMode !== 'spectrogram') return;
-    stopPlayback();
+    var view = hostView();
+    var tolerance = Math.max(1, Math.abs(view.endSec - view.startSec)) * 1e-9;
+    if (Math.abs(view.startSec - currentView.startSec) > tolerance
+      || Math.abs(view.endSec - currentView.endSec) > tolerance) stopPlayback();
     requestSpectrogram(false);
   }
 

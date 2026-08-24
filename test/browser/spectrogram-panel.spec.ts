@@ -67,6 +67,7 @@ declare global {
     SeqEyesPanelHost: {
       getView(): { startSec: number; endSec: number; totalDuration: number };
       requestAudio(id: number, startSec: number, endSec: number, options: unknown): void;
+      setNotice(key: string, message: string | string[] | null): void;
     };
   }
 }
@@ -509,6 +510,20 @@ test('clears a stale spectrogram when the current viewport is refused', async ({
   expect(state.nTime).toBe(0);
   expect(state.nFreq).toBe(0);
   expect(state.error).toContain('Zoom in');
+});
+
+test('renders each warning as a separate theme-aware row', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await page.evaluate(() => {
+    window.SeqEyesPanelHost.setNotice('test', ['First warning', 'Second warning']);
+  });
+
+  const rows = page.locator('#viewerNotice .viewer-notice-item');
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toHaveText('First warning');
+  await expect(rows.nth(1)).toHaveText('Second warning');
+  const divider = await rows.nth(0).evaluate((row) => getComputedStyle(row).borderBottomStyle);
+  expect(divider).toBe('solid');
 });
 
 test('mirrors the panel marker onto the waveform panel', async ({ page }) => {

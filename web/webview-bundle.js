@@ -147,24 +147,33 @@ var kspaceSafetyWarning=null,kspaceSafetyBusy=false,kspaceSafetyPopupTimer=0;
 var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,waveformOverviewActive=false,rfRenderPointCount=0,rfRawCurveCount=0,rfReducedCurveCount=0,rfOverviewBucketCount=0,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
 var viewerDrawFrame=0,viewerDrawMinimap=false;
 function isMobileSafetyLayout(){return !!(window.matchMedia&&window.matchMedia('(max-width: 768px), (pointer: coarse)').matches);}
+function viewerNoticeMessages(value){
+  var values=Array.isArray(value)?value:[value],messages=[];
+  for(var i=0;i<values.length;i++)if(values[i])messages.push(String(values[i]));
+  return messages;
+}
 function renderViewerNotices(){
   var el=document.getElementById('viewerNotice');if(!el)return;el.textContent='';
   var keys=Object.keys(viewerNotices),visible=0;
   for(var i=0;i<keys.length;i++){
     if(keys[i]==='kspace'&&kspaceSafetyWarning&&isMobileSafetyLayout())continue;
-    if(visible)el.appendChild(document.createTextNode(' '));
-    var span=document.createElement('span');span.textContent=viewerNotices[keys[i]];el.appendChild(span);visible++;
-  }
-  if(kspaceSafetyWarning&&!isMobileSafetyLayout()){
-    var action=document.createElement('button');action.type='button';action.className='notice-action';action.textContent=kspaceSafetyBusy?'Calculating…':'Calculate anyway…';action.disabled=kspaceSafetyBusy;
-    action.onclick=showKspaceSafetyDialog;el.appendChild(action);visible++;
+    var messages=viewerNoticeMessages(viewerNotices[keys[i]]);
+    for(var j=0;j<messages.length;j++){
+      var row=document.createElement('div');row.className='viewer-notice-item';
+      var span=document.createElement('span');span.textContent=messages[j];row.appendChild(span);
+      if(keys[i]==='kspace'&&j===messages.length-1&&kspaceSafetyWarning&&!isMobileSafetyLayout()){
+        var action=document.createElement('button');action.type='button';action.className='notice-action';action.textContent=kspaceSafetyBusy?'Calculating…':'Calculate anyway…';action.disabled=kspaceSafetyBusy;
+        action.onclick=showKspaceSafetyDialog;row.appendChild(action);
+      }
+      el.appendChild(row);visible++;
+    }
   }
   el.style.display=visible?'block':'none';
 }
 function setViewerNotice(key,message){
-  if(message&&viewerNotices[key]===message)return;
-  if(!message&&!Object.prototype.hasOwnProperty.call(viewerNotices,key))return;
-  if(message)viewerNotices[key]=message;else delete viewerNotices[key];
+  var messages=viewerNoticeMessages(message);
+  if(!messages.length&&!Object.prototype.hasOwnProperty.call(viewerNotices,key))return;
+  if(messages.length)viewerNotices[key]=messages;else delete viewerNotices[key];
   renderViewerNotices();
 }
 function setKspaceSafetyWarning(message){
@@ -411,7 +420,7 @@ window.addEventListener('message',function(e){
       return;
     }
     TD=m.totalDuration||0;GR=m.gradRaster||1e-5;
-    setViewerNotice('sequence',m.notices&&m.notices.length?m.notices.join(' '):null);
+    setViewerNotice('sequence',m.notices&&m.notices.length?m.notices:null);
     setViewerNotice('kspaceOverrideFailure',null);setKspaceSafetyWarning(m.kspaceSafety||null);
     setViewerNotice('m1',null);setViewerNotice('pns',null);setViewerNotice('pnsThreshold',null);
     waveformOverview=createWaveformOverview(BL);
@@ -4056,7 +4065,7 @@ var SeqEyesPanel = (function () {
       messages.push('Gradient energy falls inside a forbidden acoustic band (advisory: '
         + 'this compares against the current display window, and is not a compliance check).');
     }
-    notice('spectrogram', messages.length ? messages.join(' ') : null);
+    notice('spectrogram', messages.length ? messages : null);
   }
 
   /* ── Rendering ────────────────────────────────────────────────────── */
@@ -5015,7 +5024,10 @@ var SeqEyesPanel = (function () {
 
   function onViewChanged() {
     if (panelMode !== 'spectrogram') return;
-    stopPlayback();
+    var view = hostView();
+    var tolerance = Math.max(1, Math.abs(view.endSec - view.startSec)) * 1e-9;
+    if (Math.abs(view.startSec - currentView.startSec) > tolerance
+      || Math.abs(view.endSec - currentView.endSec) > tolerance) stopPlayback();
     requestSpectrogram(false);
   }
 
