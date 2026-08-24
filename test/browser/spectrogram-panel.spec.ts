@@ -20,7 +20,9 @@ interface PanelState {
   bands: number;
   hotBands: number;
   audioState: string;
+  audioContextState: string;
   audioAvailable: boolean;
+  audioActivationPending: boolean;
   pendingAudioId: number;
   audioWindowStartSec: number | null;
   audioWindowEndSec: number | null;
@@ -50,6 +52,7 @@ declare global {
       setAcousticBands(bands: { freqHz: number; bwHz: number }[]): void;
       audioState(): {
         state: string;
+        contextState: string;
         playing: boolean;
         currentTimeSec: number;
         hasBuffer: boolean;
@@ -363,7 +366,9 @@ test('persists the split ratio and flips its direction with the orientation', as
   expect(landscapeHeights.spectrogram.width).toBeCloseTo(landscapeHeights.spectrum.width, 0);
   expect(landscapeHeights.spectrogram.height).toBeGreaterThan(0);
 
-  await page.setViewportSize({ width: 700, height: 1000 });
+  // Keep this orientation-contract test above the phone breakpoint. Narrow
+  // portrait layouts intentionally replace the split with a one-pane switch.
+  await page.setViewportSize({ width: 800, height: 1000 });
   await expect.poll(async () => await page.evaluate(() => document.body.classList.contains('layout-vertical')),
     { timeout: 10_000 }).toBe(true);
   await page.waitForTimeout(400);
@@ -435,6 +440,71 @@ test('advances the playhead and the spectrum slice from the audio clock', async 
   await page.locator('#sgStop').click();
   await expect.poll(async () => (await panelState(page)).audioState).toBe('idle');
   await expect.poll(async () => Number.isFinite((await panelState(page)).playheadTimeSec)).toBe(false);
+});
+
+test('waits for a suspended audio context to activate before requesting sound', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+  await page.evaluate(() => {
+    const activation = { resumeCalls: 0, resumeHadGesture: false, requestedWhileRunning: false };
+    (window as any).__audioActivation = activation;
+    (window as any).AudioContext = class {
+      state = 'suspended';
+      currentTime = 0;
+      sampleRate = 44_100;
+      destination = {};
+      createGain() { return { gain: { value: 0 }, connect() {} }; }
+      createBuffer(channels: number, frames: number, sampleRate: number) {
+        const data = Array.from({ length: channels }, () => new Float32Array(frames));
+        return { duration: frames / sampleRate, getChannelData: (channel: number) => data[channel] };
+      }
+      createBufferSource() {
+        return { buffer: null, loop: false, connect() {}, disconnect() {}, start() {}, stop() {}, onended: null };
+      }
+      resume() {
+        activation.resumeCalls++;
+        activation.resumeHadGesture = navigator.userActivation.isActive;
+        return new Promise<void>((resolve) => setTimeout(() => {
+          this.state = 'running';
+          resolve();
+        }, 20));
+      }
+    };
+    window.SeqEyesPanelHost.requestAudio = () => {
+      activation.requestedWhileRunning = window.SeqEyesDev.audioState().contextState === 'running';
+    };
+  });
+
+  await page.locator('#sgPlay').click();
+  await expect.poll(() => page.evaluate(() => (window as any).__audioActivation.requestedWhileRunning)).toBe(true);
+  const activation = await page.evaluate(() => (window as any).__audioActivation);
+  expect(activation.resumeCalls).toBe(1);
+  expect(activation.resumeHadGesture).toBe(true);
+  expect((await page.evaluate(() => window.SeqEyesDev.audioState())).contextState).toBe('running');
+  await page.evaluate(() => window.SeqEyesPanel.stopPlayback());
+});
+
+test('keeps playback idle and retryable when audio activation is rejected', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+  await page.evaluate(() => {
+    (window as any).AudioContext = class {
+      state = 'suspended';
+      currentTime = 0;
+      sampleRate = 44_100;
+      destination = {};
+      createGain() { return { gain: { value: 0 }, connect() {} }; }
+      createBuffer() { return { duration: 0, getChannelData: () => new Float32Array(1) }; }
+      createBufferSource() { return { connect() {}, start() {} }; }
+      resume() { return Promise.reject(new Error('blocked')); }
+    };
+  });
+
+  await page.locator('#sgPlay').click();
+  await expect(page.locator('#viewerNotice')).toContainText('Audio could not start');
+  await expect.poll(async () => (await panelState(page)).audioActivationPending).toBe(false);
+  expect((await panelState(page)).audioState).toBe('idle');
+  await expect(page.locator('#sgPlay')).toBeEnabled();
 });
 
 test('keeps an exact completed position, enables reset, and wraps endpoint replay', async ({ page }) => {
@@ -579,29 +649,27 @@ test('does not loop a short retained tail from a long visible window', async ({ 
   await page.evaluate(() => window.SeqEyesDev.setMarkerTime(0.52));
   const before = await panelState(page);
 
-  const snapshot = await page.evaluate(() => {
-    let captured: {
+  const snapshot = await page.evaluate(() => new Promise<{
       startSec: number;
       endSec: number;
       durationSec: number;
       auditionDurationSec: number;
-    } | null = null;
+    }>((resolve) => {
     window.SeqEyesPanelHost.requestAudio = (id, startSec, endSec) => {
       const frames = Math.max(1, Math.round((endSec - startSec) * 44_100));
       const left = new Float32Array(frames).fill(0.1);
       const right = new Float32Array(frames).fill(-0.1);
       window.SeqEyesPanel.deliverAudio(id, { sampleRate: 44_100, left, right, startSec });
       const audio = window.SeqEyesDev.audioState();
-      captured = {
+      resolve({
         startSec,
         endSec,
         durationSec: audio.durationSec,
         auditionDurationSec: audio.auditionDurationSec,
-      };
+      });
     };
     (document.getElementById('sgPlay') as HTMLButtonElement).click();
-    return captured;
-  });
+  }));
 
   expect(snapshot).not.toBeNull();
   expect(snapshot!.startSec).toBeCloseTo(before.markerTimeSec, 3);
@@ -660,17 +728,13 @@ test('uses a bounded preview instead of synthesising an overlong visible window'
   await loadViewer(page, fixtures.gre);
   await openSpectrogram(page);
 
-  const request = await page.evaluate(() => {
-    const capture = { id: 0, startSec: 0, endSec: 0 };
+  const request = await page.evaluate(() => new Promise<{ id: number; startSec: number; endSec: number }>((resolve) => {
     window.SeqEyesPanelHost.getView = () => ({ startSec: 0, endSec: 120, totalDuration: 120 });
     window.SeqEyesPanelHost.requestAudio = (id, startSec, endSec) => {
-      capture.id = id;
-      capture.startSec = startSec;
-      capture.endSec = endSec;
+      resolve({ id, startSec, endSec });
     };
     (document.getElementById('sgPlay') as HTMLButtonElement).click();
-    return capture;
-  });
+  }));
 
   expect(request.id).toBeGreaterThan(0);
   expect(request.startSec).toBe(0);
@@ -733,6 +797,62 @@ test('renders each warning as a separate theme-aware row', async ({ page }) => {
   await expect(rows).toHaveCount(3);
   await expect(toggle).toHaveText('Collapse');
   expect(await page.evaluate(() => localStorage.getItem('seqeyes.viewerNoticesCollapsed'))).toBe('0');
+});
+
+test('keeps the portrait mobile viewer compact and switches full-width analysis views', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await loadViewer(page, fixtures.gre);
+  await page.evaluate(() => {
+    window.SeqEyesPanelHost.setNotice('mobile-layout', ['First warning', 'Second warning']);
+  });
+
+  await expect(page.locator('#menuBtn')).toBeVisible();
+  await expect(page.locator('#tbMore')).toBeHidden();
+  await expect(page.locator('#viewerNoticeList')).toBeHidden();
+  await expect(page.locator('#viewerNoticeToggle')).toHaveText('Expand');
+  expect((await requireBox(page.locator('#tb'))).height).toBeLessThan(80);
+
+  await page.locator('#menuBtn').click();
+  await expect(page.locator('#tbMore')).toBeVisible();
+  await expect(page.locator('#menuBtn')).toHaveAttribute('aria-expanded', 'true');
+  await page.locator('#menuBtn').click();
+
+  await openSpectrogram(page);
+  const main = await requireBox(page.locator('#main'));
+  const panel = await requireBox(page.locator('#right'));
+  const waveform = await requireBox(page.locator('#left'));
+  expect(panel.height).toBeLessThanOrEqual(main.height - 119);
+  expect(waveform.height).toBeGreaterThanOrEqual(119);
+
+  await expect(page.locator('#sgSettings')).toBeHidden();
+  await expect(page.locator('#sgSettingsToggle')).toBeVisible();
+  await page.locator('#sgSettingsToggle').click();
+  await expect(page.locator('#sgSettings')).toBeVisible();
+  await expect(page.locator('#sgSettingsToggle')).toHaveAttribute('aria-expanded', 'true');
+  await page.locator('#sgSettingsToggle').click();
+
+  const panelWidth = (await requireBox(page.locator('#right'))).width;
+  await expect(page.locator('#sgPane')).toBeVisible();
+  await expect(page.locator('#spPane')).toBeHidden();
+  expect((await requireBox(page.locator('#sgPane'))).width).toBeGreaterThan(panelWidth - 2);
+  await page.locator('#sgMobileView').click();
+  await expect(page.locator('#sgPane')).toBeHidden();
+  await expect(page.locator('#spPane')).toBeVisible();
+  expect((await requireBox(page.locator('#spPane'))).width).toBeGreaterThan(panelWidth - 2);
+  await expect(page.locator('#sgMobileView')).toHaveText('Spectrogram');
+
+  // Mobile browser chrome changes the visual viewport without changing
+  // orientation; the panel must be re-clamped on that resize too.
+  await page.setViewportSize({ width: 390, height: 650 });
+  await expect.poll(async () => (await requireBox(page.locator('#left'))).height).toBeGreaterThanOrEqual(119);
+
+  const viewport = await page.evaluate(() => ({
+    innerHeight: window.innerHeight,
+    bodyBottom: document.body.getBoundingClientRect().bottom,
+    scrollHeight: document.documentElement.scrollHeight,
+  }));
+  expect(viewport.bodyBottom).toBeLessThanOrEqual(viewport.innerHeight + 1);
+  expect(viewport.scrollHeight).toBeLessThanOrEqual(viewport.innerHeight + 1);
 });
 
 test('mirrors the panel marker onto the waveform panel', async ({ page }) => {
@@ -802,16 +922,12 @@ async function captureNextAudioRequest(page: Page): Promise<{
   startSec: number;
   endSec: number;
 }> {
-  return page.evaluate(() => {
-    const request = { id: 0, startSec: NaN, endSec: NaN };
+  return page.evaluate(() => new Promise<{ id: number; startSec: number; endSec: number }>((resolve) => {
     window.SeqEyesPanelHost.requestAudio = (id, startSec, endSec) => {
-      request.id = id;
-      request.startSec = startSec;
-      request.endSec = endSec;
+      resolve({ id, startSec, endSec });
     };
     (document.getElementById('sgPlay') as HTMLButtonElement).click();
-    return request;
-  });
+  }));
 }
 
 async function loadViewer(page: Page, fixturePath: string): Promise<void> {

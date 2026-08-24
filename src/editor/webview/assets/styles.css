@@ -15,7 +15,8 @@ body.theme-githublight{--bg:#ffffff;--fg:#24292f;--gr:#d0d7de;--rf:#cf222e;--rff
 body.theme-github{--bg:#0d1117;--fg:#c9d1d9;--gr:#21262d;--rf:#ff7b72;--rff:rgba(255,123,114,.08);--gx:#7ee787;--gy:#79c0ff;--gz:#ffa657;--adc:#a5d6ff;--adf:rgba(165,214,255,.12);--tr:#d2a8ff;--ax:#30363d;--lb:#8b949e;--cr:#ff7b72;--bd:#21262d;--trbg:#161b22}
 /* ── Layout ── */
 *{margin:0;padding:0;box-sizing:border-box}
-body{font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--fg);overflow:hidden;height:100vh;user-select:none;display:flex;flex-direction:column}
+html{height:100%}
+body{font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--fg);overflow:hidden;height:100vh;height:100dvh;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);user-select:none;display:flex;flex-direction:column}
 #main{display:flex;flex:1;overflow:hidden}
 #left{display:flex;flex-direction:column;flex:1;overflow:hidden;min-width:0}
 #right{width:0;overflow:hidden;position:relative;border-left:1px solid var(--gr);transition:width .25s}
@@ -93,13 +94,13 @@ body.layout-vertical #rc button{padding:4px 8px;font-size:10px}
 /* ── Narrow / touch-device toolbar ── */
 @media(max-width:768px),(pointer:coarse){
   #tb{padding:4px 6px;gap:4px;position:relative}
-  #tb .sep{margin:0 2px}
-  #tb .cur{min-width:0;font-size:10px;flex-basis:100%;text-align:left;margin-left:0;order:99}
+  #tb>.sep{display:none}
+  #tb .cur{display:none}
   #menuBtn{display:inline-block}
   #zi,#zo,#zf,#zr{display:none}
   #zr+.sep{display:none}
   #panelBtn{order:1}
-  #tb .lg{order:2;gap:4px;row-gap:1px}
+  #tb .lg{order:2;flex:1 1 100%;gap:4px;flex-wrap:nowrap;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:thin}
   #tbMore{display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--gr);border-top:none;z-index:200;padding:6px 8px;flex-direction:column;align-items:flex-start;gap:6px;box-shadow:0 4px 12px rgba(0,0,0,.15)}
   #tbMore.open{display:flex}
   #cc{cursor:crosshair}
@@ -126,6 +127,8 @@ body.layout-vertical #rc button{padding:4px 8px;font-size:10px}
 #sgTools .lg .li{cursor:pointer;display:flex;align-items:center;gap:3px;padding:0 3px;border-radius:3px;opacity:1;transition:opacity .15s}
 #sgTools .lg .li.off{opacity:.30}
 #sgTools .lg .ld{width:9px;height:9px;border-radius:2px;border:1px solid rgba(0,0,0,.15)}
+#sgSettings{display:contents}
+#sgSettingsToggle,#sgMobileView{display:none}
 #sgBody{flex:1 1 auto;display:flex;flex-direction:column;min-height:0;min-width:0}
 #sgPane{position:relative;flex:3 1 0%;min-height:0;min-width:0;overflow:hidden}
 #spPane{position:relative;flex:1 1 0%;min-height:0;min-width:0;overflow:hidden}
@@ -149,5 +152,15 @@ body.layout-vertical.sg-split-drag{cursor:col-resize}
   #sgTools{gap:4px;padding:4px 5px}
   #sgTools button{min-height:24px;padding:2px 7px}
   #sgTools input[type=number]{width:56px;min-height:22px}
-  #sgSplit{flex-basis:12px}
+  #sgSettingsToggle{display:inline-block}
+  #sgSettings{display:none;flex:1 0 100%;align-items:center;flex-wrap:wrap;gap:4px;padding-top:4px;border-top:1px solid var(--gr)}
+  #sgSettings.open{display:flex}
+  body.layout-vertical #sgMobileView{display:inline-block}
+  body.layout-vertical #sgBody{flex-direction:column}
+  body.layout-vertical #spane:not(.mobile-spectrum) #sgSplit,
+  body.layout-vertical #spane:not(.mobile-spectrum) #spPane{display:none}
+  body.layout-vertical #spane.mobile-spectrum #sgPane,
+  body.layout-vertical #spane.mobile-spectrum #sgSplit{display:none}
+  body.layout-vertical #spane.mobile-spectrum #spPane{display:block;flex:1 1 auto}
+  #viewerNotice .viewer-notice-item{align-items:flex-start;padding:5px 7px}
 }

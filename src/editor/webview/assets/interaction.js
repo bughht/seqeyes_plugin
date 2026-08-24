@@ -218,15 +218,15 @@ document.getElementById('bbc').onchange=function(){showBB=this.checked;draw();};
 /* ── Mobile hamburger menu ─────────────────────────────────────────── */
 var menuBtn=document.getElementById('menuBtn');
 if(menuBtn){
-  menuBtn.onclick=function(e){var m=document.getElementById('tbMore');m.classList.toggle('open');e.stopPropagation();};
+  menuBtn.onclick=function(e){var m=document.getElementById('tbMore'),open=m.classList.toggle('open');menuBtn.setAttribute('aria-expanded',open?'true':'false');e.stopPropagation();};
   document.addEventListener('click',function(e){
     var m=document.getElementById('tbMore');
-    if(m.classList.contains('open')&&!m.contains(e.target)&&e.target!==menuBtn)m.classList.remove('open');
+    if(m.classList.contains('open')&&!m.contains(e.target)&&e.target!==menuBtn){m.classList.remove('open');menuBtn.setAttribute('aria-expanded','false');}
   });
   // Close menu when any option inside it is used
   document.getElementById('tbMore').addEventListener('click',function(e){
     if(e.target.tagName==='BUTTON'||e.target.tagName==='SELECT'||e.target.tagName==='INPUT'){
-      this.classList.remove('open');
+      this.classList.remove('open');menuBtn.setAttribute('aria-expanded','false');
     }
   });
 }

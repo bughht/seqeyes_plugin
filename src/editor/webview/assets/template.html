@@ -1,6 +1,6 @@
 <!-- ── Toolbar ── -->
 <div id="tb">
-<button id="menuBtn" class="mobile-only" title="Menu">☰</button>
+<button id="menuBtn" class="mobile-only" title="Menu" aria-controls="tbMore" aria-expanded="false">☰</button>
 <button id="openBtn" title="Open another .seq or .bseq file">📂 Open</button>
 <button id="zi" title="Zoom In (scroll wheel)">+</button>
 <button id="zo" title="Zoom Out">−</button>
@@ -60,6 +60,9 @@
     <button id="sgStop" type="button" class="sg-glyph" aria-label="Stop playback" title="Stop playback">■</button>
     <button id="sgMute" type="button" class="sg-glyph" aria-pressed="false" aria-label="Mute" title="Mute">🔊</button>
     <input type="range" id="sgVol" min="0" max="100" value="70" aria-label="Volume" title="Volume">
+    <button id="sgSettingsToggle" type="button" aria-controls="sgSettings" aria-expanded="false">Settings</button>
+    <button id="sgMobileView" type="button" aria-controls="sgBody" aria-pressed="false">Spectrum</button>
+    <div id="sgSettings">
     <div class="sep"></div>
     <select id="sgCmap" aria-label="Colormap" title="Colormap"></select>
     <select id="sgSource" aria-label="Spectrum source" title="Analyse gradient amplitude G, or its slew rate dG/dt">
@@ -106,6 +109,7 @@
     <div class="sep"></div>
     <button id="sgMarkerClear" type="button" title="Clear the time marker (Esc)">Clear marker</button>
     <div class="lg" id="sgLegend"></div>
+    </div>
   </div>
   <div id="sgBody">
     <div id="sgPane"><canvas id="sgImg" aria-hidden="true"></canvas><canvas id="sgOvl" tabindex="0" aria-label="Gradient spectrogram: right-click to place a time marker, middle-drag for window and level"></canvas><div id="sgBusy" aria-hidden="true"></div></div>

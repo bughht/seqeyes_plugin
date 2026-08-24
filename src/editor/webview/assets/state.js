@@ -35,7 +35,7 @@ function viewerNoticeMessages(value){
   for(var i=0;i<values.length;i++)if(values[i])messages.push(String(values[i]));
   return messages;
 }
-function readViewerNoticesCollapsed(){try{return localStorage.getItem('seqeyes.viewerNoticesCollapsed')==='1';}catch(_){return false;}}
+function readViewerNoticesCollapsed(){try{var saved=localStorage.getItem('seqeyes.viewerNoticesCollapsed');return saved===null?isMobileSafetyLayout():saved==='1';}catch(_){return isMobileSafetyLayout();}}
 function setViewerNoticesCollapsed(collapsed){
   viewerNoticesCollapsed=!!collapsed;
   try{localStorage.setItem('seqeyes.viewerNoticesCollapsed',viewerNoticesCollapsed?'1':'0');}catch(_){}
@@ -214,9 +214,11 @@ function applyLayoutMode(){
   }
 }
 function panelStoredWidth(){try{var v=parseFloat(localStorage.getItem('seqeyes.panelWidth'));return isFinite(v)?v:500;}catch(_){return 500;}}
-function panelStoredHeight(){try{var v=parseFloat(localStorage.getItem('seqeyes.panelHeight'));return isFinite(v)?v:300;}catch(_){return 300;}}
+function panelMaxHeight(){var main=document.getElementById('main'),available=main?main.getBoundingClientRect().height:window.innerHeight;return Math.max(100,available-120);}
+function panelStoredHeight(){var available=document.getElementById('main'),height=available?available.getBoundingClientRect().height:window.innerHeight,raw,max=panelMaxHeight(),min=Math.min(180,max);try{var v=parseFloat(localStorage.getItem('seqeyes.panelHeight'));raw=isFinite(v)?v:(isMobileSafetyLayout()?height*.58:300);}catch(_){raw=isMobileSafetyLayout()?height*.58:300;}return Math.max(min,Math.min(raw,max));}
 function refreshLayout(){
-  if(detectLayoutMode()){
+  var changed=detectLayoutMode();
+  if(changed){
     applyLayoutMode();
     rs();
     if(typeof drawKs==='function')drawKs();
@@ -224,6 +226,9 @@ function refreshLayout(){
     // The split direction is inverted relative to the dock (R5), and the
     // ratio is persisted per orientation, so the panel re-reads both here.
     if(typeof SeqEyesPanel!=='undefined')SeqEyesPanel.onLayoutChanged();
+  }
+  else if(layoutMode==='vertical'&&panelOpen){
+    document.getElementById('right').style.setProperty('height',panelStoredHeight()+'px','important');
   }
 }
 applyLayoutMode();
@@ -844,6 +849,7 @@ window.SeqEyesPanelHost={
   getTrTimeSec:function(){return seqTiming&&seqTiming.trTimeSec>0?seqTiming.trTimeSec:0;},
   getTimeUnit:function(){return timeUnit;},
   getWaveformLeftMargin:function(){return M.l;},
+  getPanelHeight:function(){return panelStoredHeight();},
   refreshLayout:function(){refreshLayout();},
   hasKspaceData:function(){return !!(kAdc&&kAdc[0]&&kAdc[0].length);},
   requestKspace:function(){requestKspaceCalculation();},

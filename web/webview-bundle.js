@@ -152,7 +152,7 @@ function viewerNoticeMessages(value){
   for(var i=0;i<values.length;i++)if(values[i])messages.push(String(values[i]));
   return messages;
 }
-function readViewerNoticesCollapsed(){try{return localStorage.getItem('seqeyes.viewerNoticesCollapsed')==='1';}catch(_){return false;}}
+function readViewerNoticesCollapsed(){try{var saved=localStorage.getItem('seqeyes.viewerNoticesCollapsed');return saved===null?isMobileSafetyLayout():saved==='1';}catch(_){return isMobileSafetyLayout();}}
 function setViewerNoticesCollapsed(collapsed){
   viewerNoticesCollapsed=!!collapsed;
   try{localStorage.setItem('seqeyes.viewerNoticesCollapsed',viewerNoticesCollapsed?'1':'0');}catch(_){}
@@ -331,9 +331,11 @@ function applyLayoutMode(){
   }
 }
 function panelStoredWidth(){try{var v=parseFloat(localStorage.getItem('seqeyes.panelWidth'));return isFinite(v)?v:500;}catch(_){return 500;}}
-function panelStoredHeight(){try{var v=parseFloat(localStorage.getItem('seqeyes.panelHeight'));return isFinite(v)?v:300;}catch(_){return 300;}}
+function panelMaxHeight(){var main=document.getElementById('main'),available=main?main.getBoundingClientRect().height:window.innerHeight;return Math.max(100,available-120);}
+function panelStoredHeight(){var available=document.getElementById('main'),height=available?available.getBoundingClientRect().height:window.innerHeight,raw,max=panelMaxHeight(),min=Math.min(180,max);try{var v=parseFloat(localStorage.getItem('seqeyes.panelHeight'));raw=isFinite(v)?v:(isMobileSafetyLayout()?height*.58:300);}catch(_){raw=isMobileSafetyLayout()?height*.58:300;}return Math.max(min,Math.min(raw,max));}
 function refreshLayout(){
-  if(detectLayoutMode()){
+  var changed=detectLayoutMode();
+  if(changed){
     applyLayoutMode();
     rs();
     if(typeof drawKs==='function')drawKs();
@@ -341,6 +343,9 @@ function refreshLayout(){
     // The split direction is inverted relative to the dock (R5), and the
     // ratio is persisted per orientation, so the panel re-reads both here.
     if(typeof SeqEyesPanel!=='undefined')SeqEyesPanel.onLayoutChanged();
+  }
+  else if(layoutMode==='vertical'&&panelOpen){
+    document.getElementById('right').style.setProperty('height',panelStoredHeight()+'px','important');
   }
 }
 applyLayoutMode();
@@ -961,6 +966,7 @@ window.SeqEyesPanelHost={
   getTrTimeSec:function(){return seqTiming&&seqTiming.trTimeSec>0?seqTiming.trTimeSec:0;},
   getTimeUnit:function(){return timeUnit;},
   getWaveformLeftMargin:function(){return M.l;},
+  getPanelHeight:function(){return panelStoredHeight();},
   refreshLayout:function(){refreshLayout();},
   hasKspaceData:function(){return !!(kAdc&&kAdc[0]&&kAdc[0].length);},
   requestKspace:function(){requestKspaceCalculation();},
@@ -2370,7 +2376,7 @@ window.addEventListener("mousemove",function(e){
   var p=document.getElementById("right");
   var vertical=(typeof layoutMode!=='undefined'&&layoutMode==='vertical');
   if(vertical){
-    kResizeH=Math.max(120,Math.min(800,kResizeH-(e.clientY-kResizeStart)));
+    kResizeH=Math.max(120,Math.min(typeof panelMaxHeight==='function'?panelMaxHeight():800,kResizeH-(e.clientY-kResizeStart)));
     kResizeStart=e.clientY;
     p.style.setProperty('height',kResizeH+'px','important');p.style.setProperty('transition','none','important');
   }else{
@@ -2386,7 +2392,7 @@ window.addEventListener("touchmove",function(e){
   var p=document.getElementById("right");
   var vertical=(typeof layoutMode!=='undefined'&&layoutMode==='vertical');
   if(vertical){
-    kResizeH=Math.max(120,Math.min(800,kResizeH-(e.touches[0].clientY-kResizeStart)));
+    kResizeH=Math.max(120,Math.min(typeof panelMaxHeight==='function'?panelMaxHeight():800,kResizeH-(e.touches[0].clientY-kResizeStart)));
     kResizeStart=e.touches[0].clientY;
     p.style.setProperty('height',kResizeH+'px','important');p.style.setProperty('transition','none','important');
   }else{
@@ -3460,12 +3466,14 @@ var SeqEyesAudio = (function () {
     return available;
   }
 
-  /** Must be called from inside a user gesture the first time. */
+  /** Create the shared context without changing its autoplay-policy state. */
   function ensureContext() {
-    if (ctx) {
-      if (ctx.state === 'suspended' && ctx.resume) ctx.resume();
-      return ctx;
+    if (ctx && ctx.state === 'closed') {
+      ctx = null;
+      gainNode = null;
+      buffer = null;
     }
+    if (ctx) return ctx;
     var Ctor = contextClass();
     if (!Ctor) { available = false; return null; }
     try {
@@ -3481,13 +3489,53 @@ var SeqEyesAudio = (function () {
     return ctx;
   }
 
+  function primeContext() {
+    if (!ctx || !gainNode || !ctx.createBuffer || !ctx.createBufferSource) return;
+    try {
+      // Starting a silent source in the tap handler unlocks older mobile WebKit.
+      var primer = ctx.createBufferSource();
+      primer.buffer = ctx.createBuffer(1, 1, Math.max(8000, ctx.sampleRate || 44100));
+      primer.connect(gainNode);
+      primer.start(0);
+    } catch (err) { /* resume() remains the authoritative activation result */ }
+  }
+
+  /**
+   * Activate audio from a user gesture. Returns true synchronously when the
+   * context already runs, otherwise a Promise that resolves to the final state.
+   */
+  function activate() {
+    var active = ensureContext();
+    if (!active) return false;
+    if (!active.state || active.state === 'running') {
+      primeContext();
+      return true;
+    }
+
+    var resumeResult;
+    try {
+      resumeResult = active.resume ? active.resume() : null;
+      primeContext();
+    } catch (err) {
+      return false;
+    }
+    if (!resumeResult || !resumeResult.then) {
+      return !active.state || active.state === 'running';
+    }
+    return Promise.resolve(resumeResult).then(function () {
+      return !!ctx && (!ctx.state || ctx.state === 'running');
+    }, function () { return false; });
+  }
+
+  function contextState() { return ctx && ctx.state ? ctx.state : (ctx ? 'running' : 'uninitialized'); }
+
   /**
    * Install a stereo buffer.
    * `startSeqSec` is the sequence time of sample 0, so the playhead can be
    * reported in sequence time rather than buffer time.
    */
   function load(sampleRate, left, right, startSeqSec) {
-    if (!ensureContext()) return false;
+    if (!ctx || (ctx.state && ctx.state !== 'running')) return false;
     var frames = Math.min(left.length, right.length);
     if (!frames) return false;
     try {
@@ -3519,7 +3567,7 @@ var SeqEyesAudio = (function () {
    * is not audible as anything.
    */
   function play(offsetSec, totalSec) {
-    if (!buffer || !ensureContext()) return false;
+    if (!buffer || !ctx || (ctx.state && ctx.state !== 'running')) return false;
     var resuming = state === 'paused';
     stopSource();
     var offset = Math.max(0, Math.min(buffer.duration, isFinite(offsetSec) ? offsetSec : 0));
@@ -3649,6 +3697,8 @@ var SeqEyesAudio = (function () {
   return {
     isAvailable: isAvailable,
     ensureContext: ensureContext,
+    activate: activate,
+    contextState: contextState,
     load: load,
     hasBuffer: hasBuffer,
     bufferDurationSec: bufferDurationSec,
@@ -3755,6 +3805,8 @@ var SeqEyesPanel = (function () {
 
   var audioRequestId = 0;
   var pendingAudioId = 0;
+  var audioActivationId = 0;
+  var audioActivationPending = false;
   var audioWindow = null;       // buffered range plus the first-pass offset
   var playheadFrame = 0;
 
@@ -3834,7 +3886,10 @@ var SeqEyesPanel = (function () {
   }
 
   function panelSizeHorizontal() { return getNum('seqeyes.panelWidth', 500); }
-  function panelSizeVertical() { return getNum('seqeyes.panelHeight', 300); }
+  function panelSizeVertical() {
+    var h = activeHost();
+    return h && h.getPanelHeight ? h.getPanelHeight() : getNum('seqeyes.panelHeight', 300);
+  }
 
   /**
    * Enter a mode.
@@ -4417,13 +4472,17 @@ var SeqEyesPanel = (function () {
     };
   }
 
-  function togglePlayback() {
-    if (!SeqEyesAudio.isAvailable()) return;
-    if (SeqEyesAudio.isPlaying()) { pausePlayback(); return; }
+  function audioActivationFailure() {
+    notice('gradientSound', 'Audio could not start. Return to this tab and tap Play again; also check that browser audio is allowed.');
+    syncTransport();
+  }
 
-    SeqEyesAudio.ensureContext();   // must happen inside the click handler
+  function beginPlayback() {
     if (SeqEyesAudio.getState() === 'paused' && audioWindow) {
-      SeqEyesAudio.play(SeqEyesAudio.currentBufferOffsetSec(), playbackLengthSec(audioWindow));
+      if (!SeqEyesAudio.play(SeqEyesAudio.currentBufferOffsetSec(), playbackLengthSec(audioWindow))) {
+        audioActivationFailure();
+        return;
+      }
       startPlayheadLoop();
       syncTransport();
       return;
@@ -4445,6 +4504,41 @@ var SeqEyesPanel = (function () {
       channelWeights: [1, 1, 1]
     });
     syncTransport();
+  }
+
+  function togglePlayback() {
+    if (!SeqEyesAudio.isAvailable() || audioActivationPending) return;
+    if (SeqEyesAudio.isPlaying()) { pausePlayback(); return; }
+
+    // Calling activate() here, before any asynchronous host work, preserves
+    // the Play button's user activation on iOS.
+    var activationId = ++audioActivationId;
+    var activation = SeqEyesAudio.activate();
+    if (activation === true) {
+      beginPlayback();
+      return;
+    }
+    if (!activation || !activation.then) {
+      audioActivationFailure();
+      return;
+    }
+
+    audioActivationPending = true;
+    syncTransport();
+    activation.then(function (activated) {
+      if (activationId !== audioActivationId) return;
+      audioActivationPending = false;
+      if (!activated) {
+        audioActivationFailure();
+        return;
+      }
+      beginPlayback();
+      syncTransport();
+    }, function () {
+      if (activationId !== audioActivationId) return;
+      audioActivationPending = false;
+      audioActivationFailure();
+    });
   }
 
   /** D4: complete short-window repeats extend the audition to at least one second. */
@@ -4471,7 +4565,8 @@ var SeqEyesPanel = (function () {
       return;
     }
     if (!SeqEyesAudio.load(payload.sampleRate, payload.left, payload.right, payload.startSec)) {
-      notice('gradientSound', 'This host could not create an audio buffer.');
+      if (SeqEyesAudio.contextState() !== 'running') audioActivationFailure();
+      else notice('gradientSound', 'This host could not create an audio buffer.');
       syncTransport();
       return;
     }
@@ -4495,7 +4590,10 @@ var SeqEyesPanel = (function () {
       syncTransport();
       render();
     });
-    SeqEyesAudio.play(range.initialOffsetSec || 0, playbackLengthSec(range));
+    if (!SeqEyesAudio.play(range.initialOffsetSec || 0, playbackLengthSec(range))) {
+      audioActivationFailure();
+      return;
+    }
     startPlayheadLoop();
     syncTransport();
   }
@@ -4518,6 +4616,8 @@ var SeqEyesPanel = (function () {
 
   function stopPlayback() {
     audioRequestId++;
+    audioActivationId++;
+    audioActivationPending = false;
     SeqEyesAudio.stop();
     stopPlayheadLoop();
     playheadTimeSec = NaN;
@@ -4561,7 +4661,7 @@ var SeqEyesPanel = (function () {
     var mute = el('sgMute');
     var available = SeqEyesAudio.isAvailable();
     if (play) {
-      play.disabled = !available || pendingAudioId !== 0;
+      play.disabled = !available || pendingAudioId !== 0 || audioActivationPending;
       play.textContent = SeqEyesAudio.isPlaying() ? '‖' : '▶';
       play.setAttribute('aria-label', SeqEyesAudio.isPlaying() ? 'Pause' : 'Play simulated gradient sound');
       if (!available) play.title = 'Audio playback is unavailable in this host.';
@@ -4738,6 +4838,23 @@ var SeqEyesPanel = (function () {
   }
 
   function wireControls() {
+    var settingsToggle = el('sgSettingsToggle');
+    var settings = el('sgSettings');
+    if (settingsToggle && settings) settingsToggle.onclick = function () {
+      var open = settings.classList.toggle('open');
+      settingsToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      requestAnimationFrame(resize);
+    };
+
+    var mobileView = el('sgMobileView');
+    var spectrogramPane = el('spane');
+    if (mobileView && spectrogramPane) mobileView.onclick = function () {
+      var spectrum = spectrogramPane.classList.toggle('mobile-spectrum');
+      mobileView.textContent = spectrum ? 'Spectrogram' : 'Spectrum';
+      mobileView.setAttribute('aria-pressed', spectrum ? 'true' : 'false');
+      requestAnimationFrame(resize);
+    };
+
     var cmap = el('sgCmap');
     if (cmap) cmap.onchange = function () {
       colormapName = this.value;
@@ -5123,6 +5240,13 @@ var SeqEyesPanel = (function () {
   }
 
   function onLayoutChanged() {
+    var pane = el('spane');
+    var mobileView = el('sgMobileView');
+    if (layoutMode() !== 'vertical' && pane) pane.classList.remove('mobile-spectrum');
+    if (layoutMode() !== 'vertical' && mobileView) {
+      mobileView.textContent = 'Spectrum';
+      mobileView.setAttribute('aria-pressed', 'false');
+    }
     if (panelMode !== 'spectrogram') return;
     applySplit();
     applyPanelGeometry();
@@ -5219,7 +5343,9 @@ var SeqEyesPanel = (function () {
         bands: acousticBands.length,
         hotBands: hotBands.filter(Boolean).length,
         audioState: SeqEyesAudio.getState(),
+        audioContextState: SeqEyesAudio.contextState(),
         audioAvailable: SeqEyesAudio.isAvailable(),
+        audioActivationPending: audioActivationPending,
         pendingAudioId: pendingAudioId,
         audioWindowStartSec: audioWindow ? audioWindow.startSec : null,
         audioWindowEndSec: audioWindow ? audioWindow.endSec : null,
@@ -5270,6 +5396,7 @@ window.SeqEyesDev.setAcousticBands = function (bands) { SeqEyesPanel.setAcoustic
 window.SeqEyesDev.audioState = function () {
   return {
     state: SeqEyesAudio.getState(),
+    contextState: SeqEyesAudio.contextState(),
     available: SeqEyesAudio.isAvailable(),
     playing: SeqEyesAudio.isPlaying(),
     currentTimeSec: SeqEyesAudio.currentTimeSec(),
@@ -5504,15 +5631,15 @@ document.getElementById('bbc').onchange=function(){showBB=this.checked;draw();};
 /* ── Mobile hamburger menu ─────────────────────────────────────────── */
 var menuBtn=document.getElementById('menuBtn');
 if(menuBtn){
-  menuBtn.onclick=function(e){var m=document.getElementById('tbMore');m.classList.toggle('open');e.stopPropagation();};
+  menuBtn.onclick=function(e){var m=document.getElementById('tbMore'),open=m.classList.toggle('open');menuBtn.setAttribute('aria-expanded',open?'true':'false');e.stopPropagation();};
   document.addEventListener('click',function(e){
     var m=document.getElementById('tbMore');
-    if(m.classList.contains('open')&&!m.contains(e.target)&&e.target!==menuBtn)m.classList.remove('open');
+    if(m.classList.contains('open')&&!m.contains(e.target)&&e.target!==menuBtn){m.classList.remove('open');menuBtn.setAttribute('aria-expanded','false');}
   });
   // Close menu when any option inside it is used
   document.getElementById('tbMore').addEventListener('click',function(e){
     if(e.target.tagName==='BUTTON'||e.target.tagName==='SELECT'||e.target.tagName==='INPUT'){
-      this.classList.remove('open');
+      this.classList.remove('open');menuBtn.setAttribute('aria-expanded','false');
     }
   });
 }

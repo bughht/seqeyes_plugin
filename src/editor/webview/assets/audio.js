@@ -51,12 +51,14 @@ var SeqEyesAudio = (function () {
     return available;
   }
 
-  /** Must be called from inside a user gesture the first time. */
+  /** Create the shared context without changing its autoplay-policy state. */
   function ensureContext() {
-    if (ctx) {
-      if (ctx.state === 'suspended' && ctx.resume) ctx.resume();
-      return ctx;
+    if (ctx && ctx.state === 'closed') {
+      ctx = null;
+      gainNode = null;
+      buffer = null;
     }
+    if (ctx) return ctx;
     var Ctor = contextClass();
     if (!Ctor) { available = false; return null; }
     try {
@@ -72,13 +74,53 @@ var SeqEyesAudio = (function () {
     return ctx;
   }
 
+  function primeContext() {
+    if (!ctx || !gainNode || !ctx.createBuffer || !ctx.createBufferSource) return;
+    try {
+      // Starting a silent source in the tap handler unlocks older mobile WebKit.
+      var primer = ctx.createBufferSource();
+      primer.buffer = ctx.createBuffer(1, 1, Math.max(8000, ctx.sampleRate || 44100));
+      primer.connect(gainNode);
+      primer.start(0);
+    } catch (err) { /* resume() remains the authoritative activation result */ }
+  }
+
+  /**
+   * Activate audio from a user gesture. Returns true synchronously when the
+   * context already runs, otherwise a Promise that resolves to the final state.
+   */
+  function activate() {
+    var active = ensureContext();
+    if (!active) return false;
+    if (!active.state || active.state === 'running') {
+      primeContext();
+      return true;
+    }
+
+    var resumeResult;
+    try {
+      resumeResult = active.resume ? active.resume() : null;
+      primeContext();
+    } catch (err) {
+      return false;
+    }
+    if (!resumeResult || !resumeResult.then) {
+      return !active.state || active.state === 'running';
+    }
+    return Promise.resolve(resumeResult).then(function () {
+      return !!ctx && (!ctx.state || ctx.state === 'running');
+    }, function () { return false; });
+  }
+
+  function contextState() { return ctx && ctx.state ? ctx.state : (ctx ? 'running' : 'uninitialized'); }
+
   /**
    * Install a stereo buffer.
    * `startSeqSec` is the sequence time of sample 0, so the playhead can be
    * reported in sequence time rather than buffer time.
    */
   function load(sampleRate, left, right, startSeqSec) {
-    if (!ensureContext()) return false;
+    if (!ctx || (ctx.state && ctx.state !== 'running')) return false;
     var frames = Math.min(left.length, right.length);
     if (!frames) return false;
     try {
@@ -110,7 +152,7 @@ var SeqEyesAudio = (function () {
    * is not audible as anything.
    */
   function play(offsetSec, totalSec) {
-    if (!buffer || !ensureContext()) return false;
+    if (!buffer || !ctx || (ctx.state && ctx.state !== 'running')) return false;
     var resuming = state === 'paused';
     stopSource();
     var offset = Math.max(0, Math.min(buffer.duration, isFinite(offsetSec) ? offsetSec : 0));
@@ -240,6 +282,8 @@ var SeqEyesAudio = (function () {
   return {
     isAvailable: isAvailable,
     ensureContext: ensureContext,
+    activate: activate,
+    contextState: contextState,
     load: load,
     hasBuffer: hasBuffer,
     bufferDurationSec: bufferDurationSec,

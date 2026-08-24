@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
 <title>SeqEyes — Pulseq MRI Sequence Viewer</title>
 <link rel="stylesheet" href="styles.css">
 <style>
@@ -61,23 +61,26 @@
      HTML Body — same as VS Code webview (html.ts)
      ═══════════════════════════════════════════════════════════════ -->
 <div id="tb">
+<button id="menuBtn" class="mobile-only" title="Menu" aria-controls="tbMore" aria-expanded="false">☰</button>
 <img src="logo.png" alt="SeqEyes" style="width:18px;height:18px;border-radius:3px;vertical-align:middle" title="SeqEyes">
 <button id="openBtn" title="Open another local .seq or .bseq file">📂 Open</button>
 <button id="openSeqBtn" class="matlab-only" title="Open another local .seq file">📂 Open .seq</button>
 <button id="openBseqBtn" class="matlab-only" title="Open another local .bseq file">📂 Open .bseq</button>
 <button id="openUrlBtn" class="web-url-only" title="Open a .seq or .bseq file from a web link">🌐 URL</button>
-<button id="exportKspaceBtn" title="Export ADC k-space trajectory and metadata" disabled>Export</button><div class="sep"></div>
-<button id="pnsBtn" title="Load a Siemens ASC profile for PNS prediction and acoustic resonance bands">Load ASC (PNS/Acoustic)</button><div class="sep"></div>
 <button id="zi" title="Zoom In (scroll wheel)">+</button>
 <button id="zo" title="Zoom Out">−</button>
 <button id="zf" title="Fit All">Fit</button>
 <button id="zr" title="Reset">↺</button><div class="sep"></div>
+<span id="tbMore">
+<button id="exportKspaceBtn" title="Export ADC k-space trajectory and metadata" disabled>Export</button>
+<button id="pnsBtn" title="Load a Siemens ASC profile for PNS prediction and acoustic resonance bands">Load ASC (PNS/Acoustic)</button><div class="sep"></div>
 <span class="ulbl">Theme:</span><select id="theme"><option value="system">System</option><option value="onelight">One Light</option><option value="onedark">One Dark</option><option value="dracula">Dracula</option><option value="nord">Nord</option><option value="githublight">GitHub Light</option><option value="github">GitHub</option></select>
 <div class="sep"></div>
 <span class="ulbl">Time:</span><select id="tu"><option value="s">s</option><option value="ms" selected>ms</option><option value="us">µs</option></select>
 <span class="ulbl">Grad:</span><select id="gu"><option value="Hz/m" selected>Hz/m</option><option value="mT/m">mT/m</option><option value="G/cm">G/cm</option></select>
 <div class="sep"></div>
 <label class="li" id="bbt" title="Toggle block boundary lines"><input type="checkbox" id="bbc" style="margin:0;cursor:pointer"><span style="font-size:11px;color:var(--fg)">Blocks</span></label>
+</span>
 <div class="sep"></div><div class="lg" id="legend"></div>
 <button id="panelBtn" type="button" aria-pressed="false" title="Show the k-space trajectory" style="margin-left:4px">K-Space / Spectrum</button>
 <span class="cur" id="cur">← hover for time</span>
@@ -110,6 +113,9 @@
     <button id="sgStop" type="button" class="sg-glyph" aria-label="Stop playback" title="Stop playback">■</button>
     <button id="sgMute" type="button" class="sg-glyph" aria-pressed="false" aria-label="Mute" title="Mute">🔊</button>
     <input type="range" id="sgVol" min="0" max="100" value="70" aria-label="Volume" title="Volume">
+    <button id="sgSettingsToggle" type="button" aria-controls="sgSettings" aria-expanded="false">Settings</button>
+    <button id="sgMobileView" type="button" aria-controls="sgBody" aria-pressed="false">Spectrum</button>
+    <div id="sgSettings">
     <div class="sep"></div>
     <select id="sgCmap" aria-label="Colormap" title="Colormap"></select>
     <select id="sgSource" aria-label="Spectrum source" title="Analyse gradient amplitude G, or its slew rate dG/dt">
@@ -156,6 +162,7 @@
     <div class="sep"></div>
     <button id="sgMarkerClear" type="button" title="Clear the time marker (Esc)">Clear marker</button>
     <div class="lg" id="sgLegend"></div>
+    </div>
   </div>
   <div id="sgBody">
     <div id="sgPane"><canvas id="sgImg" aria-hidden="true"></canvas><canvas id="sgOvl" tabindex="0" aria-label="Gradient spectrogram: right-click to place a time marker, middle-drag for window and level"></canvas><div id="sgBusy" aria-hidden="true"></div></div>
@@ -212,7 +219,7 @@ function viewerNoticeMessages(value){
   for(var i=0;i<values.length;i++)if(values[i])messages.push(String(values[i]));
   return messages;
 }
-function readViewerNoticesCollapsed(){try{return localStorage.getItem('seqeyes.viewerNoticesCollapsed')==='1';}catch(_){return false;}}
+function readViewerNoticesCollapsed(){try{var saved=localStorage.getItem('seqeyes.viewerNoticesCollapsed');return saved===null?isMobileSafetyLayout():saved==='1';}catch(_){return isMobileSafetyLayout();}}
 function setViewerNoticesCollapsed(collapsed){
   viewerNoticesCollapsed=!!collapsed;
   try{localStorage.setItem('seqeyes.viewerNoticesCollapsed',viewerNoticesCollapsed?'1':'0');}catch(_){}
@@ -361,7 +368,7 @@ function applyLayoutMode(){
     handle.style.setProperty('height','5px','important');
     handle.style.setProperty('bottom','auto','important');
     if(rc)rc.style.setProperty('flex-direction','row','important');
-    if(panelOpen){right.style.setProperty('height',panelStoredSize('seqeyes.panelHeight',300)+'px','important');}
+    if(panelOpen){right.style.setProperty('height',panelStoredHeight()+'px','important');}
   }else{
     main.style.cssText='';left.style.cssText='';right.style.cssText='';handle.style.cssText='';
     if(rc)rc.style.cssText='';
@@ -369,13 +376,17 @@ function applyLayoutMode(){
   }
 }
 function panelStoredSize(key,fallback){try{var v=parseFloat(localStorage.getItem(key));return isFinite(v)?v:fallback;}catch(_){return fallback;}}
+function panelMaxHeight(){var main=document.getElementById('main'),available=main?main.getBoundingClientRect().height:window.innerHeight;return Math.max(100,available-120);}
+function panelStoredHeight(){var main=document.getElementById('main'),height=main?main.getBoundingClientRect().height:window.innerHeight,raw,max=panelMaxHeight(),min=Math.min(180,max);try{var v=parseFloat(localStorage.getItem('seqeyes.panelHeight'));raw=isFinite(v)?v:(isMobileSafetyLayout()?height*.58:300);}catch(_){raw=isMobileSafetyLayout()?height*.58:300;}return Math.max(min,Math.min(raw,max));}
 function refreshLayout(){
-  if(detectLayoutMode()){
+  var changed=detectLayoutMode();
+  if(changed){
     applyLayoutMode();rs();
     if(typeof drawKs==='function')drawKs();
     if(typeof drawMinimap==='function')drawMinimap();
     SeqEyesPanel.onLayoutChanged();
   }
+  else if(layoutMode==='vertical'&&panelOpen){document.getElementById('right').style.setProperty('height',panelStoredHeight()+'px','important');}
 }
 applyLayoutMode();
 var _mainEl=document.getElementById('main');
@@ -2522,6 +2533,7 @@ window.SeqEyesPanelHost={
   getTrTimeSec:function(){return seqTiming&&seqTiming.trTimeSec>0?seqTiming.trTimeSec:0;},
   getTimeUnit:function(){return timeUnit;},
   getWaveformLeftMargin:function(){return M.l;},
+  getPanelHeight:function(){return panelStoredHeight();},
   refreshLayout:function(){refreshLayout();},
   hasKspaceData:function(){return !!(kAdc&&kAdc[0]&&kAdc[0].length);},
   requestKspace:function(){requestKspaceCalculation();},

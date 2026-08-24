@@ -431,7 +431,7 @@ window.addEventListener("mousemove",function(e){
   var p=document.getElementById("right");
   var vertical=(typeof layoutMode!=='undefined'&&layoutMode==='vertical');
   if(vertical){
-    kResizeH=Math.max(120,Math.min(800,kResizeH-(e.clientY-kResizeStart)));
+    kResizeH=Math.max(120,Math.min(typeof panelMaxHeight==='function'?panelMaxHeight():800,kResizeH-(e.clientY-kResizeStart)));
     kResizeStart=e.clientY;
     p.style.setProperty('height',kResizeH+'px','important');p.style.setProperty('transition','none','important');
   }else{
@@ -447,7 +447,7 @@ window.addEventListener("touchmove",function(e){
   var p=document.getElementById("right");
   var vertical=(typeof layoutMode!=='undefined'&&layoutMode==='vertical');
   if(vertical){
-    kResizeH=Math.max(120,Math.min(800,kResizeH-(e.touches[0].clientY-kResizeStart)));
+    kResizeH=Math.max(120,Math.min(typeof panelMaxHeight==='function'?panelMaxHeight():800,kResizeH-(e.touches[0].clientY-kResizeStart)));
     kResizeStart=e.touches[0].clientY;
     p.style.setProperty('height',kResizeH+'px','important');p.style.setProperty('transition','none','important');
   }else{
