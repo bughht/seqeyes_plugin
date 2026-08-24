@@ -48,7 +48,13 @@ declare global {
       setMarkerTime(t: number): void;
       acousticBands(): { freqHz: number; bwHz: number }[];
       setAcousticBands(bands: { freqHz: number; bwHz: number }[]): void;
-      audioState(): { state: string; playing: boolean; currentTimeSec: number; hasBuffer: boolean };
+      audioState(): {
+        state: string;
+        playing: boolean;
+        currentTimeSec: number;
+        hasBuffer: boolean;
+        durationSec: number;
+      };
       setAudioClock(fn: (() => number) | null): void;
       setSplitRatio(r: number): void;
       getSplitRatio(): number;
@@ -430,6 +436,80 @@ test('advances the playhead and the spectrum slice from the audio clock', async 
   await expect.poll(async () => Number.isFinite((await panelState(page)).playheadTimeSec)).toBe(false);
 });
 
+test('keeps an exact completed position, enables reset, and wraps endpoint replay', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+  await page.evaluate(() => window.__seqeyesDebug.setView(0, 0.35));
+  await settlePanel(page);
+  await page.evaluate(() => window.SeqEyesDev.setMarkerTime(NaN));
+
+  await page.locator('#sgPlay').click();
+  await expect.poll(async () => (await panelState(page)).audioState, { timeout: 20_000 }).toBe('playing');
+  await expect.poll(async () => (await panelState(page)).audioState, { timeout: 5_000 }).toBe('idle');
+
+  const completed = await panelState(page);
+  expect(completed.markerTimeSec).toBeCloseTo(completed.viewEndSec, 9);
+  await expect(page.locator('#sgMarkerClear')).toBeEnabled();
+
+  const replay = await captureNextAudioRequest(page);
+  expect(replay.startSec).toBeCloseTo(completed.viewStartSec, 9);
+  expect(replay.endSec).toBeCloseTo(completed.viewEndSec, 9);
+  await page.evaluate(() => window.SeqEyesPanel.stopPlayback());
+
+  await page.evaluate(() => window.__seqeyesDebug.setView(0.2, 0.55));
+  await settlePanel(page);
+  const moved = await panelState(page);
+  expect(moved.markerTimeSec).toBeCloseTo(completed.viewEndSec, 9);
+
+  const resumed = await captureNextAudioRequest(page);
+  expect(resumed.startSec).toBeCloseTo(completed.viewEndSec, 9);
+  expect(resumed.endSec).toBeCloseTo(moved.viewEndSec, 9);
+  await page.evaluate(() => window.SeqEyesPanel.stopPlayback());
+
+  await page.locator('#sgMarkerClear').click();
+  await expect(page.locator('#sgMarkerClear')).toBeDisabled();
+  expect(Number.isFinite((await panelState(page)).markerTimeSec)).toBe(false);
+
+  const reset = await captureNextAudioRequest(page);
+  expect(reset.startSec).toBeCloseTo(moved.viewStartSec, 9);
+  expect(reset.endSec).toBeCloseTo(moved.viewEndSec, 9);
+  await page.evaluate(() => window.SeqEyesPanel.stopPlayback());
+});
+
+test('preserves short-window loop boundaries across pause and resume', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+  await page.evaluate(() => window.__seqeyesDebug.setView(0, 0.1));
+  await settlePanel(page);
+  await page.evaluate(() => {
+    window.SeqEyesDev.setMarkerTime(NaN);
+    window.__seqeyesTestClock = 0;
+    window.SeqEyesDev.setAudioClock(() => window.__seqeyesTestClock!);
+  });
+
+  await page.locator('#sgPlay').click();
+  await expect.poll(async () => (await panelState(page)).audioState, { timeout: 20_000 }).toBe('playing');
+  const audio = await page.evaluate(() => window.SeqEyesDev.audioState());
+  const rangeStart = (await panelState(page)).audioWindowStartSec!;
+
+  await page.evaluate(() => { window.__seqeyesTestClock = 0.06; });
+  await page.locator('#sgPlay').click();
+  await expect.poll(async () => (await panelState(page)).audioState).toBe('paused');
+  const paused = await panelState(page);
+  expect(paused.markerTimeSec).toBeCloseTo(rangeStart + 0.06, 3);
+  await expect(page.locator('#sgMarkerClear')).toBeEnabled();
+
+  await page.locator('#sgPlay').click();
+  await expect.poll(async () => (await panelState(page)).audioState).toBe('playing');
+  await page.evaluate(() => { window.__seqeyesTestClock = 0.12; });
+  await page.waitForTimeout(100);
+
+  const resumed = await page.evaluate(() => window.SeqEyesDev.audioState());
+  const expectedOffset = ((paused.markerTimeSec - rangeStart) + 0.06) % audio.durationSec;
+  expect(resumed.currentTimeSec).toBeCloseTo(rangeStart + expectedOffset, 3);
+  await page.evaluate(() => window.SeqEyesPanel.stopPlayback());
+});
+
 test('stops playback when the panel leaves spectrogram mode', async ({ page }) => {
   await loadViewer(page, fixtures.gre);
   await openSpectrogram(page);
@@ -588,6 +668,23 @@ test('resizes the spectrogram canvases from the outer panel handle', async ({ pa
 });
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
+
+async function captureNextAudioRequest(page: Page): Promise<{
+  id: number;
+  startSec: number;
+  endSec: number;
+}> {
+  return page.evaluate(() => {
+    const request = { id: 0, startSec: NaN, endSec: NaN };
+    window.SeqEyesPanelHost.requestAudio = (id, startSec, endSec) => {
+      request.id = id;
+      request.startSec = startSec;
+      request.endSec = endSec;
+    };
+    (document.getElementById('sgPlay') as HTMLButtonElement).click();
+    return request;
+  });
+}
 
 async function loadViewer(page: Page, fixturePath: string): Promise<void> {
   await page.goto('/?debug=1');

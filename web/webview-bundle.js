@@ -3424,7 +3424,10 @@ var SeqEyesAudio = (function () {
   var playOffsetSec = 0;         // offset into the buffer where playback began
   var startCtxTime = 0;          // ctx.currentTime at the last start()
   var pausedAtSec = 0;           // offset into the buffer when paused
-  var loopUntilSec = 0;          // total playback length for short windows
+  var loopUntilSec = 0;          // remaining playback length for this source
+  var playbackTotalSec = 0;      // full audition length, including short-window repeats
+  var playedBeforeSec = 0;       // audition time accumulated before the current source
+  var loopStartSec = 0;          // stable loop boundary; pause/resume must not move it
   var onEndedCallback = null;
 
   var clock = null;              // injected test clock, seconds
@@ -3485,6 +3488,9 @@ var SeqEyesAudio = (function () {
     }
     bufferStartSeqSec = isFinite(startSeqSec) ? startSeqSec : 0;
     pausedAtSec = 0;
+    playbackTotalSec = 0;
+    playedBeforeSec = 0;
+    loopStartSec = 0;
     return true;
   }
 
@@ -3501,16 +3507,28 @@ var SeqEyesAudio = (function () {
    */
   function play(offsetSec, totalSec) {
     if (!buffer || !ensureContext()) return false;
+    var resuming = state === 'paused';
     stopSource();
     var offset = Math.max(0, Math.min(buffer.duration, isFinite(offsetSec) ? offsetSec : 0));
+    if (!resuming) {
+      playedBeforeSec = 0;
+      playbackTotalSec = Math.max(buffer.duration,
+        isFinite(totalSec) && totalSec > 0 ? totalSec : buffer.duration);
+      loopStartSec = 0;
+    }
+    loopUntilSec = Math.max(0, playbackTotalSec - playedBeforeSec);
+    if (!(loopUntilSec > 0)) {
+      state = 'idle';
+      pausedAtSec = 0;
+      return false;
+    }
     var remaining = buffer.duration - offset;
-    loopUntilSec = isFinite(totalSec) && totalSec > remaining ? totalSec : remaining;
 
     source = ctx.createBufferSource();
     source.buffer = buffer;
     if (loopUntilSec > remaining) {
       source.loop = true;
-      source.loopStart = offset;
+      source.loopStart = loopStartSec;
       source.loopEnd = buffer.duration;
     }
     source.connect(gainNode);
@@ -3518,6 +3536,9 @@ var SeqEyesAudio = (function () {
       if (state === 'playing') {
         state = 'idle';
         pausedAtSec = 0;
+        playedBeforeSec = 0;
+        playbackTotalSec = 0;
+        source = null;
         if (onEndedCallback) onEndedCallback();
       }
     };
@@ -3549,6 +3570,8 @@ var SeqEyesAudio = (function () {
   function pause() {
     if (state !== 'playing') return;
     pausedAtSec = currentBufferOffsetSec();
+    playedBeforeSec = Math.min(playbackTotalSec,
+      playedBeforeSec + Math.max(0, now() - startCtxTime));
     stopSource();
     state = 'paused';
   }
@@ -3557,6 +3580,9 @@ var SeqEyesAudio = (function () {
     stopSource();
     state = 'idle';
     pausedAtSec = 0;
+    playedBeforeSec = 0;
+    playbackTotalSec = 0;
+    loopUntilSec = 0;
   }
 
   /** Offset into the buffer right now, wrapped when looping. */
@@ -3565,9 +3591,9 @@ var SeqEyesAudio = (function () {
     if (state !== 'playing' || !buffer) return pausedAtSec;
     var elapsed = Math.max(0, now() - startCtxTime);
     var offset = playOffsetSec + elapsed;
-    if (source && source.loop && buffer.duration > playOffsetSec) {
-      var span = buffer.duration - playOffsetSec;
-      if (span > 0) offset = playOffsetSec + (elapsed % span);
+    if (source && source.loop && buffer.duration > loopStartSec) {
+      var span = buffer.duration - loopStartSec;
+      if (span > 0) offset = loopStartSec + ((playOffsetSec - loopStartSec + elapsed) % span);
     }
     return Math.min(buffer.duration, offset);
   }
@@ -4287,15 +4313,18 @@ var SeqEyesPanel = (function () {
     if (!(options && options.preservePlayback)) stopPlayback();
     if (!isFinite(timeSec)) {
       markerTimeSec = NaN;
-    } else if (currentSpec && currentSpec.nTime && currentSpec.tStepSec > 0) {
+    } else if (!(options && options.exact) && currentSpec && currentSpec.nTime && currentSpec.tStepSec > 0) {
       var col = Math.max(0, Math.min(currentSpec.nTime - 1,
         Math.round((timeSec - currentSpec.tStartSec) / currentSpec.tStepSec)));
       markerTimeSec = currentSpec.tStartSec + col * currentSpec.tStepSec;
     } else {
+      // Keep transport updates exact. Manual analysis markers still snap above,
+      // while spectrum lookup independently snaps every exact transport time.
       markerTimeSec = timeSec;
     }
     var h = activeHost();
     if (h && h.setWaveformMarker) h.setWaveformMarker(isFinite(markerTimeSec) ? markerTimeSec : null);
+    syncControls();
     render();
   }
 
@@ -4349,7 +4378,13 @@ var SeqEyesPanel = (function () {
 
   function audioRange() {
     var view = hostView();
-    var start = isFinite(markerTimeSec) ? Math.max(view.startSec, markerTimeSec) : view.startSec;
+    var tolerance = Math.max(1e-9, Math.abs(view.endSec - view.startSec) * 1e-9);
+    var markerInside = isFinite(markerTimeSec)
+      && markerTimeSec >= view.startSec - tolerance
+      && markerTimeSec < view.endSec - tolerance;
+    // Replaying at this view's endpoint wraps to its start. A retained position
+    // still resumes normally when a moved viewport contains it in the interior.
+    var start = markerInside ? Math.max(view.startSec, markerTimeSec) : view.startSec;
     var requestedEnd = view.endSec;
     var boundedPreview = requestedEnd - start > AUDIO_FULL_RANGE_MAX_SEC;
     return {
@@ -4364,22 +4399,18 @@ var SeqEyesPanel = (function () {
     if (SeqEyesAudio.isPlaying()) { pausePlayback(); return; }
 
     SeqEyesAudio.ensureContext();   // must happen inside the click handler
-    var range = audioRange();
-    if (!(range.endSec > range.startSec)) {
-      notice('gradientSound', 'There is no time range to play. Zoom out or clear the marker.');
-      return;
-    }
-    if (SeqEyesAudio.getState() === 'paused' && audioWindow
-      && Math.abs(audioWindow.startSec - range.startSec) < 1e-9
-      && Math.abs(audioWindow.endSec - range.endSec) < 1e-9) {
-      // play() before the loop: the loop exits immediately unless the audio
-      // is already reporting itself as playing.
-      SeqEyesAudio.play(SeqEyesAudio.currentBufferOffsetSec(), playbackLengthSec(range));
+    if (SeqEyesAudio.getState() === 'paused' && audioWindow) {
+      SeqEyesAudio.play(SeqEyesAudio.currentBufferOffsetSec(), playbackLengthSec(audioWindow));
       startPlayheadLoop();
       syncTransport();
       return;
     }
 
+    var range = audioRange();
+    if (!(range.endSec > range.startSec)) {
+      notice('gradientSound', 'There is no time range to play. Zoom out or clear the marker.');
+      return;
+    }
     var h = activeHost();
     if (!h || !h.requestAudio) return;
     pendingAudioId = ++audioRequestId;
@@ -4432,7 +4463,7 @@ var SeqEyesPanel = (function () {
     SeqEyesAudio.onEnded(function () {
       stopPlayheadLoop();
       playheadTimeSec = range.endSec;
-      setMarkerTime(range.endSec, { preservePlayback: true });
+      setMarkerTime(range.endSec, { preservePlayback: true, exact: true });
       playheadTimeSec = NaN;
       syncTransport();
       render();
@@ -4453,6 +4484,7 @@ var SeqEyesPanel = (function () {
     SeqEyesAudio.pause();
     stopPlayheadLoop();
     playheadTimeSec = NaN;
+    setMarkerTime(SeqEyesAudio.currentTimeSec(), { preservePlayback: true, exact: true });
     syncTransport();
     render();
   }
@@ -5029,7 +5061,12 @@ var SeqEyesPanel = (function () {
     var view = hostView();
     var tolerance = Math.max(1, Math.abs(view.endSec - view.startSec)) * 1e-9;
     if (Math.abs(view.startSec - currentView.startSec) > tolerance
-      || Math.abs(view.endSec - currentView.endSec) > tolerance) stopPlayback();
+      || Math.abs(view.endSec - currentView.endSec) > tolerance) {
+      if (SeqEyesAudio.getState() !== 'idle') {
+        setMarkerTime(SeqEyesAudio.currentTimeSec(), { preservePlayback: true, exact: true });
+      }
+      stopPlayback();
+    }
     requestSpectrogram(false);
   }
 

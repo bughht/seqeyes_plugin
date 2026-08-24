@@ -27,7 +27,10 @@ var SeqEyesAudio = (function () {
   var playOffsetSec = 0;         // offset into the buffer where playback began
   var startCtxTime = 0;          // ctx.currentTime at the last start()
   var pausedAtSec = 0;           // offset into the buffer when paused
-  var loopUntilSec = 0;          // total playback length for short windows
+  var loopUntilSec = 0;          // remaining playback length for this source
+  var playbackTotalSec = 0;      // full audition length, including short-window repeats
+  var playedBeforeSec = 0;       // audition time accumulated before the current source
+  var loopStartSec = 0;          // stable loop boundary; pause/resume must not move it
   var onEndedCallback = null;
 
   var clock = null;              // injected test clock, seconds
@@ -88,6 +91,9 @@ var SeqEyesAudio = (function () {
     }
     bufferStartSeqSec = isFinite(startSeqSec) ? startSeqSec : 0;
     pausedAtSec = 0;
+    playbackTotalSec = 0;
+    playedBeforeSec = 0;
+    loopStartSec = 0;
     return true;
   }
 
@@ -104,16 +110,28 @@ var SeqEyesAudio = (function () {
    */
   function play(offsetSec, totalSec) {
     if (!buffer || !ensureContext()) return false;
+    var resuming = state === 'paused';
     stopSource();
     var offset = Math.max(0, Math.min(buffer.duration, isFinite(offsetSec) ? offsetSec : 0));
+    if (!resuming) {
+      playedBeforeSec = 0;
+      playbackTotalSec = Math.max(buffer.duration,
+        isFinite(totalSec) && totalSec > 0 ? totalSec : buffer.duration);
+      loopStartSec = 0;
+    }
+    loopUntilSec = Math.max(0, playbackTotalSec - playedBeforeSec);
+    if (!(loopUntilSec > 0)) {
+      state = 'idle';
+      pausedAtSec = 0;
+      return false;
+    }
     var remaining = buffer.duration - offset;
-    loopUntilSec = isFinite(totalSec) && totalSec > remaining ? totalSec : remaining;
 
     source = ctx.createBufferSource();
     source.buffer = buffer;
     if (loopUntilSec > remaining) {
       source.loop = true;
-      source.loopStart = offset;
+      source.loopStart = loopStartSec;
       source.loopEnd = buffer.duration;
     }
     source.connect(gainNode);
@@ -121,6 +139,9 @@ var SeqEyesAudio = (function () {
       if (state === 'playing') {
         state = 'idle';
         pausedAtSec = 0;
+        playedBeforeSec = 0;
+        playbackTotalSec = 0;
+        source = null;
         if (onEndedCallback) onEndedCallback();
       }
     };
@@ -152,6 +173,8 @@ var SeqEyesAudio = (function () {
   function pause() {
     if (state !== 'playing') return;
     pausedAtSec = currentBufferOffsetSec();
+    playedBeforeSec = Math.min(playbackTotalSec,
+      playedBeforeSec + Math.max(0, now() - startCtxTime));
     stopSource();
     state = 'paused';
   }
@@ -160,6 +183,9 @@ var SeqEyesAudio = (function () {
     stopSource();
     state = 'idle';
     pausedAtSec = 0;
+    playedBeforeSec = 0;
+    playbackTotalSec = 0;
+    loopUntilSec = 0;
   }
 
   /** Offset into the buffer right now, wrapped when looping. */
@@ -168,9 +194,9 @@ var SeqEyesAudio = (function () {
     if (state !== 'playing' || !buffer) return pausedAtSec;
     var elapsed = Math.max(0, now() - startCtxTime);
     var offset = playOffsetSec + elapsed;
-    if (source && source.loop && buffer.duration > playOffsetSec) {
-      var span = buffer.duration - playOffsetSec;
-      if (span > 0) offset = playOffsetSec + (elapsed % span);
+    if (source && source.loop && buffer.duration > loopStartSec) {
+      var span = buffer.duration - loopStartSec;
+      if (span > 0) offset = loopStartSec + ((playOffsetSec - loopStartSec + elapsed) % span);
     }
     return Math.min(buffer.duration, offset);
   }
