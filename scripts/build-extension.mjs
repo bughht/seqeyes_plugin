@@ -37,6 +37,8 @@ const extensionOutfile = path.join(ROOT, 'out', 'extension.js');
 
 const cliEntry = path.join(ROOT, 'src', 'cli', 'exportKspace.ts');
 const cliOutfile = path.join(ROOT, 'out', 'cli', 'exportKspace.js');
+const loadProfileEntry = path.join(ROOT, 'src', 'cli', 'profileLoad.ts');
+const loadProfileOutfile = path.join(ROOT, 'out', 'cli', 'profileLoad.js');
 
 async function build() {
     if (watch) {
@@ -56,6 +58,14 @@ async function build() {
         });
         await cliCtx.watch();
         console.log('👁  Watching src/cli/exportKspace.ts …');
+
+        const loadProfileCtx = await esbuild.context({
+            ...common,
+            entryPoints: [loadProfileEntry],
+            outfile: loadProfileOutfile,
+        });
+        await loadProfileCtx.watch();
+        console.log('👁  Watching src/cli/profileLoad.ts …');
         console.log('(Press Ctrl+C to stop watching)');
     } else {
         await esbuild.build({
@@ -71,6 +81,13 @@ async function build() {
             outfile: cliOutfile,
         });
         console.log('✓  out/cli/exportKspace.js');
+
+        await esbuild.build({
+            ...common,
+            entryPoints: [loadProfileEntry],
+            outfile: loadProfileOutfile,
+        });
+        console.log('✓  out/cli/profileLoad.js');
     }
 }
 

@@ -139,6 +139,7 @@
     "check:browser": "npm run build:web && npm run test:browser",
     "perf:node": "vitest run --config vitest.performance.config.ts",
     "perf:browser": "npm run build:web && playwright test --config playwright.perf.config.ts",
+    "profile:load": "npm run compile && node scripts/run-load-profile.mjs",
     "perf": "npm run perf:node && npm run perf:browser",
     "test:vscode": "npm run compile && node test/vscode/run-tests.cjs",
     "package:vsix": "npm run compile && vsce package --out seqeyes-web.vsix",
