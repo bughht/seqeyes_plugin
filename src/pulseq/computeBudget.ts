@@ -29,7 +29,7 @@ export const INTERACTIVE_COMPUTE_LIMITS = Object.freeze({
     spectrogramFftPoints: 16_384,
     spectrogramTotalCells: 4_000_000,
     spectrogramInputSamples: 8_000_000,
-    /** 120 s of stereo audio at 44.1 kHz. */
+    /** About 61.2 s of stereo audio at 44.1 kHz. */
     audioSamples: 5_400_000,
 });
 
@@ -305,7 +305,9 @@ export function estimateAudioCost(
 /** Refusal reason for an audio request, or `null` when it fits. */
 export function audioBudgetRefusal(estimate: AudioCostEstimate): string | null {
     if (estimate.totalSamples > INTERACTIVE_COMPUTE_LIMITS.audioSamples) {
-        return `The visible window is ${estimate.durationSec.toFixed(1)} s of audio, beyond the 120 s playback limit. Zoom in to play a shorter stretch.`;
+        const maxDurationSec = (INTERACTIVE_COMPUTE_LIMITS.audioSamples / 2 - 1) / estimate.sampleRate;
+        const rawBufferBytes = INTERACTIVE_COMPUTE_LIMITS.audioSamples * Float32Array.BYTES_PER_ELEMENT;
+        return `The visible window is ${estimate.durationSec.toFixed(1)} s of audio, beyond the ${maxDurationSec.toFixed(1)} s interactive limit (${formatMemorySize(rawBufferBytes)} of stereo samples before browser audio copies). Zoom in or play a bounded preview.`;
     }
     return null;
 }

@@ -180,7 +180,7 @@ describe('audio budget', () => {
 
     const long = estimateAudioCost(0, 200, 44100);
     expect(long.totalSamples).toBeGreaterThan(5_400_000);
-    expect(audioBudgetRefusal(long)).toMatch(/120 s playback limit/);
+    expect(audioBudgetRefusal(long)).toMatch(/61\.2 s interactive limit/);
   });
 
   it('counts both channels toward the limit', () => {

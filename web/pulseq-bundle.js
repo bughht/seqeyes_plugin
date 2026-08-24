@@ -1923,7 +1923,7 @@ var Pulseq = (() => {
     spectrogramFftPoints: 16384,
     spectrogramTotalCells: 4e6,
     spectrogramInputSamples: 8e6,
-    /** 120 s of stereo audio at 44.1 kHz. */
+    /** About 61.2 s of stereo audio at 44.1 kHz. */
     audioSamples: 54e5
   });
   var KSPACE_CONFIRMATION_MEMORY_BYTES = 1024 ** 3;
@@ -2075,7 +2075,9 @@ var Pulseq = (() => {
   }
   function audioBudgetRefusal(estimate) {
     if (estimate.totalSamples > INTERACTIVE_COMPUTE_LIMITS.audioSamples) {
-      return `The visible window is ${estimate.durationSec.toFixed(1)} s of audio, beyond the 120 s playback limit. Zoom in to play a shorter stretch.`;
+      const maxDurationSec = (INTERACTIVE_COMPUTE_LIMITS.audioSamples / 2 - 1) / estimate.sampleRate;
+      const rawBufferBytes = INTERACTIVE_COMPUTE_LIMITS.audioSamples * Float32Array.BYTES_PER_ELEMENT;
+      return `The visible window is ${estimate.durationSec.toFixed(1)} s of audio, beyond the ${maxDurationSec.toFixed(1)} s interactive limit (${formatMemorySize(rawBufferBytes)} of stereo samples before browser audio copies). Zoom in or play a bounded preview.`;
     }
     return null;
   }

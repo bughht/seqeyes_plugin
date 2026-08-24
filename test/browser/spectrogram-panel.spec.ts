@@ -21,6 +21,10 @@ interface PanelState {
   hotBands: number;
   audioState: string;
   audioAvailable: boolean;
+  pendingAudioId: number;
+  audioWindowStartSec: number | null;
+  audioWindowEndSec: number | null;
+  audioBoundedPreview: boolean;
   tStartSec: number | null;
   tEndSec: number | null;
   viewStartSec: number;
@@ -55,6 +59,15 @@ declare global {
       showKspaceSafetyWarning(message: string): void;
     };
     __seqeyesTestClock?: number;
+    SeqEyesPanel: {
+      deliverSpectrogramError(id: number, message: string): void;
+      deliverAudio(id: number, payload: unknown): void;
+      stopPlayback(): void;
+    };
+    SeqEyesPanelHost: {
+      getView(): { startSec: number; endSec: number; totalDuration: number };
+      requestAudio(id: number, startSec: number, endSec: number, options: unknown): void;
+    };
   }
 }
 
@@ -430,6 +443,72 @@ test('stops playback when the panel leaves spectrogram mode', async ({ page }) =
 
   await page.locator('#panelBtn').click();   // -> off
   await expect.poll(async () => (await panelState(page)).audioState).toBe('idle');
+});
+
+test('stops playback on a viewport change and ignores the invalidated audio response', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+  await page.evaluate(() => window.__seqeyesDebug.setView(0, 1.5));
+  await settlePanel(page);
+
+  await page.evaluate(() => { window.SeqEyesPanelHost.requestAudio = () => {}; });
+  await page.locator('#sgPlay').click();
+  await expect.poll(async () => (await panelState(page)).pendingAudioId).toBeGreaterThan(0);
+  const oldId = (await panelState(page)).pendingAudioId;
+
+  await page.evaluate(() => window.__seqeyesDebug.setView(0.1, 1.4));
+  await expect.poll(async () => (await panelState(page)).audioState).toBe('idle');
+  await expect.poll(async () => (await panelState(page)).pendingAudioId).toBe(0);
+
+  await page.evaluate((id) => {
+    window.SeqEyesPanel.deliverAudio(id, {
+      sampleRate: 44100,
+      startSec: 0,
+      left: new Float32Array([0.5, 0.25]),
+      right: new Float32Array([0.5, 0.25]),
+    });
+  }, oldId);
+  expect((await panelState(page)).audioState).toBe('idle');
+});
+
+test('uses a bounded preview instead of synthesising an overlong visible window', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+
+  const request = await page.evaluate(() => {
+    const capture = { id: 0, startSec: 0, endSec: 0 };
+    window.SeqEyesPanelHost.getView = () => ({ startSec: 0, endSec: 120, totalDuration: 120 });
+    window.SeqEyesPanelHost.requestAudio = (id, startSec, endSec) => {
+      capture.id = id;
+      capture.startSec = startSec;
+      capture.endSec = endSec;
+    };
+    (document.getElementById('sgPlay') as HTMLButtonElement).click();
+    return capture;
+  });
+
+  expect(request.id).toBeGreaterThan(0);
+  expect(request.startSec).toBe(0);
+  expect(request.endSec).toBe(30);
+  const state = await panelState(page);
+  expect(state.audioBoundedPreview).toBe(true);
+  expect(state.audioWindowEndSec).toBe(30);
+  await page.evaluate(() => window.SeqEyesPanel.stopPlayback());
+});
+
+test('clears a stale spectrogram when the current viewport is refused', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+  expect((await panelState(page)).nTime).toBeGreaterThan(0);
+
+  await page.evaluate(() => {
+    window.SeqEyesPanel.deliverSpectrogramError(0, 'Zoom in to compute the spectrogram.');
+  });
+
+  const state = await panelState(page);
+  expect(state.nTime).toBe(0);
+  expect(state.nFreq).toBe(0);
+  expect(state.error).toContain('Zoom in');
 });
 
 test('mirrors the panel marker onto the waveform panel', async ({ page }) => {

@@ -81,8 +81,13 @@ var SeqEyesPanel = (function () {
 
   var audioRequestId = 0;
   var pendingAudioId = 0;
-  var audioWindow = null;       // {startSec, endSec}
+  var audioWindow = null;       // {startSec, endSec, boundedPreview}
   var playheadFrame = 0;
+
+  var AUDIO_SAMPLE_RATE = 44100;
+  var AUDIO_SAMPLE_VALUE_LIMIT = 5400000;
+  var AUDIO_PREVIEW_MAX_SEC = 30;
+  var AUDIO_FULL_RANGE_MAX_SEC = (AUDIO_SAMPLE_VALUE_LIMIT / 2 - 1) / AUDIO_SAMPLE_RATE;
 
   var imageCache = null;
   var imageDirty = true;
@@ -350,7 +355,7 @@ var SeqEyesPanel = (function () {
   }
 
   function deliverSpectrogram(id, spec) {
-    if (pendingRequestId && id !== pendingRequestId) return;   // stale
+    if (id !== pendingRequestId) return;   // stale or explicitly invalidated
     pendingRequestId = 0;
     setBusy(false);
     lastError = null;
@@ -360,9 +365,16 @@ var SeqEyesPanel = (function () {
   }
 
   function deliverSpectrogramError(id, message) {
-    if (pendingRequestId && id !== pendingRequestId) return;
+    if (id !== pendingRequestId) return;
     pendingRequestId = 0;
     setBusy(false);
+    currentSpec = null;
+    averageCache = null;
+    imageCache = null;
+    imageDirty = true;
+    hotBands = [];
+    playheadTimeSec = NaN;
+    hover = null;
     lastError = message || 'The spectrogram could not be calculated.';
     notice('spectrogram', lastError);
     render();
@@ -636,7 +648,8 @@ var SeqEyesPanel = (function () {
 
   /* ── Marker (R9) ──────────────────────────────────────────────────── */
 
-  function setMarkerTime(timeSec) {
+  function setMarkerTime(timeSec, options) {
+    if (!(options && options.preservePlayback)) stopPlayback();
     if (!isFinite(timeSec)) {
       markerTimeSec = NaN;
     } else if (currentSpec && currentSpec.nTime && currentSpec.tStepSec > 0) {
@@ -702,7 +715,13 @@ var SeqEyesPanel = (function () {
   function audioRange() {
     var view = hostView();
     var start = isFinite(markerTimeSec) ? Math.max(view.startSec, markerTimeSec) : view.startSec;
-    return { startSec: start, endSec: view.endSec };
+    var requestedEnd = view.endSec;
+    var boundedPreview = requestedEnd - start > AUDIO_FULL_RANGE_MAX_SEC;
+    return {
+      startSec: start,
+      endSec: boundedPreview ? Math.min(requestedEnd, start + AUDIO_PREVIEW_MAX_SEC) : requestedEnd,
+      boundedPreview: boundedPreview
+    };
   }
 
   function togglePlayback() {
@@ -746,7 +765,7 @@ var SeqEyesPanel = (function () {
   }
 
   function deliverAudio(id, payload) {
-    if (pendingAudioId && id !== pendingAudioId) return;
+    if (id !== pendingAudioId) return;
     pendingAudioId = 0;
     if (!payload || !payload.left || !payload.left.length) {
       notice('gradientSound', 'No gradient activity in this window — nothing to play.');
@@ -765,7 +784,11 @@ var SeqEyesPanel = (function () {
     }
     var range = audioWindow || audioRange();
     var span = range.endSec - range.startSec;
-    if (span < 0.25) {
+    if (range.boundedPreview) {
+      notice('gradientSound', 'Playing a ' + AUDIO_PREVIEW_MAX_SEC + ' s preview because the visible window exceeds the '
+        + AUDIO_FULL_RANGE_MAX_SEC.toFixed(1) + ' s interactive audio limit. '
+        + 'Simulated gradient sound — not calibrated.');
+    } else if (span < 0.25) {
       notice('gradientSound', 'Window is ' + Math.round(span * 1000) + ' ms; looping. '
         + 'Simulated gradient sound — not calibrated.');
     } else {
@@ -774,7 +797,7 @@ var SeqEyesPanel = (function () {
     SeqEyesAudio.onEnded(function () {
       stopPlayheadLoop();
       playheadTimeSec = range.endSec;
-      setMarkerTime(range.endSec);
+      setMarkerTime(range.endSec, { preservePlayback: true });
       playheadTimeSec = NaN;
       syncTransport();
       render();
@@ -785,7 +808,7 @@ var SeqEyesPanel = (function () {
   }
 
   function deliverAudioError(id, message) {
-    if (pendingAudioId && id !== pendingAudioId) return;
+    if (id !== pendingAudioId) return;
     pendingAudioId = 0;
     notice('gradientSound', message || 'The gradient sound could not be synthesised.');
     syncTransport();
@@ -800,10 +823,12 @@ var SeqEyesPanel = (function () {
   }
 
   function stopPlayback() {
+    audioRequestId++;
     SeqEyesAudio.stop();
     stopPlayheadLoop();
     playheadTimeSec = NaN;
     pendingAudioId = 0;
+    audioWindow = null;
     syncTransport();
     render();
   }
@@ -842,7 +867,7 @@ var SeqEyesPanel = (function () {
     var mute = el('sgMute');
     var available = SeqEyesAudio.isAvailable();
     if (play) {
-      play.disabled = !available;
+      play.disabled = !available || pendingAudioId !== 0;
       play.textContent = SeqEyesAudio.isPlaying() ? '‖' : '▶';
       play.setAttribute('aria-label', SeqEyesAudio.isPlaying() ? 'Pause' : 'Play simulated gradient sound');
       if (!available) play.title = 'Audio playback is unavailable in this host.';
@@ -1030,6 +1055,7 @@ var SeqEyesPanel = (function () {
 
     var source = el('sgSource');
     if (source) source.onchange = function () {
+      stopPlayback();
       params.source = this.value === 'dGdt' ? 'dGdt' : 'G';
       onParamChanged(true);
     };
@@ -1365,6 +1391,7 @@ var SeqEyesPanel = (function () {
 
   function onViewChanged() {
     if (panelMode !== 'spectrogram') return;
+    stopPlayback();
     requestSpectrogram(false);
   }
 
@@ -1491,6 +1518,10 @@ var SeqEyesPanel = (function () {
         hotBands: hotBands.filter(Boolean).length,
         audioState: SeqEyesAudio.getState(),
         audioAvailable: SeqEyesAudio.isAvailable(),
+        pendingAudioId: pendingAudioId,
+        audioWindowStartSec: audioWindow ? audioWindow.startSec : null,
+        audioWindowEndSec: audioWindow ? audioWindow.endSec : null,
+        audioBoundedPreview: !!(audioWindow && audioWindow.boundedPreview),
         tStartSec: currentSpec ? currentSpec.tStartSec : null,
         tEndSec: currentSpec ? currentSpec.tStartSec + (currentSpec.nTime - 1) * currentSpec.tStepSec : null,
         viewStartSec: currentView.startSec,
