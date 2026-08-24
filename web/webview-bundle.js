@@ -142,7 +142,7 @@ ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;
 /* K‑space data — pre‑computed on the extension side */
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
 var m1Data=null,m1WindowData=null,m1WindowPending=null,m1WindowRequestId=0,pnsData=null,pnsWindowData=null,pnsWindowPending=null,pnsWindowRequestId=0,pnsBusy=false,m1Busy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null;
-var viewerNotices={};
+var viewerNotices={},viewerNoticesCollapsed=readViewerNoticesCollapsed();
 var kspaceSafetyWarning=null,kspaceSafetyBusy=false,kspaceSafetyPopupTimer=0;
 var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,waveformOverviewActive=false,rfRenderPointCount=0,rfRawCurveCount=0,rfReducedCurveCount=0,rfOverviewBucketCount=0,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
 var viewerDrawFrame=0,viewerDrawMinimap=false;
@@ -152,8 +152,14 @@ function viewerNoticeMessages(value){
   for(var i=0;i<values.length;i++)if(values[i])messages.push(String(values[i]));
   return messages;
 }
+function readViewerNoticesCollapsed(){try{return localStorage.getItem('seqeyes.viewerNoticesCollapsed')==='1';}catch(_){return false;}}
+function setViewerNoticesCollapsed(collapsed){
+  viewerNoticesCollapsed=!!collapsed;
+  try{localStorage.setItem('seqeyes.viewerNoticesCollapsed',viewerNoticesCollapsed?'1':'0');}catch(_){}
+  renderViewerNotices();
+}
 function renderViewerNotices(){
-  var el=document.getElementById('viewerNotice');if(!el)return;el.textContent='';
+  var el=document.getElementById('viewerNotice'),list=document.getElementById('viewerNoticeList'),summary=document.getElementById('viewerNoticeSummary'),toggle=document.getElementById('viewerNoticeToggle');if(!el||!list)return;list.textContent='';
   var keys=Object.keys(viewerNotices),visible=0;
   for(var i=0;i<keys.length;i++){
     if(keys[i]==='kspace'&&kspaceSafetyWarning&&isMobileSafetyLayout())continue;
@@ -165,11 +171,17 @@ function renderViewerNotices(){
         var action=document.createElement('button');action.type='button';action.className='notice-action';action.textContent=kspaceSafetyBusy?'Calculating…':'Calculate anyway…';action.disabled=kspaceSafetyBusy;
         action.onclick=showKspaceSafetyDialog;row.appendChild(action);
       }
-      el.appendChild(row);visible++;
+      list.appendChild(row);visible++;
     }
   }
+  if(summary)summary.textContent='Warnings ('+visible+')';
+  if(toggle){toggle.textContent=viewerNoticesCollapsed?'Expand':'Collapse';toggle.setAttribute('aria-expanded',viewerNoticesCollapsed?'false':'true');}
+  list.hidden=viewerNoticesCollapsed;
+  el.classList.toggle('collapsed',viewerNoticesCollapsed);
   el.style.display=visible?'block':'none';
 }
+var viewerNoticeToggle=document.getElementById('viewerNoticeToggle');
+if(viewerNoticeToggle)viewerNoticeToggle.onclick=function(){setViewerNoticesCollapsed(!viewerNoticesCollapsed);};
 function setViewerNotice(key,message){
   var messages=viewerNoticeMessages(message);
   if(!messages.length&&!Object.prototype.hasOwnProperty.call(viewerNotices,key))return;

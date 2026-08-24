@@ -605,6 +605,31 @@ test('renders each warning as a separate theme-aware row', async ({ page }) => {
   await expect(rows.nth(1)).toHaveText('Second warning');
   const divider = await rows.nth(0).evaluate((row) => getComputedStyle(row).borderBottomStyle);
   expect(divider).toBe('solid');
+
+  const panel = page.locator('#viewerNotice');
+  const list = page.locator('#viewerNoticeList');
+  const toggle = page.locator('#viewerNoticeToggle');
+  await expect(page.locator('#viewerNoticeSummary')).toHaveText('Warnings (2)');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+
+  await toggle.click();
+  await expect(panel).toBeVisible();
+  await expect(list).toBeHidden();
+  await expect(toggle).toHaveText('Expand');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  expect(await page.evaluate(() => localStorage.getItem('seqeyes.viewerNoticesCollapsed'))).toBe('1');
+
+  await page.evaluate(() => {
+    window.SeqEyesPanelHost.setNotice('third', 'Third warning');
+  });
+  await expect(page.locator('#viewerNoticeSummary')).toHaveText('Warnings (3)');
+  await expect(list).toBeHidden();
+
+  await toggle.click();
+  await expect(list).toBeVisible();
+  await expect(rows).toHaveCount(3);
+  await expect(toggle).toHaveText('Collapse');
+  expect(await page.evaluate(() => localStorage.getItem('seqeyes.viewerNoticesCollapsed'))).toBe('0');
 });
 
 test('mirrors the panel marker onto the waveform panel', async ({ page }) => {

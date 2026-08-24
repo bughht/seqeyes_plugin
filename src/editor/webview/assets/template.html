@@ -20,7 +20,13 @@
 <button id="panelBtn" type="button" aria-pressed="false" title="Show the k-space trajectory" style="margin-left:4px">K-Space / Spectrum</button>
 <span class="cur" id="cur">← hover for time</span>
 </div>
-<div id="viewerNotice" role="status" aria-live="polite"></div>
+<div id="viewerNotice">
+  <div class="viewer-notice-header">
+    <span id="viewerNoticeSummary">Warnings</span>
+    <button id="viewerNoticeToggle" class="viewer-notice-toggle" type="button" aria-controls="viewerNoticeList" aria-expanded="true">Collapse</button>
+  </div>
+  <div id="viewerNoticeList" role="status" aria-live="polite"></div>
+</div>
 <div id="kspaceSafetyOverlay" style="display:none" aria-hidden="true">
   <div id="kspaceSafetyCard" role="dialog" aria-modal="true" aria-labelledby="kspaceSafetyTitle" aria-describedby="kspaceSafetyText">
     <div id="kspaceSafetyTitle">K-space safety limit</div>
