@@ -6,17 +6,19 @@ import { performance } from 'node:perf_hooks';
 import {
     estimateEnvelopeJsonBytes,
     packBlocks,
+    packSequenceBlocks,
 } from '../editor/blockTransport';
 import {
     estimateKspaceCost,
     estimateKspacePeakMemoryBytes,
+    estimateSequenceKspaceCost,
 } from '../pulseq/computeBudget';
 import { decodeAllBlocks, getTotalDuration } from '../pulseq/decoder';
 import { hasPulseqBinaryMagic, parseSequenceBytes } from '../pulseq/sequenceReader';
 import { detectSequenceTiming } from '../pulseq/trdetect';
 import type { DecodedBlock, PulseqSequence } from '../pulseq/types';
 
-export type LoadProfileStage = 'parse' | 'decode' | 'display';
+export type LoadProfileStage = 'parse' | 'decode' | 'display' | 'bounded-display';
 
 interface MemorySnapshot {
     rssBytes: number;
@@ -136,6 +138,22 @@ export function profileSequenceLoad(inputPath: string, requestedStage: LoadProfi
         result.completedStage = 'parse';
         if (requestedStage === 'parse') return finish(result);
 
+        if (requestedStage === 'bounded-display') {
+            const kspace = measure(result, 'estimateSequenceKspaceCost', () => (
+                estimateSequenceKspaceCost(sequence, totalDurationSec)
+            ));
+            result.kspaceEstimate = {
+                ...kspace,
+                peakMemoryBytes: measure(result, 'estimateKspacePeakMemoryBytes', () => (
+                    estimateKspacePeakMemoryBytes(kspace)
+                )),
+            };
+            const packed = measure(result, 'packSequenceBlocks', () => packSequenceBlocks(sequence));
+            result.display = displayCounts(result, packed);
+            result.completedStage = 'bounded-display';
+            return finish(result);
+        }
+
         const decoded = measure(result, 'decodeAllBlocks', () => decodeAllBlocks(sequence));
         result.decoded = decodedCounts(decoded);
         const kspace = measure(result, 'estimateKspaceCost', () => (
@@ -151,16 +169,7 @@ export function profileSequenceLoad(inputPath: string, requestedStage: LoadProfi
         if (requestedStage === 'decode') return finish(result);
 
         const packed = measure(result, 'packBlocks', () => packBlocks(decoded));
-        result.display = {
-            sampleCount: packed.sampleCount,
-            pointsPerWaveform: packed.pointsPerWaveform,
-            timeBufferBytes: packed.sampleTimes.byteLength,
-            valueBufferBytes: packed.sampleValues.byteLength,
-            envelopeEstimatedJsonBytes: measure(result, 'estimateEnvelopeJsonBytes', () => (
-                estimateEnvelopeJsonBytes(packed.blocks)
-            )),
-            notice: packed.notice,
-        };
+        result.display = displayCounts(result, packed);
         result.completedStage = 'display';
         return finish(result);
     } catch (error) {
@@ -168,6 +177,19 @@ export function profileSequenceLoad(inputPath: string, requestedStage: LoadProfi
         result.error = serializeError(error);
         return finish(result);
     }
+}
+
+function displayCounts(result: LoadProfileResult, packed: ReturnType<typeof packBlocks>) {
+    return {
+        sampleCount: packed.sampleCount,
+        pointsPerWaveform: packed.pointsPerWaveform,
+        timeBufferBytes: packed.sampleTimes.byteLength,
+        valueBufferBytes: packed.sampleValues.byteLength,
+        envelopeEstimatedJsonBytes: measure(result, 'estimateEnvelopeJsonBytes', () => (
+            estimateEnvelopeJsonBytes(packed.blocks)
+        )),
+        notice: packed.notice,
+    };
 }
 
 function measure<T>(result: LoadProfileResult, name: string, operation: () => T): T {
@@ -286,8 +308,8 @@ function parseArgs(argv: string[]): { inputPath: string; stage: LoadProfileStage
 }
 
 function parseStage(value: string): LoadProfileStage {
-    if (value === 'parse' || value === 'decode' || value === 'display') return value;
-    throw new Error(`Unknown stage '${value}'; expected parse, decode, or display`);
+    if (value === 'parse' || value === 'decode' || value === 'display' || value === 'bounded-display') return value;
+    throw new Error(`Unknown stage '${value}'; expected parse, decode, display, or bounded-display`);
 }
 
 function requireValue(argv: string[], index: number, option: string): string {
@@ -298,7 +320,7 @@ function requireValue(argv: string[], index: number, option: string): string {
 
 function usage(): string {
     return [
-        'Usage: node out/cli/profileLoad.js --input <file.seq|file.bseq> [--stage parse|decode|display]',
+        'Usage: node out/cli/profileLoad.js --input <file.seq|file.bseq> [--stage parse|decode|display|bounded-display]',
         '',
         'The result is written as one JSON object to stdout. Run this executable through',
         'scripts/run-load-profile.mjs to enforce a timeout and memory ceiling.',

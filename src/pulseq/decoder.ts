@@ -56,7 +56,30 @@ function effPhaseOff(phaseOffset: number, phasePPM: number, b0: number): number 
 
 /** Decode all blocks into render‑ready waveforms. */
 export function decodeAllBlocks(seq: PulseqSequence): DecodedBlock[] {
-    return decodeBlockRange(seq, 0, seq.blocks.length);
+    return decodeBlockRange(seq, 0, seq.blocks.length, createSequenceDecodeContext(seq));
+}
+
+export interface SequenceDecodeContext {
+    readonly sequence: PulseqSequence;
+    readonly blockStartTimes: Float64Array;
+    readonly classifiedRfUses: string[];
+    readonly triggerCache: Map<number, DecodedTriggerEvent>;
+    readonly ncoCache: Map<number, DecodedNCOEvent>;
+}
+
+/** Build reusable timing and RF metadata for indexed block-range decoding. */
+export function createSequenceDecodeContext(seq: PulseqSequence): SequenceDecodeContext {
+    const blockStartTimes = new Float64Array(seq.blocks.length + 1);
+    for (let index = 0; index < seq.blocks.length; index++) {
+        blockStartTimes[index + 1] = blockStartTimes[index] + blockDurationSeconds(seq, seq.blocks[index]);
+    }
+    return {
+        sequence: seq,
+        blockStartTimes,
+        classifiedRfUses: classifyRfUses(seq),
+        triggerCache: new Map<number, DecodedTriggerEvent>(),
+        ncoCache: new Map<number, DecodedNCOEvent>(),
+    };
 }
 
 /**
@@ -68,8 +91,7 @@ export function decodeAllBlocks(seq: PulseqSequence): DecodedBlock[] {
  * existing decompressor (which is already O(n) per shape), but the block loop
  * and RF/gradient expansion are limited to the requested range.
  *
- * Cumulative time is computed from block 0 so that startTime values are
- * absolute (correct for rendering).
+ * A reusable context provides indexed absolute start times and RF roles.
  *
  * @param seq            Parsed sequence.
  * @param startBlockIdx  0‑based inclusive start block index.
@@ -80,25 +102,18 @@ export function decodeBlockRange(
     seq: PulseqSequence,
     startBlockIdx: number,
     endBlockIdx: number,
+    context = createSequenceDecodeContext(seq),
 ): DecodedBlock[] {
-    // Clear per‑sequence extension caches to avoid cross‑sequence contamination
-    _trigCache.clear();
-    _ncoCache.clear();
+    if (context.sequence !== seq) throw new Error('The decode context belongs to a different sequence.');
 
     const totalBlocks = seq.blocks.length;
     const s = Math.max(0, Math.min(startBlockIdx, totalBlocks));
     const e = Math.max(s, Math.min(endBlockIdx, totalBlocks));
     if (s >= e) return [];
 
-    // Pre‑compute cumulative time up to startBlockIdx so that all startTime
-    // values are absolute (needed for correct k‑space & visual alignment).
-    let cumulative = 0;
-    for (let i = 0; i < Math.min(s, totalBlocks); i++) {
-        cumulative += blockDurationSeconds(seq, seq.blocks[i]);
-    }
+    let cumulative = context.blockStartTimes[s];
 
     const decoded: DecodedBlock[] = [];
-    const classifiedRfUses = classifyRfUses(seq);
     for (let i = s; i < e; i++) {
         const block = seq.blocks[i];
         const dur = blockDurationSeconds(seq, block);
@@ -106,7 +121,7 @@ export function decodeBlockRange(
 
         if (block.rfId > 0) {
             const rf = seq.rfs.get(block.rfId);
-            if (rf) db.rf = decodeRF(seq, rf, cumulative, dur, classifiedRfUses[i]);
+            if (rf) db.rf = decodeRF(seq, rf, cumulative, dur, context.classifiedRfUses[i]);
         }
         db.gx = decodeGradient(seq, block.gxId, cumulative, dur, 'gx');
         db.gy = decodeGradient(seq, block.gyId, cumulative, dur, 'gy');
@@ -118,7 +133,7 @@ export function decodeBlockRange(
         }
         if (block.extId > 0) {
             const ext = seq.extensions.get(block.extId);
-            if (ext) decodeExtensions(seq, ext, db, cumulative);
+            if (ext) decodeExtensions(seq, ext, db, cumulative, context);
         }
 
         decoded.push(db);
@@ -413,13 +428,10 @@ function decodeADC(adc: ADCEntry, blockStart: number, seq: PulseqSequence): Deco
     };
 }
 
-// Cache for decoded trigger/NCO payloads keyed by extension-list node id.
-const _trigCache = new Map<number, DecodedTriggerEvent>();
-const _ncoCache = new Map<number, DecodedNCOEvent>();
-
 function decodeExtensions(
     seq: PulseqSequence, ext: ExtensionEntry,
     db: DecodedBlock, blockStart: number,
+    context: SequenceDecodeContext,
 ): void {
     const visited = new Set<number>();
     let cur: ExtensionEntry | undefined = ext;
@@ -427,7 +439,7 @@ function decodeExtensions(
         visited.add(cur.id);
         const type = seq.extensionTypes.get(cur.type) ?? ExtType.EXT_UNKNOWN;
         if (type === ExtType.EXT_TRIGGER) {
-            let cached = _trigCache.get(cur.id);
+            let cached = context.triggerCache.get(cur.id);
             if (!cached) {
                 const trigger = findById(seq.triggers, cur.ref);
                 if (trigger) {
@@ -438,7 +450,7 @@ function decodeExtensions(
                         delay: trigger.delay * 1e-6,
                         duration: trigger.duration * 1e-6,
                     };
-                    _trigCache.set(cur.id, cached);
+                    context.triggerCache.set(cur.id, cached);
                 }
             }
             if (cached) {
@@ -446,7 +458,7 @@ function decodeExtensions(
                 db.triggers.push({ ...cached, startTime: blockStart });
             }
         } else if (type === ExtType.EXT_NCO) {
-            let cached = _ncoCache.get(cur.id);
+            let cached = context.ncoCache.get(cur.id);
             if (!cached) {
                 const nco = findById(seq.ncos, cur.ref);
                 if (nco) {
@@ -459,7 +471,7 @@ function decodeExtensions(
                         delay: nco.delay * 1e-6,
                         duration: nco.duration * 1e-6,
                     };
-                    _ncoCache.set(cur.id, cached);
+                    context.ncoCache.set(cur.id, cached);
                 }
             }
             if (cached) {

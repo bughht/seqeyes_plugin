@@ -1,4 +1,5 @@
-import type { DecodedBlock } from './types';
+import { classifyRfUses } from './rfClassification';
+import type { DecodedBlock, PulseqSequence } from './types';
 
 /**
  * Interactive limits protect the UI/extension process from native-raster
@@ -91,6 +92,38 @@ export function estimateKspaceCost(
         : 0;
     const gridCandidatePoints = rasterSamples + adcSamples + gradientSupportPoints + rfSupportPoints + 2;
     return { rasterSamples, adcSamples, gridCandidatePoints };
+}
+
+/** Equivalent k-space estimate from parsed references, without waveform decode. */
+export function estimateSequenceKspaceCost(
+    seq: PulseqSequence,
+    totalDuration: number,
+): KspaceCostEstimate {
+    let adcSamples = 0;
+    let gradientSupportPoints = 0;
+    let rfSupportPoints = 0;
+    const rfUses = classifyRfUses(seq);
+    for (let index = 0; index < seq.blocks.length; index++) {
+        const block = seq.blocks[index];
+        const adc = block.adcId > 0 ? seq.adcs.get(block.adcId) : undefined;
+        if (adc?.numSamples && adc.numSamples > 0) adcSamples += adc.numSamples;
+        for (const id of [block.gxId, block.gyId, block.gzId]) {
+            if (id > 0 && (seq.trapGrads.has(id) || seq.arbitraryGrads.has(id))) {
+                gradientSupportPoints += 2;
+            }
+        }
+        if (block.rfId > 0 && seq.rfs.has(block.rfId)) {
+            rfSupportPoints += rfUses[index] === 'r' ? 2 : 3;
+        }
+    }
+    const rasterSamples = seq.rasterTimes.gradientRaster > 0 && totalDuration > 0
+        ? Math.max(2, Math.round(totalDuration / seq.rasterTimes.gradientRaster) + 1)
+        : 0;
+    return {
+        rasterSamples,
+        adcSamples,
+        gridCandidatePoints: rasterSamples + adcSamples + gradientSupportPoints + rfSupportPoints + 2,
+    };
 }
 
 /**

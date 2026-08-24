@@ -17,7 +17,13 @@
 
 import * as vscode from 'vscode';
 import { parseSequenceBytes } from '../pulseq/sequenceReader';
-import { decodeAllBlocks } from '../pulseq/decoder';
+import {
+    createSequenceDecodeContext,
+    decodeAllBlocks,
+    decodeBlockRange,
+    getTotalDuration,
+    type SequenceDecodeContext,
+} from '../pulseq/decoder';
 import { calculateKspace, type KSpaceData } from '../pulseq/kspace';
 import { calculateM1, calculateM1Coarse, type CoarseM1Data, type M1Data } from '../pulseq/m1';
 import {
@@ -39,8 +45,8 @@ import {
     derivedDetailViewLimitSec,
     estimateAudioCost,
     estimateDerivedCost,
-    estimateKspaceCost,
     estimateKspacePeakMemoryBytes,
+    estimateSequenceKspaceCost,
     estimateSpectrogramCost,
     formatMemorySize,
     formatSampleCount,
@@ -54,11 +60,11 @@ import { detectSequenceTiming } from '../pulseq/trdetect';
 import {
     estimateEnvelopeJsonBytes,
     MAX_V8_STRING_LENGTH,
-    packBlocks,
+    packSequenceBlocks,
 } from './blockTransport';
 import { getWebviewContent } from './webviewContent';
 import { serializeGradientSound, serializeSpectrogram } from './spectrogramTransport';
-import type { DecodedBlock } from '../pulseq/types';
+import type { DecodedBlock, PulseqSequence } from '../pulseq/types';
 
 // ─── Constants ────────────────────────────────────────────────────────────
 
@@ -232,6 +238,8 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
         panel.webview.options = { enableScripts: true };
         panel.webview.html = this._loadingHtml();
         let activeUri = doc.uri;
+        let activeSequence: PulseqSequence | undefined;
+        let activeDecodeContext: SequenceDecodeContext | undefined;
         let activeBlocks: DecodedBlock[] = [];
         let activeGradientRaster = 0;
         let activeRfRaster = 0;
@@ -239,8 +247,24 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
         let activePnsHardware: PnsHardware | undefined;
         let activeAcousticBands: AcousticResonance[] = [];
 
+        const allActiveBlocks = (): DecodedBlock[] => {
+            if (!activeBlocks.length && activeSequence) activeBlocks = decodeAllBlocks(activeSequence);
+            return activeBlocks;
+        };
+
+        const activeWindowBlocks = (startSec: number, endSec: number): DecodedBlock[] => {
+            if (!activeSequence || !activeDecodeContext) return [];
+            const starts = activeDecodeContext.blockStartTimes;
+            const pad = Math.max((endSec - startSec) * 0.05, 0.05);
+            let start = lowerBoundNumeric(starts, startSec - pad) - 1;
+            let end = lowerBoundNumeric(starts, endSec + pad) + 1;
+            start = Math.max(0, Math.min(start, activeSequence.blocks.length));
+            end = Math.max(start, Math.min(end, activeSequence.blocks.length));
+            return decodeBlockRange(activeSequence, start, end, activeDecodeContext);
+        };
+
         const derivedNeedsCoarseFallback = (): boolean => {
-            const estimate = estimateDerivedCost(activeBlocks, activeGradientRaster);
+            const estimate = estimateDerivedCost(allActiveBlocks(), activeGradientRaster);
             return estimate.rasterSamples > INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples;
         };
 
@@ -277,18 +301,16 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                 const timing = detectSequenceTiming(seq);
 
                 const totalBlocks = seq.blocks.length;
-                postProgress('decode', 15, `Decoding ${totalBlocks} blocks\u2026`);
-                const blocks = decodeAllBlocks(seq);
-                activeBlocks = blocks;
+                activeSequence = seq;
+                activeDecodeContext = createSequenceDecodeContext(seq);
+                activeBlocks = [];
                 activeGradientRaster = seq.rasterTimes.gradientRaster;
                 activeRfRaster = seq.rasterTimes.rfRaster;
-                const totalDur = blocks.length > 0
-                    ? blocks[blocks.length - 1].startTime + blocks[blocks.length - 1].duration
-                    : 0;
+                const totalDur = getTotalDuration(seq);
                 activeTotalDuration = totalDur;
 
                 const sequenceNotices: string[] = [];
-                const kspaceEstimate = estimateKspaceCost(blocks, seq.rasterTimes.gradientRaster, totalDur);
+                const kspaceEstimate = estimateSequenceKspaceCost(seq, totalDur);
                 const kspaceMemoryEstimate = formatMemorySize(estimateKspacePeakMemoryBytes(kspaceEstimate));
                 const kspaceOverBudget = kspaceExceedsInteractiveBudget(kspaceEstimate);
                 let kspaceSafety: string | null = null;
@@ -324,7 +346,8 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                 });
 
 
-                const packed = packBlocks(blocks);
+                postProgress('decode', 15, `Preparing ${totalBlocks} blocks in bounded batches\u2026`);
+                const packed = packSequenceBlocks(seq);
                 if (packed.notice) sequenceNotices.push(packed.notice);
 
                 // The waveform samples travel as binary buffers, but a sequence
@@ -441,14 +464,15 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
             } else if (msg.command === 'exportKspace') {
                 await this._exportKspace(activeUri);
             } else if (msg.command === 'calculateKspaceUnsafe') {
-                if (!activeBlocks.length || activeGradientRaster <= 0 || activeTotalDuration <= 0) {
+                if (!activeSequence || activeGradientRaster <= 0 || activeTotalDuration <= 0) {
                     panel.webview.postMessage({ type: 'kspaceError', message: 'No sequence is loaded.' });
                     return;
                 }
                 panel.webview.postMessage({ type: 'progress', phase: 'start', percent: 0, text: 'Calculating K-space without safety limits…' });
                 try {
+                    const blocks = allActiveBlocks();
                     const kspace = calculateKspace(
-                        activeBlocks,
+                        blocks,
                         activeGradientRaster,
                         activeTotalDuration,
                         0,
@@ -465,11 +489,11 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     panel.webview.postMessage({ type: 'progress', phase: 'done', percent: 100, text: 'K-space failed' });
                 }
             } else if (msg.command === 'calculateKspace') {
-                if (!activeBlocks.length || activeGradientRaster <= 0 || activeTotalDuration <= 0) {
+                if (!activeSequence || activeGradientRaster <= 0 || activeTotalDuration <= 0) {
                     panel.webview.postMessage({ type: 'kspaceError', message: 'No sequence is loaded.' });
                     return;
                 }
-                const estimate = estimateKspaceCost(activeBlocks, activeGradientRaster, activeTotalDuration);
+                const estimate = estimateSequenceKspaceCost(activeSequence, activeTotalDuration);
                 if (kspaceExceedsInteractiveBudget(estimate)) {
                     panel.webview.postMessage({
                         type: 'kspaceError',
@@ -479,8 +503,9 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                 }
                 panel.webview.postMessage({ type: 'progress', phase: 'start', percent: 0, text: 'Calculating K-space…' });
                 try {
+                    const blocks = allActiveBlocks();
                     const kspace = calculateKspace(
-                        activeBlocks,
+                        blocks,
                         activeGradientRaster,
                         activeTotalDuration,
                         0,
@@ -506,19 +531,20 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     panel.webview.postMessage({ type: 'progress', phase: 'done', percent: 100, text: 'K-space failed' });
                 }
             } else if (msg.command === 'calculateM1') {
-                if (!activeBlocks.length || activeGradientRaster <= 0) {
+                if (!activeSequence || activeGradientRaster <= 0) {
                     panel.webview.postMessage({ type: 'm1Error', message: 'Load a sequence before calculating M1.' });
                     return;
                 }
+                const blocks = allActiveBlocks();
                 const referenceMode = msg.referenceMode === 'observationTime' ? 'observationTime' : 'rfCenter';
                 try {
                     const m1 = derivedNeedsCoarseFallback()
-                        ? calculateM1Coarse(activeBlocks, activeGradientRaster, { referenceMode })
-                        : calculateM1(activeBlocks, activeGradientRaster, { referenceMode });
+                        ? calculateM1Coarse(blocks, activeGradientRaster, { referenceMode })
+                        : calculateM1(blocks, activeGradientRaster, { referenceMode });
                     panel.webview.postMessage({ type: 'm1Data', m1: serializeM1(m1) });
                 } catch (err) {
                     try {
-                        const coarse = calculateM1Coarse(activeBlocks, activeGradientRaster, { referenceMode });
+                        const coarse = calculateM1Coarse(blocks, activeGradientRaster, { referenceMode });
                         coarse.warnings.unshift(`Exact M1 calculation failed (${err instanceof Error ? err.message : String(err)}); using the bounded fallback.`);
                         panel.webview.postMessage({ type: 'm1Data', m1: serializeM1(coarse) });
                     } catch (fallbackError) {
@@ -529,8 +555,9 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     }
                 }
             } else if (msg.command === 'calculateM1Window') {
+                const blocks = allActiveBlocks();
                 const referenceMode = msg.referenceMode === 'observationTime' ? 'observationTime' : 'rfCenter';
-                const selected = selectM1WindowBlocks(activeBlocks, Number(msg.startSec), Number(msg.endSec));
+                const selected = selectM1WindowBlocks(blocks, Number(msg.startSec), Number(msg.endSec));
                 const estimate = estimateDerivedCost(selected.blocks, activeGradientRaster);
                 if (!selected.blocks.length || estimate.rasterSamples > INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples) {
                     panel.webview.postMessage({
@@ -555,10 +582,11 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     });
                 }
             } else if (msg.command === 'openPnsAsc') {
-                if (!activeBlocks.length || activeGradientRaster <= 0) {
+                if (!activeSequence || activeGradientRaster <= 0) {
                     panel.webview.postMessage({ type: 'pnsError', message: 'Load a sequence before loading an ASC profile.' });
                     return;
                 }
+                allActiveBlocks();
                 const uris = await vscode.window.showOpenDialog({
                     canSelectMany: false,
                     filters: { 'Siemens ASC Profiles': ['asc'], 'All Files': ['*'] },
@@ -616,7 +644,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     return;
                 }
                 const selected = selectPnsWindowBlocks(
-                    activeBlocks,
+                    allActiveBlocks(),
                     Number(msg.startSec),
                     Number(msg.endSec),
                     activePnsHardware,
@@ -651,7 +679,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                 }
             } else if (msg.command === 'calculateSpectrogram') {
                 const requestId = msg.requestId;
-                if (!activeBlocks.length || activeGradientRaster <= 0) {
+                if (!activeSequence || activeGradientRaster <= 0) {
                     panel.webview.postMessage({
                         type: 'spectrogramError',
                         requestId,
@@ -682,7 +710,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                 }
                 try {
                     const spectrogram = computeGradientSpectrogram(
-                        selectWindowBlocks(activeBlocks, startSec, endSec),
+                        activeWindowBlocks(startSec, endSec),
                         activeGradientRaster,
                         { ...params, startSec, endSec },
                     );
@@ -700,7 +728,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                 }
             } else if (msg.command === 'synthesizeGradientSound') {
                 const requestId = msg.requestId;
-                if (!activeBlocks.length) {
+                if (!activeSequence) {
                     panel.webview.postMessage({
                         type: 'gradientSoundError',
                         requestId,
@@ -718,7 +746,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                 }
                 try {
                     const sound = synthesizeGradientSound(
-                        selectWindowBlocks(activeBlocks, startSec, endSec),
+                        activeWindowBlocks(startSec, endSec),
                         {
                             startSec,
                             endSec,

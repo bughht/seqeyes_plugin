@@ -9,7 +9,8 @@ import { version } from '../package.json';
 export const PACKAGE_VERSION: string = version;
 export { parseSequenceText } from '../src/pulseq/reader';
 export { hasPulseqBinaryMagic, parseSequenceBinary, parseSequenceBytes } from '../src/pulseq/sequenceReader';
-export { decodeAllBlocks, getTotalDuration } from '../src/pulseq/decoder';
+export { createSequenceDecodeContext, decodeAllBlocks, decodeBlockRange, getTotalDuration } from '../src/pulseq/decoder';
+export { packSequenceBlocks } from '../src/editor/blockTransport';
 export { calculateKspace } from '../src/pulseq/kspace';
 export { calculateM1, calculateM1Coarse } from '../src/pulseq/m1';
 export { calculatePns, calculatePnsCoarse, parsePnsHardwareAsc, safePnsModel } from '../src/pulseq/pns';
@@ -43,6 +44,7 @@ export {
     estimateDerivedCost,
     estimateKspaceCost,
     estimateKspacePeakMemoryBytes,
+    estimateSequenceKspaceCost,
     formatMemorySize,
     formatSampleCount,
     INTERACTIVE_COMPUTE_LIMITS,

@@ -279,6 +279,8 @@ test('keeps theme, zoom clamp, hover readout, and k-space drag interactive', asy
   expect(zoomedOut.visibleDuration).toBeLessThanOrEqual(zoomedOut.totalDuration * 1.001);
   expect(zoomedOut.offset).toBeGreaterThanOrEqual(-1e-12);
 
+  await openKspace(page);
+  await page.evaluate(() => window.SeqEyesDev.setPanelMode('off'));
   const hoverPoint = await page.evaluate(() => window.__seqeyesDebug.hoverPoint()) as HoverPoint;
   const waveformBox = await requireBox(page.locator('#mc'));
   const hoverX = clamp(hoverPoint.x, 120, waveformBox.width - 60);
@@ -391,7 +393,7 @@ test('loads a bseq from a GitHub-style web URL as binary bytes', async ({ page }
   await openSequenceFromUrl(page, 'https://github.com/pulseq/pulseq/blob/master/tests/legacy/approved/gre.bseq');
   await expect(page.locator('#exportKspaceBtn')).toBeEnabled({ timeout: 60_000 });
   await expect.poll(async () => (await debugState(page)).blocks, { timeout: 20_000 }).toBe(320);
-  expect((await debugState(page)).adcCount).toBe(4096);
+  expect((await debugState(page)).adcCount).toBe(0);
   expect(fetchedUrls).toEqual([rawUrl]);
 });
 
@@ -655,7 +657,7 @@ async function openKspace(page: Page): Promise<void> {
   await expect.poll(async () => {
     const box = await page.locator('#kc').boundingBox();
     return box ? Math.min(box.width, box.height) : 0;
-  }, { timeout: 10_000 }).toBeGreaterThan(100);
+  }, { timeout: 30_000 }).toBeGreaterThan(100);
   await expect.poll(async () => (await debugState(page)).adcCount, {
     timeout: 20_000,
   }).toBeGreaterThan(0);

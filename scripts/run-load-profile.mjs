@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 
-const STAGES = ['parse', 'decode', 'display'];
+const STAGES = ['parse', 'decode', 'display', 'bounded-display'];
 
 async function main() {
     const options = parseArguments(process.argv.slice(2));
@@ -153,7 +153,7 @@ function usage() {
         'Usage: node scripts/run-load-profile.mjs --input <file> [--input <file> ...] [options]',
         '',
         'Options:',
-        '  --stages parse,decode,display  Fresh-process stages to run in order',
+        '  --stages parse,decode,display,bounded-display  Fresh-process stages to run in order',
         '  --output <file>                JSON report path',
         '  --timeout-ms <ms>              Per-stage timeout (default 600000)',
         '  --max-old-space-mib <MiB>      Per-stage V8 heap ceiling (default 4096)',

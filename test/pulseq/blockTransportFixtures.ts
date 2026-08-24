@@ -13,6 +13,7 @@ import { decodeAllBlocks } from '../../src/pulseq/decoder';
 import { downsampleM4 } from '../../src/pulseq/displayDownsampling';
 import { parseSequenceBytes } from '../../src/pulseq/sequenceReader';
 import type { DecodedBlock } from '../../src/pulseq/types';
+import type { PulseqSequence } from '../../src/pulseq/types';
 
 const FIXTURES = join(__dirname, '..', 'seqeyes_demo_seq_files');
 const ASSETS = join(__dirname, '..', '..', 'src', 'editor', 'webview', 'assets');
@@ -47,8 +48,12 @@ export function loadUnpackApi(): UnpackApi {
 }
 
 export function loadBlocks(fixture: string): DecodedBlock[] {
+    return decodeAllBlocks(loadSequence(fixture));
+}
+
+export function loadSequence(fixture: string): PulseqSequence {
     const bytes = readFileSync(join(FIXTURES, fixture));
-    return decodeAllBlocks(parseSequenceBytes(new Uint8Array(bytes), fixture));
+    return parseSequenceBytes(new Uint8Array(bytes), fixture);
 }
 
 /**
@@ -122,10 +127,7 @@ function uniform(values: ArrayLike<number>, cap: number): number[] {
 }
 
 /**
- * The all-inline block shape this transport replaced: plain arrays, as the
- * standalone web app still builds them in the renderer's own heap and as the
- * extension used to push them through postMessage. The reference both the
- * size and the rendering-equivalence tests compare against.
+ * Plain-array reference shape used by the rendering-equivalence tests.
  */
 export function serializeInlineBlocks(blocks: DecodedBlock[]): Array<Record<string, any>> {
     const wrap = (value: number): number => ((value % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
@@ -145,7 +147,7 @@ export function serializeInlineBlocks(blocks: DecodedBlock[]): Array<Record<stri
         }
         for (const key of ['gx', 'gy', 'gz'] as const) {
             const grad = b[key];
-            if (!grad) continue;
+            if (!grad || grad.type === 'none') continue;
             const display = downsampleM4(grad.timePoints, grad.waveform, MAX_DISPLAY_PTS);
             o[key] = {
                 s: grad.startTime, d: grad.duration, t: display.time, w: display.values,

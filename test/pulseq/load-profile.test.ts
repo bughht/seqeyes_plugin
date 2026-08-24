@@ -34,4 +34,15 @@ describe('stage-bounded load profiler', () => {
         expect(report.display?.valueBufferBytes).toBe(report.display!.sampleCount * 4);
         expect(report.display?.envelopeEstimatedJsonBytes).toBeGreaterThan(0);
     });
+
+    it('profiles bounded display preparation without retaining an eager decode', () => {
+        const report = profileSequenceLoad(fixture, 'bounded-display');
+
+        expect(report.status).toBe('ok');
+        expect(report.completedStage).toBe('bounded-display');
+        expect(report.decoded).toBeUndefined();
+        expect(report.phases.decodeAllBlocks).toBeUndefined();
+        expect(report.phases.packSequenceBlocks.durationMs).toBeGreaterThanOrEqual(0);
+        expect(report.display?.sampleCount).toBeGreaterThan(0);
+    });
 });

@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { estimateEnvelopeJsonBytes, MAX_DISPLAY_PTS, packBlocks } from '../../src/editor/blockTransport';
-import { INTERACTIVE_COMPUTE_LIMITS } from '../../src/pulseq/computeBudget';
+import { estimateEnvelopeJsonBytes, MAX_DISPLAY_PTS, packBlocks, packSequenceBlocks } from '../../src/editor/blockTransport';
+import { estimateKspaceCost, estimateSequenceKspaceCost, INTERACTIVE_COMPUTE_LIMITS } from '../../src/pulseq/computeBudget';
 import { downsampleM4 } from '../../src/pulseq/displayDownsampling';
 import type { DecodedBlock } from '../../src/pulseq/types';
 import {
     inlineJsonBytes,
     loadBlocks,
+    loadSequence,
     loadUnpackApi,
     transfer,
 } from './blockTransportFixtures';
@@ -52,6 +53,10 @@ describe('packed block transport', () => {
       for (const key of ['gx', 'gy', 'gz'] as const) {
         const grad = source[key];
         if (!grad) continue;
+        if (grad.type === 'none') {
+          expect(block[key]).toBeUndefined();
+          continue;
+        }
         const expected = downsampleM4(grad.timePoints, grad.waveform, MAX_DISPLAY_PTS);
         expect(Array.from(block[key].t as Float64Array)).toEqual(expected.time);
         expect(block[key].w).toHaveLength(expected.values.length);
@@ -65,6 +70,20 @@ describe('packed block transport', () => {
     }
     expect(checkedRf).toBeGreaterThan(0);
     expect(checkedGrad).toBeGreaterThan(0);
+  });
+
+  it('chunk-packs a parsed sequence without changing its display payload', () => {
+    const sequence = loadSequence('writeEpiRS.seq');
+    const decoded = loadBlocks('writeEpiRS.seq');
+    const eager = packBlocks(decoded);
+    const chunked = packSequenceBlocks(sequence, 7);
+
+    expect(chunked.blocks).toEqual(eager.blocks);
+    expect(new Float64Array(chunked.sampleTimes)).toEqual(new Float64Array(eager.sampleTimes));
+    expect(new Float32Array(chunked.sampleValues)).toEqual(new Float32Array(eager.sampleValues));
+    expect(estimateSequenceKspaceCost(sequence, 0.116)).toEqual(
+      estimateKspaceCost(decoded, sequence.rasterTimes.gradientRaster, 0.116),
+    );
   });
 
   it('keeps waveform samples out of the JSON envelope', () => {

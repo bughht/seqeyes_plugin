@@ -36,7 +36,9 @@ var Pulseq = (() => {
     computeGradientSpectrumAverage: () => computeGradientSpectrumAverage,
     computeGradientSpectrumSlice: () => computeGradientSpectrumSlice,
     countBandsOutsideRange: () => countBandsOutsideRange,
+    createSequenceDecodeContext: () => createSequenceDecodeContext,
     decodeAllBlocks: () => decodeAllBlocks,
+    decodeBlockRange: () => decodeBlockRange,
     derivedDetailViewLimitSec: () => derivedDetailViewLimitSec,
     describeAscProfile: () => describeAscProfile,
     detectSequenceTiming: () => detectSequenceTiming,
@@ -45,6 +47,7 @@ var Pulseq = (() => {
     estimateDerivedCost: () => estimateDerivedCost,
     estimateKspaceCost: () => estimateKspaceCost,
     estimateKspacePeakMemoryBytes: () => estimateKspacePeakMemoryBytes,
+    estimateSequenceKspaceCost: () => estimateSequenceKspaceCost,
     estimateSpectrogramCost: () => estimateSpectrogramCost,
     exportKspaceArtifacts: () => exportKspaceArtifacts,
     exportKspaceArtifactsFromBytes: () => exportKspaceArtifactsFromBytes,
@@ -56,6 +59,7 @@ var Pulseq = (() => {
     hasPulseqBinaryMagic: () => hasPulseqBinaryMagic,
     isEmptyAscProfile: () => isEmptyAscProfile,
     kspaceExceedsInteractiveBudget: () => kspaceExceedsInteractiveBudget,
+    packSequenceBlocks: () => packSequenceBlocks,
     parseAcousticResonancesAsc: () => parseAcousticResonancesAsc,
     parseAscProfile: () => parseAscProfile,
     parseAscText: () => parseAscText,
@@ -1535,28 +1539,36 @@ var Pulseq = (() => {
     return phaseOffset + phasePPM * 1e-6 * GAMMA_HZ_T2 * b0;
   }
   function decodeAllBlocks(seq) {
-    return decodeBlockRange(seq, 0, seq.blocks.length);
+    return decodeBlockRange(seq, 0, seq.blocks.length, createSequenceDecodeContext(seq));
   }
-  function decodeBlockRange(seq, startBlockIdx, endBlockIdx) {
-    _trigCache.clear();
-    _ncoCache.clear();
+  function createSequenceDecodeContext(seq) {
+    const blockStartTimes = new Float64Array(seq.blocks.length + 1);
+    for (let index = 0; index < seq.blocks.length; index++) {
+      blockStartTimes[index + 1] = blockStartTimes[index] + blockDurationSeconds(seq, seq.blocks[index]);
+    }
+    return {
+      sequence: seq,
+      blockStartTimes,
+      classifiedRfUses: classifyRfUses(seq),
+      triggerCache: /* @__PURE__ */ new Map(),
+      ncoCache: /* @__PURE__ */ new Map()
+    };
+  }
+  function decodeBlockRange(seq, startBlockIdx, endBlockIdx, context = createSequenceDecodeContext(seq)) {
+    if (context.sequence !== seq) throw new Error("The decode context belongs to a different sequence.");
     const totalBlocks = seq.blocks.length;
     const s = Math.max(0, Math.min(startBlockIdx, totalBlocks));
     const e = Math.max(s, Math.min(endBlockIdx, totalBlocks));
     if (s >= e) return [];
-    let cumulative = 0;
-    for (let i = 0; i < Math.min(s, totalBlocks); i++) {
-      cumulative += blockDurationSeconds(seq, seq.blocks[i]);
-    }
+    let cumulative = context.blockStartTimes[s];
     const decoded = [];
-    const classifiedRfUses = classifyRfUses(seq);
     for (let i = s; i < e; i++) {
       const block = seq.blocks[i];
       const dur = blockDurationSeconds(seq, block);
       const db = { index: block.num, duration: dur, startTime: cumulative };
       if (block.rfId > 0) {
         const rf = seq.rfs.get(block.rfId);
-        if (rf) db.rf = decodeRF(seq, rf, cumulative, dur, classifiedRfUses[i]);
+        if (rf) db.rf = decodeRF(seq, rf, cumulative, dur, context.classifiedRfUses[i]);
       }
       db.gx = decodeGradient(seq, block.gxId, cumulative, dur, "gx");
       db.gy = decodeGradient(seq, block.gyId, cumulative, dur, "gy");
@@ -1567,7 +1579,7 @@ var Pulseq = (() => {
       }
       if (block.extId > 0) {
         const ext = seq.extensions.get(block.extId);
-        if (ext) decodeExtensions(seq, ext, db, cumulative);
+        if (ext) decodeExtensions(seq, ext, db, cumulative, context);
       }
       decoded.push(db);
       cumulative += dur;
@@ -1781,16 +1793,14 @@ var Pulseq = (() => {
       phaseOffset: phaseFull
     };
   }
-  var _trigCache = /* @__PURE__ */ new Map();
-  var _ncoCache = /* @__PURE__ */ new Map();
-  function decodeExtensions(seq, ext, db, blockStart) {
+  function decodeExtensions(seq, ext, db, blockStart, context) {
     const visited = /* @__PURE__ */ new Set();
     let cur = ext;
     while (cur && !visited.has(cur.id)) {
       visited.add(cur.id);
       const type = seq.extensionTypes.get(cur.type) ?? 999 /* EXT_UNKNOWN */;
       if (type === 1 /* EXT_TRIGGER */) {
-        let cached = _trigCache.get(cur.id);
+        let cached = context.triggerCache.get(cur.id);
         if (!cached) {
           const trigger = findById(seq.triggers, cur.ref);
           if (trigger) {
@@ -1801,7 +1811,7 @@ var Pulseq = (() => {
               delay: trigger.delay * 1e-6,
               duration: trigger.duration * 1e-6
             };
-            _trigCache.set(cur.id, cached);
+            context.triggerCache.set(cur.id, cached);
           }
         }
         if (cached) {
@@ -1809,7 +1819,7 @@ var Pulseq = (() => {
           db.triggers.push({ ...cached, startTime: blockStart });
         }
       } else if (type === 100 /* EXT_NCO */) {
-        let cached = _ncoCache.get(cur.id);
+        let cached = context.ncoCache.get(cur.id);
         if (!cached) {
           const nco = findById(seq.ncos, cur.ref);
           if (nco) {
@@ -1822,7 +1832,7 @@ var Pulseq = (() => {
               delay: nco.delay * 1e-6,
               duration: nco.duration * 1e-6
             };
-            _ncoCache.set(cur.id, cached);
+            context.ncoCache.set(cur.id, cached);
           }
         }
         if (cached) {
@@ -1887,6 +1897,465 @@ var Pulseq = (() => {
   }
   function findById(items, id) {
     return items.find((item) => item.id === id);
+  }
+
+  // src/pulseq/computeBudget.ts
+  var INTERACTIVE_COMPUTE_LIMITS = Object.freeze({
+    kspaceRasterSamples: 12e6,
+    kspaceAdcSamples: 8e6,
+    kspaceGridCandidates: 18e6,
+    derivedRasterSamples: 2e6,
+    /**
+     * Ceiling on the display samples one sequence load may carry to the VS Code
+     * webview, counted as (time, amplitude) pairs across every RF and gradient
+     * waveform. At 12 bytes per pair this bounds the shared binary buffers at
+     * roughly 137 MiB in the extension host and again in the renderer.
+     * Per-waveform detail is reduced uniformly once a sequence would exceed it,
+     * because the alternative is an allocation neither process can satisfy.
+     */
+    displayTransportSamples: 12e6,
+    /**
+     * Gradient spectrogram ceilings. Unlike k-space these are never offered
+     * as a dangerous override: the spectrogram is scoped to the visible
+     * window, so the remedy is always "zoom in" rather than "risk the host".
+     */
+    spectrogramColumns: 1024,
+    spectrogramFftPoints: 16384,
+    spectrogramTotalCells: 4e6,
+    spectrogramInputSamples: 8e6,
+    /** 120 s of stereo audio at 44.1 kHz. */
+    audioSamples: 54e5
+  });
+  var KSPACE_CONFIRMATION_MEMORY_BYTES = 1024 ** 3;
+  function derivedDetailViewLimitSec(gradientRaster, trTimeSec, maxRasterSamples = INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples) {
+    if (!(gradientRaster > 0) || !(maxRasterSamples > 0)) return 0;
+    const sampleLimitedDuration = maxRasterSamples * gradientRaster / 2;
+    if (!(trTimeSec > 0)) return sampleLimitedDuration;
+    return Math.min(sampleLimitedDuration, trTimeSec * 100.5);
+  }
+  function estimateKspaceCost(blocks, gradientRaster, totalDuration) {
+    let adcSamples = 0;
+    let gradientSupportPoints = 0;
+    let rfSupportPoints = 0;
+    for (const block of blocks) {
+      if (block.adc?.numSamples && block.adc.numSamples > 0) {
+        adcSamples += block.adc.numSamples;
+      }
+      for (const gradient of [block.gx, block.gy, block.gz]) {
+        if (gradient && gradient.type !== "none" && gradient.timePoints.length >= 2) {
+          gradientSupportPoints += 2;
+        }
+      }
+      if (block.rf) rfSupportPoints += block.rf.use === "r" ? 2 : 3;
+    }
+    const rasterSamples = gradientRaster > 0 && totalDuration > 0 ? Math.max(2, Math.round(totalDuration / gradientRaster) + 1) : 0;
+    const gridCandidatePoints = rasterSamples + adcSamples + gradientSupportPoints + rfSupportPoints + 2;
+    return { rasterSamples, adcSamples, gridCandidatePoints };
+  }
+  function estimateSequenceKspaceCost(seq, totalDuration) {
+    let adcSamples = 0;
+    let gradientSupportPoints = 0;
+    let rfSupportPoints = 0;
+    const rfUses = classifyRfUses(seq);
+    for (let index = 0; index < seq.blocks.length; index++) {
+      const block = seq.blocks[index];
+      const adc = block.adcId > 0 ? seq.adcs.get(block.adcId) : void 0;
+      if (adc?.numSamples && adc.numSamples > 0) adcSamples += adc.numSamples;
+      for (const id of [block.gxId, block.gyId, block.gzId]) {
+        if (id > 0 && (seq.trapGrads.has(id) || seq.arbitraryGrads.has(id))) {
+          gradientSupportPoints += 2;
+        }
+      }
+      if (block.rfId > 0 && seq.rfs.has(block.rfId)) {
+        rfSupportPoints += rfUses[index] === "r" ? 2 : 3;
+      }
+    }
+    const rasterSamples = seq.rasterTimes.gradientRaster > 0 && totalDuration > 0 ? Math.max(2, Math.round(totalDuration / seq.rasterTimes.gradientRaster) + 1) : 0;
+    return {
+      rasterSamples,
+      adcSamples,
+      gridCandidatePoints: rasterSamples + adcSamples + gradientSupportPoints + rfSupportPoints + 2
+    };
+  }
+  function estimateKspacePeakMemoryBytes(estimate) {
+    const gridBytes = Math.max(0, estimate.gridCandidatePoints) * 96;
+    const adcAndTransferBytes = Math.max(0, estimate.adcSamples) * 104;
+    return Math.ceil(Math.min(Number.MAX_SAFE_INTEGER, (gridBytes + adcAndTransferBytes) * 1.25));
+  }
+  function kspaceExceedsInteractiveBudget(estimate) {
+    return estimate.rasterSamples > INTERACTIVE_COMPUTE_LIMITS.kspaceRasterSamples || estimate.adcSamples > INTERACTIVE_COMPUTE_LIMITS.kspaceAdcSamples || estimate.gridCandidatePoints > INTERACTIVE_COMPUTE_LIMITS.kspaceGridCandidates || estimateKspacePeakMemoryBytes(estimate) >= KSPACE_CONFIRMATION_MEMORY_BYTES;
+  }
+  function estimateDerivedCost(blocks, gradientRaster) {
+    let firstGradientTime = Infinity;
+    let lastGradientTime = -Infinity;
+    for (const block of blocks) {
+      for (const gradient of [block.gx, block.gy, block.gz]) {
+        const times = gradient?.timePoints;
+        if (!times?.length) continue;
+        const first = times[0];
+        const last = times[times.length - 1];
+        if (Number.isFinite(first) && first < firstGradientTime) firstGradientTime = first;
+        if (Number.isFinite(last) && last > lastGradientTime) lastGradientTime = last;
+      }
+    }
+    if (!Number.isFinite(firstGradientTime) || !Number.isFinite(lastGradientTime) || lastGradientTime < firstGradientTime || gradientRaster <= 0) {
+      return { rasterSamples: 0, firstGradientTime: null, lastGradientTime: null };
+    }
+    const span = lastGradientTime - firstGradientTime;
+    let rasterSamples = Math.max(1, Math.floor(span / gradientRaster) + 1);
+    const finalRasterTime = firstGradientTime + (rasterSamples - 1) * gradientRaster;
+    if (finalRasterTime < lastGradientTime - 1e-15) rasterSamples++;
+    return { rasterSamples, firstGradientTime, lastGradientTime };
+  }
+  function formatSampleCount(value) {
+    if (value >= 1e6) return `${(value / 1e6).toFixed(1)} million`;
+    if (value >= 1e3) return `${(value / 1e3).toFixed(1)} thousand`;
+    return String(value);
+  }
+  function formatMemorySize(bytes) {
+    const safeBytes = Math.max(0, Number.isFinite(bytes) ? bytes : 0);
+    const kib = 1024;
+    const mib = kib * 1024;
+    const gib = mib * 1024;
+    if (safeBytes >= gib) {
+      const value = safeBytes / gib;
+      return `${value.toFixed(value >= 10 ? 0 : 1)} GiB`;
+    }
+    if (safeBytes >= mib) {
+      const value = safeBytes / mib;
+      return `${value.toFixed(value >= 10 ? 0 : 1)} MiB`;
+    }
+    if (safeBytes >= kib) return `${(safeBytes / kib).toFixed(1)} KiB`;
+    return `${Math.round(safeBytes)} bytes`;
+  }
+  function estimateSpectrogramCost(input) {
+    const span = Math.max(0, (Number.isFinite(input.endSec) ? input.endSec : 0) - (Number.isFinite(input.startSec) ? input.startSec : 0));
+    const raster = input.gradientRaster > 0 ? input.gradientRaster : 1e-5;
+    const inputSamples = Math.max(1, Math.floor(span / raster) + 1);
+    const sampleRate = 1 / raster;
+    const fMax = input.fMaxHz > 0 ? input.fMaxHz : 3e3;
+    const decimationFactor = Math.max(1, Math.floor(sampleRate / (2.5 * fMax)));
+    const decimatedSamples = Math.floor((inputSamples - 1) / decimationFactor) + 1;
+    const windowSamples = input.windowSamples > 0 ? input.windowSamples : 512;
+    const overlap = Number.isFinite(input.overlap) ? Math.min(0.95, Math.max(0, input.overlap)) : 0.75;
+    const hop = Math.max(1, Math.round(windowSamples * (1 - overlap)));
+    const naturalColumns = Math.max(1, Math.floor((decimatedSamples - windowSamples) / hop) + 1);
+    const targetColumns = input.targetColumns > 0 ? input.targetColumns : 256;
+    const columns = Math.min(naturalColumns, targetColumns, INTERACTIVE_COMPUTE_LIMITS.spectrogramColumns);
+    const oversample = input.oversample > 0 ? input.oversample : 3;
+    let fftPoints = 1;
+    while (fftPoints < windowSamples * oversample) fftPoints *= 2;
+    const bins = fftPoints / 2 + 1;
+    return {
+      inputSamples,
+      decimatedSamples,
+      columns,
+      fftPoints,
+      totalCells: columns * bins * 4,
+      decimationFactor
+    };
+  }
+  function spectrogramBudgetRefusal(estimate) {
+    if (estimate.inputSamples > INTERACTIVE_COMPUTE_LIMITS.spectrogramInputSamples) {
+      return `Zoom in to compute the spectrogram: the visible window needs ${formatSampleCount(estimate.inputSamples)} gradient samples.`;
+    }
+    if (estimate.totalCells > INTERACTIVE_COMPUTE_LIMITS.spectrogramTotalCells) {
+      return `Zoom in or widen the frequency resolution: this spectrogram would need ${formatSampleCount(estimate.totalCells)} cells.`;
+    }
+    if (estimate.fftPoints > INTERACTIVE_COMPUTE_LIMITS.spectrogramFftPoints) {
+      return `Reduce the window length or zero-padding: a ${estimate.fftPoints}-point FFT exceeds the interactive limit.`;
+    }
+    return null;
+  }
+  function estimateAudioCost(startSec, endSec, sampleRate) {
+    const fs = sampleRate > 0 ? sampleRate : 44100;
+    const durationSec = Math.max(0, (Number.isFinite(endSec) ? endSec : 0) - (Number.isFinite(startSec) ? startSec : 0));
+    const frames = Math.floor(durationSec * fs + 1e-9) + 1;
+    return { sampleRate: fs, frames, totalSamples: frames * 2, durationSec };
+  }
+  function audioBudgetRefusal(estimate) {
+    if (estimate.totalSamples > INTERACTIVE_COMPUTE_LIMITS.audioSamples) {
+      return `The visible window is ${estimate.durationSec.toFixed(1)} s of audio, beyond the 120 s playback limit. Zoom in to play a shorter stretch.`;
+    }
+    return null;
+  }
+
+  // src/pulseq/displayDownsampling.ts
+  function reduceM4(time, values, maxPoints, emit) {
+    const n = Math.min(time.length, values.length);
+    if (n === 0 || maxPoints <= 0) return 0;
+    if (n <= maxPoints) {
+      let kept2 = 0;
+      for (let index = 0; index < n; index++) {
+        emit(time[index], values[index]);
+        kept2++;
+      }
+      return kept2;
+    }
+    const bucketCount = Math.max(1, Math.floor(maxPoints / 4));
+    let kept = 0;
+    for (let bucket = 0; bucket < bucketCount; bucket++) {
+      const start = Math.floor(bucket * n / bucketCount);
+      const end = Math.max(start + 1, Math.floor((bucket + 1) * n / bucketCount));
+      kept += emitBucket(time, values, start, Math.min(n, end), emit);
+    }
+    return kept;
+  }
+  function reduceUniform(time, values, maxPoints, emit) {
+    const n = Math.min(time.length, values.length);
+    if (n === 0 || maxPoints <= 0) return 0;
+    if (n <= maxPoints) {
+      for (let index = 0; index < n; index++) emit(time[index], values[index]);
+      return n;
+    }
+    const step = n / maxPoints;
+    for (let index = 0; index < maxPoints; index++) {
+      const source = Math.floor(index * step);
+      emit(time[source], values[source]);
+    }
+    return maxPoints;
+  }
+  function emitBucket(time, values, start, end, emit) {
+    let minIndex = start;
+    let maxIndex = start;
+    for (let index = start + 1; index < end; index++) {
+      if (values[index] < values[minIndex]) minIndex = index;
+      if (values[index] > values[maxIndex]) maxIndex = index;
+    }
+    const indices = [start, minIndex, maxIndex, end - 1].sort((a, b) => a - b);
+    let previous = -1;
+    let kept = 0;
+    for (const index of indices) {
+      if (index === previous) continue;
+      const t = time[index];
+      const value = values[index];
+      if (Number.isFinite(t) && Number.isFinite(value)) {
+        emit(t, value);
+        kept++;
+      }
+      previous = index;
+    }
+    return kept;
+  }
+
+  // src/editor/blockTransport.ts
+  var MAX_DISPLAY_PTS = 500;
+  var MIN_DISPLAY_PTS = 8;
+  var TAU = 2 * Math.PI;
+  var EMPTY_PAIR = { o: 0, n: 0 };
+  var CountingSink = class {
+    constructor(cap) {
+      __publicField(this, "cap", cap);
+      __publicField(this, "buildEnvelope", false);
+      __publicField(this, "total", 0);
+    }
+    pair(time, values, useM4) {
+      this.total += useM4 ? reduceM4(time, values, this.cap, discard) : reduceUniform(time, values, this.cap, discard);
+      return EMPTY_PAIR;
+    }
+  };
+  var WritingSink = class {
+    constructor(cap, times, values) {
+      __publicField(this, "cap", cap);
+      __publicField(this, "times", times);
+      __publicField(this, "values", values);
+      __publicField(this, "buildEnvelope", true);
+      __publicField(this, "cursor", 0);
+      __publicField(this, "wrapPhase", false);
+      /** Hoisted so the hot path allocates one closure, not one per waveform. */
+      __publicField(this, "emit", (time, value) => {
+        this.times[this.cursor] = time;
+        this.values[this.cursor] = this.wrapPhase ? (value % TAU + TAU) % TAU : value;
+        this.cursor++;
+      });
+    }
+    get written() {
+      return this.cursor;
+    }
+    pair(time, values, useM4, wrapPhase) {
+      const start = this.cursor;
+      this.wrapPhase = wrapPhase;
+      if (useM4) reduceM4(time, values, this.cap, this.emit);
+      else reduceUniform(time, values, this.cap, this.emit);
+      this.wrapPhase = false;
+      return { o: start, n: this.cursor - start };
+    }
+  };
+  function discard() {
+  }
+  function packSequenceBlocks(seq, batchSize = 512) {
+    const budget = INTERACTIVE_COMPUTE_LIMITS.displayTransportSamples;
+    const seriesCount = countSequenceWaveformSeries(seq);
+    const cap = seriesCount > 0 ? Math.max(MIN_DISPLAY_PTS, Math.min(MAX_DISPLAY_PTS, Math.floor(budget / seriesCount))) : MAX_DISPLAY_PTS;
+    const capacity = seriesCount * cap;
+    const times = new Float64Array(capacity);
+    const values = new Float32Array(capacity);
+    const envelope = new Array(seq.blocks.length);
+    const context = createSequenceDecodeContext(seq);
+    let cursor = 0;
+    for (let start = 0; start < seq.blocks.length; start += batchSize) {
+      const end = Math.min(seq.blocks.length, start + batchSize);
+      const decoded = decodeBlockRange(seq, start, end, context);
+      const packed = packBlocksAtCap(decoded, cap);
+      if (cursor + packed.sampleCount > capacity) {
+        throw new Error("The display transport exceeded its structural sample bound.");
+      }
+      times.set(new Float64Array(packed.sampleTimes), cursor);
+      values.set(new Float32Array(packed.sampleValues), cursor);
+      for (let index = 0; index < packed.blocks.length; index++) {
+        const block = packed.blocks[index];
+        shiftBlockOffsets(block, cursor);
+        envelope[start + index] = block;
+      }
+      cursor += packed.sampleCount;
+    }
+    return {
+      blocks: envelope,
+      sampleTimes: times.buffer.slice(0, cursor * Float64Array.BYTES_PER_ELEMENT),
+      sampleValues: values.buffer.slice(0, cursor * Float32Array.BYTES_PER_ELEMENT),
+      sampleCount: cursor,
+      pointsPerWaveform: cap,
+      notice: cap < MAX_DISPLAY_PTS ? `Large sequence: waveform detail was reduced to ${cap} points per event (normally ${MAX_DISPLAY_PTS}) to stay inside the display transfer budget.` : null
+    };
+  }
+  function packBlocksAtCap(blocks, cap, knownTotal) {
+    const total = knownTotal ?? countSamples(blocks, cap);
+    const times = new Float64Array(total);
+    const values = new Float32Array(total);
+    const sink = new WritingSink(cap, times, values);
+    const envelope = new Array(blocks.length);
+    for (let index = 0; index < blocks.length; index++) {
+      envelope[index] = walkBlock(blocks[index], sink);
+    }
+    if (sink.written !== total) {
+      throw new Error(
+        `Display transport packed ${sink.written} samples but reserved ${total}.`
+      );
+    }
+    return {
+      blocks: envelope,
+      sampleTimes: times.buffer,
+      sampleValues: values.buffer,
+      sampleCount: total,
+      pointsPerWaveform: cap,
+      notice: cap < MAX_DISPLAY_PTS ? `Large sequence: waveform detail was reduced to ${cap} points per event (normally ${MAX_DISPLAY_PTS}) to stay inside the display transfer budget.` : null
+    };
+  }
+  function countSequenceWaveformSeries(seq) {
+    let count = 0;
+    for (const block of seq.blocks) {
+      if (block.rfId > 0 && seq.rfs.has(block.rfId)) count += 2;
+      for (const id of [block.gxId, block.gyId, block.gzId]) {
+        if (id > 0 && (seq.trapGrads.has(id) || seq.arbitraryGrads.has(id))) count++;
+      }
+    }
+    return count;
+  }
+  function shiftBlockOffsets(block, delta) {
+    const rf = block.rf;
+    if (rf) {
+      rf.o += delta;
+      rf.qo += delta;
+    }
+    for (const key of ["gx", "gy", "gz"]) {
+      const gradient = block[key];
+      if (gradient) gradient.o += delta;
+    }
+  }
+  function countSamples(blocks, cap) {
+    const sink = new CountingSink(cap);
+    for (const block of blocks) walkBlock(block, sink);
+    return sink.total;
+  }
+  function walkBlock(block, sink) {
+    const out = sink.buildEnvelope ? { i: block.index, s: block.startTime, d: block.duration } : null;
+    if (block.rf) {
+      const magnitude = sink.pair(block.rf.timePoints, block.rf.magnitude, true, false);
+      const phase = sink.pair(block.rf.timePoints, block.rf.phase, false, true);
+      if (out) out.rf = packRf(block.rf, magnitude, phase);
+    }
+    if (block.gx && block.gx.type !== "none") {
+      const ref = sink.pair(block.gx.timePoints, block.gx.waveform, true, false);
+      if (out) out.gx = packGrad(block.gx, ref);
+    }
+    if (block.gy && block.gy.type !== "none") {
+      const ref = sink.pair(block.gy.timePoints, block.gy.waveform, true, false);
+      if (out) out.gy = packGrad(block.gy, ref);
+    }
+    if (block.gz && block.gz.type !== "none") {
+      const ref = sink.pair(block.gz.timePoints, block.gz.waveform, true, false);
+      if (out) out.gz = packGrad(block.gz, ref);
+    }
+    if (out && block.adc) {
+      out.adc = {
+        s: block.adc.startTime,
+        n: block.adc.numSamples,
+        dw: block.adc.dwell,
+        d: block.adc.delay,
+        fo: block.adc.freqOffset,
+        po: block.adc.phaseOffset
+      };
+    }
+    if (out && block.triggers?.length) {
+      out.trg = block.triggers.map((t) => ({ s: t.startTime, c: t.channel, d: t.delay, dr: t.duration }));
+    }
+    return out;
+  }
+  function packRf(rf, magnitude, phase) {
+    const metrics = waveformMagnitudeMetrics(rf.timePoints, rf.magnitude);
+    return {
+      s: rf.startTime,
+      d: rf.duration,
+      // `t`/`m` (magnitude) and `pt`/`p` (phase) buffer spans.
+      o: magnitude.o,
+      n: magnitude.n,
+      qo: phase.o,
+      qn: phase.n,
+      pk: metrics.peak,
+      ar: metrics.area,
+      bp: metrics.blockPulse,
+      a: rf.amplitude,
+      fo: rf.freqOffset,
+      po: rf.phaseOffset,
+      u: rf.use || "u"
+      // 'e'=excitation, 'r'=refocusing, 'i'=inversion, 's'=saturation, 'u'=undefined
+    };
+  }
+  function packGrad(grad, ref) {
+    return {
+      s: grad.startTime,
+      d: grad.duration,
+      o: ref.o,
+      n: ref.n,
+      a: grad.amplitude,
+      ty: grad.type,
+      ch: grad.channel
+    };
+  }
+  function waveformMagnitudeMetrics(time, values) {
+    const count = Math.min(time.length, values.length);
+    let peak = 0;
+    let min = Infinity;
+    let max = -Infinity;
+    let area = 0;
+    let finiteCount = 0;
+    for (let index = 0; index < count; index++) {
+      if (Number.isFinite(values[index])) {
+        const magnitude = Math.abs(values[index]);
+        peak = Math.max(peak, magnitude);
+        min = Math.min(min, magnitude);
+        max = Math.max(max, magnitude);
+        finiteCount++;
+      }
+    }
+    for (let index = 1; index < count; index++) {
+      const delta = time[index] - time[index - 1];
+      if (!Number.isFinite(delta) || delta <= 0) continue;
+      area += 0.5 * (Math.abs(values[index - 1] || 0) + Math.abs(values[index] || 0)) * delta;
+    }
+    const tolerance = Math.max(1e-12, peak * 1e-9);
+    const blockPulse = finiteCount === count && count >= 2 && peak > 0 && max - min <= tolerance;
+    return { peak, area, blockPulse };
   }
 
   // src/pulseq/physicalGradients.ts
@@ -3658,162 +4127,6 @@ var Pulseq = (() => {
   function decimatedLength(coreSamples, factor) {
     if (coreSamples <= 0) return 0;
     return Math.floor((coreSamples - 1) / Math.max(1, factor)) + 1;
-  }
-
-  // src/pulseq/computeBudget.ts
-  var INTERACTIVE_COMPUTE_LIMITS = Object.freeze({
-    kspaceRasterSamples: 12e6,
-    kspaceAdcSamples: 8e6,
-    kspaceGridCandidates: 18e6,
-    derivedRasterSamples: 2e6,
-    /**
-     * Ceiling on the display samples one sequence load may carry to the VS Code
-     * webview, counted as (time, amplitude) pairs across every RF and gradient
-     * waveform. At 12 bytes per pair this bounds the shared binary buffers at
-     * roughly 137 MiB in the extension host and again in the renderer.
-     * Per-waveform detail is reduced uniformly once a sequence would exceed it,
-     * because the alternative is an allocation neither process can satisfy.
-     */
-    displayTransportSamples: 12e6,
-    /**
-     * Gradient spectrogram ceilings. Unlike k-space these are never offered
-     * as a dangerous override: the spectrogram is scoped to the visible
-     * window, so the remedy is always "zoom in" rather than "risk the host".
-     */
-    spectrogramColumns: 1024,
-    spectrogramFftPoints: 16384,
-    spectrogramTotalCells: 4e6,
-    spectrogramInputSamples: 8e6,
-    /** 120 s of stereo audio at 44.1 kHz. */
-    audioSamples: 54e5
-  });
-  var KSPACE_CONFIRMATION_MEMORY_BYTES = 1024 ** 3;
-  function derivedDetailViewLimitSec(gradientRaster, trTimeSec, maxRasterSamples = INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples) {
-    if (!(gradientRaster > 0) || !(maxRasterSamples > 0)) return 0;
-    const sampleLimitedDuration = maxRasterSamples * gradientRaster / 2;
-    if (!(trTimeSec > 0)) return sampleLimitedDuration;
-    return Math.min(sampleLimitedDuration, trTimeSec * 100.5);
-  }
-  function estimateKspaceCost(blocks, gradientRaster, totalDuration) {
-    let adcSamples = 0;
-    let gradientSupportPoints = 0;
-    let rfSupportPoints = 0;
-    for (const block of blocks) {
-      if (block.adc?.numSamples && block.adc.numSamples > 0) {
-        adcSamples += block.adc.numSamples;
-      }
-      for (const gradient of [block.gx, block.gy, block.gz]) {
-        if (gradient && gradient.type !== "none" && gradient.timePoints.length >= 2) {
-          gradientSupportPoints += 2;
-        }
-      }
-      if (block.rf) rfSupportPoints += block.rf.use === "r" ? 2 : 3;
-    }
-    const rasterSamples = gradientRaster > 0 && totalDuration > 0 ? Math.max(2, Math.round(totalDuration / gradientRaster) + 1) : 0;
-    const gridCandidatePoints = rasterSamples + adcSamples + gradientSupportPoints + rfSupportPoints + 2;
-    return { rasterSamples, adcSamples, gridCandidatePoints };
-  }
-  function estimateKspacePeakMemoryBytes(estimate) {
-    const gridBytes = Math.max(0, estimate.gridCandidatePoints) * 96;
-    const adcAndTransferBytes = Math.max(0, estimate.adcSamples) * 104;
-    return Math.ceil(Math.min(Number.MAX_SAFE_INTEGER, (gridBytes + adcAndTransferBytes) * 1.25));
-  }
-  function kspaceExceedsInteractiveBudget(estimate) {
-    return estimate.rasterSamples > INTERACTIVE_COMPUTE_LIMITS.kspaceRasterSamples || estimate.adcSamples > INTERACTIVE_COMPUTE_LIMITS.kspaceAdcSamples || estimate.gridCandidatePoints > INTERACTIVE_COMPUTE_LIMITS.kspaceGridCandidates || estimateKspacePeakMemoryBytes(estimate) >= KSPACE_CONFIRMATION_MEMORY_BYTES;
-  }
-  function estimateDerivedCost(blocks, gradientRaster) {
-    let firstGradientTime = Infinity;
-    let lastGradientTime = -Infinity;
-    for (const block of blocks) {
-      for (const gradient of [block.gx, block.gy, block.gz]) {
-        const times = gradient?.timePoints;
-        if (!times?.length) continue;
-        const first = times[0];
-        const last = times[times.length - 1];
-        if (Number.isFinite(first) && first < firstGradientTime) firstGradientTime = first;
-        if (Number.isFinite(last) && last > lastGradientTime) lastGradientTime = last;
-      }
-    }
-    if (!Number.isFinite(firstGradientTime) || !Number.isFinite(lastGradientTime) || lastGradientTime < firstGradientTime || gradientRaster <= 0) {
-      return { rasterSamples: 0, firstGradientTime: null, lastGradientTime: null };
-    }
-    const span = lastGradientTime - firstGradientTime;
-    let rasterSamples = Math.max(1, Math.floor(span / gradientRaster) + 1);
-    const finalRasterTime = firstGradientTime + (rasterSamples - 1) * gradientRaster;
-    if (finalRasterTime < lastGradientTime - 1e-15) rasterSamples++;
-    return { rasterSamples, firstGradientTime, lastGradientTime };
-  }
-  function formatSampleCount(value) {
-    if (value >= 1e6) return `${(value / 1e6).toFixed(1)} million`;
-    if (value >= 1e3) return `${(value / 1e3).toFixed(1)} thousand`;
-    return String(value);
-  }
-  function formatMemorySize(bytes) {
-    const safeBytes = Math.max(0, Number.isFinite(bytes) ? bytes : 0);
-    const kib = 1024;
-    const mib = kib * 1024;
-    const gib = mib * 1024;
-    if (safeBytes >= gib) {
-      const value = safeBytes / gib;
-      return `${value.toFixed(value >= 10 ? 0 : 1)} GiB`;
-    }
-    if (safeBytes >= mib) {
-      const value = safeBytes / mib;
-      return `${value.toFixed(value >= 10 ? 0 : 1)} MiB`;
-    }
-    if (safeBytes >= kib) return `${(safeBytes / kib).toFixed(1)} KiB`;
-    return `${Math.round(safeBytes)} bytes`;
-  }
-  function estimateSpectrogramCost(input) {
-    const span = Math.max(0, (Number.isFinite(input.endSec) ? input.endSec : 0) - (Number.isFinite(input.startSec) ? input.startSec : 0));
-    const raster = input.gradientRaster > 0 ? input.gradientRaster : 1e-5;
-    const inputSamples = Math.max(1, Math.floor(span / raster) + 1);
-    const sampleRate = 1 / raster;
-    const fMax = input.fMaxHz > 0 ? input.fMaxHz : 3e3;
-    const decimationFactor = Math.max(1, Math.floor(sampleRate / (2.5 * fMax)));
-    const decimatedSamples = Math.floor((inputSamples - 1) / decimationFactor) + 1;
-    const windowSamples = input.windowSamples > 0 ? input.windowSamples : 512;
-    const overlap = Number.isFinite(input.overlap) ? Math.min(0.95, Math.max(0, input.overlap)) : 0.75;
-    const hop = Math.max(1, Math.round(windowSamples * (1 - overlap)));
-    const naturalColumns = Math.max(1, Math.floor((decimatedSamples - windowSamples) / hop) + 1);
-    const targetColumns = input.targetColumns > 0 ? input.targetColumns : 256;
-    const columns = Math.min(naturalColumns, targetColumns, INTERACTIVE_COMPUTE_LIMITS.spectrogramColumns);
-    const oversample = input.oversample > 0 ? input.oversample : 3;
-    let fftPoints = 1;
-    while (fftPoints < windowSamples * oversample) fftPoints *= 2;
-    const bins = fftPoints / 2 + 1;
-    return {
-      inputSamples,
-      decimatedSamples,
-      columns,
-      fftPoints,
-      totalCells: columns * bins * 4,
-      decimationFactor
-    };
-  }
-  function spectrogramBudgetRefusal(estimate) {
-    if (estimate.inputSamples > INTERACTIVE_COMPUTE_LIMITS.spectrogramInputSamples) {
-      return `Zoom in to compute the spectrogram: the visible window needs ${formatSampleCount(estimate.inputSamples)} gradient samples.`;
-    }
-    if (estimate.totalCells > INTERACTIVE_COMPUTE_LIMITS.spectrogramTotalCells) {
-      return `Zoom in or widen the frequency resolution: this spectrogram would need ${formatSampleCount(estimate.totalCells)} cells.`;
-    }
-    if (estimate.fftPoints > INTERACTIVE_COMPUTE_LIMITS.spectrogramFftPoints) {
-      return `Reduce the window length or zero-padding: a ${estimate.fftPoints}-point FFT exceeds the interactive limit.`;
-    }
-    return null;
-  }
-  function estimateAudioCost(startSec, endSec, sampleRate) {
-    const fs = sampleRate > 0 ? sampleRate : 44100;
-    const durationSec = Math.max(0, (Number.isFinite(endSec) ? endSec : 0) - (Number.isFinite(startSec) ? startSec : 0));
-    const frames = Math.floor(durationSec * fs + 1e-9) + 1;
-    return { sampleRate: fs, frames, totalSamples: frames * 2, durationSec };
-  }
-  function audioBudgetRefusal(estimate) {
-    if (estimate.totalSamples > INTERACTIVE_COMPUTE_LIMITS.audioSamples) {
-      return `The visible window is ${estimate.durationSec.toFixed(1)} s of audio, beyond the 120 s playback limit. Zoom in to play a shorter stretch.`;
-    }
-    return null;
   }
 
   // src/pulseq/gradSpectrum.ts

@@ -21,8 +21,9 @@
  */
 
 import { INTERACTIVE_COMPUTE_LIMITS } from '../pulseq/computeBudget';
+import { createSequenceDecodeContext, decodeBlockRange } from '../pulseq/decoder';
 import { reduceM4, reduceUniform } from '../pulseq/displayDownsampling';
-import type { DecodedBlock, DecodedGradWaveform, DecodedRFWaveform } from '../pulseq/types';
+import type { DecodedBlock, DecodedGradWaveform, DecodedRFWaveform, PulseqSequence } from '../pulseq/types';
 
 /** Display samples kept per waveform when the sequence fits the budget. */
 export const MAX_DISPLAY_PTS = 500;
@@ -148,6 +149,59 @@ export function packBlocks(blocks: DecodedBlock[]): PackedBlocks {
         total = countSamples(blocks, cap);
     }
 
+    return packBlocksAtCap(blocks, cap, total);
+}
+
+/**
+ * Decode and pack bounded batches without retaining every full-resolution
+ * waveform. The fixed cap is chosen from the parsed event references, so the
+ * destination allocation has a deterministic upper bound before decoding.
+ */
+export function packSequenceBlocks(seq: PulseqSequence, batchSize = 512): PackedBlocks {
+    const budget = INTERACTIVE_COMPUTE_LIMITS.displayTransportSamples;
+    const seriesCount = countSequenceWaveformSeries(seq);
+    const cap = seriesCount > 0
+        ? Math.max(MIN_DISPLAY_PTS, Math.min(MAX_DISPLAY_PTS, Math.floor(budget / seriesCount)))
+        : MAX_DISPLAY_PTS;
+    const capacity = seriesCount * cap;
+    const times = new Float64Array(capacity);
+    const values = new Float32Array(capacity);
+    const envelope = new Array<object>(seq.blocks.length);
+    const context = createSequenceDecodeContext(seq);
+    let cursor = 0;
+
+    for (let start = 0; start < seq.blocks.length; start += batchSize) {
+        const end = Math.min(seq.blocks.length, start + batchSize);
+        const decoded = decodeBlockRange(seq, start, end, context);
+        const packed = packBlocksAtCap(decoded, cap);
+        if (cursor + packed.sampleCount > capacity) {
+            throw new Error('The display transport exceeded its structural sample bound.');
+        }
+        times.set(new Float64Array(packed.sampleTimes), cursor);
+        values.set(new Float32Array(packed.sampleValues), cursor);
+        for (let index = 0; index < packed.blocks.length; index++) {
+            const block = packed.blocks[index] as Record<string, unknown>;
+            shiftBlockOffsets(block, cursor);
+            envelope[start + index] = block;
+        }
+        cursor += packed.sampleCount;
+    }
+
+    return {
+        blocks: envelope,
+        sampleTimes: times.buffer.slice(0, cursor * Float64Array.BYTES_PER_ELEMENT),
+        sampleValues: values.buffer.slice(0, cursor * Float32Array.BYTES_PER_ELEMENT),
+        sampleCount: cursor,
+        pointsPerWaveform: cap,
+        notice: cap < MAX_DISPLAY_PTS
+            ? `Large sequence: waveform detail was reduced to ${cap} points per event `
+              + `(normally ${MAX_DISPLAY_PTS}) to stay inside the display transfer budget.`
+            : null,
+    };
+}
+
+function packBlocksAtCap(blocks: DecodedBlock[], cap: number, knownTotal?: number): PackedBlocks {
+    const total = knownTotal ?? countSamples(blocks, cap);
     const times = new Float64Array(total);
     const values = new Float32Array(total);
     const sink = new WritingSink(cap, times, values);
@@ -177,6 +231,29 @@ export function packBlocks(blocks: DecodedBlock[]): PackedBlocks {
     };
 }
 
+function countSequenceWaveformSeries(seq: PulseqSequence): number {
+    let count = 0;
+    for (const block of seq.blocks) {
+        if (block.rfId > 0 && seq.rfs.has(block.rfId)) count += 2;
+        for (const id of [block.gxId, block.gyId, block.gzId]) {
+            if (id > 0 && (seq.trapGrads.has(id) || seq.arbitraryGrads.has(id))) count++;
+        }
+    }
+    return count;
+}
+
+function shiftBlockOffsets(block: Record<string, unknown>, delta: number): void {
+    const rf = block.rf as Record<string, number> | undefined;
+    if (rf) {
+        rf.o += delta;
+        rf.qo += delta;
+    }
+    for (const key of ['gx', 'gy', 'gz'] as const) {
+        const gradient = block[key] as Record<string, number> | undefined;
+        if (gradient) gradient.o += delta;
+    }
+}
+
 function countSamples(blocks: DecodedBlock[], cap: number): number {
     const sink = new CountingSink(cap);
     for (const block of blocks) walkBlock(block, sink);
@@ -198,15 +275,15 @@ function walkBlock(block: DecodedBlock, sink: PairSink): Record<string, unknown>
         const phase = sink.pair(block.rf.timePoints, block.rf.phase, false, true);
         if (out) out.rf = packRf(block.rf, magnitude, phase);
     }
-    if (block.gx) {
+    if (block.gx && block.gx.type !== 'none') {
         const ref = sink.pair(block.gx.timePoints, block.gx.waveform, true, false);
         if (out) out.gx = packGrad(block.gx, ref);
     }
-    if (block.gy) {
+    if (block.gy && block.gy.type !== 'none') {
         const ref = sink.pair(block.gy.timePoints, block.gy.waveform, true, false);
         if (out) out.gy = packGrad(block.gy, ref);
     }
-    if (block.gz) {
+    if (block.gz && block.gz.type !== 'none') {
         const ref = sink.pair(block.gz.timePoints, block.gz.waveform, true, false);
         if (out) out.gz = packGrad(block.gz, ref);
     }
