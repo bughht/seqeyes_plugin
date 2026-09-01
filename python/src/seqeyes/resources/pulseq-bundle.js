@@ -24,7 +24,11 @@ var Pulseq = (() => {
   var pulseq_browser_exports = {};
   __export(pulseq_browser_exports, {
     INTERACTIVE_COMPUTE_LIMITS: () => INTERACTIVE_COMPUTE_LIMITS,
+    MAX_RF_RESPONSE_BANDS: () => MAX_RF_RESPONSE_BANDS,
+    MAX_RF_RESPONSE_FFT_POINTS: () => MAX_RF_RESPONSE_FFT_POINTS,
+    MAX_RF_RESPONSE_SAMPLES: () => MAX_RF_RESPONSE_SAMPLES,
     PACKAGE_VERSION: () => PACKAGE_VERSION,
+    analyzeRfResponse: () => analyzeRfResponse,
     audioBudgetRefusal: () => audioBudgetRefusal,
     calculateKspace: () => calculateKspace,
     calculateM1: () => calculateM1,
@@ -47,6 +51,7 @@ var Pulseq = (() => {
     estimateDerivedCost: () => estimateDerivedCost,
     estimateKspaceCost: () => estimateKspaceCost,
     estimateKspacePeakMemoryBytes: () => estimateKspacePeakMemoryBytes,
+    estimateRfCarrierAreaDeg: () => estimateRfCarrierAreaDeg,
     estimateSequenceKspaceCost: () => estimateSequenceKspaceCost,
     estimateSpectrogramCost: () => estimateSpectrogramCost,
     exportKspaceArtifacts: () => exportKspaceArtifacts,
@@ -81,7 +86,7 @@ var Pulseq = (() => {
   });
 
   // package.json
-  var version = "0.3.1";
+  var version = "0.3.2";
 
   // src/pulseq/decompressor.ts
   function decompressShape(compressed, numSamples) {
@@ -1522,6 +1527,334 @@ var Pulseq = (() => {
     return DEFAULT_B0_T;
   }
 
+  // src/pulseq/fft.ts
+  var twiddleCache = /* @__PURE__ */ new Map();
+  var hannCache = /* @__PURE__ */ new Map();
+  function isPowerOfTwo(n) {
+    return n > 0 && (n & n - 1) === 0;
+  }
+  function nextPowerOfTwo(n) {
+    if (n <= 1) return 1;
+    let p = 1;
+    while (p < n) p *= 2;
+    return p;
+  }
+  function previousPowerOfTwo(n) {
+    if (n <= 1) return 1;
+    let p = 1;
+    while (p * 2 <= n) p *= 2;
+    return p;
+  }
+  function getTwiddles(n) {
+    const cached = twiddleCache.get(n);
+    if (cached) return cached;
+    if (!isPowerOfTwo(n)) throw new Error(`FFT size must be a power of two, got ${n}`);
+    const cos = new Float64Array(n / 2);
+    const sin = new Float64Array(n / 2);
+    for (let i = 0; i < n / 2; i++) {
+      const angle = -2 * Math.PI * i / n;
+      cos[i] = Math.cos(angle);
+      sin[i] = Math.sin(angle);
+    }
+    const bits = Math.round(Math.log2(n));
+    const reverse = new Uint32Array(n);
+    for (let i = 0; i < n; i++) {
+      let r = 0;
+      for (let b = 0; b < bits; b++) if (i & 1 << b) r |= 1 << bits - 1 - b;
+      reverse[i] = r;
+    }
+    const table = { cos, sin, reverse };
+    twiddleCache.set(n, table);
+    return table;
+  }
+  function fftInPlace(re, im, n) {
+    const { cos, sin, reverse } = getTwiddles(n);
+    for (let i = 0; i < n; i++) {
+      const j = reverse[i];
+      if (j > i) {
+        let tmp = re[i];
+        re[i] = re[j];
+        re[j] = tmp;
+        tmp = im[i];
+        im[i] = im[j];
+        im[j] = tmp;
+      }
+    }
+    for (let size = 2; size <= n; size *= 2) {
+      const half = size / 2;
+      const step = n / size;
+      for (let start = 0; start < n; start += size) {
+        for (let k = 0; k < half; k++) {
+          const twiddleIndex = k * step;
+          const wr = cos[twiddleIndex];
+          const wi = sin[twiddleIndex];
+          const a = start + k;
+          const b = a + half;
+          const xr = re[b] * wr - im[b] * wi;
+          const xi = re[b] * wi + im[b] * wr;
+          re[b] = re[a] - xr;
+          im[b] = im[a] - xi;
+          re[a] += xr;
+          im[a] += xi;
+        }
+      }
+    }
+  }
+  function realFFTPairMagnitude(a, b, n, scratchRe, scratchIm, outA, outB) {
+    for (let i = 0; i < n; i++) {
+      scratchRe[i] = a[i];
+      scratchIm[i] = b[i];
+    }
+    fftInPlace(scratchRe, scratchIm, n);
+    const half = n >> 1;
+    for (let k = 0; k <= half; k++) {
+      const j = (n - k) % n;
+      const zr = scratchRe[k], zi = scratchIm[k];
+      const cr = scratchRe[j], ci = -scratchIm[j];
+      const ar = 0.5 * (zr + cr);
+      const ai = 0.5 * (zi + ci);
+      const br = 0.5 * (zi - ci);
+      const bi = -0.5 * (zr - cr);
+      outA[k] = Math.sqrt(ar * ar + ai * ai);
+      outB[k] = Math.sqrt(br * br + bi * bi);
+    }
+  }
+  function realFFTMagnitude(a, n, scratchRe, scratchIm, out) {
+    for (let i = 0; i < n; i++) {
+      scratchRe[i] = a[i];
+      scratchIm[i] = 0;
+    }
+    fftInPlace(scratchRe, scratchIm, n);
+    const half = n >> 1;
+    for (let k = 0; k <= half; k++) {
+      const re = scratchRe[k], im = scratchIm[k];
+      out[k] = Math.sqrt(re * re + im * im);
+    }
+  }
+  function hannWindow(n) {
+    const cached = hannCache.get(n);
+    if (cached) return cached;
+    const w = new Float64Array(n);
+    for (let i = 0; i < n; i++) w[i] = 0.5 * (1 - Math.cos(2 * Math.PI * (i + 1) / n));
+    hannCache.set(n, w);
+    return w;
+  }
+  function windowCoherentGain(w) {
+    let sum = 0;
+    for (let i = 0; i < w.length; i++) sum += w[i];
+    return sum;
+  }
+
+  // src/pulseq/rfResponse.ts
+  var MAX_RF_RESPONSE_FFT_POINTS = 131072;
+  var MAX_RF_RESPONSE_SAMPLES = 131072;
+  var MAX_RF_RESPONSE_BANDS = 8;
+  var MIN_FFT_POINTS = 64;
+  var ZERO_PAD_FACTOR = 4;
+  var DOMINANT_BAND_FRACTION = 0.5;
+  var MIN_DOMINANT_AREA_DEG = 0.01;
+  var DEG_PER_CYCLE = 360;
+  var TAU = 2 * Math.PI;
+  function analyzeRfResponse(rf, seq, classifiedUse = rf.use) {
+    if (rfSampleCount(rf, seq) > MAX_RF_RESPONSE_SAMPLES) {
+      return {
+        carrierAreaDeg: estimateRfCarrierAreaDeg(rf, seq),
+        bands: [],
+        spectrumAnalyzed: false,
+        limited: true
+      };
+    }
+    const samples = buildComplexRfSamples(rf, seq);
+    const carrierAreaDeg = frequencyResolvedAreaDeg(samples, 0);
+    const normalizedUse = classifiedUse.toLowerCase();
+    const inversion = normalizedUse === "i" || normalizedUse === "inversion";
+    let offsets;
+    let spectrumAnalyzed = false;
+    let limited = false;
+    if (inversion) {
+      offsets = [0];
+    } else if (samples.uniform && samples.real.length <= MAX_RF_RESPONSE_FFT_POINTS) {
+      offsets = dominantBandOffsets(samples);
+      spectrumAnalyzed = true;
+    } else {
+      offsets = [0];
+      limited = true;
+    }
+    const bands = offsets.map((frequencyOffsetHz) => {
+      const spectralAreaDeg = frequencyResolvedAreaDeg(samples, frequencyOffsetHz);
+      const spinor = propagateSpinor(samples, frequencyOffsetHz);
+      return {
+        frequencyOffsetHz,
+        spectralAreaDeg,
+        polarFlipDeg: spinor.polarFlipDeg,
+        mz: spinor.mz
+      };
+    });
+    return { carrierAreaDeg, bands, spectrumAnalyzed, limited };
+  }
+  function estimateRfCarrierAreaDeg(rf, seq) {
+    const magnitude = seq.shapes.get(rf.magShapeId);
+    if (!magnitude || magnitude.numSamples < 1) return 0;
+    const phase = seq.shapes.get(rf.phaseShapeId);
+    const time = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId) : void 0;
+    const count = rfSampleCount(rf, seq);
+    const raster = seq.rasterTimes.rfRaster;
+    let realArea = 0;
+    let imaginaryArea = 0;
+    for (let index = 0; index < count; index++) {
+      const sampleTime = time ? time.samples[index] * raster : (index + 0.5) * raster;
+      const nextTime = time && index + 1 < count ? time.samples[index + 1] * raster : sampleTime + raster;
+      const width = nextTime - sampleTime;
+      const amplitude = rf.amplitude * magnitude.samples[index];
+      const phaseRad = TAU * (phase?.samples[index] ?? 0);
+      if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(amplitude) || !Number.isFinite(phaseRad)) continue;
+      realArea += amplitude * Math.cos(phaseRad) * width;
+      imaginaryArea += amplitude * Math.sin(phaseRad) * width;
+    }
+    return DEG_PER_CYCLE * Math.hypot(realArea, imaginaryArea);
+  }
+  function rfSampleCount(rf, seq) {
+    const magnitude = seq.shapes.get(rf.magShapeId);
+    if (!magnitude) return 0;
+    const phase = seq.shapes.get(rf.phaseShapeId);
+    const time = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId) : void 0;
+    return Math.min(
+      magnitude.numSamples,
+      phase?.numSamples ?? magnitude.numSamples,
+      time?.numSamples ?? magnitude.numSamples
+    );
+  }
+  function buildComplexRfSamples(rf, seq) {
+    const magnitude = seq.shapes.get(rf.magShapeId);
+    if (!magnitude || magnitude.numSamples < 1) return emptySamples(seq.rasterTimes.rfRaster);
+    const phase = seq.shapes.get(rf.phaseShapeId);
+    const time = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId) : void 0;
+    const count = Math.min(
+      magnitude.numSamples,
+      phase?.numSamples ?? magnitude.numSamples,
+      time?.numSamples ?? magnitude.numSamples
+    );
+    if (count < 1) return emptySamples(seq.rasterTimes.rfRaster);
+    const raster = seq.rasterTimes.rfRaster;
+    const real = new Float64Array(count);
+    const imaginary = new Float64Array(count);
+    const times = new Float64Array(count);
+    const widths = new Float64Array(count);
+    let uniform = !time;
+    for (let index = 0; index < count; index++) {
+      const sampleTime = time ? time.samples[index] * raster : (index + 0.5) * raster;
+      const nextTime = time && index + 1 < count ? time.samples[index + 1] * raster : sampleTime + raster;
+      const width = nextTime - sampleTime;
+      const amplitude = rf.amplitude * magnitude.samples[index];
+      const phaseRad = TAU * (phase?.samples[index] ?? 0);
+      times[index] = Number.isFinite(sampleTime) ? sampleTime : 0;
+      widths[index] = Number.isFinite(width) && width > 0 ? width : 0;
+      real[index] = Number.isFinite(amplitude) && Number.isFinite(phaseRad) ? amplitude * Math.cos(phaseRad) : 0;
+      imaginary[index] = Number.isFinite(amplitude) && Number.isFinite(phaseRad) ? amplitude * Math.sin(phaseRad) : 0;
+      if (Math.abs(widths[index] - raster) > Math.max(1e-12, raster * 1e-6)) uniform = false;
+    }
+    return { real, imaginary, times, widths, uniform, dwell: raster };
+  }
+  function emptySamples(raster) {
+    return {
+      real: new Float64Array(0),
+      imaginary: new Float64Array(0),
+      times: new Float64Array(0),
+      widths: new Float64Array(0),
+      uniform: true,
+      dwell: raster
+    };
+  }
+  function frequencyResolvedAreaDeg(samples, frequencyOffsetHz) {
+    let realArea = 0;
+    let imaginaryArea = 0;
+    for (let index = 0; index < samples.real.length; index++) {
+      const angle = -TAU * frequencyOffsetHz * samples.times[index];
+      const cosine = Math.cos(angle);
+      const sine = Math.sin(angle);
+      const width = samples.widths[index];
+      realArea += (samples.real[index] * cosine - samples.imaginary[index] * sine) * width;
+      imaginaryArea += (samples.real[index] * sine + samples.imaginary[index] * cosine) * width;
+    }
+    return DEG_PER_CYCLE * Math.hypot(realArea, imaginaryArea);
+  }
+  function dominantBandOffsets(samples) {
+    const sampleCount = samples.real.length;
+    if (sampleCount === 0 || !Number.isFinite(samples.dwell) || samples.dwell <= 0) return [0];
+    const paddedTarget = sampleCount <= Math.floor(MAX_RF_RESPONSE_FFT_POINTS / ZERO_PAD_FACTOR) ? sampleCount * ZERO_PAD_FACTOR : sampleCount;
+    const fftPoints = nextPowerOfTwo(Math.max(MIN_FFT_POINTS, paddedTarget));
+    if (fftPoints > MAX_RF_RESPONSE_FFT_POINTS) return [0];
+    const real = new Float64Array(fftPoints);
+    const imaginary = new Float64Array(fftPoints);
+    real.set(samples.real);
+    imaginary.set(samples.imaginary);
+    fftInPlace(real, imaginary, fftPoints);
+    let peakAreaDeg = 0;
+    for (let bin = 0; bin < fftPoints; bin++) {
+      peakAreaDeg = Math.max(
+        peakAreaDeg,
+        DEG_PER_CYCLE * samples.dwell * Math.hypot(real[bin], imaginary[bin])
+      );
+    }
+    if (!Number.isFinite(peakAreaDeg) || peakAreaDeg < MIN_DOMINANT_AREA_DEG) return [0];
+    const threshold = Math.max(MIN_DOMINANT_AREA_DEG, peakAreaDeg * DOMINANT_BAND_FRACTION);
+    const clusters = [];
+    let active = null;
+    const half = fftPoints / 2;
+    const frequencyStep = 1 / (fftPoints * samples.dwell);
+    for (let signedBin = -half; signedBin < half; signedBin++) {
+      const bin = signedBin < 0 ? signedBin + fftPoints : signedBin;
+      const areaDeg = DEG_PER_CYCLE * samples.dwell * Math.hypot(real[bin], imaginary[bin]);
+      if (areaDeg >= threshold) {
+        const weight = areaDeg * areaDeg;
+        if (!active) active = { frequencySum: 0, weightSum: 0, peakAreaDeg: 0 };
+        active.frequencySum += signedBin * frequencyStep * weight;
+        active.weightSum += weight;
+        active.peakAreaDeg = Math.max(active.peakAreaDeg, areaDeg);
+      } else if (active) {
+        clusters.push(active);
+        active = null;
+      }
+    }
+    if (active) clusters.push(active);
+    const offsets = clusters.filter((cluster) => cluster.weightSum > 0).sort((left, right) => right.peakAreaDeg - left.peakAreaDeg).slice(0, MAX_RF_RESPONSE_BANDS).map((cluster) => cluster.frequencySum / cluster.weightSum).sort((left, right) => left - right);
+    return offsets.length > 0 ? offsets : [0];
+  }
+  function propagateSpinor(samples, frequencyOffsetHz) {
+    let stateAReal = 1;
+    let stateAImaginary = 0;
+    let stateBReal = 0;
+    let stateBImaginary = 0;
+    for (let index = 0; index < samples.real.length; index++) {
+      const bx = samples.real[index];
+      const by = samples.imaginary[index];
+      const norm = Math.hypot(bx, by, frequencyOffsetHz);
+      const width = samples.widths[index];
+      if (!(norm > 0) || !(width > 0)) continue;
+      const sine = Math.sin(Math.PI * norm * width);
+      const localAReal = Math.cos(Math.PI * norm * width);
+      const localAImaginary = -frequencyOffsetHz / norm * sine;
+      const localBReal = by / norm * sine;
+      const localBImaginary = -bx / norm * sine;
+      const nextAReal = localAReal * stateAReal - localAImaginary * stateAImaginary - localBReal * stateBReal - localBImaginary * stateBImaginary;
+      const nextAImaginary = localAReal * stateAImaginary + localAImaginary * stateAReal - localBReal * stateBImaginary + localBImaginary * stateBReal;
+      const nextBReal = localBReal * stateAReal - localBImaginary * stateAImaginary + localAReal * stateBReal + localAImaginary * stateBImaginary;
+      const nextBImaginary = localBReal * stateAImaginary + localBImaginary * stateAReal + localAReal * stateBImaginary - localAImaginary * stateBReal;
+      stateAReal = nextAReal;
+      stateAImaginary = nextAImaginary;
+      stateBReal = nextBReal;
+      stateBImaginary = nextBImaginary;
+    }
+    const aMagnitudeSquared = stateAReal * stateAReal + stateAImaginary * stateAImaginary;
+    const bMagnitudeSquared = stateBReal * stateBReal + stateBImaginary * stateBImaginary;
+    const normalization = aMagnitudeSquared + bMagnitudeSquared;
+    const mz = normalization > 0 ? clamp((aMagnitudeSquared - bMagnitudeSquared) / normalization, -1, 1) : 1;
+    return { mz, polarFlipDeg: Math.acos(mz) * 180 / Math.PI };
+  }
+  function clamp(value, minimum, maximum) {
+    return Math.max(minimum, Math.min(maximum, value));
+  }
+
   // src/pulseq/decoder.ts
   var GAMMA_HZ_T2 = 42576e3;
   var DEFAULT_B0_T2 = 3;
@@ -1550,6 +1883,7 @@ var Pulseq = (() => {
       sequence: seq,
       blockStartTimes,
       classifiedRfUses: classifyRfUses(seq),
+      rfResponseCache: /* @__PURE__ */ new Map(),
       triggerCache: /* @__PURE__ */ new Map(),
       ncoCache: /* @__PURE__ */ new Map()
     };
@@ -1568,7 +1902,15 @@ var Pulseq = (() => {
       const db = { index: block.num, duration: dur, startTime: cumulative };
       if (block.rfId > 0) {
         const rf = seq.rfs.get(block.rfId);
-        if (rf) db.rf = decodeRF(seq, rf, cumulative, dur, context.classifiedRfUses[i]);
+        if (rf) {
+          const use = context.classifiedRfUses[i];
+          let response = context.rfResponseCache.get(rf.id);
+          if (!response) {
+            response = analyzeRfResponse(rf, seq, use);
+            context.rfResponseCache.set(rf.id, response);
+          }
+          db.rf = decodeRF(seq, rf, cumulative, dur, use, response);
+        }
       }
       db.gx = decodeGradient(seq, block.gxId, cumulative, dur, "gx");
       db.gy = decodeGradient(seq, block.gyId, cumulative, dur, "gy");
@@ -1597,7 +1939,7 @@ var Pulseq = (() => {
     if (seq.versionCombined < VER_PRE_14) return block.dur * 1e-6;
     return block.dur * seq.rasterTimes.blockDurationRaster;
   }
-  function decodeRF(seq, rf, blockStart, _blockDur, classifiedUse) {
+  function decodeRF(seq, rf, blockStart, _blockDur, classifiedUse, response) {
     const raster = seq.rasterTimes.rfRaster;
     const rfDelay = rf.delay * 1e-6;
     const rfStart = blockStart + rfDelay;
@@ -1632,6 +1974,7 @@ var Pulseq = (() => {
       magnitude: amp,
       phase,
       amplitude: rf.amplitude,
+      response,
       freqOffset: freqFull,
       phaseOffset: phaseFull,
       use
@@ -2143,7 +2486,7 @@ var Pulseq = (() => {
   // src/editor/blockTransport.ts
   var MAX_DISPLAY_PTS = 500;
   var MIN_DISPLAY_PTS = 8;
-  var TAU = 2 * Math.PI;
+  var TAU2 = 2 * Math.PI;
   var EMPTY_PAIR = { o: 0, n: 0 };
   var CountingSink = class {
     constructor(cap) {
@@ -2167,7 +2510,7 @@ var Pulseq = (() => {
       /** Hoisted so the hot path allocates one closure, not one per waveform. */
       __publicField(this, "emit", (time, value) => {
         this.times[this.cursor] = time;
-        this.values[this.cursor] = this.wrapPhase ? (value % TAU + TAU) % TAU : value;
+        this.values[this.cursor] = this.wrapPhase ? (value % TAU2 + TAU2) % TAU2 : value;
         this.cursor++;
       });
     }
@@ -2309,6 +2652,12 @@ var Pulseq = (() => {
   }
   function packRf(rf, magnitude, phase) {
     const metrics = waveformMagnitudeMetrics(rf.timePoints, rf.magnitude);
+    const responseBands = rf.response.bands.map((band) => [
+      band.frequencyOffsetHz,
+      band.spectralAreaDeg,
+      band.polarFlipDeg,
+      band.mz
+    ]);
     return {
       s: rf.startTime,
       d: rf.duration,
@@ -2321,6 +2670,10 @@ var Pulseq = (() => {
       ar: metrics.area,
       bp: metrics.blockPulse,
       a: rf.amplitude,
+      a0: rf.response.carrierAreaDeg,
+      rb: responseBands,
+      rs: rf.response.spectrumAnalyzed ? 1 : 0,
+      rl: rf.response.limited ? 1 : 0,
       fo: rf.freqOffset,
       po: rf.phaseOffset,
       u: rf.use || "u"
@@ -3919,124 +4272,6 @@ var Pulseq = (() => {
     return outside;
   }
 
-  // src/pulseq/fft.ts
-  var twiddleCache = /* @__PURE__ */ new Map();
-  var hannCache = /* @__PURE__ */ new Map();
-  function isPowerOfTwo(n) {
-    return n > 0 && (n & n - 1) === 0;
-  }
-  function nextPowerOfTwo(n) {
-    if (n <= 1) return 1;
-    let p = 1;
-    while (p < n) p *= 2;
-    return p;
-  }
-  function previousPowerOfTwo(n) {
-    if (n <= 1) return 1;
-    let p = 1;
-    while (p * 2 <= n) p *= 2;
-    return p;
-  }
-  function getTwiddles(n) {
-    const cached = twiddleCache.get(n);
-    if (cached) return cached;
-    if (!isPowerOfTwo(n)) throw new Error(`FFT size must be a power of two, got ${n}`);
-    const cos = new Float64Array(n / 2);
-    const sin = new Float64Array(n / 2);
-    for (let i = 0; i < n / 2; i++) {
-      const angle = -2 * Math.PI * i / n;
-      cos[i] = Math.cos(angle);
-      sin[i] = Math.sin(angle);
-    }
-    const bits = Math.round(Math.log2(n));
-    const reverse = new Uint32Array(n);
-    for (let i = 0; i < n; i++) {
-      let r = 0;
-      for (let b = 0; b < bits; b++) if (i & 1 << b) r |= 1 << bits - 1 - b;
-      reverse[i] = r;
-    }
-    const table = { cos, sin, reverse };
-    twiddleCache.set(n, table);
-    return table;
-  }
-  function fftInPlace(re, im, n) {
-    const { cos, sin, reverse } = getTwiddles(n);
-    for (let i = 0; i < n; i++) {
-      const j = reverse[i];
-      if (j > i) {
-        let tmp = re[i];
-        re[i] = re[j];
-        re[j] = tmp;
-        tmp = im[i];
-        im[i] = im[j];
-        im[j] = tmp;
-      }
-    }
-    for (let size = 2; size <= n; size *= 2) {
-      const half = size / 2;
-      const step = n / size;
-      for (let start = 0; start < n; start += size) {
-        for (let k = 0; k < half; k++) {
-          const twiddleIndex = k * step;
-          const wr = cos[twiddleIndex];
-          const wi = sin[twiddleIndex];
-          const a = start + k;
-          const b = a + half;
-          const xr = re[b] * wr - im[b] * wi;
-          const xi = re[b] * wi + im[b] * wr;
-          re[b] = re[a] - xr;
-          im[b] = im[a] - xi;
-          re[a] += xr;
-          im[a] += xi;
-        }
-      }
-    }
-  }
-  function realFFTPairMagnitude(a, b, n, scratchRe, scratchIm, outA, outB) {
-    for (let i = 0; i < n; i++) {
-      scratchRe[i] = a[i];
-      scratchIm[i] = b[i];
-    }
-    fftInPlace(scratchRe, scratchIm, n);
-    const half = n >> 1;
-    for (let k = 0; k <= half; k++) {
-      const j = (n - k) % n;
-      const zr = scratchRe[k], zi = scratchIm[k];
-      const cr = scratchRe[j], ci = -scratchIm[j];
-      const ar = 0.5 * (zr + cr);
-      const ai = 0.5 * (zi + ci);
-      const br = 0.5 * (zi - ci);
-      const bi = -0.5 * (zr - cr);
-      outA[k] = Math.sqrt(ar * ar + ai * ai);
-      outB[k] = Math.sqrt(br * br + bi * bi);
-    }
-  }
-  function realFFTMagnitude(a, n, scratchRe, scratchIm, out) {
-    for (let i = 0; i < n; i++) {
-      scratchRe[i] = a[i];
-      scratchIm[i] = 0;
-    }
-    fftInPlace(scratchRe, scratchIm, n);
-    const half = n >> 1;
-    for (let k = 0; k <= half; k++) {
-      const re = scratchRe[k], im = scratchIm[k];
-      out[k] = Math.sqrt(re * re + im * im);
-    }
-  }
-  function hannWindow(n) {
-    const cached = hannCache.get(n);
-    if (cached) return cached;
-    const w = new Float64Array(n);
-    for (let i = 0; i < n; i++) w[i] = 0.5 * (1 - Math.cos(2 * Math.PI * (i + 1) / n));
-    hannCache.set(n, w);
-    return w;
-  }
-  function windowCoherentGain(w) {
-    let sum = 0;
-    for (let i = 0; i < w.length; i++) sum += w[i];
-    return sum;
-  }
-
   // src/pulseq/decimator.ts
   var DECIMATION_STOPBAND_DB = 80;
   var planCache = /* @__PURE__ */ new Map();
@@ -4151,24 +4386,24 @@ var Pulseq = (() => {
   });
   function resolveSpectrogramParams(params) {
     const merged = { ...DEFAULT_SPECTROGRAM_PARAMS, ...params ?? {} };
-    const fMaxHz = clamp(finite(merged.fMaxHz, 3e3), 1, 5e6);
+    const fMaxHz = clamp2(finite(merged.fMaxHz, 3e3), 1, 5e6);
     return {
       source: merged.source === "dGdt" ? "dGdt" : "G",
-      fMinHz: clamp(finite(merged.fMinHz, 0), 0, fMaxHz - 1),
+      fMinHz: clamp2(finite(merged.fMinHz, 0), 0, fMaxHz - 1),
       fMaxHz,
       windowSamples: Math.max(0, Math.floor(finite(merged.windowSamples, 0))),
-      overlap: clamp(finite(merged.overlap, 0.75), 0, 0.9375),
-      oversample: clamp(Math.round(finite(merged.oversample, 3)), 1, 4),
-      targetColumns: clamp(Math.round(finite(merged.targetColumns, 256)), 64, 512),
+      overlap: clamp2(finite(merged.overlap, 0.75), 0, 0.9375),
+      oversample: clamp2(Math.round(finite(merged.oversample, 3)), 1, 4),
+      targetColumns: clamp2(Math.round(finite(merged.targetColumns, 256)), 64, 512),
       normalize: merged.normalize !== false
     };
   }
   function chooseWindowSamples(params, decimatedDt, viewDurationSec, warnings) {
-    if (params.windowSamples > 0) return clamp(params.windowSamples, MIN_WINDOW_SAMPLES, 4096);
+    if (params.windowSamples > 0) return clamp2(params.windowSamples, MIN_WINDOW_SAMPLES, 4096);
     const dfTarget = Math.max(20, (params.fMaxHz - params.fMinHz) / 64);
-    let nwin = clamp(nextPowerOfTwo(Math.round(1 / (dfTarget * decimatedDt))), MIN_WINDOW_SAMPLES, 4096);
+    let nwin = clamp2(nextPowerOfTwo(Math.round(1 / (dfTarget * decimatedDt))), MIN_WINDOW_SAMPLES, 4096);
     if (nwin * decimatedDt > viewDurationSec / 3) {
-      const shrunk = clamp(previousPowerOfTwo(Math.floor(viewDurationSec / (3 * decimatedDt))), MIN_WINDOW_SAMPLES, 4096);
+      const shrunk = clamp2(previousPowerOfTwo(Math.floor(viewDurationSec / (3 * decimatedDt))), MIN_WINDOW_SAMPLES, 4096);
       if (shrunk < nwin) {
         nwin = shrunk;
         const achievedDf = 1 / (nwin * decimatedDt);
@@ -4201,7 +4436,7 @@ var Pulseq = (() => {
     let windowSamples = chooseWindowSamples(params, decimatedDt, viewDuration, warnings);
     const tooShort = nDecimated < MIN_WINDOW_SAMPLES;
     if (windowSamples > nDecimated) {
-      windowSamples = clamp(previousPowerOfTwo(nDecimated), MIN_WINDOW_SAMPLES, 4096);
+      windowSamples = clamp2(previousPowerOfTwo(nDecimated), MIN_WINDOW_SAMPLES, 4096);
     }
     let hop = Math.max(1, Math.round(windowSamples * (1 - params.overlap)));
     let columns = nDecimated >= windowSamples ? Math.floor((nDecimated - windowSamples) / hop) + 1 : 0;
@@ -4400,7 +4635,7 @@ var Pulseq = (() => {
     if (spec.nTime <= 0) return -1;
     if (!(spec.tStepSec > 0)) return 0;
     const raw = Math.round((timeSec - spec.tStartSec) / spec.tStepSec);
-    return clamp(raw, 0, spec.nTime - 1);
+    return clamp2(raw, 0, spec.nTime - 1);
   }
   function computeGradientSpectrumSlice(spec, timeSec) {
     const col = spectrogramColumnAt(spec, timeSec);
@@ -4513,7 +4748,7 @@ var Pulseq = (() => {
     }
     return { frequencyHz, gx: accX, gy: accY, gz: accZ, rss, segments };
   }
-  function clamp(value, lo, hi) {
+  function clamp2(value, lo, hi) {
     return Math.max(lo, Math.min(hi, value));
   }
   function finite(value, fallback) {

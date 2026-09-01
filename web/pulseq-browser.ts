@@ -56,6 +56,13 @@ export {
 } from '../src/pulseq/computeBudget';
 export { detectSequenceTiming } from '../src/pulseq/trdetect';
 export {
+    analyzeRfResponse,
+    estimateRfCarrierAreaDeg,
+    MAX_RF_RESPONSE_BANDS,
+    MAX_RF_RESPONSE_FFT_POINTS,
+    MAX_RF_RESPONSE_SAMPLES,
+} from '../src/pulseq/rfResponse';
+export {
     exportKspaceArtifacts,
     exportKspaceArtifactsFromBytes,
     exportKspaceArtifactsFromSequence,

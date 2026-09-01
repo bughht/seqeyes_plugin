@@ -53,6 +53,14 @@ describe('packed block transport', () => {
           expect(block.rf.p[k]).toBeGreaterThanOrEqual(0);
           expect(block.rf.p[k]).toBeLessThan(2 * Math.PI + 1e-6);
         }
+        expect(block.rf.a0).toBeCloseTo(source.rf.response.carrierAreaDeg, 10);
+        expect(block.rf.rb).toHaveLength(source.rf.response.bands.length);
+        for (let band = 0; band < block.rf.rb.length; band++) {
+          expect(block.rf.rb[band][0]).toBeCloseTo(source.rf.response.bands[band].frequencyOffsetHz, 8);
+          expect(block.rf.rb[band][1]).toBeCloseTo(source.rf.response.bands[band].spectralAreaDeg, 8);
+          expect(block.rf.rb[band][2]).toBeCloseTo(source.rf.response.bands[band].polarFlipDeg, 8);
+          expect(block.rf.rb[band][3]).toBeCloseTo(source.rf.response.bands[band].mz, 8);
+        }
         checkedRf++;
       }
 
