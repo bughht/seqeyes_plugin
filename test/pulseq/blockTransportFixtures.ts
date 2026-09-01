@@ -142,7 +142,14 @@ export function serializeInlineBlocks(blocks: DecodedBlock[]): Array<Record<stri
                 pk: metrics.peak, ar: metrics.area, bp: metrics.blockPulse,
                 pt: uniform(b.rf.timePoints, MAX_DISPLAY_PTS),
                 p: uniform(b.rf.phase, MAX_DISPLAY_PTS).map(wrap),
-                a: b.rf.amplitude, fo: b.rf.freqOffset, po: b.rf.phaseOffset, u: b.rf.use || 'u',
+                a: b.rf.amplitude,
+                a0: b.rf.response.carrierAreaDeg,
+                rb: b.rf.response.bands.map(v => [
+                    v.frequencyOffsetHz, v.spectralAreaDeg, v.polarFlipDeg, v.mz,
+                ]),
+                rs: b.rf.response.spectrumAnalyzed ? 1 : 0,
+                rl: b.rf.response.limited ? 1 : 0,
+                fo: b.rf.freqOffset, po: b.rf.phaseOffset, u: b.rf.use || 'u',
             };
         }
         for (const key of ['gx', 'gy', 'gz'] as const) {

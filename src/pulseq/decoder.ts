@@ -17,7 +17,8 @@ import type {
     RFEntry, TrapGradEntry, ArbitraryGradEntry, ADCEntry, ExtensionEntry, BlockEntry,
 } from './types';
 import { ExtType, VER_PRE_14 } from './types';
-import { classifyRfUses, estimateNominalRfFlipAngleDeg } from './rfClassification';
+import { classifyRfUses } from './rfClassification';
+import { analyzeRfResponse } from './rfResponse';
 
 // ─── Constants ───────────────────────────────────────────────────────────
 
@@ -63,6 +64,7 @@ export interface SequenceDecodeContext {
     readonly sequence: PulseqSequence;
     readonly blockStartTimes: Float64Array;
     readonly classifiedRfUses: string[];
+    readonly rfResponseCache: Map<number, ReturnType<typeof analyzeRfResponse>>;
     readonly triggerCache: Map<number, DecodedTriggerEvent>;
     readonly ncoCache: Map<number, DecodedNCOEvent>;
 }
@@ -77,6 +79,7 @@ export function createSequenceDecodeContext(seq: PulseqSequence): SequenceDecode
         sequence: seq,
         blockStartTimes,
         classifiedRfUses: classifyRfUses(seq),
+        rfResponseCache: new Map<number, ReturnType<typeof analyzeRfResponse>>(),
         triggerCache: new Map<number, DecodedTriggerEvent>(),
         ncoCache: new Map<number, DecodedNCOEvent>(),
     };
@@ -121,7 +124,15 @@ export function decodeBlockRange(
 
         if (block.rfId > 0) {
             const rf = seq.rfs.get(block.rfId);
-            if (rf) db.rf = decodeRF(seq, rf, cumulative, dur, context.classifiedRfUses[i]);
+            if (rf) {
+                const use = context.classifiedRfUses[i];
+                let response = context.rfResponseCache.get(rf.id);
+                if (!response) {
+                    response = analyzeRfResponse(rf, seq, use);
+                    context.rfResponseCache.set(rf.id, response);
+                }
+                db.rf = decodeRF(seq, rf, cumulative, dur, use, response);
+            }
         }
         db.gx = decodeGradient(seq, block.gxId, cumulative, dur, 'gx');
         db.gy = decodeGradient(seq, block.gyId, cumulative, dur, 'gy');
@@ -180,6 +191,7 @@ function decodeRF(
     blockStart: number,
     _blockDur: number,
     classifiedUse: string,
+    response: ReturnType<typeof analyzeRfResponse>,
 ): DecodedRFWaveform {
     const raster = seq.rasterTimes.rfRaster;
     const rfDelay = rf.delay * 1e-6;
@@ -239,7 +251,7 @@ function decodeRF(
         magnitude: amp,
         phase,
         amplitude: rf.amplitude,
-        flipAngleDeg: estimateNominalRfFlipAngleDeg(rf, seq),
+        response,
         freqOffset: freqFull,
         phaseOffset: phaseFull,
         use,

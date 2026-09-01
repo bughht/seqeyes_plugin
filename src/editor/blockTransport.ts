@@ -354,6 +354,12 @@ function packRf(
     phase: PairRef,
 ): Record<string, unknown> {
     const metrics = waveformMagnitudeMetrics(rf.timePoints, rf.magnitude);
+    const responseBands = rf.response.bands.map(band => [
+        band.frequencyOffsetHz,
+        band.spectralAreaDeg,
+        band.polarFlipDeg,
+        band.mz,
+    ]);
     return {
         s: rf.startTime, d: rf.duration,
         // `t`/`m` (magnitude) and `pt`/`p` (phase) buffer spans.
@@ -362,7 +368,12 @@ function packRf(
         pk: metrics.peak,
         ar: metrics.area,
         bp: metrics.blockPulse,
-        a: rf.amplitude, fa: rf.flipAngleDeg, fo: rf.freqOffset, po: rf.phaseOffset,
+        a: rf.amplitude,
+        a0: rf.response.carrierAreaDeg,
+        rb: responseBands,
+        rs: rf.response.spectrumAnalyzed ? 1 : 0,
+        rl: rf.response.limited ? 1 : 0,
+        fo: rf.freqOffset, po: rf.phaseOffset,
         u: rf.use || 'u',   // 'e'=excitation, 'r'=refocusing, 'i'=inversion, 's'=saturation, 'u'=undefined
     };
 }

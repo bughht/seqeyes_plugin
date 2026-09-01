@@ -95,41 +95,6 @@ export function estimateRfFlipAngleDeg(rf: RFEntry, seq: PulseqSequence): number
     return 90;
 }
 
-/**
- * Estimate the nominal flip angle from the complex baseband RF shape.
- * Pulseq RF amplitudes are in Hz, so one cycle of integrated RF area is 360°.
- * Global phase and frequency offsets select the rotating frame and are not part
- * of the nominal envelope integral.
- */
-export function estimateNominalRfFlipAngleDeg(rf: RFEntry, seq: PulseqSequence): number {
-    const magnitude = seq.shapes.get(rf.magShapeId);
-    if (!magnitude || magnitude.numSamples < 1) return 0;
-    const phase = seq.shapes.get(rf.phaseShapeId);
-    const time = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId) : undefined;
-    const count = Math.min(
-        magnitude.numSamples,
-        phase?.numSamples ?? magnitude.numSamples,
-        time?.numSamples ?? magnitude.numSamples,
-    );
-    if (count < 1) return 0;
-
-    const raster = seq.rasterTimes.rfRaster;
-    let realArea = 0;
-    let imaginaryArea = 0;
-    for (let index = 0; index < count; index++) {
-        const width = time && index + 1 < count
-            ? (time.samples[index + 1] - time.samples[index]) * raster
-            : raster;
-        if (!Number.isFinite(width) || width <= 0) continue;
-        const amplitude = rf.amplitude * magnitude.samples[index];
-        const phaseRad = 2 * Math.PI * (phase?.samples[index] ?? 0);
-        if (!Number.isFinite(amplitude) || !Number.isFinite(phaseRad)) continue;
-        realArea += amplitude * Math.cos(phaseRad) * width;
-        imaginaryArea += amplitude * Math.sin(phaseRad) * width;
-    }
-    return 360 * Math.hypot(realArea, imaginaryArea);
-}
-
 function isLegacyFatSaturation(rf: RFEntry, seq: PulseqSequence): boolean {
     const b0Tesla = getB0(seq);
     const frequencyPpm = rf.freqPPM !== 0

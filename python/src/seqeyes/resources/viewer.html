@@ -1127,6 +1127,55 @@ function appendDerivedTooltipLines(lines,ct){
   }
 }
 
+function fmtFlipAngle(value){
+  if(!isFinite(value))return null;
+  var absolute=Math.abs(value),digits=absolute<10?2:(absolute<100?1:0);
+  return value.toFixed(digits)+'°';
+}
+function fmtRfFrequency(value){
+  var absolute=Math.abs(value),sign=value<0?'−':'+';
+  if(absolute>=1000)return sign+(absolute/1000).toFixed(absolute<10000?2:1)+' kHz';
+  return sign+absolute.toFixed(absolute<100?1:0)+' Hz';
+}
+function rfBandMetric(bands,index){
+  if(!bands.length)return null;
+  var min=Infinity,max=-Infinity,total=0;
+  for(var i=0;i<bands.length;i++){var value=bands[i][index];if(!isFinite(value))return null;min=Math.min(min,value);max=Math.max(max,value);total+=value;}
+  var mean=total/bands.length;
+  if(max-min<=Math.max(.25,Math.abs(mean)*.01))return fmtFlipAngle(mean);
+  return fmtFlipAngle(min)+'–'+fmtFlipAngle(max);
+}
+function rfBandOffsets(bands){
+  if(!bands.length)return '';
+  if(bands.length===2){
+    var left=bands[0][0],right=bands[1][0],scale=Math.max(1,Math.abs(left),Math.abs(right));
+    if(Math.abs(left+right)<=.02*scale)return '±'+fmtRfFrequency(Math.abs(right)).slice(1);
+  }
+  if(bands.length<=3)return bands.map(function(v){return fmtRfFrequency(v[0]);}).join(',');
+  return fmtRfFrequency(bands[0][0])+'…'+fmtRfFrequency(bands[bands.length-1][0]);
+}
+function rfResponseSummary(rf){
+  var bands=(rf.rb||[]).filter(function(v){return v&&v.length>=4&&isFinite(v[0])&&isFinite(v[1])&&isFinite(v[2])&&isFinite(v[3]);});
+  var area0=fmtFlipAngle(rf.a0),use=(rf.u||'u').toLowerCase();
+  if(!bands.length)return area0?'  area₀='+area0:'';
+  var polar=rfBandMetric(bands,2),spectral=rfBandMetric(bands,1);
+  if(use==='i'||use==='inversion'){
+    var center=bands[0];for(var i=1;i<bands.length;i++)if(Math.abs(bands[i][0])<Math.abs(center[0]))center=bands[i];
+    var efficiency=Math.max(0,Math.min(1,-center[3]))*100;
+    return '  Inv≈'+efficiency.toFixed(1)+'%  θz≈'+fmtFlipAngle(center[2])+(area0?'  area₀='+area0:'');
+  }
+  if(bands.length>1){
+    var prefix=(use==='e'||use==='excitation')?'FA≈':'θz≈';
+    var summary='  MB'+bands.length+' '+prefix+polar;
+    var meanPolar=0,meanArea=0;for(var j=0;j<bands.length;j++){meanPolar+=bands[j][2];meanArea+=bands[j][1];}
+    if(Math.abs(meanArea-meanPolar)/bands.length>.5)summary+=' (area≈'+spectral+')';
+    return summary+'  Δf='+rfBandOffsets(bands);
+  }
+  var single='  '+((use==='e'||use==='excitation')?'FA≈':'θz≈')+polar;
+  if(Math.abs(bands[0][0])>1)single+='  Δf='+fmtRfFrequency(bands[0][0]);
+  return single;
+}
+
 // Tooltip
 function showTooltipAt(cx,cy,ct){
   var ch=cH(),vc=visChannels(),vi2=Math.floor((cy-mc.getBoundingClientRect().top-M.t)/ch);
@@ -1136,7 +1185,7 @@ function showTooltipAt(cx,cy,ct){
     if(found){
       var blockDt=Math.max(0,Math.min(found.d,ct-found.s));
       lines=['Block #'+found.i,'Time: '+fmtT(timeConv(ct))+' '+timeUnitStr()+' (Δ '+fmtT(timeConv(blockDt))+' / dur: '+fmtT(timeConv(found.d))+' '+timeUnitStr()+')'];
-      if(found.rf){lines.push('RF: '+(found.rf.a||0).toFixed(1)+' Hz  fo='+(found.rf.fo||0).toFixed(0)+' Hz  φ₀='+((found.rf.po||0)%6.283).toFixed(2)+' rad');}
+      if(found.rf){lines.push('RF: '+(found.rf.a||0).toFixed(1)+' Hz'+rfResponseSummary(found.rf)+'  fo='+(found.rf.fo||0).toFixed(0)+' Hz  φ₀='+((found.rf.po||0)%6.283).toFixed(2)+' rad');}
       if(found.gx&&found.gx.ty!=='none')lines.push('Gx: '+fmtG(found.gx,ct));
       if(found.gy&&found.gy.ty!=='none')lines.push('Gy: '+fmtG(found.gy,ct));
       if(found.gz&&found.gz.ty!=='none')lines.push('Gz: '+fmtG(found.gz,ct));
@@ -1345,6 +1394,12 @@ function convertBlock(blk) {
       s: blk.rf.startTime || 0,
       d: blk.rf.duration || 0,
       a: blk.rf.amplitude || 0,
+      a0: blk.rf.response ? blk.rf.response.carrierAreaDeg : 0,
+      rb: blk.rf.response ? blk.rf.response.bands.map(function(v) {
+        return [v.frequencyOffsetHz, v.spectralAreaDeg, v.polarFlipDeg, v.mz];
+      }) : [],
+      rs: blk.rf.response && blk.rf.response.spectrumAnalyzed ? 1 : 0,
+      rl: blk.rf.response && blk.rf.response.limited ? 1 : 0,
       fo: blk.rf.freqOffset || 0,
       po: ((blk.rf.phaseOffset || 0) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI),
       t: blk.rf.timePoints || [],

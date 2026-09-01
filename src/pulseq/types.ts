@@ -205,10 +205,24 @@ export interface DecodedRFWaveform {
     magnitude: Float64Array;    // [Hz]
     phase: Float64Array;        // [rad]  wrapped to [-π, π]
     amplitude: number;          // [Hz]
-    flipAngleDeg: number;       // nominal complex-area estimate [deg]
+    response: RFResponseAnalysis;
     freqOffset: number;         // [Hz]  (effective, incl. PPM)
     phaseOffset: number;        // [rad] (effective, incl. PPM)
     use: string;                // 'e'=excitation, 'r'=refocusing, 'i'=inversion, 's'=saturation, 'u'=undefined
+}
+
+export interface RFResponseBand {
+    frequencyOffsetHz: number;  // relative to the RF carrier [Hz]
+    spectralAreaDeg: number;    // demodulated complex-area equivalent [deg]
+    polarFlipDeg: number;       // final polar angle from +Mz [deg]
+    mz: number;                 // final normalized longitudinal magnetization
+}
+
+export interface RFResponseAnalysis {
+    carrierAreaDeg: number;
+    bands: RFResponseBand[];
+    spectrumAnalyzed: boolean;
+    limited: boolean;
 }
 
 export interface DecodedGradWaveform {

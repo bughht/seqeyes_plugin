@@ -5571,6 +5571,49 @@ function fmtFlipAngle(value){
   var absolute=Math.abs(value),digits=absolute<10?2:(absolute<100?1:0);
   return value.toFixed(digits)+'\u00b0';
 }
+function fmtRfFrequency(value){
+  var absolute=Math.abs(value),sign=value<0?'\u2212':'+';
+  if(absolute>=1000)return sign+(absolute/1000).toFixed(absolute<10000?2:1)+' kHz';
+  return sign+absolute.toFixed(absolute<100?1:0)+' Hz';
+}
+function rfBandMetric(bands,index){
+  if(!bands.length)return null;
+  var min=Infinity,max=-Infinity,total=0;
+  for(var i=0;i<bands.length;i++){var value=bands[i][index];if(!isFinite(value))return null;min=Math.min(min,value);max=Math.max(max,value);total+=value;}
+  var mean=total/bands.length;
+  if(max-min<=Math.max(.25,Math.abs(mean)*.01))return fmtFlipAngle(mean);
+  return fmtFlipAngle(min)+'\u2013'+fmtFlipAngle(max);
+}
+function rfBandOffsets(bands){
+  if(!bands.length)return '';
+  if(bands.length===2){
+    var left=bands[0][0],right=bands[1][0],scale=Math.max(1,Math.abs(left),Math.abs(right));
+    if(Math.abs(left+right)<=.02*scale)return '\u00b1'+fmtRfFrequency(Math.abs(right)).slice(1);
+  }
+  if(bands.length<=3)return bands.map(function(v){return fmtRfFrequency(v[0]);}).join(',');
+  return fmtRfFrequency(bands[0][0])+'\u2026'+fmtRfFrequency(bands[bands.length-1][0]);
+}
+function rfResponseSummary(rf){
+  var bands=(rf.rb||[]).filter(function(v){return v&&v.length>=4&&isFinite(v[0])&&isFinite(v[1])&&isFinite(v[2])&&isFinite(v[3]);});
+  var area0=fmtFlipAngle(rf.a0),use=(rf.u||'u').toLowerCase();
+  if(!bands.length)return area0?'  area\u2080='+area0:'';
+  var polar=rfBandMetric(bands,2),spectral=rfBandMetric(bands,1);
+  if(use==='i'||use==='inversion'){
+    var center=bands[0];for(var i=1;i<bands.length;i++)if(Math.abs(bands[i][0])<Math.abs(center[0]))center=bands[i];
+    var efficiency=Math.max(0,Math.min(1,-center[3]))*100;
+    return '  Inv\u2248'+efficiency.toFixed(1)+'%  \u03b8z\u2248'+fmtFlipAngle(center[2])+(area0?'  area\u2080='+area0:'');
+  }
+  if(bands.length>1){
+    var prefix=(use==='e'||use==='excitation')?'FA\u2248':'\u03b8z\u2248';
+    var summary='  MB'+bands.length+' '+prefix+polar;
+    var meanPolar=0,meanArea=0;for(var j=0;j<bands.length;j++){meanPolar+=bands[j][2];meanArea+=bands[j][1];}
+    if(Math.abs(meanArea-meanPolar)/bands.length>.5)summary+=' (area\u2248'+spectral+')';
+    return summary+'  \u0394f='+rfBandOffsets(bands);
+  }
+  var single='  '+((use==='e'||use==='excitation')?'FA\u2248':'\u03b8z\u2248')+polar;
+  if(Math.abs(bands[0][0])>1)single+='  \u0394f='+fmtRfFrequency(bands[0][0]);
+  return single;
+}
 function showTooltipAt(cx,cy,ct){
   var ch=cH(),vc=visChannels(),vi2=Math.floor((cy-mc.getBoundingClientRect().top-M.t)/ch);
   if(vi2>=0&&vi2<vc.length){
@@ -5579,7 +5622,7 @@ function showTooltipAt(cx,cy,ct){
     if(found){
       var blockDt=Math.max(0,Math.min(found.d,ct-found.s));
       lines=['Block #'+found.i,'Time: '+fmtT(timeConv(ct))+' '+timeUnitStr()+' (\u0394 '+fmtT(timeConv(blockDt))+' / dur: '+fmtT(timeConv(found.d))+' '+timeUnitStr()+')'];
-      if(found.rf){var flip=fmtFlipAngle(found.rf.fa);lines.push('RF: '+(found.rf.a||0).toFixed(1)+' Hz'+(flip?'  FA\u2248'+flip:'')+'  fo='+(found.rf.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.rf.po||0)%6.283).toFixed(2)+' rad');}
+      if(found.rf){lines.push('RF: '+(found.rf.a||0).toFixed(1)+' Hz'+rfResponseSummary(found.rf)+'  fo='+(found.rf.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.rf.po||0)%6.283).toFixed(2)+' rad');}
       if(found.gx&&found.gx.ty!=='none')lines.push('Gx: '+fmtG(found.gx,ct));
       if(found.gy&&found.gy.ty!=='none')lines.push('Gy: '+fmtG(found.gy,ct));
       if(found.gz&&found.gz.ty!=='none')lines.push('Gz: '+fmtG(found.gz,ct));

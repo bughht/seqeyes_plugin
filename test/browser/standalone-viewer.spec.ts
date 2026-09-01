@@ -87,12 +87,14 @@ test('preserves resolvable RF pulse shapes and bounds the full-sequence RF overv
     end: number;
     points: number;
     blockPulse: boolean;
-    flipAngleDeg: number;
+    carrierAreaDeg: number;
+    responseBands: number[][];
   }>;
   expect(rfEvents.length).toBeGreaterThan(20);
   expect(Math.min(...rfEvents.map(event => event.points))).toBeGreaterThan(100);
   expect(rfEvents.some(event => event.blockPulse)).toBe(false);
-  expect(rfEvents.every(event => Number.isFinite(event.flipAngleDeg))).toBe(true);
+  expect(rfEvents.every(event => Number.isFinite(event.carrierAreaDeg))).toBe(true);
+  expect(rfEvents.every(event => event.responseBands.length > 0)).toBe(true);
 
   const first = rfEvents[0];
   const last = rfEvents[7];
@@ -126,6 +128,33 @@ test('preserves resolvable RF pulse shapes and bounds the full-sequence RF overv
   expect(overview.rfRenderPoints).toBeGreaterThan(overview.rfReducedCurves * 3);
   expect(overview.rfRenderPoints).toBeLessThan(12_000);
   await expectCanvasRegionVaried(page.locator('#mc'), 0.05, 0, 0.9, 0.18);
+});
+
+test('labels multiband and inversion RF responses without treating carrier area as generic FA', async ({ page }) => {
+  await page.goto('/?debug=1');
+  const summaries = await page.evaluate(() => {
+    const summarize = (window as unknown as {
+      rfResponseSummary: (rf: Record<string, unknown>) => string;
+    }).rfResponseSummary;
+    return {
+      multiband: summarize({
+        u: 'e', a0: 0.014,
+        rb: [[-4444.44, 90.002, 89.996, 0], [4444.44, 90.002, 89.996, 0]],
+      }),
+      inversion: summarize({
+        u: 'i', a0: 287.145,
+        rb: [[0, 287.145, 175.95, -0.9975]],
+      }),
+    };
+  });
+
+  expect(summaries.multiband).toContain('MB2 FA≈90.0°');
+  expect(summaries.multiband).toContain('Δf=±4.44 kHz');
+  expect(summaries.multiband).not.toContain('area₀');
+  expect(summaries.inversion).toContain('Inv≈99.8%');
+  expect(summaries.inversion).toContain('θz≈176°');
+  expect(summaries.inversion).toContain('area₀=287°');
+  expect(summaries.inversion).not.toContain('FA≈287°');
 });
 
 test('keeps homogeneous RF pulses discrete and renders mixed dense RF as bounded pulse glyphs', async ({ page }) => {
