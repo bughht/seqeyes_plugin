@@ -17,7 +17,7 @@ import type {
     RFEntry, TrapGradEntry, ArbitraryGradEntry, ADCEntry, ExtensionEntry, BlockEntry,
 } from './types';
 import { ExtType, VER_PRE_14 } from './types';
-import { classifyRfUses } from './rfClassification';
+import { classifyRfUses, estimateNominalRfFlipAngleDeg } from './rfClassification';
 
 // ─── Constants ───────────────────────────────────────────────────────────
 
@@ -239,6 +239,7 @@ function decodeRF(
         magnitude: amp,
         phase,
         amplitude: rf.amplitude,
+        flipAngleDeg: estimateNominalRfFlipAngleDeg(rf, seq),
         freqOffset: freqFull,
         phaseOffset: phaseFull,
         use,

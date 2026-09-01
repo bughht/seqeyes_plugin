@@ -362,7 +362,7 @@ function packRf(
         pk: metrics.peak,
         ar: metrics.area,
         bp: metrics.blockPulse,
-        a: rf.amplitude, fo: rf.freqOffset, po: rf.phaseOffset,
+        a: rf.amplitude, fa: rf.flipAngleDeg, fo: rf.freqOffset, po: rf.phaseOffset,
         u: rf.use || 'u',   // 'e'=excitation, 'r'=refocusing, 'i'=inversion, 's'=saturation, 'u'=undefined
     };
 }

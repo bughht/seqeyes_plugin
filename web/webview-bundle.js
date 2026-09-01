@@ -5566,6 +5566,11 @@ function placeTooltip(cx,cy){
   var top=cy+12;if(top+r.height+pad>vh)top=cy-r.height-12;if(top<pad)top=pad;
   tt.style.left=left+'px';tt.style.top=top+'px';
 }
+function fmtFlipAngle(value){
+  if(!isFinite(value))return null;
+  var absolute=Math.abs(value),digits=absolute<10?2:(absolute<100?1:0);
+  return value.toFixed(digits)+'\u00b0';
+}
 function showTooltipAt(cx,cy,ct){
   var ch=cH(),vc=visChannels(),vi2=Math.floor((cy-mc.getBoundingClientRect().top-M.t)/ch);
   if(vi2>=0&&vi2<vc.length){
@@ -5574,7 +5579,7 @@ function showTooltipAt(cx,cy,ct){
     if(found){
       var blockDt=Math.max(0,Math.min(found.d,ct-found.s));
       lines=['Block #'+found.i,'Time: '+fmtT(timeConv(ct))+' '+timeUnitStr()+' (\u0394 '+fmtT(timeConv(blockDt))+' / dur: '+fmtT(timeConv(found.d))+' '+timeUnitStr()+')'];
-      if(found.rf){lines.push('RF: '+(found.rf.a||0).toFixed(1)+' Hz  fo='+(found.rf.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.rf.po||0)%6.283).toFixed(2)+' rad');}
+      if(found.rf){var flip=fmtFlipAngle(found.rf.fa);lines.push('RF: '+(found.rf.a||0).toFixed(1)+' Hz'+(flip?'  FA\u2248'+flip:'')+'  fo='+(found.rf.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.rf.po||0)%6.283).toFixed(2)+' rad');}
       if(found.gx&&found.gx.ty!=='none')lines.push('Gx: '+fmtG(found.gx,ct));
       if(found.gy&&found.gy.ty!=='none')lines.push('Gy: '+fmtG(found.gy,ct));
       if(found.gz&&found.gz.ty!=='none')lines.push('Gz: '+fmtG(found.gz,ct));

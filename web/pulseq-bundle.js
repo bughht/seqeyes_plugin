@@ -1500,6 +1500,31 @@ var Pulseq = (() => {
     if (absoluteAmplitude > 1500) return 120;
     return 90;
   }
+  function estimateNominalRfFlipAngleDeg(rf, seq) {
+    const magnitude = seq.shapes.get(rf.magShapeId);
+    if (!magnitude || magnitude.numSamples < 1) return 0;
+    const phase = seq.shapes.get(rf.phaseShapeId);
+    const time = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId) : void 0;
+    const count = Math.min(
+      magnitude.numSamples,
+      phase?.numSamples ?? magnitude.numSamples,
+      time?.numSamples ?? magnitude.numSamples
+    );
+    if (count < 1) return 0;
+    const raster = seq.rasterTimes.rfRaster;
+    let realArea = 0;
+    let imaginaryArea = 0;
+    for (let index = 0; index < count; index++) {
+      const width = time && index + 1 < count ? (time.samples[index + 1] - time.samples[index]) * raster : raster;
+      if (!Number.isFinite(width) || width <= 0) continue;
+      const amplitude = rf.amplitude * magnitude.samples[index];
+      const phaseRad = 2 * Math.PI * (phase?.samples[index] ?? 0);
+      if (!Number.isFinite(amplitude) || !Number.isFinite(phaseRad)) continue;
+      realArea += amplitude * Math.cos(phaseRad) * width;
+      imaginaryArea += amplitude * Math.sin(phaseRad) * width;
+    }
+    return 360 * Math.hypot(realArea, imaginaryArea);
+  }
   function isLegacyFatSaturation(rf, seq) {
     const b0Tesla = getB0(seq);
     const frequencyPpm = rf.freqPPM !== 0 ? rf.freqPPM : b0Tesla > 0 ? 1e6 * rf.freqOffset / (GAMMA_HZ_T * b0Tesla) : 0;
@@ -1632,6 +1657,7 @@ var Pulseq = (() => {
       magnitude: amp,
       phase,
       amplitude: rf.amplitude,
+      flipAngleDeg: estimateNominalRfFlipAngleDeg(rf, seq),
       freqOffset: freqFull,
       phaseOffset: phaseFull,
       use
@@ -2321,6 +2347,7 @@ var Pulseq = (() => {
       ar: metrics.area,
       bp: metrics.blockPulse,
       a: rf.amplitude,
+      fa: rf.flipAngleDeg,
       fo: rf.freqOffset,
       po: rf.phaseOffset,
       u: rf.use || "u"

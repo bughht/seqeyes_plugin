@@ -53,6 +53,7 @@ describe('packed block transport', () => {
           expect(block.rf.p[k]).toBeGreaterThanOrEqual(0);
           expect(block.rf.p[k]).toBeLessThan(2 * Math.PI + 1e-6);
         }
+        expect(block.rf.fa).toBeCloseTo(source.rf.flipAngleDeg, 10);
         checkedRf++;
       }
 

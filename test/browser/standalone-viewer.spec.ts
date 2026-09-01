@@ -87,10 +87,12 @@ test('preserves resolvable RF pulse shapes and bounds the full-sequence RF overv
     end: number;
     points: number;
     blockPulse: boolean;
+    flipAngleDeg: number;
   }>;
   expect(rfEvents.length).toBeGreaterThan(20);
   expect(Math.min(...rfEvents.map(event => event.points))).toBeGreaterThan(100);
   expect(rfEvents.some(event => event.blockPulse)).toBe(false);
+  expect(rfEvents.every(event => Number.isFinite(event.flipAngleDeg))).toBe(true);
 
   const first = rfEvents[0];
   const last = rfEvents[7];
@@ -107,6 +109,15 @@ test('preserves resolvable RF pulse shapes and bounds the full-sequence RF overv
   expect(detailed.rfOverviewBuckets).toBe(0);
   expect(detailed.rfRenderPoints).toBeGreaterThan(1_000);
   await expectCanvasRegionVaried(page.locator('#mc'), 0.05, 0, 0.9, 0.18);
+
+  const detailedState = await debugState(page);
+  const waveformBox = await requireBox(page.locator('#mc'));
+  const firstRfTime = 0.5 * (first.start + first.end);
+  await page.mouse.move(
+    waveformBox.x + 92 + (firstRfTime - detailedState.offset) * detailedState.scale,
+    waveformBox.y + 18,
+  );
+  await expect(page.locator('#tt')).toContainText('FA≈');
 
   await page.locator('#zf').click();
   const overview = await debugState(page);

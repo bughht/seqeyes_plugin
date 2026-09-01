@@ -205,6 +205,7 @@ export interface DecodedRFWaveform {
     magnitude: Float64Array;    // [Hz]
     phase: Float64Array;        // [rad]  wrapped to [-π, π]
     amplitude: number;          // [Hz]
+    flipAngleDeg: number;       // nominal complex-area estimate [deg]
     freqOffset: number;         // [Hz]  (effective, incl. PPM)
     phaseOffset: number;        // [rad] (effective, incl. PPM)
     use: string;                // 'e'=excitation, 'r'=refocusing, 'i'=inversion, 's'=saturation, 'u'=undefined
