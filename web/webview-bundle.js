@@ -4823,7 +4823,16 @@ var SeqEyesPanel = (function () {
       if (e.key === 'Escape' && isFinite(markerTimeSec)) { setMarkerTime(NaN); syncControls(); }
     });
     document.addEventListener('visibilitychange', function () {
-      if (document.hidden) stopPlayback();
+      if (document.hidden) {
+        // Web Audio can keep rendering in a background tab, but animation frames
+        // cannot. Preserve the audition and suspend only its visual updates.
+        stopPlayheadLoop();
+        return;
+      }
+      if (panelMode !== 'spectrogram') return;
+      if (SeqEyesAudio.isPlaying()) startPlayheadLoop();
+      syncTransport();
+      render();
     });
     window.addEventListener('pagehide', function () { SeqEyesAudio.dispose(); });
     window.addEventListener('resize', function () { if (panelMode === 'spectrogram') resize(); });

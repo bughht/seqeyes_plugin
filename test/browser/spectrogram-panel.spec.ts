@@ -735,6 +735,63 @@ test('stops playback when the panel leaves spectrogram mode', async ({ page }) =
   await expect.poll(async () => (await panelState(page)).audioState).toBe('idle');
 });
 
+test('keeps playback active while hidden and resynchronizes the playhead when visible', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+  await page.evaluate(() => window.__seqeyesDebug.setView(0, 1.5));
+  await settlePanel(page);
+
+  await page.evaluate(() => {
+    class BackgroundAudioContext {
+      state = 'running';
+      currentTime = 0;
+      sampleRate = 44_100;
+      destination = {};
+      createGain() { return { gain: { value: 0 }, connect() {} }; }
+      createBuffer(channels: number, frames: number, sampleRate: number) {
+        const data = Array.from({ length: channels }, () => new Float32Array(frames));
+        return { duration: frames / sampleRate, getChannelData: (channel: number) => data[channel] };
+      }
+      createBufferSource() {
+        return {
+          buffer: null,
+          loop: false,
+          loopStart: 0,
+          loopEnd: 0,
+          connect() {},
+          disconnect() {},
+          start() {},
+          stop() {},
+          onended: null,
+        };
+      }
+      resume() { return Promise.resolve(); }
+      close() { this.state = 'closed'; return Promise.resolve(); }
+    }
+    (window as any).AudioContext = BackgroundAudioContext;
+  });
+
+  await page.locator('#sgPlay').click();
+  await expect.poll(async () => (await panelState(page)).audioState, { timeout: 20_000 }).toBe('playing');
+
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  expect((await panelState(page)).audioState).toBe('playing');
+
+  await page.evaluate(() => {
+    const audio = window.SeqEyesDev.audioState();
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+    window.SeqEyesDev.setAudioClock(() => audio.currentTimeSec + 0.4);
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect.poll(async () => (await panelState(page)).playheadTimeSec).toBeGreaterThan(0.35);
+  expect((await panelState(page)).audioState).toBe('playing');
+
+  await page.locator('#sgStop').click();
+});
+
 test('stops playback on a viewport change and ignores the invalidated audio response', async ({ page }) => {
   await loadViewer(page, fixtures.gre);
   await openSpectrogram(page);
