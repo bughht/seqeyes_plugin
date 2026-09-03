@@ -505,7 +505,9 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     return;
                 }
                 const requestedCap = Math.max(8, Math.min(500, Math.floor(Number(msg.pointsPerWaveform) || 500)));
-                const cacheKey = `${sequenceGeneration}:${start}:${end}:${requestedCap}`;
+                // The window is what makes this detail rather than a second
+                // overview, so it has to be part of the cache identity.
+                const cacheKey = `${sequenceGeneration}:${start}:${end}:${requestedCap}:${startSec}:${endSec}`;
                 try {
                     let packed = waveformDetailCache.get(cacheKey);
                     if (!packed) {
@@ -515,6 +517,8 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                             end,
                             activeDecodeContext,
                             requestedCap,
+                            undefined,
+                            { startSec, endSec },
                         );
                         const retainedBytes = packed.sampleTimes.byteLength + packed.sampleValues.byteLength
                             + estimateEnvelopeJsonBytes(packed.blocks);
@@ -526,6 +530,8 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                         sequenceGeneration,
                         startBlock: start,
                         endBlock: end,
+                        startSec,
+                        endSec,
                         blocks: packed.blocks,
                         sampleTimes: packed.sampleTimes,
                         sampleValues: packed.sampleValues,

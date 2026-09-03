@@ -128,6 +128,18 @@ var blockPos=[];
 /* VS Code API — acquired once, used for postMessage to extension host */
 var vscApi=(typeof acquireVsCodeApi!=='undefined')?acquireVsCodeApi():null;
 
+/* Viewport waveform detail crosses the extension boundary; the standalone web
+   app installs its own in-heap implementation instead. */
+if(vscApi)requestWaveformDetailWindow=function(request){
+  vscApi.postMessage({
+    command:'requestWaveformDetail',
+    requestId:request.requestId,
+    sequenceGeneration:request.generation,
+    startSec:request.startSec,endSec:request.endSec,
+    pointsPerWaveform:request.pointsPerWaveform
+  });
+};
+
 function normalizeM1ReferenceMode(mode){return mode==='observationTime'?'observationTime':'rfCenter';}
 function readM1ReferenceMode(){
   try{localStorage.removeItem('seqeyes.m1ReferenceMode');}catch(_){}
@@ -285,7 +297,7 @@ function applySerializedKspace(payload){
    much as the message: the progress overlay reaches "Ready" either way, so
    leaving stale blocks on screen would read as a successful load. */
 function showSequenceLoadFailure(message){
-  BL=[];waveformOverview=null;blockPos=[];mmCache=null;
+  BL=[];waveformOverview=null;blockPos=[];mmCache=null;resetWaveformDetail();
   setViewerNotice('sequence',message);
   setExportButtonEnabled(false);
   draw();drawMinimap();
@@ -313,6 +325,7 @@ window.addEventListener('message',function(e){
     return;
   }
   if(m.type==='sequenceData'){
+    resetWaveformDetail(m.sequenceGeneration);
     try{
       BL=unpackSequenceBlocks(m.blocks,m.sampleTimes,m.sampleValues,m.sampleCount||0);
     }catch(err){
@@ -339,6 +352,21 @@ window.addEventListener('message',function(e){
     setExportButtonEnabled(true);
     SeqEyesPanel.onSequenceLoaded();
     requestAnimationFrame(function(){refreshLayout();draw();drawKs();drawMinimap();});
+  }else if(m.type==='waveformDetailData'){
+    var detailBlocks;
+    try{
+      detailBlocks=unpackSequenceBlocks(m.blocks,m.sampleTimes,m.sampleValues,m.sampleCount||0);
+    }catch(err){
+      failWaveformDetail({generation:m.sequenceGeneration,message:(err&&err.message||String(err))});
+      return;
+    }
+    if(applyWaveformDetail({
+      requestId:m.requestId,generation:m.sequenceGeneration,
+      startBlock:m.startBlock,endBlock:m.endBlock,
+      startSec:m.startSec,endSec:m.endSec,blocks:detailBlocks
+    }))draw();
+  }else if(m.type==='waveformDetailError'){
+    failWaveformDetail({generation:m.sequenceGeneration,message:m.message});
   }else if(m.type==='loadError'){
     showSequenceLoadFailure(m.message||'The sequence could not be loaded.');
   }else if(m.type==='kspaceData'){

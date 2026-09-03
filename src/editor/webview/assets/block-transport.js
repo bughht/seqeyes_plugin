@@ -147,11 +147,18 @@ var WAVEFORM_DETAIL_DEBOUNCE_MS = 160;
 /** Mirrors the host's block ceiling so a hopeless request is never sent. */
 var WAVEFORM_DETAIL_BLOCK_LIMIT = 20000;
 
-/** Discard detail and in-flight requests; call whenever BL is replaced. */
-function resetWaveformDetail(){
+/**
+ * Discard detail and in-flight requests; call whenever BL is replaced.
+ *
+ * VS Code passes the extension host's own sequence generation so both sides
+ * agree on which load a reply belongs to; the standalone web app owns the
+ * counter itself and just advances it.
+ */
+function resetWaveformDetail(generation){
   waveformDetail=null;activeWaveformDetail=null;waveformDetailPending=null;
   clearTimeout(waveformDetailTimer);waveformDetailTimer=0;
-  waveformDetailGeneration++;
+  waveformDetailGeneration=(typeof generation==='number'&&isFinite(generation))
+    ?generation:waveformDetailGeneration+1;
 }
 
 function waveformDetailCovers(detail,vs,ve){
