@@ -11,12 +11,21 @@ export { parseSequenceText } from '../src/pulseq/reader';
 export { hasPulseqBinaryMagic, parseSequenceBinary, parseSequenceBytes } from '../src/pulseq/sequenceReader';
 export { createSequenceDecodeContext, decodeAllBlocks, decodeBlockRange, getTotalDuration } from '../src/pulseq/decoder';
 export {
+    BAND_DETAIL_SAMPLES,
+    countExactDetailSamples,
+    EXACT_DETAIL_SAMPLES,
     MAX_DETAIL_PTS,
     MAX_DISPLAY_PTS,
     packSequenceBlockRange,
     packSequenceBlocks,
     resolveDetailBlockRange,
 } from '../src/editor/blockTransport';
+export {
+    computeGradientEnvelope,
+    countGradientSamples,
+    MAX_ENVELOPE_COLUMNS,
+    packGradientEnvelope,
+} from '../src/pulseq/gradientEnvelope';
 export { calculateKspace } from '../src/pulseq/kspace';
 export { calculateM1, calculateM1Coarse } from '../src/pulseq/m1';
 export { calculatePns, calculatePnsCoarse, parsePnsHardwareAsc, safePnsModel } from '../src/pulseq/pns';

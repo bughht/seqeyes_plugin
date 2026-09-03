@@ -23,9 +23,12 @@ var Pulseq = (() => {
   // web/pulseq-browser.ts
   var pulseq_browser_exports = {};
   __export(pulseq_browser_exports, {
+    BAND_DETAIL_SAMPLES: () => BAND_DETAIL_SAMPLES,
+    EXACT_DETAIL_SAMPLES: () => EXACT_DETAIL_SAMPLES,
     INTERACTIVE_COMPUTE_LIMITS: () => INTERACTIVE_COMPUTE_LIMITS,
     MAX_DETAIL_PTS: () => MAX_DETAIL_PTS,
     MAX_DISPLAY_PTS: () => MAX_DISPLAY_PTS,
+    MAX_ENVELOPE_COLUMNS: () => MAX_ENVELOPE_COLUMNS,
     MAX_RF_RESPONSE_BANDS: () => MAX_RF_RESPONSE_BANDS,
     MAX_RF_RESPONSE_FFT_POINTS: () => MAX_RF_RESPONSE_FFT_POINTS,
     MAX_RF_RESPONSE_SAMPLES: () => MAX_RF_RESPONSE_SAMPLES,
@@ -38,10 +41,13 @@ var Pulseq = (() => {
     calculatePns: () => calculatePns,
     calculatePnsCoarse: () => calculatePnsCoarse,
     computeGradSpectrumParity: () => computeGradSpectrumParity,
+    computeGradientEnvelope: () => computeGradientEnvelope,
     computeGradientSpectrogram: () => computeGradientSpectrogram,
     computeGradientSpectrumAverage: () => computeGradientSpectrumAverage,
     computeGradientSpectrumSlice: () => computeGradientSpectrumSlice,
     countBandsOutsideRange: () => countBandsOutsideRange,
+    countExactDetailSamples: () => countExactDetailSamples,
+    countGradientSamples: () => countGradientSamples,
     createSequenceDecodeContext: () => createSequenceDecodeContext,
     decodeAllBlocks: () => decodeAllBlocks,
     decodeBlockRange: () => decodeBlockRange,
@@ -66,6 +72,7 @@ var Pulseq = (() => {
     hasPulseqBinaryMagic: () => hasPulseqBinaryMagic,
     isEmptyAscProfile: () => isEmptyAscProfile,
     kspaceExceedsInteractiveBudget: () => kspaceExceedsInteractiveBudget,
+    packGradientEnvelope: () => packGradientEnvelope,
     packSequenceBlockRange: () => packSequenceBlockRange,
     packSequenceBlocks: () => packSequenceBlocks,
     parseAcousticResonancesAsc: () => parseAcousticResonancesAsc,
@@ -2506,6 +2513,8 @@ var Pulseq = (() => {
   var MAX_DISPLAY_PTS = 500;
   var MIN_DISPLAY_PTS = 8;
   var MAX_DETAIL_PTS = 4096;
+  var EXACT_DETAIL_SAMPLES = 5e4;
+  var BAND_DETAIL_SAMPLES = INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples;
   var WINDOW_DETAIL_SAMPLE_LIMIT = 2e6;
   var TAU2 = 2 * Math.PI;
   var EMPTY_PAIR = { o: 0, n: 0 };
@@ -2611,6 +2620,10 @@ var Pulseq = (() => {
     ) : safeRequestedCap;
     const decoded = decodeBlockRange(seq, start, end, context);
     const clip = window && window.endSec > window.startSec ? window : null;
+    const exactTotal = countSamples(decoded, Number.MAX_SAFE_INTEGER, clip);
+    if (exactTotal <= Math.min(EXACT_DETAIL_SAMPLES, safeSampleLimit)) {
+      return packBlocksAtCap(decoded, Number.MAX_SAFE_INTEGER, exactTotal, clip);
+    }
     return packBlocksAtCap(decoded, cap, void 0, clip);
   }
   function resolveDetailBlockRange(blockStartTimes, blockCount, startSec, endSec) {
@@ -2627,6 +2640,9 @@ var Pulseq = (() => {
     const start = Math.max(0, Math.min(blockCount, lowerBound(startSec) - 1));
     const end = Math.max(start, Math.min(blockCount, lowerBound(endSec) + 1));
     return { start, end };
+  }
+  function countExactDetailSamples(blocks, window = null) {
+    return countSamples(blocks, Number.MAX_SAFE_INTEGER, window);
   }
   function packBlocksAtCap(blocks, cap, knownTotal, window = null) {
     const total = knownTotal ?? countSamples(blocks, cap, window);
@@ -2780,6 +2796,95 @@ var Pulseq = (() => {
     const tolerance = Math.max(1e-12, peak * 1e-9);
     const blockPulse = finiteCount === count && count >= 2 && peak > 0 && max - min <= tolerance;
     return { peak, area, blockPulse };
+  }
+
+  // src/pulseq/gradientEnvelope.ts
+  var GRADIENT_CHANNELS = ["gx", "gy", "gz"];
+  var MAX_ENVELOPE_COLUMNS = 8192;
+  function emptyChannel(columns) {
+    const min = new Float32Array(columns).fill(Infinity);
+    const max = new Float32Array(columns).fill(-Infinity);
+    return { min, max, filled: new Uint8Array(columns) };
+  }
+  function accumulate(channel, grad, startSec, endSec, columns) {
+    const time = grad.timePoints;
+    const values = grad.waveform;
+    const n = Math.min(time.length, values.length);
+    if (n === 0) return;
+    const span = endSec - startSec;
+    if (!(span > 0)) return;
+    const toColumn = (t) => (t - startSec) / span * columns;
+    const put = (column, value) => {
+      if (column < 0 || column >= columns || !Number.isFinite(value)) return;
+      if (value < channel.min[column]) channel.min[column] = value;
+      if (value > channel.max[column]) channel.max[column] = value;
+      channel.filled[column] = 1;
+    };
+    if (n === 1) {
+      put(Math.floor(toColumn(time[0])), values[0]);
+      return;
+    }
+    for (let i = 1; i < n; i++) {
+      const t0 = time[i - 1];
+      const t1 = time[i];
+      if (t1 < startSec || t0 > endSec) continue;
+      const c0 = toColumn(t0);
+      const c1 = toColumn(t1);
+      const lo = Math.max(0, Math.floor(Math.min(c0, c1)));
+      const hi = Math.min(columns - 1, Math.floor(Math.max(c0, c1)));
+      const dc = c1 - c0;
+      const valueAt = (column) => {
+        if (dc === 0) return values[i];
+        const f = (column - c0) / dc;
+        return values[i - 1] + f * (values[i] - values[i - 1]);
+      };
+      for (let column = lo; column <= hi; column++) {
+        const from = Math.max(Math.min(c0, c1), column);
+        const to = Math.min(Math.max(c0, c1), column + 1);
+        if (to < from) continue;
+        put(column, valueAt(from));
+        put(column, valueAt(to));
+      }
+    }
+  }
+  function computeGradientEnvelope(blocks, startSec, endSec, columns) {
+    const width = Math.max(1, Math.min(MAX_ENVELOPE_COLUMNS, Math.floor(columns)));
+    const channels = {
+      gx: emptyChannel(width),
+      gy: emptyChannel(width),
+      gz: emptyChannel(width)
+    };
+    for (const block of blocks) {
+      for (const key of GRADIENT_CHANNELS) {
+        const grad = block[key];
+        if (!grad || grad.type === "none") continue;
+        accumulate(channels[key], grad, startSec, endSec, width);
+      }
+    }
+    return { startSec, endSec, columns: width, channels };
+  }
+  function countGradientSamples(blocks) {
+    let total = 0;
+    for (const block of blocks) {
+      for (const key of GRADIENT_CHANNELS) {
+        const grad = block[key];
+        if (grad && grad.type !== "none") total += grad.timePoints.length;
+      }
+    }
+    return total;
+  }
+  function packGradientEnvelope(envelope) {
+    const { columns } = envelope;
+    const out = new Float32Array(columns * 6);
+    let cursor = 0;
+    for (const key of GRADIENT_CHANNELS) {
+      const channel = envelope.channels[key];
+      for (let c = 0; c < columns; c++) out[cursor + c] = channel.filled[c] ? channel.min[c] : NaN;
+      cursor += columns;
+      for (let c = 0; c < columns; c++) out[cursor + c] = channel.filled[c] ? channel.max[c] : NaN;
+      cursor += columns;
+    }
+    return { startSec: envelope.startSec, endSec: envelope.endSec, columns, values: out.buffer };
   }
 
   // src/pulseq/physicalGradients.ts

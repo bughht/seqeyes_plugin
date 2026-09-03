@@ -64,6 +64,17 @@ export const MAX_DETAIL_PTS = 4096;
  */
 export const EXACT_DETAIL_SAMPLES = 50_000;
 
+/**
+ * Widest window whose samples may be walked on demand for a view change.
+ *
+ * Reuses the budget the derived channels already decode against, because it is
+ * the same question — how much work one settled view may cost — and the answer
+ * should not differ per feature.  Above `EXACT_DETAIL_SAMPLES` the samples are
+ * summarised into a per-column band rather than drawn individually, so this
+ * bounds decoding, not drawing.
+ */
+export const BAND_DETAIL_SAMPLES = INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples;
+
 /** A detail request may use at most this many aligned time/value pairs. */
 export const WINDOW_DETAIL_SAMPLE_LIMIT = 2_000_000;
 
@@ -346,6 +357,20 @@ export function resolveDetailBlockRange(
     const start = Math.max(0, Math.min(blockCount, lowerBound(startSec) - 1));
     const end = Math.max(start, Math.min(blockCount, lowerBound(endSec) + 1));
     return { start, end };
+}
+
+/**
+ * Samples a detail window would carry if nothing were reduced.
+ *
+ * The exact/band decision has to be made before packing, and it must count what
+ * `packSequenceBlockRange` will count or the two disagree: the caller picks the
+ * exact path and the packer then quietly reduces anyway.
+ */
+export function countExactDetailSamples(
+    blocks: DecodedBlock[],
+    window: DetailWindow | null = null,
+): number {
+    return countSamples(blocks, Number.MAX_SAFE_INTEGER, window);
 }
 
 function packBlocksAtCap(

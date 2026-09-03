@@ -35,6 +35,8 @@ interface DebugState {
   gradViewPoints: number;
   waveformDetailActive: boolean;
   waveformDetailWindowSec: number;
+  waveformBandActive: boolean;
+  waveformBandColumns: number;
   title: string;
 }
 
@@ -197,6 +199,39 @@ test('refills gradients at readout scale while other rows use the overview', asy
   // contributed at most its own point count per gradient. Detail must beat
   // that by a wide margin or the oscillation still aliases.
   expect(state.gradViewPoints).toBeGreaterThan(event.points * 4);
+});
+
+test('draws a TR exactly and hands wider views to a min/max band', async ({ page }) => {
+  await loadViewer(page, fixtures.largeSequence);
+  const event = await page.evaluate(() => window.__seqeyesDebug.longestGradientEvent('gx')) as {
+    start: number; end: number; points: number; block: number;
+  };
+  const mid = 0.5 * (event.start + event.end);
+  const show = async (width: number) => {
+    await page.evaluate(({ s, e }) => window.__seqeyesDebug.setView(Math.max(0, s), e),
+      { s: mid - width / 2, e: mid + width / 2 });
+    await expect
+      .poll(async () => {
+        const st = await debugState(page);
+        return st.waveformDetailActive || st.waveformBandActive;
+      }, { timeout: 6_000 })
+      .toBe(true);
+    return debugState(page);
+  };
+
+  // A TR is small enough to send sample for sample: judging a trajectory needs
+  // the samples themselves, not a summary of them.
+  const oneTr = await show(1.4547);
+  expect(oneTr.waveformDetailActive).toBe(true);
+  expect(oneTr.waveformBandActive).toBe(false);
+  expect(oneTr.gradViewPoints).toBeGreaterThan(event.points * 10);
+
+  // Far wider, the samples stop being drawable one segment each, so the view
+  // switches to the band rather than to a polyline through a reduced subset.
+  const wide = await show(20);
+  expect(wide.waveformBandActive).toBe(true);
+  expect(wide.waveformDetailActive).toBe(false);
+  expect(wide.waveformBandColumns).toBeGreaterThan(500);
 });
 
 test('sharpens waveform detail as zoom deepens instead of reusing a wide window', async ({ page }) => {

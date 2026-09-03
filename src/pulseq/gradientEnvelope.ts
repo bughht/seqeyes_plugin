@@ -143,3 +143,31 @@ export function countGradientSamples(blocks: DecodedBlock[]): number {
     }
     return total;
 }
+
+/** Wire form: six contiguous runs of `columns` floats, NaN where unfilled. */
+export interface PackedGradientEnvelope {
+    startSec: number;
+    endSec: number;
+    columns: number;
+    /** gxMin, gxMax, gyMin, gyMax, gzMin, gzMax — each `columns` long. */
+    values: ArrayBuffer;
+}
+
+/**
+ * Flatten an envelope for transfer.  Unfilled columns become NaN rather than a
+ * separate mask, so a gap in the gradient cannot be mistaken for a zero value
+ * by a consumer that forgets to check the mask.
+ */
+export function packGradientEnvelope(envelope: GradientEnvelope): PackedGradientEnvelope {
+    const { columns } = envelope;
+    const out = new Float32Array(columns * 6);
+    let cursor = 0;
+    for (const key of GRADIENT_CHANNELS) {
+        const channel = envelope.channels[key];
+        for (let c = 0; c < columns; c++) out[cursor + c] = channel.filled[c] ? channel.min[c] : NaN;
+        cursor += columns;
+        for (let c = 0; c < columns; c++) out[cursor + c] = channel.filled[c] ? channel.max[c] : NaN;
+        cursor += columns;
+    }
+    return { startSec: envelope.startSec, endSec: envelope.endSec, columns, values: out.buffer };
+}

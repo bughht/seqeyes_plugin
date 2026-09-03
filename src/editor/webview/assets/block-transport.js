@@ -129,6 +129,21 @@ function deserializeGradientSound(payload){
 
 /** Detail currently held: {blocks,startBlock,endBlock,startSec,endSec,generation}. */
 var waveformDetail = null;
+/**
+ * Band held for windows carrying more samples than can be drawn one segment
+ * each: {startSec,endSec,columns,values,generation}.  `values` is six runs of
+ * `columns` floats — gxMin, gxMax, gyMin, gyMax, gzMin, gzMax — NaN where a
+ * column holds no gradient, so a gap cannot be read as a zero.
+ */
+var waveformBand = null;
+/** Set for one drawBlocks pass when the band, not samples, describes the view. */
+var activeWaveformBand = null;
+/**
+ * Narrowest window the host refused as beyond its decode budget.  Anything at
+ * least this wide would be refused too, so it is not asked for again; zooming
+ * in narrows the request and lifts the block on its own.
+ */
+var waveformDetailRefusedSec = Infinity;
 /** Set for the duration of one drawBlocks pass when detail covers the view. */
 var activeWaveformDetail = null;
 var waveformDetailPending = null;
@@ -165,12 +180,6 @@ var WAVEFORM_DETAIL_DEBOUNCE_MS = 160;
  */
 var WAVEFORM_DETAIL_REFINE_FACTOR = 2;
 /**
- * Stop asking for detail once the view already holds this many transported
- * samples per pixel.  Below it the curve is being drawn from fewer samples than
- * the screen could show, which is exactly when a finer window helps.
- */
-var WAVEFORM_DETAIL_TRIGGER_PPP = 4;
-/**
  * Total detail samples to ask for, per pixel of plot width, shared across every
  * curve in the window.  Generous because most events in a window are short and
  * keep far fewer samples than their share, which leaves the long readouts —
@@ -189,6 +198,7 @@ var WAVEFORM_DETAIL_BLOCK_LIMIT = 20000;
  */
 function resetWaveformDetail(generation){
   waveformDetail=null;activeWaveformDetail=null;waveformDetailPending=null;
+  waveformBand=null;activeWaveformBand=null;waveformDetailRefusedSec=Infinity;
   clearTimeout(waveformDetailTimer);waveformDetailTimer=0;
   waveformDetailGeneration=(typeof generation==='number'&&isFinite(generation))
     ?generation:waveformDetailGeneration+1;
@@ -234,19 +244,48 @@ function waveformDetailForView(vs,ve,visiblePoints,pixelBudget,startBlock,endBlo
   // Draw from any detail that covers the view, even while a sharper window is
   // in flight: coarse detail still beats the whole-sequence overview.
   activeWaveformDetail=waveformDetailCovers(waveformDetail,vs,ve)?waveformDetail:null;
-  // Without detail, too few transported samples per pixel means the view is
-  // showing reduced data where it has room for more.  With detail, keep
-  // sharpening while the held window stays wider than the view deserves.
+  // Anything not already served by exact samples or a band is being drawn from
+  // the reduced transport, which is the representation to get away from — so
+  // ask, whatever the point count.  Held data is refetched once its window is
+  // wider than the view deserves.  Loops are prevented by the coverage test and
+  // by remembering a refusal, not by withholding the request.
   var wants=activeWaveformDetail
-    ?!waveformWindowServes(waveformDetail,vs,ve)
-    :visiblePoints<pixelBudget*WAVEFORM_DETAIL_TRIGGER_PPP;
-  if(wants&&endBlock-startBlock<=WAVEFORM_DETAIL_BLOCK_LIMIT)scheduleWaveformDetail(vs,ve,pointBudget);
+    ? !waveformWindowServes(waveformDetail,vs,ve)
+    : (waveformDetailCovers(waveformBand,vs,ve)
+      ? !waveformWindowServes(waveformBand,vs,ve)
+      : true);
+  if(wants&&endBlock-startBlock<=WAVEFORM_DETAIL_BLOCK_LIMIT)
+    scheduleWaveformDetail(vs,ve,pointBudget,pixelBudget);
   return activeWaveformDetail;
 }
 
-function scheduleWaveformDetail(vs,ve,pointBudget){
+/**
+ * The band gradients should be drawn from, or null when exact samples are
+ * available or the view is beyond what the host will decode.  Kept separate
+ * from the sample path so a stale band is never drawn beside fresher samples.
+ */
+function waveformBandForView(vs,ve){
+  activeWaveformBand=(!activeWaveformDetail&&waveformDetailCovers(waveformBand,vs,ve))
+    ?waveformBand:null;
+  return activeWaveformBand;
+}
+
+/** One column's [min,max] for a channel, or null where it holds nothing. */
+function bandColumn(band,channelIndex,column){
+  if(!band||column<0||column>=band.columns)return null;
+  var base=channelIndex*2*band.columns;
+  var lo=band.values[base+column],hi=band.values[base+band.columns+column];
+  if(!(lo===lo)||!(hi===hi))return null;   // NaN marks an empty column
+  return{lo:lo,hi:hi};
+}
+
+function scheduleWaveformDetail(vs,ve,pointBudget,pixelBudget){
   if(typeof requestWaveformDetailWindow!=='function'||!(ve>vs))return;
   var pad=(ve-vs)*0.25,start=Math.max(0,vs-pad),end=ve+pad;
+  if(end-start>=waveformDetailRefusedSec)return;
+  // Enough columns that the part inside the view still gets about one per
+  // pixel once the padding either side is discounted.
+  var columns=Math.max(1,Math.ceil((pixelBudget||1)*((end-start)/(ve-vs))));
   // Same adequacy test as the held detail, so an in-flight wide request cannot
   // suppress the narrower one a deeper zoom now needs.
   if(waveformWindowServes(waveformDetailPending,vs,ve))return;
@@ -259,7 +298,7 @@ function scheduleWaveformDetail(vs,ve,pointBudget){
         requestId:waveformDetailRequestId,
         generation:waveformDetailGeneration,
         startSec:start,endSec:end,
-        pointBudget:pointBudget
+        pointBudget:pointBudget,columns:columns
       });
     }catch(err){waveformDetailPending=null;
       reportWaveformDetail('Waveform detail was not calculated: '+(err&&err.message||String(err))+'.');}
@@ -276,6 +315,30 @@ function applyWaveformDetail(payload){
     startSec:payload.startSec,endSec:payload.endSec,generation:payload.generation
   };
   reportWaveformDetail(null);
+  return true;
+}
+
+/** Accept a band for a window too dense to draw sample by sample. */
+function applyWaveformBand(payload){
+  if(!payload||payload.generation!==waveformDetailGeneration)return false;
+  if(payload.requestId!==waveformDetailRequestId)return false;
+  waveformDetailPending=null;
+  waveformDetail=null;activeWaveformDetail=null;
+  waveformBand={
+    startSec:payload.startSec,endSec:payload.endSec,columns:payload.columns,
+    values:payload.values,generation:payload.generation
+  };
+  reportWaveformDetail(null);
+  return true;
+}
+
+/** Remember that this window exceeds the decode budget and stop asking. */
+function refuseWaveformDetail(payload){
+  if(!payload||payload.generation!==waveformDetailGeneration)return false;
+  if(payload.requestId!==waveformDetailRequestId)return false;
+  waveformDetailPending=null;
+  var width=payload.endSec-payload.startSec;
+  if(width>0&&width<waveformDetailRefusedSec)waveformDetailRefusedSec=width;
   return true;
 }
 

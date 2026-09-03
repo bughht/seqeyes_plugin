@@ -366,6 +366,20 @@ window.addEventListener('message',function(e){
       startBlock:m.startBlock,endBlock:m.endBlock,
       startSec:m.startSec,endSec:m.endSec,blocks:detailBlocks
     }))draw();
+  }else if(m.type==='waveformBandData'){
+    var bandValues=asTypedView(m.values,Float32Array);
+    if(!bandValues){
+      failWaveformDetail({requestId:m.requestId,generation:m.sequenceGeneration,
+        message:'the waveform band did not arrive as binary data'});
+      return;
+    }
+    if(applyWaveformBand({
+      requestId:m.requestId,generation:m.sequenceGeneration,
+      startSec:m.startSec,endSec:m.endSec,columns:m.columns,values:bandValues
+    }))draw();
+  }else if(m.type==='waveformDetailUnavailable'){
+    if(refuseWaveformDetail({requestId:m.requestId,generation:m.sequenceGeneration,
+      startSec:m.startSec,endSec:m.endSec}))draw();
   }else if(m.type==='waveformDetailError'){
     failWaveformDetail({requestId:m.requestId,generation:m.sequenceGeneration,message:m.message});
   }else if(m.type==='loadError'){

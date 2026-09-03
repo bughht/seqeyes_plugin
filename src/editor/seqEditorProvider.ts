@@ -62,11 +62,19 @@ import {
     MAX_DETAIL_PTS,
     MAX_V8_STRING_LENGTH,
     MIN_DISPLAY_PTS,
+    BAND_DETAIL_SAMPLES,
+    countExactDetailSamples,
+    EXACT_DETAIL_SAMPLES,
     packSequenceBlockRange,
     packSequenceBlocks,
     resolveDetailBlockRange,
     WINDOW_DETAIL_SAMPLE_LIMIT,
 } from './blockTransport';
+import {
+    computeGradientEnvelope,
+    MAX_ENVELOPE_COLUMNS,
+    packGradientEnvelope,
+} from '../pulseq/gradientEnvelope';
 import { ByteBoundedLru } from './windowDetailCache';
 import { getWebviewContent } from './webviewContent';
 import { serializeGradientSound, serializeSpectrogram } from './spectrogramTransport';
@@ -521,8 +529,44 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                 );
                 // The window and budget are what make this detail rather than a
                 // second overview, so both belong in the cache identity.
+                const columns = Math.max(1, Math.min(
+                    MAX_ENVELOPE_COLUMNS,
+                    Math.floor(Number(msg.columns) || 0) || 1,
+                ));
                 const cacheKey = `${sequenceGeneration}:${start}:${end}:${pointBudget}:${startSec}:${endSec}`;
                 try {
+                    const decoded = decodeBlockRange(activeSequence, start, end, activeDecodeContext);
+                    const windowSamples = countExactDetailSamples(decoded, { startSec, endSec });
+                    if (windowSamples > EXACT_DETAIL_SAMPLES) {
+                        // More samples than can be drawn one segment each. Summarise
+                        // them into a band rather than reducing and connecting a
+                        // subset, which would assert a path between samples that are
+                        // not adjacent. Beyond the decode budget, leave the view to
+                        // the precomputed hierarchy instead.
+                        if (windowSamples > BAND_DETAIL_SAMPLES) {
+                            panel.webview.postMessage({
+                                type: 'waveformDetailUnavailable',
+                                requestId,
+                                sequenceGeneration,
+                                startSec,
+                                endSec,
+                            });
+                            return;
+                        }
+                        const band = packGradientEnvelope(
+                            computeGradientEnvelope(decoded, startSec, endSec, columns),
+                        );
+                        panel.webview.postMessage({
+                            type: 'waveformBandData',
+                            requestId,
+                            sequenceGeneration,
+                            startSec: band.startSec,
+                            endSec: band.endSec,
+                            columns: band.columns,
+                            values: band.values,
+                        });
+                        return;
+                    }
                     let packed = waveformDetailCache.get(cacheKey);
                     if (!packed) {
                         packed = packSequenceBlockRange(

@@ -983,6 +983,26 @@ function installWaveformDetailSource(seq){
     var range=Pulseq.resolveDetailBlockRange(
       decodeContext.blockStartTimes,seq.blocks.length,request.startSec,request.endSec);
     if(range.end<=range.start){failWaveformDetail({requestId:request.requestId,generation:request.generation,message:'no blocks in view'});return;}
+    var decoded=Pulseq.decodeBlockRange(seq,range.start,range.end,decodeContext);
+    var windowSamples=Pulseq.countExactDetailSamples(decoded,{startSec:request.startSec,endSec:request.endSec});
+    if(windowSamples>Pulseq.EXACT_DETAIL_SAMPLES){
+      // Too many to draw one segment each. Summarise into a band rather than
+      // reducing and connecting a subset; past the decode budget, leave the
+      // view to the precomputed hierarchy.
+      if(windowSamples>Pulseq.BAND_DETAIL_SAMPLES){
+        if(refuseWaveformDetail({requestId:request.requestId,generation:request.generation,
+          startSec:request.startSec,endSec:request.endSec}))draw();
+        return;
+      }
+      var band=Pulseq.packGradientEnvelope(
+        Pulseq.computeGradientEnvelope(decoded,request.startSec,request.endSec,request.columns));
+      if(applyWaveformBand({
+        requestId:request.requestId,generation:request.generation,
+        startSec:band.startSec,endSec:band.endSec,columns:band.columns,
+        values:new Float32Array(band.values)
+      }))draw();
+      return;
+    }
     var packed=Pulseq.packSequenceBlockRange(
       seq,range.start,range.end,decodeContext,Pulseq.MAX_DETAIL_PTS,undefined,
       {startSec:request.startSec,endSec:request.endSec},request.pointBudget);
@@ -1685,9 +1705,17 @@ function drawBlocks(vs,ve,s){
   else activeWaveformDetail=null;
   if(rows[0]>=0){if(aggregateRf)drawRfOverview(overview,rows[0],ch,colors,vs,ve);else drawRfBlocks(range.start,range.end,rows[0],ch,colors,vs,ve,pixelBudget*8);}
   if(rows[1]>=0){if(overviewUse.phase)drawPhaseSampled(range.start,range.end,rows[1],ch,colors,vs,ve,pixelBudget);else drawPhaseBlocks(range.start,range.end,rows[1],ch,colors,vs,ve);}
-  if(rows[2]>=0){if(overviewUse.gx)drawGradientOverview(overview,'gx',rows[2],2,ch,colors.gx,vs,ve);else drawGradientBlocks(range.start,range.end,'gx',rows[2],2,ch,colors.gx,vs,ve);}
-  if(rows[3]>=0){if(overviewUse.gy)drawGradientOverview(overview,'gy',rows[3],3,ch,colors.gy,vs,ve);else drawGradientBlocks(range.start,range.end,'gy',rows[3],3,ch,colors.gy,vs,ve);}
-  if(rows[4]>=0){if(overviewUse.gz)drawGradientOverview(overview,'gz',rows[4],4,ch,colors.gz,vs,ve);else drawGradientBlocks(range.start,range.end,'gz',rows[4],4,ch,colors.gz,vs,ve);}
+  // Band first: where it covers the view it is the accurate representation, and
+  // the block polyline would be drawing an already-reduced transport instead.
+  var band=waveformBandForView(vs,ve);
+  var gradKeys=['gx','gy','gz'];
+  for(var gi=0;gi<3;gi++){
+    var row=rows[2+gi],key=gradKeys[gi];
+    if(row<0)continue;
+    if(band)drawGradientBand(band,gi,key,row,2+gi,ch,colors[key],vs,ve);
+    else if(overviewUse[key])drawGradientOverview(overview,key,row,2+gi,ch,colors[key],vs,ve);
+    else drawGradientBlocks(range.start,range.end,key,row,2+gi,ch,colors[key],vs,ve);
+  }
   if(rows[5]>=0){if(overviewUse.adc)drawAdcOverview(overview,rows[5],ch,colors,vs,ve);else drawAdcBlocks(range.start,range.end,rows[5],ch,colors,vs,ve);}
   if(rows[6]>=0&&range.end-range.start<=pixelBudget)drawTriggerBlocks(range.start,range.end,rows[6],ch,colors,vs,ve);
 }
@@ -1844,6 +1872,36 @@ function drawPhaseBlocks(start,end,vi,ch,colors,vs,ve){
       }
     }
     if(hasAdc)ctx.stroke();ctx.setLineDash([]);
+  });
+}
+
+/**
+ * Draw one gradient channel as a min/max band.
+ *
+ * Used where the view holds more samples than pixels: each column is filled
+ * between the extremes the waveform actually reached while crossing it, so the
+ * shape stays truthful without asserting a path between samples that are not
+ * adjacent.  Empty columns break the shape rather than being drawn at zero.
+ */
+function drawGradientBand(band,channelIndex,key,vi,ci,ch,color,vs,ve){
+  var y=cy(vi),scale=ch*.4/channelRange(ci);
+  var span=band.endSec-band.startSec;if(!(span>0))return;
+  var perColumn=span/band.columns;
+  var first=Math.max(0,Math.floor((vs-band.startSec)/perColumn));
+  var last=Math.min(band.columns-1,Math.ceil((ve-band.startSec)/perColumn));
+  rowClip(vi,ch,function(){
+    ctx.fillStyle=color;ctx.globalAlpha=.55;ctx.beginPath();var drew=false;
+    for(var c=first;c<=last;c++){
+      var col=bandColumn(band,channelIndex,c);if(!col)continue;
+      var x0=t2x(band.startSec+c*perColumn),x1=t2x(band.startSec+(c+1)*perColumn);
+      var w=Math.max(x1-x0,.75);
+      var yTop=y-col.hi*scale,yBottom=y-col.lo*scale;
+      // A flat run would be an invisible zero-height rectangle.
+      ctx.rect(x0,yTop,w,Math.max(yBottom-yTop,.75));drew=true;
+      gradViewPointCount++;
+    }
+    if(drew)ctx.fill();
+    ctx.globalAlpha=1;
   });
 }
 
@@ -2709,7 +2767,7 @@ if(location.search.indexOf("debug=1")>=0){
   window.__seqeyesDebug={
     state:function(){
       var adcCount=(kAdc&&kAdc[0])?kAdc[0].length:0;
-      return{blocks:BL.length,totalDuration:TD,offset:ox,scale:sc,visibleDuration:visibleDuration(),minRasterTime:minRasterTime(),kOpen:kOpen,kView:kView,kRotX:kRotX,kRotY:kRotY,kScale:kScl,adcCount:adcCount,exportEnabled:!!(exportBtn&&!exportBtn.disabled),derivedRenderPoints:derivedRenderPointCount,derivedEnvelopeCurves:derivedEnvelopeCurveCount,derivedRawCurves:derivedRawCurveCount,waveformOverviewActive:waveformOverviewActive,rfRenderPoints:rfRenderPointCount,rfRawCurves:rfRawCurveCount,rfReducedCurves:rfReducedCurveCount,rfOverviewBuckets:rfOverviewBucketCount,notices:Object.keys(viewerNotices).reduce(function(all,k){return all.concat(viewerNoticeMessages(viewerNotices[k]));},[]),lastDrawDurationMs:lastDrawDurationMs,drawCount:viewerDrawCount,cursorDrawCount:viewerCursorDrawCount,kTrajectoryDrawCount:kSpaceTrajectoryDrawCount,kOverlayDrawCount:kSpaceOverlayDrawCount,m1ReferenceMode:m1ReferenceMode,m1DetailActive:!!m1WindowData,derivedDetailMaxViewSec:derivedDetailMaxViewSec,gradViewPoints:gradViewPointCount,waveformDetailActive:!!activeWaveformDetail,waveformDetailWindowSec:activeWaveformDetail?activeWaveformDetail.endSec-activeWaveformDetail.startSec:0,panelMode:panelMode,panelOpen:panelOpen,title:document.title};
+      return{blocks:BL.length,totalDuration:TD,offset:ox,scale:sc,visibleDuration:visibleDuration(),minRasterTime:minRasterTime(),kOpen:kOpen,kView:kView,kRotX:kRotX,kRotY:kRotY,kScale:kScl,adcCount:adcCount,exportEnabled:!!(exportBtn&&!exportBtn.disabled),derivedRenderPoints:derivedRenderPointCount,derivedEnvelopeCurves:derivedEnvelopeCurveCount,derivedRawCurves:derivedRawCurveCount,waveformOverviewActive:waveformOverviewActive,rfRenderPoints:rfRenderPointCount,rfRawCurves:rfRawCurveCount,rfReducedCurves:rfReducedCurveCount,rfOverviewBuckets:rfOverviewBucketCount,notices:Object.keys(viewerNotices).reduce(function(all,k){return all.concat(viewerNoticeMessages(viewerNotices[k]));},[]),lastDrawDurationMs:lastDrawDurationMs,drawCount:viewerDrawCount,cursorDrawCount:viewerCursorDrawCount,kTrajectoryDrawCount:kSpaceTrajectoryDrawCount,kOverlayDrawCount:kSpaceOverlayDrawCount,m1ReferenceMode:m1ReferenceMode,m1DetailActive:!!m1WindowData,derivedDetailMaxViewSec:derivedDetailMaxViewSec,gradViewPoints:gradViewPointCount,waveformDetailActive:!!activeWaveformDetail,waveformDetailWindowSec:activeWaveformDetail?activeWaveformDetail.endSec-activeWaveformDetail.startSec:0,waveformBandActive:!!activeWaveformBand,waveformBandColumns:activeWaveformBand?activeWaveformBand.columns:0,panelMode:panelMode,panelOpen:panelOpen,title:document.title};
     },
     hoverPoint:function(){
       var t=(kAdcTime&&kAdcTime.length)?kAdcTime[Math.floor(kAdcTime.length/2)]:TD*0.5;
