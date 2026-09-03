@@ -1641,13 +1641,20 @@ function drawBlocks(vs,ve,s){
   var pixelBudget=Math.max(1,Math.floor(plotWidth()));
   var overview=selectWaveformOverview(waveformOverview,range.start,range.end,pixelBudget);
   function useOverview(key){return !!overview&&waveformVisiblePointCount(waveformOverview,key,range.start,range.end)>pixelBudget;}
-  function useGradientOverview(key){return !!overview&&waveformVisibleGradientPointCount(BL,key,range.start,range.end,vs,ve)>pixelBudget*8;}
+  var gradVisible={gx:waveformVisibleGradientPointCount(BL,'gx',range.start,range.end,vs,ve),
+    gy:waveformVisibleGradientPointCount(BL,'gy',range.start,range.end,vs,ve),
+    gz:waveformVisibleGradientPointCount(BL,'gz',range.start,range.end,vs,ve)};
+  function useGradientOverview(key){return !!overview&&gradVisible[key]>pixelBudget*8;}
   var rfPoints=waveformVisiblePointCount(waveformOverview,'rf',range.start,range.end),rfEvents=waveformVisiblePointCount(waveformOverview,'rfEvents',range.start,range.end);
   var aggregateRf=!!overview&&rfEvents>pixelBudget*2,reduceRf=aggregateRf||rfPoints>pixelBudget*8;
   var overviewUse={rf:reduceRf,phase:useOverview('phase'),gx:useGradientOverview('gx'),gy:useGradientOverview('gy'),gz:useGradientOverview('gz'),adc:useOverview('adc')};
   var dense=overviewUse.rf||overviewUse.phase||overviewUse.gx||overviewUse.gy||overviewUse.gz||overviewUse.adc;
   waveformOverviewActive=dense;
   setViewerNotice('dense',dense?'Dense overview mode is active. Zoom in for full waveform detail.':null);
+  // Raw level draws whatever the transport delivered, so this is where an
+  // over-reduced view has to be refilled with samples clipped to the viewport.
+  if(dense)activeWaveformDetail=null;
+  else waveformDetailForView(vs,ve,gradVisible.gx+gradVisible.gy+gradVisible.gz,pixelBudget,range.start,range.end);
   if(rows[0]>=0){if(aggregateRf)drawRfOverview(overview,rows[0],ch,colors,vs,ve);else drawRfBlocks(range.start,range.end,rows[0],ch,colors,vs,ve,pixelBudget*8);}
   if(rows[1]>=0){if(overviewUse.phase)drawPhaseSampled(range.start,range.end,rows[1],ch,colors,vs,ve,pixelBudget);else drawPhaseBlocks(range.start,range.end,rows[1],ch,colors,vs,ve);}
   if(rows[2]>=0){if(overviewUse.gx)drawGradientOverview(overview,'gx',rows[2],2,ch,colors.gx,vs,ve);else drawGradientBlocks(range.start,range.end,'gx',rows[2],2,ch,colors.gx,vs,ve);}
@@ -1757,7 +1764,7 @@ function drawRfBlocks(start,end,vi,ch,colors,vs,ve,maxPoints){
   rowClip(vi,ch,function(){
     var visibleEvents=[];
     for(var bi=start;bi<end;bi++){
-      var rf=BL[bi].rf;if(!rf||rf.s+rf.d<vs||rf.s>ve)continue;
+      var rf=blockAt(bi).rf;if(!rf||rf.s+rf.d<vs||rf.s>ve)continue;
       visibleEvents.push(rf);
     }
     var pointBudget=Math.max(4,Math.floor((maxPoints||Infinity)/Math.max(1,visibleEvents.length)));
@@ -1782,7 +1789,7 @@ function drawPhaseBlocks(start,end,vi,ch,colors,vs,ve){
   rowClip(vi,ch,function(){
     ctx.strokeStyle=colors.rf;ctx.lineWidth=.8;ctx.beginPath();var hasRf=false;
     for(var bi=start;bi<end;bi++){
-      var rf=BL[bi].rf,phaseTime=rf&&(rf.pt||rf.t);if(!rf||!rf.p||!phaseTime||rf.s+rf.d<vs||rf.s>ve)continue;
+      var rf=blockAt(bi).rf,phaseTime=rf&&(rf.pt||rf.t);if(!rf||!rf.p||!phaseTime||rf.s+rf.d<vs||rf.s>ve)continue;
       var n=Math.min(phaseTime.length,rf.p.length);
       for(var i=0;i<n;i++){
         var sx=t2x(phaseTime[i]),sy=y+ch*.45-rf.p[i]*scale;
@@ -1817,7 +1824,7 @@ function drawGradientBlocks(start,end,key,vi,ci,ch,color,vs,ve){
   rowClip(vi,ch,function(){
     ctx.strokeStyle=color;ctx.lineWidth=1;ctx.beginPath();var hasPath=false;
     for(var bi=start;bi<end;bi++){
-      var g=BL[bi][key];if(!g||g.ty==='none'||!g.t||!g.w||g.t.length<2)continue;
+      var g=blockAt(bi)[key];if(!g||g.ty==='none'||!g.t||!g.w||g.t.length<2)continue;
       var n=Math.min(g.t.length,g.w.length);
       if(n<2)continue;
       if(g.t[n-1]<vs||g.t[0]>ve)continue;

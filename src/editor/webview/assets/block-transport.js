@@ -109,3 +109,121 @@ function deserializeGradientSound(payload){
     right:decodeB64F32(payload.rightB64,payload.n)
   };
 }
+
+/* ── Viewport waveform detail ─────────────────────────────────────────────
+   The initial payload is one bounded overview of the whole sequence: every
+   waveform is reduced to at most a few hundred points so a large sequence can
+   cross the transport at all.  That is the right trade for the first paint and
+   for wide views, but it is irreversible — zooming into 0.5 ms of a 48 ms
+   readout leaves the renderer connecting a handful of surviving extrema, which
+   draws as straight polygonal segments instead of the real waveform.
+
+   So when the view is zoomed far enough that it holds fewer transported
+   samples than it has pixels, the host is asked to decode that block range
+   again and reduce it against the visible interval instead of the whole event.
+   The reply replaces only the blocks it covers, and only while it covers the
+   view; everything outside keeps the overview.  Requests are debounced so a
+   drag issues one decode at rest rather than one per frame, and each reply
+   carries the sequence generation it was packed from so a load that lands
+   mid-flight cannot paint the previous sequence's samples. */
+
+/** Detail currently held: {blocks,startBlock,endBlock,startSec,endSec,generation}. */
+var waveformDetail = null;
+/** Set for the duration of one drawBlocks pass when detail covers the view. */
+var activeWaveformDetail = null;
+var waveformDetailPending = null;
+var waveformDetailTimer = 0;
+var waveformDetailRequestId = 0;
+/** Bumped by the host on every sequence load; stale replies are dropped. */
+var waveformDetailGeneration = 0;
+/**
+ * Installed by each host: VS Code posts a message to the extension, the
+ * standalone web app packs the range in this same heap.  Receives
+ * {requestId, generation, startSec, endSec, pointsPerWaveform}.
+ */
+var requestWaveformDetailWindow = null;
+
+var WAVEFORM_DETAIL_DEBOUNCE_MS = 160;
+/** Mirrors the host's block ceiling so a hopeless request is never sent. */
+var WAVEFORM_DETAIL_BLOCK_LIMIT = 20000;
+
+/** Discard detail and in-flight requests; call whenever BL is replaced. */
+function resetWaveformDetail(){
+  waveformDetail=null;activeWaveformDetail=null;waveformDetailPending=null;
+  clearTimeout(waveformDetailTimer);waveformDetailTimer=0;
+  waveformDetailGeneration++;
+}
+
+function waveformDetailCovers(detail,vs,ve){
+  return !!(detail&&detail.generation===waveformDetailGeneration
+    &&detail.startSec<=vs+1e-12&&detail.endSec>=ve-1e-12);
+}
+
+/**
+ * The block the renderer should draw for index `bi`.  Detail blocks carry the
+ * same identity and timing as their overview counterparts and differ only in
+ * waveform resolution, so substituting one is transparent to every caller.
+ */
+function blockAt(bi){
+  var detail=activeWaveformDetail;
+  if(detail&&bi>=detail.startBlock&&bi<detail.endBlock){
+    var block=detail.blocks[bi-detail.startBlock];
+    if(block)return block;
+  }
+  return BL[bi];
+}
+
+/**
+ * Decide whether detail applies to this view and, if it would help, ask for it.
+ * Returns the detail to draw from, or null to keep the overview.
+ */
+function waveformDetailForView(vs,ve,visiblePoints,pixelBudget,startBlock,endBlock){
+  if(waveformDetailCovers(waveformDetail,vs,ve))activeWaveformDetail=waveformDetail;
+  else activeWaveformDetail=null;
+  // Fewer transported samples than pixels means the view is showing reduced
+  // data where it has room for more — the only case detail can improve.
+  if(!activeWaveformDetail&&visiblePoints<pixelBudget
+    &&endBlock-startBlock<=WAVEFORM_DETAIL_BLOCK_LIMIT)scheduleWaveformDetail(vs,ve);
+  return activeWaveformDetail;
+}
+
+function scheduleWaveformDetail(vs,ve){
+  if(typeof requestWaveformDetailWindow!=='function'||!(ve>vs))return;
+  var pad=(ve-vs)*0.25,start=Math.max(0,vs-pad),end=ve+pad;
+  if(waveformDetailPending&&waveformDetailPending.startSec<=start+1e-12
+    &&waveformDetailPending.endSec>=end-1e-12)return;
+  clearTimeout(waveformDetailTimer);
+  waveformDetailTimer=setTimeout(function(){
+    waveformDetailPending={startSec:start,endSec:end};
+    waveformDetailRequestId++;
+    try{
+      requestWaveformDetailWindow({
+        requestId:waveformDetailRequestId,
+        generation:waveformDetailGeneration,
+        startSec:start,endSec:end,
+        pointsPerWaveform:500
+      });
+    }catch(err){waveformDetailPending=null;setViewerNotice('waveformDetail',
+      'Waveform detail was not calculated: '+(err&&err.message||String(err))+'.');}
+  },WAVEFORM_DETAIL_DEBOUNCE_MS);
+}
+
+/** Accept a detail reply. Ignores stale generations and superseded requests. */
+function applyWaveformDetail(payload){
+  if(!payload||payload.generation!==waveformDetailGeneration)return false;
+  if(payload.requestId!==waveformDetailRequestId)return false;
+  waveformDetailPending=null;
+  waveformDetail={
+    blocks:payload.blocks,startBlock:payload.startBlock,endBlock:payload.endBlock,
+    startSec:payload.startSec,endSec:payload.endSec,generation:payload.generation
+  };
+  setViewerNotice('waveformDetail',null);
+  return true;
+}
+
+/** Record a failed detail request without discarding the overview. */
+function failWaveformDetail(payload){
+  if(!payload||payload.generation!==waveformDetailGeneration)return;
+  waveformDetailPending=null;
+  setViewerNotice('waveformDetail','Waveform detail was not calculated: '+(payload.message||'unknown error')+'.');
+}

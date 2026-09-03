@@ -113,6 +113,124 @@ function deserializeGradientSound(payload){
   };
 }
 
+/* ── Viewport waveform detail ─────────────────────────────────────────────
+   The initial payload is one bounded overview of the whole sequence: every
+   waveform is reduced to at most a few hundred points so a large sequence can
+   cross the transport at all.  That is the right trade for the first paint and
+   for wide views, but it is irreversible — zooming into 0.5 ms of a 48 ms
+   readout leaves the renderer connecting a handful of surviving extrema, which
+   draws as straight polygonal segments instead of the real waveform.
+
+   So when the view is zoomed far enough that it holds fewer transported
+   samples than it has pixels, the host is asked to decode that block range
+   again and reduce it against the visible interval instead of the whole event.
+   The reply replaces only the blocks it covers, and only while it covers the
+   view; everything outside keeps the overview.  Requests are debounced so a
+   drag issues one decode at rest rather than one per frame, and each reply
+   carries the sequence generation it was packed from so a load that lands
+   mid-flight cannot paint the previous sequence's samples. */
+
+/** Detail currently held: {blocks,startBlock,endBlock,startSec,endSec,generation}. */
+var waveformDetail = null;
+/** Set for the duration of one drawBlocks pass when detail covers the view. */
+var activeWaveformDetail = null;
+var waveformDetailPending = null;
+var waveformDetailTimer = 0;
+var waveformDetailRequestId = 0;
+/** Bumped by the host on every sequence load; stale replies are dropped. */
+var waveformDetailGeneration = 0;
+/**
+ * Installed by each host: VS Code posts a message to the extension, the
+ * standalone web app packs the range in this same heap.  Receives
+ * {requestId, generation, startSec, endSec, pointsPerWaveform}.
+ */
+var requestWaveformDetailWindow = null;
+
+var WAVEFORM_DETAIL_DEBOUNCE_MS = 160;
+/** Mirrors the host's block ceiling so a hopeless request is never sent. */
+var WAVEFORM_DETAIL_BLOCK_LIMIT = 20000;
+
+/** Discard detail and in-flight requests; call whenever BL is replaced. */
+function resetWaveformDetail(){
+  waveformDetail=null;activeWaveformDetail=null;waveformDetailPending=null;
+  clearTimeout(waveformDetailTimer);waveformDetailTimer=0;
+  waveformDetailGeneration++;
+}
+
+function waveformDetailCovers(detail,vs,ve){
+  return !!(detail&&detail.generation===waveformDetailGeneration
+    &&detail.startSec<=vs+1e-12&&detail.endSec>=ve-1e-12);
+}
+
+/**
+ * The block the renderer should draw for index `bi`.  Detail blocks carry the
+ * same identity and timing as their overview counterparts and differ only in
+ * waveform resolution, so substituting one is transparent to every caller.
+ */
+function blockAt(bi){
+  var detail=activeWaveformDetail;
+  if(detail&&bi>=detail.startBlock&&bi<detail.endBlock){
+    var block=detail.blocks[bi-detail.startBlock];
+    if(block)return block;
+  }
+  return BL[bi];
+}
+
+/**
+ * Decide whether detail applies to this view and, if it would help, ask for it.
+ * Returns the detail to draw from, or null to keep the overview.
+ */
+function waveformDetailForView(vs,ve,visiblePoints,pixelBudget,startBlock,endBlock){
+  if(waveformDetailCovers(waveformDetail,vs,ve))activeWaveformDetail=waveformDetail;
+  else activeWaveformDetail=null;
+  // Fewer transported samples than pixels means the view is showing reduced
+  // data where it has room for more — the only case detail can improve.
+  if(!activeWaveformDetail&&visiblePoints<pixelBudget
+    &&endBlock-startBlock<=WAVEFORM_DETAIL_BLOCK_LIMIT)scheduleWaveformDetail(vs,ve);
+  return activeWaveformDetail;
+}
+
+function scheduleWaveformDetail(vs,ve){
+  if(typeof requestWaveformDetailWindow!=='function'||!(ve>vs))return;
+  var pad=(ve-vs)*0.25,start=Math.max(0,vs-pad),end=ve+pad;
+  if(waveformDetailPending&&waveformDetailPending.startSec<=start+1e-12
+    &&waveformDetailPending.endSec>=end-1e-12)return;
+  clearTimeout(waveformDetailTimer);
+  waveformDetailTimer=setTimeout(function(){
+    waveformDetailPending={startSec:start,endSec:end};
+    waveformDetailRequestId++;
+    try{
+      requestWaveformDetailWindow({
+        requestId:waveformDetailRequestId,
+        generation:waveformDetailGeneration,
+        startSec:start,endSec:end,
+        pointsPerWaveform:500
+      });
+    }catch(err){waveformDetailPending=null;setViewerNotice('waveformDetail',
+      'Waveform detail was not calculated: '+(err&&err.message||String(err))+'.');}
+  },WAVEFORM_DETAIL_DEBOUNCE_MS);
+}
+
+/** Accept a detail reply. Ignores stale generations and superseded requests. */
+function applyWaveformDetail(payload){
+  if(!payload||payload.generation!==waveformDetailGeneration)return false;
+  if(payload.requestId!==waveformDetailRequestId)return false;
+  waveformDetailPending=null;
+  waveformDetail={
+    blocks:payload.blocks,startBlock:payload.startBlock,endBlock:payload.endBlock,
+    startSec:payload.startSec,endSec:payload.endSec,generation:payload.generation
+  };
+  setViewerNotice('waveformDetail',null);
+  return true;
+}
+
+/** Record a failed detail request without discarding the overview. */
+function failWaveformDetail(payload){
+  if(!payload||payload.generation!==waveformDetailGeneration)return;
+  waveformDetailPending=null;
+  setViewerNotice('waveformDetail','Waveform detail was not calculated: '+(payload.message||'unknown error')+'.');
+}
+
 
 /* ══ state.js ══ */
 /* ═══════════════════════════════════════════════════════════════════════
@@ -1714,13 +1832,20 @@ function drawBlocks(vs,ve,s){
   var pixelBudget=Math.max(1,Math.floor(plotWidth()));
   var overview=selectWaveformOverview(waveformOverview,range.start,range.end,pixelBudget);
   function useOverview(key){return !!overview&&waveformVisiblePointCount(waveformOverview,key,range.start,range.end)>pixelBudget;}
-  function useGradientOverview(key){return !!overview&&waveformVisibleGradientPointCount(BL,key,range.start,range.end,vs,ve)>pixelBudget*8;}
+  var gradVisible={gx:waveformVisibleGradientPointCount(BL,'gx',range.start,range.end,vs,ve),
+    gy:waveformVisibleGradientPointCount(BL,'gy',range.start,range.end,vs,ve),
+    gz:waveformVisibleGradientPointCount(BL,'gz',range.start,range.end,vs,ve)};
+  function useGradientOverview(key){return !!overview&&gradVisible[key]>pixelBudget*8;}
   var rfPoints=waveformVisiblePointCount(waveformOverview,'rf',range.start,range.end),rfEvents=waveformVisiblePointCount(waveformOverview,'rfEvents',range.start,range.end);
   var aggregateRf=!!overview&&rfEvents>pixelBudget*2,reduceRf=aggregateRf||rfPoints>pixelBudget*8;
   var overviewUse={rf:reduceRf,phase:useOverview('phase'),gx:useGradientOverview('gx'),gy:useGradientOverview('gy'),gz:useGradientOverview('gz'),adc:useOverview('adc')};
   var dense=overviewUse.rf||overviewUse.phase||overviewUse.gx||overviewUse.gy||overviewUse.gz||overviewUse.adc;
   waveformOverviewActive=dense;
   setViewerNotice('dense',dense?'Dense overview mode is active. Zoom in for full waveform detail.':null);
+  // Raw level draws whatever the transport delivered, so this is where an
+  // over-reduced view has to be refilled with samples clipped to the viewport.
+  if(dense)activeWaveformDetail=null;
+  else waveformDetailForView(vs,ve,gradVisible.gx+gradVisible.gy+gradVisible.gz,pixelBudget,range.start,range.end);
   if(rows[0]>=0){if(aggregateRf)drawRfOverview(overview,rows[0],ch,colors,vs,ve);else drawRfBlocks(range.start,range.end,rows[0],ch,colors,vs,ve,pixelBudget*8);}
   if(rows[1]>=0){if(overviewUse.phase)drawPhaseSampled(range.start,range.end,rows[1],ch,colors,vs,ve,pixelBudget);else drawPhaseBlocks(range.start,range.end,rows[1],ch,colors,vs,ve);}
   if(rows[2]>=0){if(overviewUse.gx)drawGradientOverview(overview,'gx',rows[2],2,ch,colors.gx,vs,ve);else drawGradientBlocks(range.start,range.end,'gx',rows[2],2,ch,colors.gx,vs,ve);}
@@ -1830,7 +1955,7 @@ function drawRfBlocks(start,end,vi,ch,colors,vs,ve,maxPoints){
   rowClip(vi,ch,function(){
     var visibleEvents=[];
     for(var bi=start;bi<end;bi++){
-      var rf=BL[bi].rf;if(!rf||rf.s+rf.d<vs||rf.s>ve)continue;
+      var rf=blockAt(bi).rf;if(!rf||rf.s+rf.d<vs||rf.s>ve)continue;
       visibleEvents.push(rf);
     }
     var pointBudget=Math.max(4,Math.floor((maxPoints||Infinity)/Math.max(1,visibleEvents.length)));
@@ -1855,7 +1980,7 @@ function drawPhaseBlocks(start,end,vi,ch,colors,vs,ve){
   rowClip(vi,ch,function(){
     ctx.strokeStyle=colors.rf;ctx.lineWidth=.8;ctx.beginPath();var hasRf=false;
     for(var bi=start;bi<end;bi++){
-      var rf=BL[bi].rf,phaseTime=rf&&(rf.pt||rf.t);if(!rf||!rf.p||!phaseTime||rf.s+rf.d<vs||rf.s>ve)continue;
+      var rf=blockAt(bi).rf,phaseTime=rf&&(rf.pt||rf.t);if(!rf||!rf.p||!phaseTime||rf.s+rf.d<vs||rf.s>ve)continue;
       var n=Math.min(phaseTime.length,rf.p.length);
       for(var i=0;i<n;i++){
         var sx=t2x(phaseTime[i]),sy=y+ch*.45-rf.p[i]*scale;
@@ -1890,7 +2015,7 @@ function drawGradientBlocks(start,end,key,vi,ci,ch,color,vs,ve){
   rowClip(vi,ch,function(){
     ctx.strokeStyle=color;ctx.lineWidth=1;ctx.beginPath();var hasPath=false;
     for(var bi=start;bi<end;bi++){
-      var g=BL[bi][key];if(!g||g.ty==='none'||!g.t||!g.w||g.t.length<2)continue;
+      var g=blockAt(bi)[key];if(!g||g.ty==='none'||!g.t||!g.w||g.t.length<2)continue;
       var n=Math.min(g.t.length,g.w.length);
       if(n<2)continue;
       if(g.t[n-1]<vs||g.t[0]>ve)continue;

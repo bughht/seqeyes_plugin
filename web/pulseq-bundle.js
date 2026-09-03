@@ -2426,39 +2426,54 @@ var Pulseq = (() => {
   }
 
   // src/pulseq/displayDownsampling.ts
-  function reduceM4(time, values, maxPoints, emit) {
-    const n = Math.min(time.length, values.length);
+  function reduceM4Range(time, values, start, end, maxPoints, emit) {
+    const n = Math.max(0, end - start);
     if (n === 0 || maxPoints <= 0) return 0;
     if (n <= maxPoints) {
-      let kept2 = 0;
-      for (let index = 0; index < n; index++) {
-        emit(time[index], values[index]);
-        kept2++;
-      }
-      return kept2;
+      for (let index = start; index < end; index++) emit(time[index], values[index]);
+      return n;
     }
     const bucketCount = Math.max(1, Math.floor(maxPoints / 4));
     let kept = 0;
     for (let bucket = 0; bucket < bucketCount; bucket++) {
-      const start = Math.floor(bucket * n / bucketCount);
-      const end = Math.max(start + 1, Math.floor((bucket + 1) * n / bucketCount));
-      kept += emitBucket(time, values, start, Math.min(n, end), emit);
+      const bucketStart = start + Math.floor(bucket * n / bucketCount);
+      const bucketEnd = Math.max(bucketStart + 1, start + Math.floor((bucket + 1) * n / bucketCount));
+      kept += emitBucket(time, values, bucketStart, Math.min(end, bucketEnd), emit);
     }
     return kept;
   }
-  function reduceUniform(time, values, maxPoints, emit) {
-    const n = Math.min(time.length, values.length);
+  function reduceUniformRange(time, values, start, end, maxPoints, emit) {
+    const n = Math.max(0, end - start);
     if (n === 0 || maxPoints <= 0) return 0;
     if (n <= maxPoints) {
-      for (let index = 0; index < n; index++) emit(time[index], values[index]);
+      for (let index = start; index < end; index++) emit(time[index], values[index]);
       return n;
     }
     const step = n / maxPoints;
     for (let index = 0; index < maxPoints; index++) {
-      const source = Math.floor(index * step);
-      emit(time[source], values[source]);
+      emit(time[start + Math.floor(index * step)], values[start + Math.floor(index * step)]);
     }
     return maxPoints;
+  }
+  function clipIndexRange(time, startSec, endSec, length) {
+    const n = Math.max(0, Math.min(length, time.length));
+    if (n === 0) return { start: 0, end: 0 };
+    let lo = 0;
+    let hi = n;
+    while (lo < hi) {
+      const mid = lo + hi >> 1;
+      if (time[mid] < startSec) lo = mid + 1;
+      else hi = mid;
+    }
+    const start = Math.max(0, lo - 1);
+    lo = start;
+    hi = n;
+    while (lo < hi) {
+      const mid = lo + hi >> 1;
+      if (time[mid] <= endSec) lo = mid + 1;
+      else hi = mid;
+    }
+    return { start, end: Math.min(n, lo + 1) };
   }
   function emitBucket(time, values, start, end, emit) {
     let minIndex = start;
@@ -2489,21 +2504,29 @@ var Pulseq = (() => {
   var TAU2 = 2 * Math.PI;
   var EMPTY_PAIR = { o: 0, n: 0 };
   var CountingSink = class {
-    constructor(cap) {
+    constructor(cap, window = null) {
       __publicField(this, "cap", cap);
+      __publicField(this, "window", window);
       __publicField(this, "buildEnvelope", false);
       __publicField(this, "total", 0);
     }
     pair(time, values, useM4) {
-      this.total += useM4 ? reduceM4(time, values, this.cap, discard) : reduceUniform(time, values, this.cap, discard);
+      const { start, end } = clipPair(time, values, this.window);
+      this.total += useM4 ? reduceM4Range(time, values, start, end, this.cap, discard) : reduceUniformRange(time, values, start, end, this.cap, discard);
       return EMPTY_PAIR;
     }
   };
+  function clipPair(time, values, window) {
+    const n = Math.min(time.length, values.length);
+    if (!window) return { start: 0, end: n };
+    return clipIndexRange(time, window.startSec, window.endSec, n);
+  }
   var WritingSink = class {
-    constructor(cap, times, values) {
+    constructor(cap, times, values, window = null) {
       __publicField(this, "cap", cap);
       __publicField(this, "times", times);
       __publicField(this, "values", values);
+      __publicField(this, "window", window);
       __publicField(this, "buildEnvelope", true);
       __publicField(this, "cursor", 0);
       __publicField(this, "wrapPhase", false);
@@ -2518,12 +2541,13 @@ var Pulseq = (() => {
       return this.cursor;
     }
     pair(time, values, useM4, wrapPhase) {
-      const start = this.cursor;
+      const origin = this.cursor;
+      const clipped = clipPair(time, values, this.window);
       this.wrapPhase = wrapPhase;
-      if (useM4) reduceM4(time, values, this.cap, this.emit);
-      else reduceUniform(time, values, this.cap, this.emit);
+      if (useM4) reduceM4Range(time, values, clipped.start, clipped.end, this.cap, this.emit);
+      else reduceUniformRange(time, values, clipped.start, clipped.end, this.cap, this.emit);
       this.wrapPhase = false;
-      return { o: start, n: this.cursor - start };
+      return { o: origin, n: this.cursor - origin };
     }
   };
   function discard() {
@@ -2563,11 +2587,11 @@ var Pulseq = (() => {
       notice: cap < MAX_DISPLAY_PTS ? `Large sequence: waveform detail was reduced to ${cap} points per event (normally ${MAX_DISPLAY_PTS}) to stay inside the display transfer budget.` : null
     };
   }
-  function packBlocksAtCap(blocks, cap, knownTotal) {
-    const total = knownTotal ?? countSamples(blocks, cap);
+  function packBlocksAtCap(blocks, cap, knownTotal, window = null) {
+    const total = knownTotal ?? countSamples(blocks, cap, window);
     const times = new Float64Array(total);
     const values = new Float32Array(total);
-    const sink = new WritingSink(cap, times, values);
+    const sink = new WritingSink(cap, times, values, window);
     const envelope = new Array(blocks.length);
     for (let index = 0; index < blocks.length; index++) {
       envelope[index] = walkBlock(blocks[index], sink);
@@ -2611,8 +2635,8 @@ var Pulseq = (() => {
       if (gradient) gradient.o += delta;
     }
   }
-  function countSamples(blocks, cap) {
-    const sink = new CountingSink(cap);
+  function countSamples(blocks, cap, window = null) {
+    const sink = new CountingSink(cap, window);
     for (const block of blocks) walkBlock(block, sink);
     return sink.total;
   }
