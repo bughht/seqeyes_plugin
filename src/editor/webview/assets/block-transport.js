@@ -154,7 +154,7 @@ var waveformDetailGeneration = 0;
 /**
  * Installed by each host: VS Code posts a message to the extension, the
  * standalone web app packs the range in this same heap.  Receives
- * {requestId, generation, startSec, endSec, pointBudget}.
+ * {requestId, generation, startSec, endSec, columns}.
  */
 var requestWaveformDetailWindow = null;
 /**
@@ -179,13 +179,6 @@ var WAVEFORM_DETAIL_DEBOUNCE_MS = 160;
  * refetching settles in one step instead of oscillating.
  */
 var WAVEFORM_DETAIL_REFINE_FACTOR = 2;
-/**
- * Total detail samples to ask for, per pixel of plot width, shared across every
- * curve in the window.  Generous because most events in a window are short and
- * keep far fewer samples than their share, which leaves the long readouts —
- * the ones that actually looked wrong — enough points to draw smoothly.
- */
-var WAVEFORM_DETAIL_VIEW_POINTS = 32;
 /** Mirrors the host's block ceiling so a hopeless request is never sent. */
 var WAVEFORM_DETAIL_BLOCK_LIMIT = 20000;
 
@@ -240,7 +233,7 @@ function blockAt(blocks,bi){
  * Decide whether detail applies to this view and, if it would help, ask for it.
  * Returns the detail to draw from, or null to keep the overview.
  */
-function waveformDetailForView(vs,ve,visiblePoints,pixelBudget,startBlock,endBlock,pointBudget){
+function waveformDetailForView(vs,ve,pixelBudget,startBlock,endBlock){
   // Draw from any detail that covers the view, even while a sharper window is
   // in flight: coarse detail still beats the whole-sequence overview.
   activeWaveformDetail=waveformDetailCovers(waveformDetail,vs,ve)?waveformDetail:null;
@@ -255,7 +248,7 @@ function waveformDetailForView(vs,ve,visiblePoints,pixelBudget,startBlock,endBlo
       ? !waveformWindowServes(waveformBand,vs,ve)
       : true);
   if(wants&&endBlock-startBlock<=WAVEFORM_DETAIL_BLOCK_LIMIT)
-    scheduleWaveformDetail(vs,ve,pointBudget,pixelBudget);
+    scheduleWaveformDetail(vs,ve,pixelBudget);
   return activeWaveformDetail;
 }
 
@@ -279,7 +272,7 @@ function bandColumn(band,channelIndex,column){
   return{lo:lo,hi:hi};
 }
 
-function scheduleWaveformDetail(vs,ve,pointBudget,pixelBudget){
+function scheduleWaveformDetail(vs,ve,pixelBudget){
   if(typeof requestWaveformDetailWindow!=='function'||!(ve>vs))return;
   var pad=(ve-vs)*0.25,start=Math.max(0,vs-pad),end=ve+pad;
   if(end-start>=waveformDetailRefusedSec)return;
@@ -298,7 +291,7 @@ function scheduleWaveformDetail(vs,ve,pointBudget,pixelBudget){
         requestId:waveformDetailRequestId,
         generation:waveformDetailGeneration,
         startSec:start,endSec:end,
-        pointBudget:pointBudget,columns:columns
+        columns:columns
       });
     }catch(err){waveformDetailPending=null;
       reportWaveformDetail('Waveform detail was not calculated: '+(err&&err.message||String(err))+'.');}

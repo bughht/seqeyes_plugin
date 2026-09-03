@@ -309,8 +309,7 @@ function drawBlocks(vs,ve,s){
   // overview says nothing about the gradients, which may still be drawing
   // transported samples and still be the thing that looks wrong.
   var rawWaveformRows=!(overviewUse.gx&&overviewUse.gy&&overviewUse.gz&&reduceRf);
-  if(rawWaveformRows)waveformDetailForView(vs,ve,gradVisible.gx+gradVisible.gy+gradVisible.gz,
-    pixelBudget,range.start,range.end,pixelBudget*WAVEFORM_DETAIL_VIEW_POINTS);
+  if(rawWaveformRows)waveformDetailForView(vs,ve,pixelBudget,range.start,range.end);
   else activeWaveformDetail=null;
   if(rows[0]>=0){if(aggregateRf)drawRfOverview(overview,rows[0],ch,colors,vs,ve);else drawRfBlocks(range.start,range.end,rows[0],ch,colors,vs,ve,pixelBudget*8);}
   if(rows[1]>=0){if(overviewUse.phase)drawPhaseSampled(range.start,range.end,rows[1],ch,colors,vs,ve,pixelBudget);else drawPhaseBlocks(range.start,range.end,rows[1],ch,colors,vs,ve);}

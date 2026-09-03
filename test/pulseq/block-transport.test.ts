@@ -221,8 +221,7 @@ describe('packed block transport', () => {
     const endSec = native.timePoints[native.timePoints.length - 1];
 
     const packed = packSequenceBlockRange(
-      sequence, index, index + 1, undefined, MAX_DETAIL_PTS, undefined,
-      { startSec, endSec }, 8_000,
+      sequence, index, index + 1, undefined, MAX_DETAIL_PTS, undefined, { startSec, endSec },
     );
     const times = new Float64Array(packed.sampleTimes);
     const values = new Float32Array(packed.sampleValues);
@@ -241,7 +240,7 @@ describe('packed block transport', () => {
     const sequence = loadSequence('writeSpiral.seq');
     // A one-sample exactness budget forces the reduced path for any real window.
     const packed = packSequenceBlockRange(
-      sequence, 0, sequence.blocks.length, undefined, MAX_DETAIL_PTS, 1_000, null, 400,
+      sequence, 0, sequence.blocks.length, undefined, MAX_DETAIL_PTS, 1_000, null,
     );
     expect(packed.sampleCount).toBeLessThanOrEqual(1_000);
     expect(packed.pointsPerWaveform).toBeLessThanOrEqual(MAX_DETAIL_PTS);

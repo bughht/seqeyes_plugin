@@ -61,14 +61,12 @@ import {
     estimateEnvelopeJsonBytes,
     MAX_DETAIL_PTS,
     MAX_V8_STRING_LENGTH,
-    MIN_DISPLAY_PTS,
     BAND_DETAIL_SAMPLES,
     countExactDetailSamples,
     EXACT_DETAIL_SAMPLES,
     packSequenceBlockRange,
     packSequenceBlocks,
     resolveDetailBlockRange,
-    WINDOW_DETAIL_SAMPLE_LIMIT,
 } from './blockTransport';
 import {
     computeGradientEnvelope,
@@ -521,19 +519,13 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     });
                     return;
                 }
-                // The renderer sends what it can usefully draw across the whole
-                // window; the per-waveform ceiling is ours.
-                const pointBudget = Math.max(
-                    MIN_DISPLAY_PTS,
-                    Math.min(WINDOW_DETAIL_SAMPLE_LIMIT, Math.floor(Number(msg.pointBudget) || 0)),
-                );
-                // The window and budget are what make this detail rather than a
-                // second overview, so both belong in the cache identity.
                 const columns = Math.max(1, Math.min(
                     MAX_ENVELOPE_COLUMNS,
                     Math.floor(Number(msg.columns) || 0) || 1,
                 ));
-                const cacheKey = `${sequenceGeneration}:${start}:${end}:${pointBudget}:${startSec}:${endSec}`;
+                // The window is what makes this detail rather than a second
+                // overview, so it belongs in the cache identity.
+                const cacheKey = `${sequenceGeneration}:${start}:${end}:${startSec}:${endSec}`;
                 try {
                     const decoded = decodeBlockRange(activeSequence, start, end, activeDecodeContext);
                     const windowSamples = countExactDetailSamples(decoded, { startSec, endSec });
@@ -577,7 +569,6 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                             MAX_DETAIL_PTS,
                             undefined,
                             { startSec, endSec },
-                            pointBudget,
                         );
                         const retainedBytes = packed.sampleTimes.byteLength + packed.sampleValues.byteLength
                             + estimateEnvelopeJsonBytes(packed.blocks);

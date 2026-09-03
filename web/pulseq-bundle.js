@@ -2602,7 +2602,7 @@ var Pulseq = (() => {
       notice: cap < MAX_DISPLAY_PTS ? `Large sequence: waveform detail was reduced to ${cap} points per event (normally ${MAX_DISPLAY_PTS}) to stay inside the display transfer budget.` : null
     };
   }
-  function packSequenceBlockRange(seq, startBlock, endBlock, context = createSequenceDecodeContext(seq), requestedCap = MAX_DISPLAY_PTS, sampleLimit = WINDOW_DETAIL_SAMPLE_LIMIT, window = null, totalPointBudget = 0) {
+  function packSequenceBlockRange(seq, startBlock, endBlock, context = createSequenceDecodeContext(seq), requestedCap = MAX_DISPLAY_PTS, sampleLimit = WINDOW_DETAIL_SAMPLE_LIMIT, window = null) {
     const start = Math.max(0, Math.min(seq.blocks.length, Math.floor(startBlock)));
     const end = Math.max(start, Math.min(seq.blocks.length, Math.ceil(endBlock)));
     const seriesCount = countSequenceWaveformSeriesRange(seq, start, end);
@@ -2613,10 +2613,9 @@ var Pulseq = (() => {
         `The waveform detail window needs at least ${seriesCount * MIN_DISPLAY_PTS} samples; zoom in further.`
       );
     }
-    const budgetCap = totalPointBudget > 0 && seriesCount > 0 ? Math.floor(totalPointBudget / seriesCount) : Number.POSITIVE_INFINITY;
     const cap = seriesCount > 0 ? Math.max(
       MIN_DISPLAY_PTS,
-      Math.min(safeRequestedCap, budgetCap, Math.floor(safeSampleLimit / seriesCount))
+      Math.min(safeRequestedCap, Math.floor(safeSampleLimit / seriesCount))
     ) : safeRequestedCap;
     const decoded = decodeBlockRange(seq, start, end, context);
     const clip = window && window.endSec > window.startSec ? window : null;
