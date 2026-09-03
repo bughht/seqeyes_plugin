@@ -154,6 +154,16 @@ function reportWaveformDetail(message){
 }
 
 var WAVEFORM_DETAIL_DEBOUNCE_MS = 160;
+/**
+ * Refetch once the held window is this many times wider than the view.
+ *
+ * Time coverage alone is not enough: a window fetched for a 5 ms view still
+ * covers a 0.5 ms view, so without this the detail would freeze at whatever
+ * zoom first requested it and never sharpen as the user keeps zooming in.  A
+ * fresh request pads to 1.5x the view, comfortably inside this bound, so
+ * refetching settles in one step instead of oscillating.
+ */
+var WAVEFORM_DETAIL_REFINE_FACTOR = 2;
 /** Mirrors the host's block ceiling so a hopeless request is never sent. */
 var WAVEFORM_DETAIL_BLOCK_LIMIT = 20000;
 
@@ -174,6 +184,15 @@ function resetWaveformDetail(generation){
 function waveformDetailCovers(detail,vs,ve){
   return !!(detail&&detail.generation===waveformDetailGeneration
     &&detail.startSec<=vs+1e-12&&detail.endSec>=ve-1e-12);
+}
+
+/**
+ * Whether a window is not just valid for this view but sharp enough for it.
+ * A window far wider than the view spent most of its point budget off screen.
+ */
+function waveformWindowServes(win,vs,ve){
+  if(!waveformDetailCovers(win,vs,ve))return false;
+  return (win.endSec-win.startSec)<=(ve-vs)*WAVEFORM_DETAIL_REFINE_FACTOR;
 }
 
 /**
@@ -199,23 +218,28 @@ function blockAt(blocks,bi){
  * Returns the detail to draw from, or null to keep the overview.
  */
 function waveformDetailForView(vs,ve,visiblePoints,pixelBudget,startBlock,endBlock){
-  if(waveformDetailCovers(waveformDetail,vs,ve))activeWaveformDetail=waveformDetail;
-  else activeWaveformDetail=null;
-  // Fewer transported samples than pixels means the view is showing reduced
-  // data where it has room for more — the only case detail can improve.
-  if(!activeWaveformDetail&&visiblePoints<pixelBudget
-    &&endBlock-startBlock<=WAVEFORM_DETAIL_BLOCK_LIMIT)scheduleWaveformDetail(vs,ve);
+  // Draw from any detail that covers the view, even while a sharper window is
+  // in flight: coarse detail still beats the whole-sequence overview.
+  activeWaveformDetail=waveformDetailCovers(waveformDetail,vs,ve)?waveformDetail:null;
+  // Without detail, fewer transported samples than pixels means the view is
+  // showing reduced data where it has room for more.  With detail, keep
+  // sharpening while the held window stays wider than the view deserves.
+  var wants=activeWaveformDetail
+    ?!waveformWindowServes(waveformDetail,vs,ve)
+    :visiblePoints<pixelBudget;
+  if(wants&&endBlock-startBlock<=WAVEFORM_DETAIL_BLOCK_LIMIT)scheduleWaveformDetail(vs,ve);
   return activeWaveformDetail;
 }
 
 function scheduleWaveformDetail(vs,ve){
   if(typeof requestWaveformDetailWindow!=='function'||!(ve>vs))return;
   var pad=(ve-vs)*0.25,start=Math.max(0,vs-pad),end=ve+pad;
-  if(waveformDetailPending&&waveformDetailPending.startSec<=start+1e-12
-    &&waveformDetailPending.endSec>=end-1e-12)return;
+  // Same adequacy test as the held detail, so an in-flight wide request cannot
+  // suppress the narrower one a deeper zoom now needs.
+  if(waveformWindowServes(waveformDetailPending,vs,ve))return;
   clearTimeout(waveformDetailTimer);
   waveformDetailTimer=setTimeout(function(){
-    waveformDetailPending={startSec:start,endSec:end};
+    waveformDetailPending={startSec:start,endSec:end,generation:waveformDetailGeneration};
     waveformDetailRequestId++;
     try{
       requestWaveformDetailWindow({

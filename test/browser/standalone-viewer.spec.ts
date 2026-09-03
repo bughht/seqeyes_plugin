@@ -34,6 +34,7 @@ interface DebugState {
   derivedDetailMaxViewSec: number;
   gradViewPoints: number;
   waveformDetailActive: boolean;
+  waveformDetailWindowSec: number;
   title: string;
 }
 
@@ -169,6 +170,36 @@ test('refills deep-zoom gradient detail instead of connecting overview extrema',
   expect(detailed.gradViewPoints).toBeGreaterThan(40);
   expect(detailed.waveformOverviewActive).toBe(false);
   await expectCanvasRegionVaried(page.locator('#mc'), 0.05, 0.2, 0.9, 0.6);
+});
+
+test('sharpens waveform detail as zoom deepens instead of reusing a wide window', async ({ page }) => {
+  await loadViewer(page, fixtures.largeSequence);
+  const event = await page.evaluate(() => window.__seqeyesDebug.longestGradientEvent('gx')) as {
+    start: number; end: number; points: number; block: number;
+  };
+  const mid = 0.5 * (event.start + event.end);
+
+  const settle = async (width: number) => {
+    await page.evaluate(({ s, e }) => window.__seqeyesDebug.setView(s, e), { s: mid, e: mid + width });
+    await expect
+      .poll(async () => (await debugState(page)).waveformDetailActive, { timeout: 5_000 })
+      .toBe(true);
+    await expect
+      .poll(async () => (await debugState(page)).waveformDetailWindowSec < width * 3, { timeout: 5_000 })
+      .toBe(true);
+    return debugState(page);
+  };
+
+  // Zooming in stages is what exposed this: a window fetched for the wider view
+  // still time-covers every deeper view, so without a sharpness test the detail
+  // freezes at the first zoom that requested it.
+  const wide = await settle(0.005);
+  const deep = await settle(0.0005);
+
+  expect(deep.waveformDetailWindowSec).toBeLessThan(wide.waveformDetailWindowSec / 4);
+  // A tenth of the span must not carry a tenth of the samples: refetching at the
+  // deeper zoom recovers the native raster the wide window had reduced away.
+  expect(deep.gradViewPoints).toBeGreaterThan(wide.gradViewPoints / 5);
 });
 
 test('labels multiband and inversion RF responses without treating carrier area as generic FA', async ({ page }) => {
