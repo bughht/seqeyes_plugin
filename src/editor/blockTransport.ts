@@ -45,6 +45,25 @@ export const MIN_DISPLAY_PTS = 8;
  */
 export const MAX_DETAIL_PTS = 4096;
 
+/**
+ * Deliver a detail window unreduced when it needs no more than this many
+ * samples.
+ *
+ * A reduced curve keeps every per-bucket extreme, so it does not understate a
+ * waveform's swing and a one-sample spike still survives — but it draws
+ * straight lines through the samples in between, which can flatten a step, a
+ * wrong slope or a timing glitch that is not a local extreme.  At the scales
+ * used to judge whether a sequence is correct, that doubt is not worth
+ * carrying: one TR of a spiral is ~17,500 samples, a fifth of a MiB.
+ *
+ * Sized by drawing cost rather than transfer cost, because every sample here
+ * becomes a line segment on each frame.  The renderer already accepts about
+ * `plotWidth * 8` points at its raw level, so this stays within an order of
+ * magnitude of a burden the viewer is known to sustain.  Windows above it are
+ * summarised as a min/max band instead, which costs one segment per column.
+ */
+export const EXACT_DETAIL_SAMPLES = 50_000;
+
 /** A detail request may use at most this many aligned time/value pairs. */
 export const WINDOW_DETAIL_SAMPLE_LIMIT = 2_000_000;
 
@@ -289,6 +308,13 @@ export function packSequenceBlockRange(
         : safeRequestedCap;
     const decoded = decodeBlockRange(seq, start, end, context);
     const clip = window && window.endSec > window.startSec ? window : null;
+
+    // Exactness first: if every sample the window covers fits the budget, send
+    // them all and skip the reduction entirely.
+    const exactTotal = countSamples(decoded, Number.MAX_SAFE_INTEGER, clip);
+    if (exactTotal <= Math.min(EXACT_DETAIL_SAMPLES, safeSampleLimit)) {
+        return packBlocksAtCap(decoded, Number.MAX_SAFE_INTEGER, exactTotal, clip);
+    }
     return packBlocksAtCap(decoded, cap, undefined, clip);
 }
 

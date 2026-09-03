@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   estimateEnvelopeJsonBytes,
+  MAX_DETAIL_PTS,
   MAX_DISPLAY_PTS,
   packBlocks,
   packSequenceBlockRange,
@@ -129,9 +130,13 @@ describe('packed block transport', () => {
     for (const t of native.timePoints) if (t >= nativeStart && t <= windowEnd) nativeInWindow++;
     expect(nativeInWindow).toBeGreaterThan(20);
 
-    const whole = packSequenceBlockRange(sequence, index, index + 1);
+    // A sample ceiling below the event's own size forces the reduced path;
+    // without it the window is small enough to be delivered exactly, which is
+    // the behaviour the exactness test above covers.
+    const limit = 2_000;
+    const whole = packSequenceBlockRange(sequence, index, index + 1, undefined, MAX_DISPLAY_PTS, limit);
     const clipped = packSequenceBlockRange(
-      sequence, index, index + 1, undefined, MAX_DISPLAY_PTS, undefined,
+      sequence, index, index + 1, undefined, MAX_DISPLAY_PTS, limit,
       { startSec: nativeStart, endSec: windowEnd },
     );
 
@@ -202,6 +207,44 @@ describe('packed block transport', () => {
     const detail = packSequenceBlockRange(sequence, 4, 17, undefined, 500, undefined, null);
     expect(detail.blocks).toEqual(expected.blocks);
     expect(new Float64Array(detail.sampleTimes)).toEqual(new Float64Array(expected.sampleTimes));
+  });
+
+  it('delivers a detail window unreduced when every sample fits the budget', () => {
+    const sequence = loadSequence('writeSpiral.seq');
+    const decoded = loadBlocks('writeSpiral.seq');
+    const index = decoded.findIndex(b => b.gx && b.gx.type !== 'none' && b.gx.timePoints.length > 2000);
+    const native = decoded[index].gx!;
+    // A window wide enough that a reduction would otherwise apply: the event
+    // alone carries more points than the per-waveform detail ceiling.
+    expect(native.timePoints.length).toBeGreaterThan(MAX_DETAIL_PTS);
+    const startSec = native.timePoints[0];
+    const endSec = native.timePoints[native.timePoints.length - 1];
+
+    const packed = packSequenceBlockRange(
+      sequence, index, index + 1, undefined, MAX_DETAIL_PTS, undefined,
+      { startSec, endSec }, 8_000,
+    );
+    const times = new Float64Array(packed.sampleTimes);
+    const values = new Float32Array(packed.sampleValues);
+    const ref = (packed.blocks[0] as Record<string, { o: number; n: number }>).gx;
+
+    // Every native sample, in order, with no substitution or interpolation —
+    // this is what makes a trajectory judgeable rather than merely plausible.
+    expect(ref.n).toBe(native.timePoints.length);
+    for (let i = 0; i < ref.n; i++) {
+      expect(times[ref.o + i]).toBeCloseTo(native.timePoints[i], 12);
+      expect(values[ref.o + i]).toBeCloseTo(Math.fround(native.waveform[i]), 6);
+    }
+  });
+
+  it('falls back to a bounded reduction when a window cannot be sent exactly', () => {
+    const sequence = loadSequence('writeSpiral.seq');
+    // A one-sample exactness budget forces the reduced path for any real window.
+    const packed = packSequenceBlockRange(
+      sequence, 0, sequence.blocks.length, undefined, MAX_DETAIL_PTS, 1_000, null, 400,
+    );
+    expect(packed.sampleCount).toBeLessThanOrEqual(1_000);
+    expect(packed.pointsPerWaveform).toBeLessThanOrEqual(MAX_DETAIL_PTS);
   });
 
   it('refuses a viewport whose minimum detail exceeds its sample ceiling', () => {
