@@ -60,9 +60,14 @@ import { detectSequenceTiming } from '../pulseq/trdetect';
 import {
     estimateEnvelopeJsonBytes,
     MAX_V8_STRING_LENGTH,
-    packSequenceBlockRange,
     packSequenceBlocks,
+    type PackedBlocks,
 } from './blockTransport';
+import {
+    buildWaveformDetailReply,
+    waveformDetailMessage,
+    type WaveformDetailReply,
+} from './waveformDetailReply';
 import { ByteBoundedLru } from './windowDetailCache';
 import { getWebviewContent } from './webviewContent';
 import { serializeGradientSound, serializeSpectrogram } from './spectrogramTransport';
@@ -72,7 +77,6 @@ import type { DecodedBlock, PulseqSequence } from '../pulseq/types';
 
 const VIEW_TYPE = 'seqeyes.sequenceViewer';
 const WINDOW_DETAIL_CACHE_BYTES = 64 * 1024 * 1024;
-const WINDOW_DETAIL_BLOCK_LIMIT = 20_000;
 
 export interface SeqEyesDiagnosticLoadState {
     activeUri: string;
@@ -251,7 +255,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
         let activePnsHardware: PnsHardware | undefined;
         let activeAcousticBands: AcousticResonance[] = [];
         let sequenceGeneration = 0;
-        const waveformDetailCache = new ByteBoundedLru<ReturnType<typeof packSequenceBlockRange>>(
+        const waveformDetailCache = new ByteBoundedLru<PackedBlocks>(
             WINDOW_DETAIL_CACHE_BYTES,
         );
 
@@ -492,54 +496,31 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     });
                     return;
                 }
-                const startSec = Number(msg.startSec);
-                const endSec = Number(msg.endSec);
-                const { start, end } = activeWindowBlockRange(startSec, endSec);
-                if (!(endSec > startSec) || end - start > WINDOW_DETAIL_BLOCK_LIMIT) {
-                    panel.webview.postMessage({
-                        type: 'waveformDetailError',
-                        requestId,
-                        sequenceGeneration,
-                        message: 'This waveform detail window is too large. Zoom in further.',
-                    });
-                    return;
-                }
-                const requestedCap = Math.max(8, Math.min(500, Math.floor(Number(msg.pointsPerWaveform) || 500)));
-                const cacheKey = `${sequenceGeneration}:${start}:${end}:${requestedCap}`;
-                try {
-                    let packed = waveformDetailCache.get(cacheKey);
-                    if (!packed) {
-                        packed = packSequenceBlockRange(
+                const reply = ((): WaveformDetailReply => {
+                    try {
+                        return buildWaveformDetailReply(
                             activeSequence,
-                            start,
-                            end,
                             activeDecodeContext,
-                            requestedCap,
+                            {
+                                startSec: Number(msg.startSec),
+                                endSec: Number(msg.endSec),
+                                columns: Number(msg.columns),
+                            },
+                            sequenceGeneration,
+                            key => waveformDetailCache.get(key),
                         );
-                        const retainedBytes = packed.sampleTimes.byteLength + packed.sampleValues.byteLength
-                            + estimateEnvelopeJsonBytes(packed.blocks);
-                        waveformDetailCache.set(cacheKey, packed, retainedBytes);
+                    } catch (err) {
+                        return { kind: 'error', message: err instanceof Error ? err.message : String(err) };
                     }
-                    panel.webview.postMessage({
-                        type: 'waveformDetailData',
-                        requestId,
-                        sequenceGeneration,
-                        startBlock: start,
-                        endBlock: end,
-                        blocks: packed.blocks,
-                        sampleTimes: packed.sampleTimes,
-                        sampleValues: packed.sampleValues,
-                        sampleCount: packed.sampleCount,
-                        pointsPerWaveform: packed.pointsPerWaveform,
-                    });
-                } catch (err) {
-                    panel.webview.postMessage({
-                        type: 'waveformDetailError',
-                        requestId,
-                        sequenceGeneration,
-                        message: err instanceof Error ? err.message : String(err),
-                    });
+                })();
+
+                if (reply.kind === 'samples') {
+                    const { packed } = reply;
+                    const retainedBytes = packed.sampleTimes.byteLength + packed.sampleValues.byteLength
+                        + estimateEnvelopeJsonBytes(packed.blocks);
+                    waveformDetailCache.set(reply.cacheKey, packed, retainedBytes);
                 }
+                panel.webview.postMessage(waveformDetailMessage(reply, requestId, sequenceGeneration));
             } else if (msg.command === 'calculateKspaceUnsafe') {
                 if (!activeSequence || activeGradientRaster <= 0 || activeTotalDuration <= 0) {
                     panel.webview.postMessage({ type: 'kspaceError', message: 'No sequence is loaded.' });

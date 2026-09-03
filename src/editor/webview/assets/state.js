@@ -27,7 +27,7 @@ var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
 var m1Data=null,m1WindowData=null,m1WindowPending=null,m1WindowRequestId=0,pnsData=null,pnsWindowData=null,pnsWindowPending=null,pnsWindowRequestId=0,pnsBusy=false,m1Busy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null;
 var viewerNotices={},viewerNoticesCollapsed=readViewerNoticesCollapsed();
 var kspaceSafetyWarning=null,kspaceSafetyBusy=false,kspaceSafetyPopupTimer=0;
-var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,waveformOverviewActive=false,rfRenderPointCount=0,rfRawCurveCount=0,rfReducedCurveCount=0,rfOverviewBucketCount=0,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
+var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,waveformOverviewActive=false,rfRenderPointCount=0,rfRawCurveCount=0,rfReducedCurveCount=0,rfOverviewBucketCount=0,gradViewPointCount=0,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
 var viewerDrawFrame=0,viewerDrawMinimap=false;
 function isMobileSafetyLayout(){return !!(window.matchMedia&&window.matchMedia('(max-width: 768px), (pointer: coarse)').matches);}
 function viewerNoticeMessages(value){
@@ -127,6 +127,19 @@ var blockPos=[];
 
 /* VS Code API — acquired once, used for postMessage to extension host */
 var vscApi=(typeof acquireVsCodeApi!=='undefined')?acquireVsCodeApi():null;
+
+/* Viewport waveform detail crosses the extension boundary; the standalone web
+   app installs its own in-heap implementation instead. */
+waveformDetailNotice=function(message){setViewerNotice('waveformDetail',message);};
+if(vscApi)requestWaveformDetailWindow=function(request){
+  vscApi.postMessage({
+    command:'requestWaveformDetail',
+    requestId:request.requestId,
+    sequenceGeneration:request.generation,
+    startSec:request.startSec,endSec:request.endSec,
+    columns:request.columns
+  });
+};
 
 function normalizeM1ReferenceMode(mode){return mode==='observationTime'?'observationTime':'rfCenter';}
 function readM1ReferenceMode(){
@@ -285,7 +298,7 @@ function applySerializedKspace(payload){
    much as the message: the progress overlay reaches "Ready" either way, so
    leaving stale blocks on screen would read as a successful load. */
 function showSequenceLoadFailure(message){
-  BL=[];waveformOverview=null;blockPos=[];mmCache=null;
+  BL=[];waveformOverview=null;blockPos=[];mmCache=null;resetWaveformDetail();
   setViewerNotice('sequence',message);
   setExportButtonEnabled(false);
   draw();drawMinimap();
@@ -313,6 +326,7 @@ window.addEventListener('message',function(e){
     return;
   }
   if(m.type==='sequenceData'){
+    resetWaveformDetail(m.sequenceGeneration);
     try{
       BL=unpackSequenceBlocks(m.blocks,m.sampleTimes,m.sampleValues,m.sampleCount||0);
     }catch(err){
@@ -339,6 +353,35 @@ window.addEventListener('message',function(e){
     setExportButtonEnabled(true);
     SeqEyesPanel.onSequenceLoaded();
     requestAnimationFrame(function(){refreshLayout();draw();drawKs();drawMinimap();});
+  }else if(m.type==='waveformDetailData'){
+    var detailBlocks;
+    try{
+      detailBlocks=unpackSequenceBlocks(m.blocks,m.sampleTimes,m.sampleValues,m.sampleCount||0);
+    }catch(err){
+      failWaveformDetail({requestId:m.requestId,generation:m.sequenceGeneration,message:(err&&err.message||String(err))});
+      return;
+    }
+    if(applyWaveformDetail({
+      requestId:m.requestId,generation:m.sequenceGeneration,
+      startBlock:m.startBlock,endBlock:m.endBlock,
+      startSec:m.startSec,endSec:m.endSec,blocks:detailBlocks
+    }))draw();
+  }else if(m.type==='waveformBandData'){
+    var bandValues=asTypedView(m.values,Float32Array);
+    if(!bandValues){
+      failWaveformDetail({requestId:m.requestId,generation:m.sequenceGeneration,
+        message:'the waveform band did not arrive as binary data'});
+      return;
+    }
+    if(applyWaveformBand({
+      requestId:m.requestId,generation:m.sequenceGeneration,
+      startSec:m.startSec,endSec:m.endSec,columns:m.columns,values:bandValues
+    }))draw();
+  }else if(m.type==='waveformDetailUnavailable'){
+    if(refuseWaveformDetail({requestId:m.requestId,generation:m.sequenceGeneration,
+      startSec:m.startSec,endSec:m.endSec}))draw();
+  }else if(m.type==='waveformDetailError'){
+    failWaveformDetail({requestId:m.requestId,generation:m.sequenceGeneration,message:m.message});
   }else if(m.type==='loadError'){
     showSequenceLoadFailure(m.message||'The sequence could not be loaded.');
   }else if(m.type==='kspaceData'){

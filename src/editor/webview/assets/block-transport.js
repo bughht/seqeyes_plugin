@@ -109,3 +109,240 @@ function deserializeGradientSound(payload){
     right:decodeB64F32(payload.rightB64,payload.n)
   };
 }
+
+/* ── Viewport waveform detail ─────────────────────────────────────────────
+   The initial payload is one bounded overview of the whole sequence: every
+   waveform is reduced to at most a few hundred points so a large sequence can
+   cross the transport at all.  That is the right trade for the first paint and
+   for wide views, but it is irreversible — zooming into 0.5 ms of a 48 ms
+   readout leaves the renderer connecting a handful of surviving extrema, which
+   draws as straight polygonal segments instead of the real waveform.
+
+   So when the view is zoomed far enough that it holds fewer transported
+   samples than it has pixels, the host is asked to decode that block range
+   again and reduce it against the visible interval instead of the whole event.
+   The reply replaces only the blocks it covers, and only while it covers the
+   view; everything outside keeps the overview.  Requests are debounced so a
+   drag issues one decode at rest rather than one per frame, and each reply
+   carries the sequence generation it was packed from so a load that lands
+   mid-flight cannot paint the previous sequence's samples. */
+
+/** Detail currently held: {blocks,startBlock,endBlock,startSec,endSec,generation}. */
+var waveformDetail = null;
+/**
+ * Band held for windows carrying more samples than can be drawn one segment
+ * each: {startSec,endSec,columns,values,generation}.  `values` is six runs of
+ * `columns` floats — gxMin, gxMax, gyMin, gyMax, gzMin, gzMax — NaN where a
+ * column holds no gradient, so a gap cannot be read as a zero.
+ */
+var waveformBand = null;
+/** Set for one drawBlocks pass when the band, not samples, describes the view. */
+var activeWaveformBand = null;
+/**
+ * Narrowest window the host refused as beyond its decode budget.  Anything at
+ * least this wide would be refused too, so it is not asked for again; zooming
+ * in narrows the request and lifts the block on its own.
+ */
+var waveformDetailRefusedSec = Infinity;
+/** Set for the duration of one drawBlocks pass when detail covers the view. */
+var activeWaveformDetail = null;
+var waveformDetailPending = null;
+var waveformDetailTimer = 0;
+var waveformDetailRequestId = 0;
+/** Bumped by the host on every sequence load; stale replies are dropped. */
+var waveformDetailGeneration = 0;
+/**
+ * Installed by each host: VS Code posts a message to the extension, the
+ * standalone web app packs the range in this same heap.  Receives
+ * {requestId, generation, startSec, endSec, columns}.
+ */
+var requestWaveformDetailWindow = null;
+/**
+ * Installed by each host to surface a detail failure.  This bundle's notice
+ * state is not what the standalone web app renders, so the message has to go
+ * back out to whichever viewer is actually on screen.
+ */
+var waveformDetailNotice = null;
+
+function reportWaveformDetail(message){
+  if(typeof waveformDetailNotice==='function')waveformDetailNotice(message);
+}
+
+var WAVEFORM_DETAIL_DEBOUNCE_MS = 160;
+/**
+ * Refetch once the held window is this many times wider than the view.
+ *
+ * Time coverage alone is not enough: a window fetched for a 5 ms view still
+ * covers a 0.5 ms view, so without this the detail would freeze at whatever
+ * zoom first requested it and never sharpen as the user keeps zooming in.  A
+ * fresh request pads to 1.5x the view, comfortably inside this bound, so
+ * refetching settles in one step instead of oscillating.
+ */
+var WAVEFORM_DETAIL_REFINE_FACTOR = 2;
+/** Mirrors the host's block ceiling so a hopeless request is never sent. */
+var WAVEFORM_DETAIL_BLOCK_LIMIT = 20000;
+
+/**
+ * Discard detail and in-flight requests; call whenever BL is replaced.
+ *
+ * VS Code passes the extension host's own sequence generation so both sides
+ * agree on which load a reply belongs to; the standalone web app owns the
+ * counter itself and just advances it.
+ */
+function resetWaveformDetail(generation){
+  waveformDetail=null;activeWaveformDetail=null;waveformDetailPending=null;
+  waveformBand=null;activeWaveformBand=null;waveformDetailRefusedSec=Infinity;
+  clearTimeout(waveformDetailTimer);waveformDetailTimer=0;
+  waveformDetailGeneration=(typeof generation==='number'&&isFinite(generation))
+    ?generation:waveformDetailGeneration+1;
+}
+
+function waveformDetailCovers(detail,vs,ve){
+  return !!(detail&&detail.generation===waveformDetailGeneration
+    &&detail.startSec<=vs+1e-12&&detail.endSec>=ve-1e-12);
+}
+
+/**
+ * Whether a window is not just valid for this view but sharp enough for it.
+ * A window far wider than the view spent most of its point budget off screen.
+ */
+function waveformWindowServes(win,vs,ve){
+  if(!waveformDetailCovers(win,vs,ve))return false;
+  return (win.endSec-win.startSec)<=(ve-vs)*WAVEFORM_DETAIL_REFINE_FACTOR;
+}
+
+/**
+ * The block the renderer should draw for index `bi`.  Detail blocks carry the
+ * same identity and timing as their overview counterparts and differ only in
+ * waveform resolution, so substituting one is transparent to every caller.
+ *
+ * `blocks` is passed in rather than read from a global because the standalone
+ * web app runs its renderer inside an IIFE with its own `BL`; every function
+ * this bundle shares with it has to take the state it operates on.
+ */
+function blockAt(blocks,bi){
+  var detail=activeWaveformDetail;
+  if(detail&&bi>=detail.startBlock&&bi<detail.endBlock){
+    var block=detail.blocks[bi-detail.startBlock];
+    if(block)return block;
+  }
+  return blocks[bi];
+}
+
+/**
+ * Decide whether detail applies to this view and, if it would help, ask for it.
+ * Returns the detail to draw from, or null to keep the overview.
+ */
+function waveformDetailForView(vs,ve,pixelBudget,startBlock,endBlock){
+  // Draw from any detail that covers the view, even while a sharper window is
+  // in flight: coarse detail still beats the whole-sequence overview.
+  activeWaveformDetail=waveformDetailCovers(waveformDetail,vs,ve)?waveformDetail:null;
+  // Anything not already served by exact samples or a band is being drawn from
+  // the reduced transport, which is the representation to get away from — so
+  // ask, whatever the point count.  Held data is refetched once its window is
+  // wider than the view deserves.  Loops are prevented by the coverage test and
+  // by remembering a refusal, not by withholding the request.
+  var wants=activeWaveformDetail
+    ? !waveformWindowServes(waveformDetail,vs,ve)
+    : (waveformDetailCovers(waveformBand,vs,ve)
+      ? !waveformWindowServes(waveformBand,vs,ve)
+      : true);
+  if(wants&&endBlock-startBlock<=WAVEFORM_DETAIL_BLOCK_LIMIT)
+    scheduleWaveformDetail(vs,ve,pixelBudget);
+  return activeWaveformDetail;
+}
+
+/**
+ * The band gradients should be drawn from, or null when exact samples are
+ * available or the view is beyond what the host will decode.  Kept separate
+ * from the sample path so a stale band is never drawn beside fresher samples.
+ */
+function waveformBandForView(vs,ve){
+  activeWaveformBand=(!activeWaveformDetail&&waveformDetailCovers(waveformBand,vs,ve))
+    ?waveformBand:null;
+  return activeWaveformBand;
+}
+
+/** One column's [min,max] for a channel, or null where it holds nothing. */
+function bandColumn(band,channelIndex,column){
+  if(!band||column<0||column>=band.columns)return null;
+  var base=channelIndex*2*band.columns;
+  var lo=band.values[base+column],hi=band.values[base+band.columns+column];
+  if(!(lo===lo)||!(hi===hi))return null;   // NaN marks an empty column
+  return{lo:lo,hi:hi};
+}
+
+function scheduleWaveformDetail(vs,ve,pixelBudget){
+  if(typeof requestWaveformDetailWindow!=='function'||!(ve>vs))return;
+  var pad=(ve-vs)*0.25,start=Math.max(0,vs-pad),end=ve+pad;
+  if(end-start>=waveformDetailRefusedSec)return;
+  // Enough columns that the part inside the view still gets about one per
+  // pixel once the padding either side is discounted.
+  var columns=Math.max(1,Math.ceil((pixelBudget||1)*((end-start)/(ve-vs))));
+  // Same adequacy test as the held detail, so an in-flight wide request cannot
+  // suppress the narrower one a deeper zoom now needs.
+  if(waveformWindowServes(waveformDetailPending,vs,ve))return;
+  clearTimeout(waveformDetailTimer);
+  waveformDetailTimer=setTimeout(function(){
+    waveformDetailPending={startSec:start,endSec:end,generation:waveformDetailGeneration};
+    waveformDetailRequestId++;
+    try{
+      requestWaveformDetailWindow({
+        requestId:waveformDetailRequestId,
+        generation:waveformDetailGeneration,
+        startSec:start,endSec:end,
+        columns:columns
+      });
+    }catch(err){waveformDetailPending=null;
+      reportWaveformDetail('Waveform detail was not calculated: '+(err&&err.message||String(err))+'.');}
+  },WAVEFORM_DETAIL_DEBOUNCE_MS);
+}
+
+/** Accept a detail reply. Ignores stale generations and superseded requests. */
+function applyWaveformDetail(payload){
+  if(!payload||payload.generation!==waveformDetailGeneration)return false;
+  if(payload.requestId!==waveformDetailRequestId)return false;
+  waveformDetailPending=null;
+  waveformDetail={
+    blocks:payload.blocks,startBlock:payload.startBlock,endBlock:payload.endBlock,
+    startSec:payload.startSec,endSec:payload.endSec,generation:payload.generation
+  };
+  reportWaveformDetail(null);
+  return true;
+}
+
+/** Accept a band for a window too dense to draw sample by sample. */
+function applyWaveformBand(payload){
+  if(!payload||payload.generation!==waveformDetailGeneration)return false;
+  if(payload.requestId!==waveformDetailRequestId)return false;
+  waveformDetailPending=null;
+  waveformDetail=null;activeWaveformDetail=null;
+  waveformBand={
+    startSec:payload.startSec,endSec:payload.endSec,columns:payload.columns,
+    values:payload.values,generation:payload.generation
+  };
+  reportWaveformDetail(null);
+  return true;
+}
+
+/** Remember that this window exceeds the decode budget and stop asking. */
+function refuseWaveformDetail(payload){
+  if(!payload||payload.generation!==waveformDetailGeneration)return false;
+  if(payload.requestId!==waveformDetailRequestId)return false;
+  waveformDetailPending=null;
+  var width=payload.endSec-payload.startSec;
+  if(width>0&&width<waveformDetailRefusedSec)waveformDetailRefusedSec=width;
+  return true;
+}
+
+/**
+ * Record a failed detail request without discarding the overview.  Checks the
+ * request id as well as the generation so a superseded failure cannot clear a
+ * newer in-flight request or leave a notice about a window nobody is viewing.
+ */
+function failWaveformDetail(payload){
+  if(!payload||payload.generation!==waveformDetailGeneration)return;
+  if(payload.requestId!==waveformDetailRequestId)return;
+  waveformDetailPending=null;
+  reportWaveformDetail('Waveform detail was not calculated: '+(payload.message||'unknown error')+'.');
+}

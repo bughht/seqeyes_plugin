@@ -23,7 +23,12 @@ var Pulseq = (() => {
   // web/pulseq-browser.ts
   var pulseq_browser_exports = {};
   __export(pulseq_browser_exports, {
+    BAND_DETAIL_SAMPLES: () => BAND_DETAIL_SAMPLES,
+    EXACT_DETAIL_SAMPLES: () => EXACT_DETAIL_SAMPLES,
     INTERACTIVE_COMPUTE_LIMITS: () => INTERACTIVE_COMPUTE_LIMITS,
+    MAX_DETAIL_PTS: () => MAX_DETAIL_PTS,
+    MAX_DISPLAY_PTS: () => MAX_DISPLAY_PTS,
+    MAX_ENVELOPE_COLUMNS: () => MAX_ENVELOPE_COLUMNS,
     MAX_RF_RESPONSE_BANDS: () => MAX_RF_RESPONSE_BANDS,
     MAX_RF_RESPONSE_FFT_POINTS: () => MAX_RF_RESPONSE_FFT_POINTS,
     MAX_RF_RESPONSE_SAMPLES: () => MAX_RF_RESPONSE_SAMPLES,
@@ -36,10 +41,13 @@ var Pulseq = (() => {
     calculatePns: () => calculatePns,
     calculatePnsCoarse: () => calculatePnsCoarse,
     computeGradSpectrumParity: () => computeGradSpectrumParity,
+    computeGradientEnvelope: () => computeGradientEnvelope,
     computeGradientSpectrogram: () => computeGradientSpectrogram,
     computeGradientSpectrumAverage: () => computeGradientSpectrumAverage,
     computeGradientSpectrumSlice: () => computeGradientSpectrumSlice,
     countBandsOutsideRange: () => countBandsOutsideRange,
+    countExactDetailSamples: () => countExactDetailSamples,
+    countGradientSamples: () => countGradientSamples,
     createSequenceDecodeContext: () => createSequenceDecodeContext,
     decodeAllBlocks: () => decodeAllBlocks,
     decodeBlockRange: () => decodeBlockRange,
@@ -64,6 +72,8 @@ var Pulseq = (() => {
     hasPulseqBinaryMagic: () => hasPulseqBinaryMagic,
     isEmptyAscProfile: () => isEmptyAscProfile,
     kspaceExceedsInteractiveBudget: () => kspaceExceedsInteractiveBudget,
+    packGradientEnvelope: () => packGradientEnvelope,
+    packSequenceBlockRange: () => packSequenceBlockRange,
     packSequenceBlocks: () => packSequenceBlocks,
     parseAcousticResonancesAsc: () => parseAcousticResonancesAsc,
     parseAscProfile: () => parseAscProfile,
@@ -74,6 +84,7 @@ var Pulseq = (() => {
     parseSequenceText: () => parseSequenceText,
     physicalGradientValueAt: () => physicalGradientValueAt,
     resamplePhysicalGradients: () => resamplePhysicalGradients,
+    resolveDetailBlockRange: () => resolveDetailBlockRange,
     resolveSpectrogramParams: () => resolveSpectrogramParams,
     rotateGradient: () => rotateGradient,
     safePnsModel: () => safePnsModel,
@@ -86,7 +97,7 @@ var Pulseq = (() => {
   });
 
   // package.json
-  var version = "0.3.3";
+  var version = "0.3.4";
 
   // src/pulseq/decompressor.ts
   function decompressShape(compressed, numSamples) {
@@ -2426,39 +2437,54 @@ var Pulseq = (() => {
   }
 
   // src/pulseq/displayDownsampling.ts
-  function reduceM4(time, values, maxPoints, emit) {
-    const n = Math.min(time.length, values.length);
+  function reduceM4Range(time, values, start, end, maxPoints, emit) {
+    const n = Math.max(0, end - start);
     if (n === 0 || maxPoints <= 0) return 0;
     if (n <= maxPoints) {
-      let kept2 = 0;
-      for (let index = 0; index < n; index++) {
-        emit(time[index], values[index]);
-        kept2++;
-      }
-      return kept2;
+      for (let index = start; index < end; index++) emit(time[index], values[index]);
+      return n;
     }
     const bucketCount = Math.max(1, Math.floor(maxPoints / 4));
     let kept = 0;
     for (let bucket = 0; bucket < bucketCount; bucket++) {
-      const start = Math.floor(bucket * n / bucketCount);
-      const end = Math.max(start + 1, Math.floor((bucket + 1) * n / bucketCount));
-      kept += emitBucket(time, values, start, Math.min(n, end), emit);
+      const bucketStart = start + Math.floor(bucket * n / bucketCount);
+      const bucketEnd = Math.max(bucketStart + 1, start + Math.floor((bucket + 1) * n / bucketCount));
+      kept += emitBucket(time, values, bucketStart, Math.min(end, bucketEnd), emit);
     }
     return kept;
   }
-  function reduceUniform(time, values, maxPoints, emit) {
-    const n = Math.min(time.length, values.length);
+  function reduceUniformRange(time, values, start, end, maxPoints, emit) {
+    const n = Math.max(0, end - start);
     if (n === 0 || maxPoints <= 0) return 0;
     if (n <= maxPoints) {
-      for (let index = 0; index < n; index++) emit(time[index], values[index]);
+      for (let index = start; index < end; index++) emit(time[index], values[index]);
       return n;
     }
     const step = n / maxPoints;
     for (let index = 0; index < maxPoints; index++) {
-      const source = Math.floor(index * step);
-      emit(time[source], values[source]);
+      emit(time[start + Math.floor(index * step)], values[start + Math.floor(index * step)]);
     }
     return maxPoints;
+  }
+  function clipIndexRange(time, startSec, endSec, length) {
+    const n = Math.max(0, Math.min(length, time.length));
+    if (n === 0) return { start: 0, end: 0 };
+    let lo = 0;
+    let hi = n;
+    while (lo < hi) {
+      const mid = lo + hi >> 1;
+      if (time[mid] < startSec) lo = mid + 1;
+      else hi = mid;
+    }
+    const start = Math.max(0, lo - 1);
+    lo = start;
+    hi = n;
+    while (lo < hi) {
+      const mid = lo + hi >> 1;
+      if (time[mid] <= endSec) lo = mid + 1;
+      else hi = mid;
+    }
+    return { start, end: Math.min(n, lo + 1) };
   }
   function emitBucket(time, values, start, end, emit) {
     let minIndex = start;
@@ -2486,24 +2512,36 @@ var Pulseq = (() => {
   // src/editor/blockTransport.ts
   var MAX_DISPLAY_PTS = 500;
   var MIN_DISPLAY_PTS = 8;
+  var MAX_DETAIL_PTS = 4096;
+  var EXACT_DETAIL_SAMPLES = 5e4;
+  var BAND_DETAIL_SAMPLES = INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples;
+  var WINDOW_DETAIL_SAMPLE_LIMIT = 2e6;
   var TAU2 = 2 * Math.PI;
   var EMPTY_PAIR = { o: 0, n: 0 };
   var CountingSink = class {
-    constructor(cap) {
+    constructor(cap, window = null) {
       __publicField(this, "cap", cap);
+      __publicField(this, "window", window);
       __publicField(this, "buildEnvelope", false);
       __publicField(this, "total", 0);
     }
     pair(time, values, useM4) {
-      this.total += useM4 ? reduceM4(time, values, this.cap, discard) : reduceUniform(time, values, this.cap, discard);
+      const { start, end } = clipPair(time, values, this.window);
+      this.total += useM4 ? reduceM4Range(time, values, start, end, this.cap, discard) : reduceUniformRange(time, values, start, end, this.cap, discard);
       return EMPTY_PAIR;
     }
   };
+  function clipPair(time, values, window) {
+    const n = Math.min(time.length, values.length);
+    if (!window) return { start: 0, end: n };
+    return clipIndexRange(time, window.startSec, window.endSec, n);
+  }
   var WritingSink = class {
-    constructor(cap, times, values) {
+    constructor(cap, times, values, window = null) {
       __publicField(this, "cap", cap);
       __publicField(this, "times", times);
       __publicField(this, "values", values);
+      __publicField(this, "window", window);
       __publicField(this, "buildEnvelope", true);
       __publicField(this, "cursor", 0);
       __publicField(this, "wrapPhase", false);
@@ -2518,12 +2556,13 @@ var Pulseq = (() => {
       return this.cursor;
     }
     pair(time, values, useM4, wrapPhase) {
-      const start = this.cursor;
+      const origin = this.cursor;
+      const clipped = clipPair(time, values, this.window);
       this.wrapPhase = wrapPhase;
-      if (useM4) reduceM4(time, values, this.cap, this.emit);
-      else reduceUniform(time, values, this.cap, this.emit);
+      if (useM4) reduceM4Range(time, values, clipped.start, clipped.end, this.cap, this.emit);
+      else reduceUniformRange(time, values, clipped.start, clipped.end, this.cap, this.emit);
       this.wrapPhase = false;
-      return { o: start, n: this.cursor - start };
+      return { o: origin, n: this.cursor - origin };
     }
   };
   function discard() {
@@ -2563,11 +2602,52 @@ var Pulseq = (() => {
       notice: cap < MAX_DISPLAY_PTS ? `Large sequence: waveform detail was reduced to ${cap} points per event (normally ${MAX_DISPLAY_PTS}) to stay inside the display transfer budget.` : null
     };
   }
-  function packBlocksAtCap(blocks, cap, knownTotal) {
-    const total = knownTotal ?? countSamples(blocks, cap);
+  function packSequenceBlockRange(seq, startBlock, endBlock, context = createSequenceDecodeContext(seq), requestedCap = MAX_DISPLAY_PTS, sampleLimit = WINDOW_DETAIL_SAMPLE_LIMIT, window = null) {
+    const start = Math.max(0, Math.min(seq.blocks.length, Math.floor(startBlock)));
+    const end = Math.max(start, Math.min(seq.blocks.length, Math.ceil(endBlock)));
+    const seriesCount = countSequenceWaveformSeriesRange(seq, start, end);
+    const safeSampleLimit = Number.isFinite(sampleLimit) && sampleLimit >= 0 ? Math.floor(sampleLimit) : WINDOW_DETAIL_SAMPLE_LIMIT;
+    const safeRequestedCap = Number.isFinite(requestedCap) && requestedCap > 0 ? Math.floor(requestedCap) : MAX_DISPLAY_PTS;
+    if (seriesCount * MIN_DISPLAY_PTS > safeSampleLimit) {
+      throw new Error(
+        `The waveform detail window needs at least ${seriesCount * MIN_DISPLAY_PTS} samples; zoom in further.`
+      );
+    }
+    const cap = seriesCount > 0 ? Math.max(
+      MIN_DISPLAY_PTS,
+      Math.min(safeRequestedCap, Math.floor(safeSampleLimit / seriesCount))
+    ) : safeRequestedCap;
+    const decoded = decodeBlockRange(seq, start, end, context);
+    const clip = window && window.endSec > window.startSec ? window : null;
+    const exactTotal = countSamples(decoded, Number.MAX_SAFE_INTEGER, clip);
+    if (exactTotal <= Math.min(EXACT_DETAIL_SAMPLES, safeSampleLimit)) {
+      return packBlocksAtCap(decoded, Number.MAX_SAFE_INTEGER, exactTotal, clip);
+    }
+    return packBlocksAtCap(decoded, cap, void 0, clip);
+  }
+  function resolveDetailBlockRange(blockStartTimes, blockCount, startSec, endSec) {
+    const lowerBound = (target) => {
+      let lo = 0;
+      let hi = blockStartTimes.length;
+      while (lo < hi) {
+        const mid = lo + hi >> 1;
+        if (blockStartTimes[mid] < target) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo;
+    };
+    const start = Math.max(0, Math.min(blockCount, lowerBound(startSec) - 1));
+    const end = Math.max(start, Math.min(blockCount, lowerBound(endSec) + 1));
+    return { start, end };
+  }
+  function countExactDetailSamples(blocks, window = null) {
+    return countSamples(blocks, Number.MAX_SAFE_INTEGER, window);
+  }
+  function packBlocksAtCap(blocks, cap, knownTotal, window = null) {
+    const total = knownTotal ?? countSamples(blocks, cap, window);
     const times = new Float64Array(total);
     const values = new Float32Array(total);
-    const sink = new WritingSink(cap, times, values);
+    const sink = new WritingSink(cap, times, values, window);
     const envelope = new Array(blocks.length);
     for (let index = 0; index < blocks.length; index++) {
       envelope[index] = walkBlock(blocks[index], sink);
@@ -2611,8 +2691,8 @@ var Pulseq = (() => {
       if (gradient) gradient.o += delta;
     }
   }
-  function countSamples(blocks, cap) {
-    const sink = new CountingSink(cap);
+  function countSamples(blocks, cap, window = null) {
+    const sink = new CountingSink(cap, window);
     for (const block of blocks) walkBlock(block, sink);
     return sink.total;
   }
@@ -2715,6 +2795,95 @@ var Pulseq = (() => {
     const tolerance = Math.max(1e-12, peak * 1e-9);
     const blockPulse = finiteCount === count && count >= 2 && peak > 0 && max - min <= tolerance;
     return { peak, area, blockPulse };
+  }
+
+  // src/pulseq/gradientEnvelope.ts
+  var GRADIENT_CHANNELS = ["gx", "gy", "gz"];
+  var MAX_ENVELOPE_COLUMNS = 8192;
+  function emptyChannel(columns) {
+    const min = new Float32Array(columns).fill(Infinity);
+    const max = new Float32Array(columns).fill(-Infinity);
+    return { min, max, filled: new Uint8Array(columns) };
+  }
+  function accumulate(channel, grad, startSec, endSec, columns) {
+    const time = grad.timePoints;
+    const values = grad.waveform;
+    const n = Math.min(time.length, values.length);
+    if (n === 0) return;
+    const span = endSec - startSec;
+    if (!(span > 0)) return;
+    const toColumn = (t) => (t - startSec) / span * columns;
+    const put = (column, value) => {
+      if (column < 0 || column >= columns || !Number.isFinite(value)) return;
+      if (value < channel.min[column]) channel.min[column] = value;
+      if (value > channel.max[column]) channel.max[column] = value;
+      channel.filled[column] = 1;
+    };
+    if (n === 1) {
+      put(Math.floor(toColumn(time[0])), values[0]);
+      return;
+    }
+    for (let i = 1; i < n; i++) {
+      const t0 = time[i - 1];
+      const t1 = time[i];
+      if (t1 < startSec || t0 > endSec) continue;
+      const c0 = toColumn(t0);
+      const c1 = toColumn(t1);
+      const lo = Math.max(0, Math.floor(Math.min(c0, c1)));
+      const hi = Math.min(columns - 1, Math.floor(Math.max(c0, c1)));
+      const dc = c1 - c0;
+      const valueAt = (column) => {
+        if (dc === 0) return values[i];
+        const f = (column - c0) / dc;
+        return values[i - 1] + f * (values[i] - values[i - 1]);
+      };
+      for (let column = lo; column <= hi; column++) {
+        const from = Math.max(Math.min(c0, c1), column);
+        const to = Math.min(Math.max(c0, c1), column + 1);
+        if (to < from) continue;
+        put(column, valueAt(from));
+        put(column, valueAt(to));
+      }
+    }
+  }
+  function computeGradientEnvelope(blocks, startSec, endSec, columns) {
+    const width = Math.max(1, Math.min(MAX_ENVELOPE_COLUMNS, Math.floor(columns)));
+    const channels = {
+      gx: emptyChannel(width),
+      gy: emptyChannel(width),
+      gz: emptyChannel(width)
+    };
+    for (const block of blocks) {
+      for (const key of GRADIENT_CHANNELS) {
+        const grad = block[key];
+        if (!grad || grad.type === "none") continue;
+        accumulate(channels[key], grad, startSec, endSec, width);
+      }
+    }
+    return { startSec, endSec, columns: width, channels };
+  }
+  function countGradientSamples(blocks) {
+    let total = 0;
+    for (const block of blocks) {
+      for (const key of GRADIENT_CHANNELS) {
+        const grad = block[key];
+        if (grad && grad.type !== "none") total += grad.timePoints.length;
+      }
+    }
+    return total;
+  }
+  function packGradientEnvelope(envelope) {
+    const { columns } = envelope;
+    const out = new Float32Array(columns * 6);
+    let cursor = 0;
+    for (const key of GRADIENT_CHANNELS) {
+      const channel = envelope.channels[key];
+      for (let c = 0; c < columns; c++) out[cursor + c] = channel.filled[c] ? channel.min[c] : NaN;
+      cursor += columns;
+      for (let c = 0; c < columns; c++) out[cursor + c] = channel.filled[c] ? channel.max[c] : NaN;
+      cursor += columns;
+    }
+    return { startSec: envelope.startSec, endSec: envelope.endSec, columns, values: out.buffer };
   }
 
   // src/pulseq/physicalGradients.ts

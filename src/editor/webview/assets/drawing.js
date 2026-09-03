@@ -3,7 +3,7 @@ var panelMarkerTimeSec=NaN;
    Main draw loop
    ═══════════════════════════════════════════════════════════════════════ */
 function draw(){
-  var drawStarted=performance.now();derivedRenderPointCount=0;derivedEnvelopeCurveCount=0;derivedRawCurveCount=0;rfRenderPointCount=0;rfRawCurveCount=0;rfReducedCurveCount=0;rfOverviewBucketCount=0;viewerDrawCount++;
+  var drawStarted=performance.now();derivedRenderPointCount=0;derivedEnvelopeCurveCount=0;derivedRawCurveCount=0;rfRenderPointCount=0;rfRawCurveCount=0;rfReducedCurveCount=0;rfOverviewBucketCount=0;gradViewPointCount=0;viewerDrawCount++;
   var w=mc.width/(window.devicePixelRatio||1),h=mc.height/(window.devicePixelRatio||1);
   var s=getComputedStyle(document.body);
   ctx.clearRect(0,0,w,h);
@@ -293,18 +293,37 @@ function drawBlocks(vs,ve,s){
   var pixelBudget=Math.max(1,Math.floor(plotWidth()));
   var overview=selectWaveformOverview(waveformOverview,range.start,range.end,pixelBudget);
   function useOverview(key){return !!overview&&waveformVisiblePointCount(waveformOverview,key,range.start,range.end)>pixelBudget;}
-  function useGradientOverview(key){return !!overview&&waveformVisibleGradientPointCount(BL,key,range.start,range.end,vs,ve)>pixelBudget*8;}
+  var gradVisible={gx:waveformVisibleGradientPointCount(BL,'gx',range.start,range.end,vs,ve),
+    gy:waveformVisibleGradientPointCount(BL,'gy',range.start,range.end,vs,ve),
+    gz:waveformVisibleGradientPointCount(BL,'gz',range.start,range.end,vs,ve)};
+  function useGradientOverview(key){return !!overview&&gradVisible[key]>pixelBudget*8;}
   var rfPoints=waveformVisiblePointCount(waveformOverview,'rf',range.start,range.end),rfEvents=waveformVisiblePointCount(waveformOverview,'rfEvents',range.start,range.end);
   var aggregateRf=!!overview&&rfEvents>pixelBudget*2,reduceRf=aggregateRf||rfPoints>pixelBudget*8;
   var overviewUse={rf:reduceRf,phase:useOverview('phase'),gx:useGradientOverview('gx'),gy:useGradientOverview('gy'),gz:useGradientOverview('gz'),adc:useOverview('adc')};
   var dense=overviewUse.rf||overviewUse.phase||overviewUse.gx||overviewUse.gy||overviewUse.gz||overviewUse.adc;
   waveformOverviewActive=dense;
   setViewerNotice('dense',dense?'Dense overview mode is active. Zoom in for full waveform detail.':null);
+  // Raw level draws whatever the transport delivered, so this is where an
+  // over-reduced view has to be refilled with samples clipped to the viewport.
+  // Keyed on the waveform rows specifically: phase or ADC switching to the
+  // overview says nothing about the gradients, which may still be drawing
+  // transported samples and still be the thing that looks wrong.
+  var rawWaveformRows=!(overviewUse.gx&&overviewUse.gy&&overviewUse.gz&&reduceRf);
+  if(rawWaveformRows)waveformDetailForView(vs,ve,pixelBudget,range.start,range.end);
+  else activeWaveformDetail=null;
   if(rows[0]>=0){if(aggregateRf)drawRfOverview(overview,rows[0],ch,colors,vs,ve);else drawRfBlocks(range.start,range.end,rows[0],ch,colors,vs,ve,pixelBudget*8);}
   if(rows[1]>=0){if(overviewUse.phase)drawPhaseSampled(range.start,range.end,rows[1],ch,colors,vs,ve,pixelBudget);else drawPhaseBlocks(range.start,range.end,rows[1],ch,colors,vs,ve);}
-  if(rows[2]>=0){if(overviewUse.gx)drawGradientOverview(overview,'gx',rows[2],2,ch,colors.gx,vs,ve);else drawGradientBlocks(range.start,range.end,'gx',rows[2],2,ch,colors.gx,vs,ve);}
-  if(rows[3]>=0){if(overviewUse.gy)drawGradientOverview(overview,'gy',rows[3],3,ch,colors.gy,vs,ve);else drawGradientBlocks(range.start,range.end,'gy',rows[3],3,ch,colors.gy,vs,ve);}
-  if(rows[4]>=0){if(overviewUse.gz)drawGradientOverview(overview,'gz',rows[4],4,ch,colors.gz,vs,ve);else drawGradientBlocks(range.start,range.end,'gz',rows[4],4,ch,colors.gz,vs,ve);}
+  // Band first: where it covers the view it is the accurate representation, and
+  // the block polyline would be drawing an already-reduced transport instead.
+  var band=waveformBandForView(vs,ve);
+  var gradKeys=['gx','gy','gz'];
+  for(var gi=0;gi<3;gi++){
+    var row=rows[2+gi],key=gradKeys[gi];
+    if(row<0)continue;
+    if(band)drawGradientBand(band,gi,key,row,2+gi,ch,colors[key],vs,ve);
+    else if(overviewUse[key])drawGradientOverview(overview,key,row,2+gi,ch,colors[key],vs,ve);
+    else drawGradientBlocks(range.start,range.end,key,row,2+gi,ch,colors[key],vs,ve);
+  }
   if(rows[5]>=0){if(overviewUse.adc)drawAdcOverview(overview,rows[5],ch,colors,vs,ve);else drawAdcBlocks(range.start,range.end,rows[5],ch,colors,vs,ve);}
   if(rows[6]>=0&&range.end-range.start<=pixelBudget)drawTriggerBlocks(range.start,range.end,rows[6],ch,colors,vs,ve);
 }
@@ -409,7 +428,7 @@ function drawRfBlocks(start,end,vi,ch,colors,vs,ve,maxPoints){
   rowClip(vi,ch,function(){
     var visibleEvents=[];
     for(var bi=start;bi<end;bi++){
-      var rf=BL[bi].rf;if(!rf||rf.s+rf.d<vs||rf.s>ve)continue;
+      var rf=blockAt(BL,bi).rf;if(!rf||rf.s+rf.d<vs||rf.s>ve)continue;
       visibleEvents.push(rf);
     }
     var pointBudget=Math.max(4,Math.floor((maxPoints||Infinity)/Math.max(1,visibleEvents.length)));
@@ -434,7 +453,7 @@ function drawPhaseBlocks(start,end,vi,ch,colors,vs,ve){
   rowClip(vi,ch,function(){
     ctx.strokeStyle=colors.rf;ctx.lineWidth=.8;ctx.beginPath();var hasRf=false;
     for(var bi=start;bi<end;bi++){
-      var rf=BL[bi].rf,phaseTime=rf&&(rf.pt||rf.t);if(!rf||!rf.p||!phaseTime||rf.s+rf.d<vs||rf.s>ve)continue;
+      var rf=blockAt(BL,bi).rf,phaseTime=rf&&(rf.pt||rf.t);if(!rf||!rf.p||!phaseTime||rf.s+rf.d<vs||rf.s>ve)continue;
       var n=Math.min(phaseTime.length,rf.p.length);
       for(var i=0;i<n;i++){
         var sx=t2x(phaseTime[i]),sy=y+ch*.45-rf.p[i]*scale;
@@ -464,18 +483,51 @@ function drawPhaseBlocks(start,end,vi,ch,colors,vs,ve){
   });
 }
 
+/**
+ * Draw one gradient channel as a min/max band.
+ *
+ * Used where the view holds more samples than pixels: each column is filled
+ * between the extremes the waveform actually reached while crossing it, so the
+ * shape stays truthful without asserting a path between samples that are not
+ * adjacent.  Empty columns break the shape rather than being drawn at zero.
+ */
+function drawGradientBand(band,channelIndex,key,vi,ci,ch,color,vs,ve){
+  var y=cy(vi),scale=ch*.4/channelRange(ci);
+  var span=band.endSec-band.startSec;if(!(span>0))return;
+  var perColumn=span/band.columns;
+  var first=Math.max(0,Math.floor((vs-band.startSec)/perColumn));
+  var last=Math.min(band.columns-1,Math.ceil((ve-band.startSec)/perColumn));
+  rowClip(vi,ch,function(){
+    ctx.fillStyle=color;ctx.globalAlpha=.55;ctx.beginPath();var drew=false;
+    for(var c=first;c<=last;c++){
+      var col=bandColumn(band,channelIndex,c);if(!col)continue;
+      var x0=t2x(band.startSec+c*perColumn),x1=t2x(band.startSec+(c+1)*perColumn);
+      var w=Math.max(x1-x0,.75);
+      var yTop=y-col.hi*scale,yBottom=y-col.lo*scale;
+      // A flat run would be an invisible zero-height rectangle.
+      ctx.rect(x0,yTop,w,Math.max(yBottom-yTop,.75));drew=true;
+      gradViewPointCount++;
+    }
+    if(drew)ctx.fill();
+    ctx.globalAlpha=1;
+  });
+}
+
 function drawGradientBlocks(start,end,key,vi,ci,ch,color,vs,ve){
   var y=cy(vi),scale=ch*.4/channelRange(ci);
   rowClip(vi,ch,function(){
     ctx.strokeStyle=color;ctx.lineWidth=1;ctx.beginPath();var hasPath=false;
     for(var bi=start;bi<end;bi++){
-      var g=BL[bi][key];if(!g||g.ty==='none'||!g.t||!g.w||g.t.length<2)continue;
+      var g=blockAt(BL,bi)[key];if(!g||g.ty==='none'||!g.t||!g.w||g.t.length<2)continue;
       var n=Math.min(g.t.length,g.w.length);
       if(n<2)continue;
       if(g.t[n-1]<vs||g.t[0]>ve)continue;
       for(var i=0;i<n;i++){
         var sx=t2x(g.t[i]),sy=y-g.w[i]*scale;
         if(i===0)ctx.moveTo(sx,sy);else ctx.lineTo(sx,sy);
+        // Counted per visible point, not per event: an over-reduced waveform
+        // still draws a whole long event, it just has almost nothing in view.
+        if(g.t[i]>=vs&&g.t[i]<=ve)gradViewPointCount++;
       }
       hasPath=true;
     }
