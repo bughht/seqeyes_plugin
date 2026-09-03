@@ -137,7 +137,7 @@ if(vscApi)requestWaveformDetailWindow=function(request){
     requestId:request.requestId,
     sequenceGeneration:request.generation,
     startSec:request.startSec,endSec:request.endSec,
-    pointsPerWaveform:request.pointsPerWaveform
+    columns:request.columns
   });
 };
 
