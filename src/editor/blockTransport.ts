@@ -22,7 +22,7 @@
 
 import { INTERACTIVE_COMPUTE_LIMITS } from '../pulseq/computeBudget';
 import { createSequenceDecodeContext, decodeBlockRange } from '../pulseq/decoder';
-import { reduceM4, reduceUniform } from '../pulseq/displayDownsampling';
+import { clipIndexRange, reduceM4Range, reduceUniformRange } from '../pulseq/displayDownsampling';
 import type { DecodedBlock, DecodedGradWaveform, DecodedRFWaveform, PulseqSequence } from '../pulseq/types';
 
 /** Display samples kept per waveform when the sequence fits the budget. */
@@ -60,6 +60,15 @@ interface PairRef {
     n: number;
 }
 
+/**
+ * Visible time interval a detail pack is clipped to.  `null` means "the whole
+ * waveform", which is what initial full-sequence packing uses.
+ */
+export interface DetailWindow {
+    startSec: number;
+    endSec: number;
+}
+
 const EMPTY_PAIR: PairRef = { o: 0, n: 0 };
 
 /**
@@ -82,14 +91,30 @@ class CountingSink implements PairSink {
     readonly buildEnvelope = false;
     total = 0;
 
-    constructor(private readonly cap: number) { }
+    constructor(private readonly cap: number, private readonly window: DetailWindow | null = null) { }
 
     pair(time: ArrayLike<number>, values: ArrayLike<number>, useM4: boolean): PairRef {
+        const { start, end } = clipPair(time, values, this.window);
         this.total += useM4
-            ? reduceM4(time, values, this.cap, discard)
-            : reduceUniform(time, values, this.cap, discard);
+            ? reduceM4Range(time, values, start, end, this.cap, discard)
+            : reduceUniformRange(time, values, start, end, this.cap, discard);
         return EMPTY_PAIR;
     }
+}
+
+/**
+ * Resolve one waveform's index range.  Counting and writing must derive it the
+ * same way or the envelope offsets would stop describing the buffers, so both
+ * sinks route through this one function.
+ */
+function clipPair(
+    time: ArrayLike<number>,
+    values: ArrayLike<number>,
+    window: DetailWindow | null,
+): { start: number; end: number } {
+    const n = Math.min(time.length, values.length);
+    if (!window) return { start: 0, end: n };
+    return clipIndexRange(time, window.startSec, window.endSec, n);
 }
 
 class WritingSink implements PairSink {
@@ -108,6 +133,7 @@ class WritingSink implements PairSink {
         private readonly cap: number,
         private readonly times: Float64Array,
         private readonly values: Float32Array,
+        private readonly window: DetailWindow | null = null,
     ) { }
 
     get written(): number {
@@ -120,12 +146,13 @@ class WritingSink implements PairSink {
         useM4: boolean,
         wrapPhase: boolean,
     ): PairRef {
-        const start = this.cursor;
+        const origin = this.cursor;
+        const clipped = clipPair(time, values, this.window);
         this.wrapPhase = wrapPhase;
-        if (useM4) reduceM4(time, values, this.cap, this.emit);
-        else reduceUniform(time, values, this.cap, this.emit);
+        if (useM4) reduceM4Range(time, values, clipped.start, clipped.end, this.cap, this.emit);
+        else reduceUniformRange(time, values, clipped.start, clipped.end, this.cap, this.emit);
         this.wrapPhase = false;
-        return { o: start, n: this.cursor - start };
+        return { o: origin, n: this.cursor - origin };
     }
 }
 
@@ -209,6 +236,11 @@ export function packSequenceBlocks(seq: PulseqSequence, batchSize = 512): Packed
  * The caller resolves the time window through `SequenceDecodeContext`; this
  * function enforces a separate sample ceiling so a fit-all request cannot
  * accidentally recreate the initial all-sequence payload.
+ *
+ * `window` is what makes this a detail path rather than a second overview.
+ * Without it each waveform is reduced as a whole event, so a request for 0.5 ms
+ * inside a 48 ms readout returns the same coarse samples the overview already
+ * had.  With it, the cap is spent only on the visible interval.
  */
 export function packSequenceBlockRange(
     seq: PulseqSequence,
@@ -217,6 +249,7 @@ export function packSequenceBlockRange(
     context = createSequenceDecodeContext(seq),
     requestedCap = MAX_DISPLAY_PTS,
     sampleLimit = WINDOW_DETAIL_SAMPLE_LIMIT,
+    window: DetailWindow | null = null,
 ): PackedBlocks {
     const start = Math.max(0, Math.min(seq.blocks.length, Math.floor(startBlock)));
     const end = Math.max(start, Math.min(seq.blocks.length, Math.ceil(endBlock)));
@@ -239,14 +272,20 @@ export function packSequenceBlockRange(
         )
         : MAX_DISPLAY_PTS;
     const decoded = decodeBlockRange(seq, start, end, context);
-    return packBlocksAtCap(decoded, cap);
+    const clip = window && window.endSec > window.startSec ? window : null;
+    return packBlocksAtCap(decoded, cap, undefined, clip);
 }
 
-function packBlocksAtCap(blocks: DecodedBlock[], cap: number, knownTotal?: number): PackedBlocks {
-    const total = knownTotal ?? countSamples(blocks, cap);
+function packBlocksAtCap(
+    blocks: DecodedBlock[],
+    cap: number,
+    knownTotal?: number,
+    window: DetailWindow | null = null,
+): PackedBlocks {
+    const total = knownTotal ?? countSamples(blocks, cap, window);
     const times = new Float64Array(total);
     const values = new Float32Array(total);
-    const sink = new WritingSink(cap, times, values);
+    const sink = new WritingSink(cap, times, values, window);
     const envelope = new Array<object>(blocks.length);
     for (let index = 0; index < blocks.length; index++) {
         envelope[index] = walkBlock(blocks[index], sink) as object;
@@ -301,8 +340,8 @@ function shiftBlockOffsets(block: Record<string, unknown>, delta: number): void 
     }
 }
 
-function countSamples(blocks: DecodedBlock[], cap: number): number {
-    const sink = new CountingSink(cap);
+function countSamples(blocks: DecodedBlock[], cap: number, window: DetailWindow | null = null): number {
+    const sink = new CountingSink(cap, window);
     for (const block of blocks) walkBlock(block, sink);
     return sink.total;
 }

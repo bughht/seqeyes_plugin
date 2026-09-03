@@ -37,23 +37,38 @@ export function reduceM4(
     maxPoints: number,
     emit: DisplaySampleSink,
 ): number {
-    const n = Math.min(time.length, values.length);
+    return reduceM4Range(time, values, 0, Math.min(time.length, values.length), maxPoints, emit);
+}
+
+/**
+ * `reduceM4` restricted to the half-open index range `[start, end)`.
+ *
+ * Viewport detail clips a waveform to the visible interval *before* reducing
+ * it, so the point budget is spent on what is on screen instead of on the whole
+ * event.  A 48 ms spiral readout reduced whole keeps ~6 points per millisecond;
+ * the same budget spent on a visible 0.5 ms keeps every native sample.
+ */
+export function reduceM4Range(
+    time: ArrayLike<number>,
+    values: ArrayLike<number>,
+    start: number,
+    end: number,
+    maxPoints: number,
+    emit: DisplaySampleSink,
+): number {
+    const n = Math.max(0, end - start);
     if (n === 0 || maxPoints <= 0) return 0;
     if (n <= maxPoints) {
-        let kept = 0;
-        for (let index = 0; index < n; index++) {
-            emit(time[index], values[index]);
-            kept++;
-        }
-        return kept;
+        for (let index = start; index < end; index++) emit(time[index], values[index]);
+        return n;
     }
 
     const bucketCount = Math.max(1, Math.floor(maxPoints / 4));
     let kept = 0;
     for (let bucket = 0; bucket < bucketCount; bucket++) {
-        const start = Math.floor(bucket * n / bucketCount);
-        const end = Math.max(start + 1, Math.floor((bucket + 1) * n / bucketCount));
-        kept += emitBucket(time, values, start, Math.min(n, end), emit);
+        const bucketStart = start + Math.floor(bucket * n / bucketCount);
+        const bucketEnd = Math.max(bucketStart + 1, start + Math.floor((bucket + 1) * n / bucketCount));
+        kept += emitBucket(time, values, bucketStart, Math.min(end, bucketEnd), emit);
     }
     return kept;
 }
@@ -69,18 +84,62 @@ export function reduceUniform(
     maxPoints: number,
     emit: DisplaySampleSink,
 ): number {
-    const n = Math.min(time.length, values.length);
+    return reduceUniformRange(time, values, 0, Math.min(time.length, values.length), maxPoints, emit);
+}
+
+/** `reduceUniform` restricted to the half-open index range `[start, end)`. */
+export function reduceUniformRange(
+    time: ArrayLike<number>,
+    values: ArrayLike<number>,
+    start: number,
+    end: number,
+    maxPoints: number,
+    emit: DisplaySampleSink,
+): number {
+    const n = Math.max(0, end - start);
     if (n === 0 || maxPoints <= 0) return 0;
     if (n <= maxPoints) {
-        for (let index = 0; index < n; index++) emit(time[index], values[index]);
+        for (let index = start; index < end; index++) emit(time[index], values[index]);
         return n;
     }
     const step = n / maxPoints;
     for (let index = 0; index < maxPoints; index++) {
-        const source = Math.floor(index * step);
-        emit(time[source], values[source]);
+        emit(time[start + Math.floor(index * step)], values[start + Math.floor(index * step)]);
     }
     return maxPoints;
+}
+
+/**
+ * Index range covering `[startSec, endSec]` plus one sample beyond each edge.
+ *
+ * The extra samples are what let the renderer draw the line segments that
+ * cross the viewport boundary; clipping to strictly-inside samples would leave
+ * a visible gap at both edges of every detail window.
+ */
+export function clipIndexRange(
+    time: ArrayLike<number>,
+    startSec: number,
+    endSec: number,
+    length: number,
+): { start: number; end: number } {
+    const n = Math.max(0, Math.min(length, time.length));
+    if (n === 0) return { start: 0, end: 0 };
+    let lo = 0;
+    let hi = n;
+    while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (time[mid] < startSec) lo = mid + 1;
+        else hi = mid;
+    }
+    const start = Math.max(0, lo - 1);
+    lo = start;
+    hi = n;
+    while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (time[mid] <= endSec) lo = mid + 1;
+        else hi = mid;
+    }
+    return { start, end: Math.min(n, lo + 1) };
 }
 
 function emitBucket(
