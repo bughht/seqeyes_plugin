@@ -16,14 +16,9 @@ import { resolve } from 'node:path';
 
 import { expect, test, type Page } from '@playwright/test';
 
-import {
-  MAX_DETAIL_PTS,
-  packSequenceBlockRange,
-  packSequenceBlocks,
-  resolveDetailBlockRange,
-} from '../../src/editor/blockTransport';
-import { createSequenceDecodeContext, decodeBlockRange, getTotalDuration } from '../../src/pulseq/decoder';
-import { computeGradientEnvelope, packGradientEnvelope } from '../../src/pulseq/gradientEnvelope';
+import { packSequenceBlocks } from '../../src/editor/blockTransport';
+import { buildWaveformDetailReply, waveformDetailMessage } from '../../src/editor/waveformDetailReply';
+import { createSequenceDecodeContext, getTotalDuration } from '../../src/pulseq/decoder';
 import { parseSequenceBytes } from '../../src/pulseq/sequenceReader';
 import { detectSequenceTiming } from '../../src/pulseq/trdetect';
 
@@ -53,6 +48,17 @@ async function openWebview(page: Page): Promise<void> {
     + `<body>${body}<script>(function(){${bundle}})();</script></body></html>`,
     { waitUntil: 'load' },
   );
+}
+
+/** Post the extension's message verbatim, moving its buffers across as base64. */
+async function postExtensionMessage(page: Page, message: Record<string, unknown>) {
+  const plain: Record<string, unknown> = {};
+  const buffers: Record<string, string> = {};
+  for (const [key, value] of Object.entries(message)) {
+    if (value instanceof ArrayBuffer) buffers[key] = b64(value);
+    else plain[key] = value;
+  }
+  await post(page, plain, buffers);
 }
 
 /** Deliver a message the way VS Code does, rebuilding buffers inside the page. */
@@ -108,51 +114,38 @@ test('consumes exact detail and a band over the extension message contract', asy
 
   const before = await canvasShot(page);
 
-  // Answer with exactly what the provider would build for that window.
+  // Answer with what the extension would actually send: the same decision
+  // function the provider delegates to, on the window the webview asked for.
   const startSec = Number(request!.startSec);
   const endSec = Number(request!.endSec);
-  const range = resolveDetailBlockRange(context.blockStartTimes, seq.blocks.length, startSec, endSec);
-  const decoded = decodeBlockRange(seq, range.start, range.end, context);
-  const detail = packSequenceBlockRange(
-    seq, range.start, range.end, context, MAX_DETAIL_PTS, undefined, { startSec, endSec },
+  const columns = Number(request!.columns);
+  const detailReply = buildWaveformDetailReply(seq, context, { startSec, endSec, columns }, 1);
+  expect(detailReply.kind, 'a TR-scale window should be answered with samples').toBe('samples');
+  if (detailReply.kind !== 'samples') throw new Error('unreachable');
+  await postExtensionMessage(
+    page, waveformDetailMessage(detailReply, Number(request!.requestId), 1),
   );
-  await post(page, {
-    type: 'waveformDetailData',
-    requestId: Number(request!.requestId),
-    sequenceGeneration: 1,
-    startBlock: range.start,
-    endBlock: range.end,
-    startSec,
-    endSec,
-    sampleCount: detail.sampleCount,
-    blocks: detail.blocks,
-    pointsPerWaveform: detail.pointsPerWaveform,
-  }, { sampleTimes: b64(detail.sampleTimes), sampleValues: b64(detail.sampleValues) });
 
   await expect.poll(async () => (await canvasShot(page)).equals(before) === false, { timeout: 5_000 }).toBe(true);
   const afterDetail = await canvasShot(page);
 
-  // And with a band, which travels as one Float32 buffer rather than as samples.
-  const band = packGradientEnvelope(computeGradientEnvelope(decoded, startSec, endSec, 640));
-  await post(page, {
-    type: 'waveformBandData',
-    requestId: Number(request!.requestId),
-    sequenceGeneration: 1,
-    startSec: band.startSec,
-    endSec: band.endSec,
-    columns: band.columns,
-  }, { values: b64(band.values) });
+  // And with a band, by asking the same function for a window wide enough that
+  // it chooses one — so the payload shape is the extension's, not the test's.
+  const total = getTotalDuration(seq);
+  const bandReply = buildWaveformDetailReply(seq, context, { startSec: 0, endSec: total, columns }, 1);
+  expect(bandReply.kind, 'the whole sequence should be answered with a band').toBe('band');
+  if (bandReply.kind !== 'band') throw new Error('unreachable');
+  expect(bandReply.columns).toBeGreaterThan(100);
+  await postExtensionMessage(
+    page, waveformDetailMessage(bandReply, Number(request!.requestId), 1),
+  );
 
   await expect.poll(async () => (await canvasShot(page)).equals(afterDetail) === false, { timeout: 5_000 }).toBe(true);
 
   // A refusal must be absorbed quietly rather than blanking the viewer.
-  await post(page, {
-    type: 'waveformDetailUnavailable',
-    requestId: Number(request!.requestId),
-    sequenceGeneration: 1,
-    startSec,
-    endSec,
-  });
+  await postExtensionMessage(page, waveformDetailMessage(
+    { kind: 'unavailable', startSec, endSec }, Number(request!.requestId), 1,
+  ));
   await expect(page.locator('#mc')).toBeVisible();
   expect(failures).toEqual([]);
 });
