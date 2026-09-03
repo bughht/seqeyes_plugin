@@ -149,27 +149,54 @@ test('refills deep-zoom gradient detail instead of connecting overview extrema',
 
   // Zoom to 0.5 ms in the middle of the readout — far below the transported
   // sample spacing, so nothing but real detail can fill it.
+  const width = 0.0005;
   const mid = 0.5 * (event.start + event.end);
   const changed = await page.evaluate(
     ({ start, end }) => window.__seqeyesDebug.setView(start, end),
-    { start: mid, end: mid + 0.0005 },
+    { start: mid, end: mid + width },
   );
   expect(changed).toBe(true);
 
-  const overviewOnly = await debugState(page);
-  expect(overviewOnly.waveformOverviewActive).toBe(false);
+  // Wait for detail fetched *for this view*, not merely for one that covers it.
+  await expect
+    .poll(async () => {
+      const s = await debugState(page);
+      return s.waveformDetailActive && s.waveformDetailWindowSec < width * 3;
+    }, { timeout: 5_000 })
+    .toBe(true);
+
+  const detailed = await debugState(page);
+  // What the initial transport alone could have put on screen here.
+  const transportedInView = (event.points / (event.end - event.start)) * width;
+  expect(transportedInView).toBeLessThan(10);
+  expect(detailed.gradViewPoints).toBeGreaterThan(transportedInView * 10);
+  expect(detailed.waveformOverviewActive).toBe(false);
+  await expectCanvasRegionVaried(page.locator('#mc'), 0.05, 0.2, 0.9, 0.6);
+});
+
+test('refills gradients at readout scale while other rows use the overview', async ({ page }) => {
+  await loadViewer(page, fixtures.largeSequence);
+  const event = await page.evaluate(() => window.__seqeyesDebug.longestGradientEvent('gx')) as {
+    start: number; end: number; points: number; block: number;
+  };
+  // A view a few times the readout: the gradients still draw from transported
+  // samples here, so this is the scale a spiral looked aliased at.
+  const width = 0.3;
+  const mid = 0.5 * (event.start + event.end);
+  await page.evaluate(({ s, e }) => window.__seqeyesDebug.setView(s, e), { s: mid - width / 2, e: mid + width / 2 });
 
   await expect
     .poll(async () => (await debugState(page)).waveformDetailActive, { timeout: 5_000 })
     .toBe(true);
+  const state = await debugState(page);
 
-  const detailed = await debugState(page);
-  // Without the fix this window held single-digit gradient points inside the
-  // viewport; clipping before reduction recovers the native samples.
-  expect(detailed.gradViewPoints).toBeGreaterThan(overviewOnly.gradViewPoints * 4);
-  expect(detailed.gradViewPoints).toBeGreaterThan(40);
-  expect(detailed.waveformOverviewActive).toBe(false);
-  await expectCanvasRegionVaried(page.locator('#mc'), 0.05, 0.2, 0.9, 0.6);
+  // Phase/ADC have switched to the overview at this width. That must not
+  // suppress detail for the gradient rows, which are still drawing raw.
+  expect(state.waveformOverviewActive).toBe(true);
+  // The whole readout is inside the view, so the initial transport could have
+  // contributed at most its own point count per gradient. Detail must beat
+  // that by a wide margin or the oscillation still aliases.
+  expect(state.gradViewPoints).toBeGreaterThan(event.points * 4);
 });
 
 test('sharpens waveform detail as zoom deepens instead of reusing a wide window', async ({ page }) => {
@@ -196,10 +223,13 @@ test('sharpens waveform detail as zoom deepens instead of reusing a wide window'
   const wide = await settle(0.005);
   const deep = await settle(0.0005);
 
+  // The shrinking window is the signal: reusing the wide one is exactly the
+  // defect, and coverage alone would have kept it.
   expect(deep.waveformDetailWindowSec).toBeLessThan(wide.waveformDetailWindowSec / 4);
-  // A tenth of the span must not carry a tenth of the samples: refetching at the
-  // deeper zoom recovers the native raster the wide window had reduced away.
-  expect(deep.gradViewPoints).toBeGreaterThan(wide.gradViewPoints / 5);
+  // Both views end up at the native raster, so the deep view keeps roughly the
+  // same samples-per-second the wide one had rather than a reduced share.
+  const density = (s: DebugState, width: number) => s.gradViewPoints / width;
+  expect(density(deep, 0.0005)).toBeGreaterThan(density(wide, 0.005) * 0.5);
 });
 
 test('labels multiband and inversion RF responses without treating carrier area as generic FA', async ({ page }) => {

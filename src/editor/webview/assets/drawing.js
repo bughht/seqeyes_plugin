@@ -305,8 +305,13 @@ function drawBlocks(vs,ve,s){
   setViewerNotice('dense',dense?'Dense overview mode is active. Zoom in for full waveform detail.':null);
   // Raw level draws whatever the transport delivered, so this is where an
   // over-reduced view has to be refilled with samples clipped to the viewport.
-  if(dense)activeWaveformDetail=null;
-  else waveformDetailForView(vs,ve,gradVisible.gx+gradVisible.gy+gradVisible.gz,pixelBudget,range.start,range.end);
+  // Keyed on the waveform rows specifically: phase or ADC switching to the
+  // overview says nothing about the gradients, which may still be drawing
+  // transported samples and still be the thing that looks wrong.
+  var rawWaveformRows=!(overviewUse.gx&&overviewUse.gy&&overviewUse.gz&&reduceRf);
+  if(rawWaveformRows)waveformDetailForView(vs,ve,gradVisible.gx+gradVisible.gy+gradVisible.gz,
+    pixelBudget,range.start,range.end,pixelBudget*WAVEFORM_DETAIL_VIEW_POINTS);
+  else activeWaveformDetail=null;
   if(rows[0]>=0){if(aggregateRf)drawRfOverview(overview,rows[0],ch,colors,vs,ve);else drawRfBlocks(range.start,range.end,rows[0],ch,colors,vs,ve,pixelBudget*8);}
   if(rows[1]>=0){if(overviewUse.phase)drawPhaseSampled(range.start,range.end,rows[1],ch,colors,vs,ve,pixelBudget);else drawPhaseBlocks(range.start,range.end,rows[1],ch,colors,vs,ve);}
   if(rows[2]>=0){if(overviewUse.gx)drawGradientOverview(overview,'gx',rows[2],2,ch,colors.gx,vs,ve);else drawGradientBlocks(range.start,range.end,'gx',rows[2],2,ch,colors.gx,vs,ve);}

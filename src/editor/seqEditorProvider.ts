@@ -59,10 +59,13 @@ import { exportKspaceArtifactsFromBytes } from '../pulseq/kspaceExport';
 import { detectSequenceTiming } from '../pulseq/trdetect';
 import {
     estimateEnvelopeJsonBytes,
+    MAX_DETAIL_PTS,
     MAX_V8_STRING_LENGTH,
+    MIN_DISPLAY_PTS,
     packSequenceBlockRange,
     packSequenceBlocks,
     resolveDetailBlockRange,
+    WINDOW_DETAIL_SAMPLE_LIMIT,
 } from './blockTransport';
 import { ByteBoundedLru } from './windowDetailCache';
 import { getWebviewContent } from './webviewContent';
@@ -510,10 +513,15 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     });
                     return;
                 }
-                const requestedCap = Math.max(8, Math.min(500, Math.floor(Number(msg.pointsPerWaveform) || 500)));
-                // The window is what makes this detail rather than a second
-                // overview, so it has to be part of the cache identity.
-                const cacheKey = `${sequenceGeneration}:${start}:${end}:${requestedCap}:${startSec}:${endSec}`;
+                // The renderer sends what it can usefully draw across the whole
+                // window; the per-waveform ceiling is ours.
+                const pointBudget = Math.max(
+                    MIN_DISPLAY_PTS,
+                    Math.min(WINDOW_DETAIL_SAMPLE_LIMIT, Math.floor(Number(msg.pointBudget) || 0)),
+                );
+                // The window and budget are what make this detail rather than a
+                // second overview, so both belong in the cache identity.
+                const cacheKey = `${sequenceGeneration}:${start}:${end}:${pointBudget}:${startSec}:${endSec}`;
                 try {
                     let packed = waveformDetailCache.get(cacheKey);
                     if (!packed) {
@@ -522,9 +530,10 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                             start,
                             end,
                             activeDecodeContext,
-                            requestedCap,
+                            MAX_DETAIL_PTS,
                             undefined,
                             { startSec, endSec },
+                            pointBudget,
                         );
                         const retainedBytes = packed.sampleTimes.byteLength + packed.sampleValues.byteLength
                             + estimateEnvelopeJsonBytes(packed.blocks);

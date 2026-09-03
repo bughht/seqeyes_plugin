@@ -35,6 +35,16 @@ export const MAX_DISPLAY_PTS = 500;
  */
 export const MIN_DISPLAY_PTS = 8;
 
+/**
+ * Ceiling for one waveform inside a *detail* pack.
+ *
+ * Far above `MAX_DISPLAY_PTS` because the two answer different questions: the
+ * initial pack holds every event of the whole sequence at once and has to stay
+ * inside the transfer budget, while a detail pack covers one bounded window and
+ * is additionally limited by the caller's pixel-derived budget below.
+ */
+export const MAX_DETAIL_PTS = 4096;
+
 /** A detail request may use at most this many aligned time/value pairs. */
 export const WINDOW_DETAIL_SAMPLE_LIMIT = 2_000_000;
 
@@ -250,6 +260,7 @@ export function packSequenceBlockRange(
     requestedCap = MAX_DISPLAY_PTS,
     sampleLimit = WINDOW_DETAIL_SAMPLE_LIMIT,
     window: DetailWindow | null = null,
+    totalPointBudget = 0,
 ): PackedBlocks {
     const start = Math.max(0, Math.min(seq.blocks.length, Math.floor(startBlock)));
     const end = Math.max(start, Math.min(seq.blocks.length, Math.ceil(endBlock)));
@@ -265,12 +276,17 @@ export function packSequenceBlockRange(
             `The waveform detail window needs at least ${seriesCount * MIN_DISPLAY_PTS} samples; zoom in further.`,
         );
     }
+    // The renderer's budget is what it can usefully draw across every curve in
+    // the window, so it is shared out per series rather than applied to each.
+    const budgetCap = totalPointBudget > 0 && seriesCount > 0
+        ? Math.floor(totalPointBudget / seriesCount)
+        : Number.POSITIVE_INFINITY;
     const cap = seriesCount > 0
         ? Math.max(
             MIN_DISPLAY_PTS,
-            Math.min(MAX_DISPLAY_PTS, safeRequestedCap, Math.floor(safeSampleLimit / seriesCount)),
+            Math.min(safeRequestedCap, budgetCap, Math.floor(safeSampleLimit / seriesCount)),
         )
-        : MAX_DISPLAY_PTS;
+        : safeRequestedCap;
     const decoded = decodeBlockRange(seq, start, end, context);
     const clip = window && window.endSec > window.startSec ? window : null;
     return packBlocksAtCap(decoded, cap, undefined, clip);

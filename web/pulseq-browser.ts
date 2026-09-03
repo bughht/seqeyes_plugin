@@ -11,6 +11,7 @@ export { parseSequenceText } from '../src/pulseq/reader';
 export { hasPulseqBinaryMagic, parseSequenceBinary, parseSequenceBytes } from '../src/pulseq/sequenceReader';
 export { createSequenceDecodeContext, decodeAllBlocks, decodeBlockRange, getTotalDuration } from '../src/pulseq/decoder';
 export {
+    MAX_DETAIL_PTS,
     MAX_DISPLAY_PTS,
     packSequenceBlockRange,
     packSequenceBlocks,

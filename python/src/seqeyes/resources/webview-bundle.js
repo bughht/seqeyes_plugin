@@ -142,7 +142,7 @@ var waveformDetailGeneration = 0;
 /**
  * Installed by each host: VS Code posts a message to the extension, the
  * standalone web app packs the range in this same heap.  Receives
- * {requestId, generation, startSec, endSec, pointsPerWaveform}.
+ * {requestId, generation, startSec, endSec, pointBudget}.
  */
 var requestWaveformDetailWindow = null;
 /**
@@ -167,6 +167,19 @@ var WAVEFORM_DETAIL_DEBOUNCE_MS = 160;
  * refetching settles in one step instead of oscillating.
  */
 var WAVEFORM_DETAIL_REFINE_FACTOR = 2;
+/**
+ * Stop asking for detail once the view already holds this many transported
+ * samples per pixel.  Below it the curve is being drawn from fewer samples than
+ * the screen could show, which is exactly when a finer window helps.
+ */
+var WAVEFORM_DETAIL_TRIGGER_PPP = 4;
+/**
+ * Total detail samples to ask for, per pixel of plot width, shared across every
+ * curve in the window.  Generous because most events in a window are short and
+ * keep far fewer samples than their share, which leaves the long readouts —
+ * the ones that actually looked wrong — enough points to draw smoothly.
+ */
+var WAVEFORM_DETAIL_VIEW_POINTS = 32;
 /** Mirrors the host's block ceiling so a hopeless request is never sent. */
 var WAVEFORM_DETAIL_BLOCK_LIMIT = 20000;
 
@@ -220,21 +233,21 @@ function blockAt(blocks,bi){
  * Decide whether detail applies to this view and, if it would help, ask for it.
  * Returns the detail to draw from, or null to keep the overview.
  */
-function waveformDetailForView(vs,ve,visiblePoints,pixelBudget,startBlock,endBlock){
+function waveformDetailForView(vs,ve,visiblePoints,pixelBudget,startBlock,endBlock,pointBudget){
   // Draw from any detail that covers the view, even while a sharper window is
   // in flight: coarse detail still beats the whole-sequence overview.
   activeWaveformDetail=waveformDetailCovers(waveformDetail,vs,ve)?waveformDetail:null;
-  // Without detail, fewer transported samples than pixels means the view is
+  // Without detail, too few transported samples per pixel means the view is
   // showing reduced data where it has room for more.  With detail, keep
   // sharpening while the held window stays wider than the view deserves.
   var wants=activeWaveformDetail
     ?!waveformWindowServes(waveformDetail,vs,ve)
-    :visiblePoints<pixelBudget;
-  if(wants&&endBlock-startBlock<=WAVEFORM_DETAIL_BLOCK_LIMIT)scheduleWaveformDetail(vs,ve);
+    :visiblePoints<pixelBudget*WAVEFORM_DETAIL_TRIGGER_PPP;
+  if(wants&&endBlock-startBlock<=WAVEFORM_DETAIL_BLOCK_LIMIT)scheduleWaveformDetail(vs,ve,pointBudget);
   return activeWaveformDetail;
 }
 
-function scheduleWaveformDetail(vs,ve){
+function scheduleWaveformDetail(vs,ve,pointBudget){
   if(typeof requestWaveformDetailWindow!=='function'||!(ve>vs))return;
   var pad=(ve-vs)*0.25,start=Math.max(0,vs-pad),end=ve+pad;
   // Same adequacy test as the held detail, so an in-flight wide request cannot
@@ -249,7 +262,7 @@ function scheduleWaveformDetail(vs,ve){
         requestId:waveformDetailRequestId,
         generation:waveformDetailGeneration,
         startSec:start,endSec:end,
-        pointsPerWaveform:500
+        pointBudget:pointBudget
       });
     }catch(err){waveformDetailPending=null;
       reportWaveformDetail('Waveform detail was not calculated: '+(err&&err.message||String(err))+'.');}
@@ -1923,8 +1936,13 @@ function drawBlocks(vs,ve,s){
   setViewerNotice('dense',dense?'Dense overview mode is active. Zoom in for full waveform detail.':null);
   // Raw level draws whatever the transport delivered, so this is where an
   // over-reduced view has to be refilled with samples clipped to the viewport.
-  if(dense)activeWaveformDetail=null;
-  else waveformDetailForView(vs,ve,gradVisible.gx+gradVisible.gy+gradVisible.gz,pixelBudget,range.start,range.end);
+  // Keyed on the waveform rows specifically: phase or ADC switching to the
+  // overview says nothing about the gradients, which may still be drawing
+  // transported samples and still be the thing that looks wrong.
+  var rawWaveformRows=!(overviewUse.gx&&overviewUse.gy&&overviewUse.gz&&reduceRf);
+  if(rawWaveformRows)waveformDetailForView(vs,ve,gradVisible.gx+gradVisible.gy+gradVisible.gz,
+    pixelBudget,range.start,range.end,pixelBudget*WAVEFORM_DETAIL_VIEW_POINTS);
+  else activeWaveformDetail=null;
   if(rows[0]>=0){if(aggregateRf)drawRfOverview(overview,rows[0],ch,colors,vs,ve);else drawRfBlocks(range.start,range.end,rows[0],ch,colors,vs,ve,pixelBudget*8);}
   if(rows[1]>=0){if(overviewUse.phase)drawPhaseSampled(range.start,range.end,rows[1],ch,colors,vs,ve,pixelBudget);else drawPhaseBlocks(range.start,range.end,rows[1],ch,colors,vs,ve);}
   if(rows[2]>=0){if(overviewUse.gx)drawGradientOverview(overview,'gx',rows[2],2,ch,colors.gx,vs,ve);else drawGradientBlocks(range.start,range.end,'gx',rows[2],2,ch,colors.gx,vs,ve);}
