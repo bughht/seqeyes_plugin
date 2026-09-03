@@ -142,6 +142,16 @@ var waveformDetailGeneration = 0;
  * {requestId, generation, startSec, endSec, pointsPerWaveform}.
  */
 var requestWaveformDetailWindow = null;
+/**
+ * Installed by each host to surface a detail failure.  This bundle's notice
+ * state is not what the standalone web app renders, so the message has to go
+ * back out to whichever viewer is actually on screen.
+ */
+var waveformDetailNotice = null;
+
+function reportWaveformDetail(message){
+  if(typeof waveformDetailNotice==='function')waveformDetailNotice(message);
+}
 
 var WAVEFORM_DETAIL_DEBOUNCE_MS = 160;
 /** Mirrors the host's block ceiling so a hopeless request is never sent. */
@@ -170,14 +180,18 @@ function waveformDetailCovers(detail,vs,ve){
  * The block the renderer should draw for index `bi`.  Detail blocks carry the
  * same identity and timing as their overview counterparts and differ only in
  * waveform resolution, so substituting one is transparent to every caller.
+ *
+ * `blocks` is passed in rather than read from a global because the standalone
+ * web app runs its renderer inside an IIFE with its own `BL`; every function
+ * this bundle shares with it has to take the state it operates on.
  */
-function blockAt(bi){
+function blockAt(blocks,bi){
   var detail=activeWaveformDetail;
   if(detail&&bi>=detail.startBlock&&bi<detail.endBlock){
     var block=detail.blocks[bi-detail.startBlock];
     if(block)return block;
   }
-  return BL[bi];
+  return blocks[bi];
 }
 
 /**
@@ -210,8 +224,8 @@ function scheduleWaveformDetail(vs,ve){
         startSec:start,endSec:end,
         pointsPerWaveform:500
       });
-    }catch(err){waveformDetailPending=null;setViewerNotice('waveformDetail',
-      'Waveform detail was not calculated: '+(err&&err.message||String(err))+'.');}
+    }catch(err){waveformDetailPending=null;
+      reportWaveformDetail('Waveform detail was not calculated: '+(err&&err.message||String(err))+'.');}
   },WAVEFORM_DETAIL_DEBOUNCE_MS);
 }
 
@@ -224,13 +238,18 @@ function applyWaveformDetail(payload){
     blocks:payload.blocks,startBlock:payload.startBlock,endBlock:payload.endBlock,
     startSec:payload.startSec,endSec:payload.endSec,generation:payload.generation
   };
-  setViewerNotice('waveformDetail',null);
+  reportWaveformDetail(null);
   return true;
 }
 
-/** Record a failed detail request without discarding the overview. */
+/**
+ * Record a failed detail request without discarding the overview.  Checks the
+ * request id as well as the generation so a superseded failure cannot clear a
+ * newer in-flight request or leave a notice about a window nobody is viewing.
+ */
 function failWaveformDetail(payload){
   if(!payload||payload.generation!==waveformDetailGeneration)return;
+  if(payload.requestId!==waveformDetailRequestId)return;
   waveformDetailPending=null;
-  setViewerNotice('waveformDetail','Waveform detail was not calculated: '+(payload.message||'unknown error')+'.');
+  reportWaveformDetail('Waveform detail was not calculated: '+(payload.message||'unknown error')+'.');
 }

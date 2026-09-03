@@ -24,6 +24,7 @@ var Pulseq = (() => {
   var pulseq_browser_exports = {};
   __export(pulseq_browser_exports, {
     INTERACTIVE_COMPUTE_LIMITS: () => INTERACTIVE_COMPUTE_LIMITS,
+    MAX_DISPLAY_PTS: () => MAX_DISPLAY_PTS,
     MAX_RF_RESPONSE_BANDS: () => MAX_RF_RESPONSE_BANDS,
     MAX_RF_RESPONSE_FFT_POINTS: () => MAX_RF_RESPONSE_FFT_POINTS,
     MAX_RF_RESPONSE_SAMPLES: () => MAX_RF_RESPONSE_SAMPLES,
@@ -64,6 +65,7 @@ var Pulseq = (() => {
     hasPulseqBinaryMagic: () => hasPulseqBinaryMagic,
     isEmptyAscProfile: () => isEmptyAscProfile,
     kspaceExceedsInteractiveBudget: () => kspaceExceedsInteractiveBudget,
+    packSequenceBlockRange: () => packSequenceBlockRange,
     packSequenceBlocks: () => packSequenceBlocks,
     parseAcousticResonancesAsc: () => parseAcousticResonancesAsc,
     parseAscProfile: () => parseAscProfile,
@@ -74,6 +76,7 @@ var Pulseq = (() => {
     parseSequenceText: () => parseSequenceText,
     physicalGradientValueAt: () => physicalGradientValueAt,
     resamplePhysicalGradients: () => resamplePhysicalGradients,
+    resolveDetailBlockRange: () => resolveDetailBlockRange,
     resolveSpectrogramParams: () => resolveSpectrogramParams,
     rotateGradient: () => rotateGradient,
     safePnsModel: () => safePnsModel,
@@ -2501,6 +2504,7 @@ var Pulseq = (() => {
   // src/editor/blockTransport.ts
   var MAX_DISPLAY_PTS = 500;
   var MIN_DISPLAY_PTS = 8;
+  var WINDOW_DETAIL_SAMPLE_LIMIT = 2e6;
   var TAU2 = 2 * Math.PI;
   var EMPTY_PAIR = { o: 0, n: 0 };
   var CountingSink = class {
@@ -2586,6 +2590,40 @@ var Pulseq = (() => {
       pointsPerWaveform: cap,
       notice: cap < MAX_DISPLAY_PTS ? `Large sequence: waveform detail was reduced to ${cap} points per event (normally ${MAX_DISPLAY_PTS}) to stay inside the display transfer budget.` : null
     };
+  }
+  function packSequenceBlockRange(seq, startBlock, endBlock, context = createSequenceDecodeContext(seq), requestedCap = MAX_DISPLAY_PTS, sampleLimit = WINDOW_DETAIL_SAMPLE_LIMIT, window = null) {
+    const start = Math.max(0, Math.min(seq.blocks.length, Math.floor(startBlock)));
+    const end = Math.max(start, Math.min(seq.blocks.length, Math.ceil(endBlock)));
+    const seriesCount = countSequenceWaveformSeriesRange(seq, start, end);
+    const safeSampleLimit = Number.isFinite(sampleLimit) && sampleLimit >= 0 ? Math.floor(sampleLimit) : WINDOW_DETAIL_SAMPLE_LIMIT;
+    const safeRequestedCap = Number.isFinite(requestedCap) && requestedCap > 0 ? Math.floor(requestedCap) : MAX_DISPLAY_PTS;
+    if (seriesCount * MIN_DISPLAY_PTS > safeSampleLimit) {
+      throw new Error(
+        `The waveform detail window needs at least ${seriesCount * MIN_DISPLAY_PTS} samples; zoom in further.`
+      );
+    }
+    const cap = seriesCount > 0 ? Math.max(
+      MIN_DISPLAY_PTS,
+      Math.min(MAX_DISPLAY_PTS, safeRequestedCap, Math.floor(safeSampleLimit / seriesCount))
+    ) : MAX_DISPLAY_PTS;
+    const decoded = decodeBlockRange(seq, start, end, context);
+    const clip = window && window.endSec > window.startSec ? window : null;
+    return packBlocksAtCap(decoded, cap, void 0, clip);
+  }
+  function resolveDetailBlockRange(blockStartTimes, blockCount, startSec, endSec) {
+    const lowerBound = (target) => {
+      let lo = 0;
+      let hi = blockStartTimes.length;
+      while (lo < hi) {
+        const mid = lo + hi >> 1;
+        if (blockStartTimes[mid] < target) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo;
+    };
+    const start = Math.max(0, Math.min(blockCount, lowerBound(startSec) - 1));
+    const end = Math.max(start, Math.min(blockCount, lowerBound(endSec) + 1));
+    return { start, end };
   }
   function packBlocksAtCap(blocks, cap, knownTotal, window = null) {
     const total = knownTotal ?? countSamples(blocks, cap, window);

@@ -3,7 +3,7 @@ var panelMarkerTimeSec=NaN;
    Main draw loop
    ═══════════════════════════════════════════════════════════════════════ */
 function draw(){
-  var drawStarted=performance.now();derivedRenderPointCount=0;derivedEnvelopeCurveCount=0;derivedRawCurveCount=0;rfRenderPointCount=0;rfRawCurveCount=0;rfReducedCurveCount=0;rfOverviewBucketCount=0;viewerDrawCount++;
+  var drawStarted=performance.now();derivedRenderPointCount=0;derivedEnvelopeCurveCount=0;derivedRawCurveCount=0;rfRenderPointCount=0;rfRawCurveCount=0;rfReducedCurveCount=0;rfOverviewBucketCount=0;gradViewPointCount=0;viewerDrawCount++;
   var w=mc.width/(window.devicePixelRatio||1),h=mc.height/(window.devicePixelRatio||1);
   var s=getComputedStyle(document.body);
   ctx.clearRect(0,0,w,h);
@@ -416,7 +416,7 @@ function drawRfBlocks(start,end,vi,ch,colors,vs,ve,maxPoints){
   rowClip(vi,ch,function(){
     var visibleEvents=[];
     for(var bi=start;bi<end;bi++){
-      var rf=blockAt(bi).rf;if(!rf||rf.s+rf.d<vs||rf.s>ve)continue;
+      var rf=blockAt(BL,bi).rf;if(!rf||rf.s+rf.d<vs||rf.s>ve)continue;
       visibleEvents.push(rf);
     }
     var pointBudget=Math.max(4,Math.floor((maxPoints||Infinity)/Math.max(1,visibleEvents.length)));
@@ -441,7 +441,7 @@ function drawPhaseBlocks(start,end,vi,ch,colors,vs,ve){
   rowClip(vi,ch,function(){
     ctx.strokeStyle=colors.rf;ctx.lineWidth=.8;ctx.beginPath();var hasRf=false;
     for(var bi=start;bi<end;bi++){
-      var rf=blockAt(bi).rf,phaseTime=rf&&(rf.pt||rf.t);if(!rf||!rf.p||!phaseTime||rf.s+rf.d<vs||rf.s>ve)continue;
+      var rf=blockAt(BL,bi).rf,phaseTime=rf&&(rf.pt||rf.t);if(!rf||!rf.p||!phaseTime||rf.s+rf.d<vs||rf.s>ve)continue;
       var n=Math.min(phaseTime.length,rf.p.length);
       for(var i=0;i<n;i++){
         var sx=t2x(phaseTime[i]),sy=y+ch*.45-rf.p[i]*scale;
@@ -476,13 +476,16 @@ function drawGradientBlocks(start,end,key,vi,ci,ch,color,vs,ve){
   rowClip(vi,ch,function(){
     ctx.strokeStyle=color;ctx.lineWidth=1;ctx.beginPath();var hasPath=false;
     for(var bi=start;bi<end;bi++){
-      var g=blockAt(bi)[key];if(!g||g.ty==='none'||!g.t||!g.w||g.t.length<2)continue;
+      var g=blockAt(BL,bi)[key];if(!g||g.ty==='none'||!g.t||!g.w||g.t.length<2)continue;
       var n=Math.min(g.t.length,g.w.length);
       if(n<2)continue;
       if(g.t[n-1]<vs||g.t[0]>ve)continue;
       for(var i=0;i<n;i++){
         var sx=t2x(g.t[i]),sy=y-g.w[i]*scale;
         if(i===0)ctx.moveTo(sx,sy);else ctx.lineTo(sx,sy);
+        // Counted per visible point, not per event: an over-reduced waveform
+        // still draws a whole long event, it just has almost nothing in view.
+        if(g.t[i]>=vs&&g.t[i]<=ve)gradViewPointCount++;
       }
       hasPath=true;
     }

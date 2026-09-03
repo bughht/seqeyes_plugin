@@ -145,6 +145,16 @@ var waveformDetailGeneration = 0;
  * {requestId, generation, startSec, endSec, pointsPerWaveform}.
  */
 var requestWaveformDetailWindow = null;
+/**
+ * Installed by each host to surface a detail failure.  This bundle's notice
+ * state is not what the standalone web app renders, so the message has to go
+ * back out to whichever viewer is actually on screen.
+ */
+var waveformDetailNotice = null;
+
+function reportWaveformDetail(message){
+  if(typeof waveformDetailNotice==='function')waveformDetailNotice(message);
+}
 
 var WAVEFORM_DETAIL_DEBOUNCE_MS = 160;
 /** Mirrors the host's block ceiling so a hopeless request is never sent. */
@@ -173,14 +183,18 @@ function waveformDetailCovers(detail,vs,ve){
  * The block the renderer should draw for index `bi`.  Detail blocks carry the
  * same identity and timing as their overview counterparts and differ only in
  * waveform resolution, so substituting one is transparent to every caller.
+ *
+ * `blocks` is passed in rather than read from a global because the standalone
+ * web app runs its renderer inside an IIFE with its own `BL`; every function
+ * this bundle shares with it has to take the state it operates on.
  */
-function blockAt(bi){
+function blockAt(blocks,bi){
   var detail=activeWaveformDetail;
   if(detail&&bi>=detail.startBlock&&bi<detail.endBlock){
     var block=detail.blocks[bi-detail.startBlock];
     if(block)return block;
   }
-  return BL[bi];
+  return blocks[bi];
 }
 
 /**
@@ -213,8 +227,8 @@ function scheduleWaveformDetail(vs,ve){
         startSec:start,endSec:end,
         pointsPerWaveform:500
       });
-    }catch(err){waveformDetailPending=null;setViewerNotice('waveformDetail',
-      'Waveform detail was not calculated: '+(err&&err.message||String(err))+'.');}
+    }catch(err){waveformDetailPending=null;
+      reportWaveformDetail('Waveform detail was not calculated: '+(err&&err.message||String(err))+'.');}
   },WAVEFORM_DETAIL_DEBOUNCE_MS);
 }
 
@@ -227,15 +241,20 @@ function applyWaveformDetail(payload){
     blocks:payload.blocks,startBlock:payload.startBlock,endBlock:payload.endBlock,
     startSec:payload.startSec,endSec:payload.endSec,generation:payload.generation
   };
-  setViewerNotice('waveformDetail',null);
+  reportWaveformDetail(null);
   return true;
 }
 
-/** Record a failed detail request without discarding the overview. */
+/**
+ * Record a failed detail request without discarding the overview.  Checks the
+ * request id as well as the generation so a superseded failure cannot clear a
+ * newer in-flight request or leave a notice about a window nobody is viewing.
+ */
 function failWaveformDetail(payload){
   if(!payload||payload.generation!==waveformDetailGeneration)return;
+  if(payload.requestId!==waveformDetailRequestId)return;
   waveformDetailPending=null;
-  setViewerNotice('waveformDetail','Waveform detail was not calculated: '+(payload.message||'unknown error')+'.');
+  reportWaveformDetail('Waveform detail was not calculated: '+(payload.message||'unknown error')+'.');
 }
 
 
@@ -269,7 +288,7 @@ var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
 var m1Data=null,m1WindowData=null,m1WindowPending=null,m1WindowRequestId=0,pnsData=null,pnsWindowData=null,pnsWindowPending=null,pnsWindowRequestId=0,pnsBusy=false,m1Busy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null;
 var viewerNotices={},viewerNoticesCollapsed=readViewerNoticesCollapsed();
 var kspaceSafetyWarning=null,kspaceSafetyBusy=false,kspaceSafetyPopupTimer=0;
-var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,waveformOverviewActive=false,rfRenderPointCount=0,rfRawCurveCount=0,rfReducedCurveCount=0,rfOverviewBucketCount=0,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
+var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,waveformOverviewActive=false,rfRenderPointCount=0,rfRawCurveCount=0,rfReducedCurveCount=0,rfOverviewBucketCount=0,gradViewPointCount=0,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
 var viewerDrawFrame=0,viewerDrawMinimap=false;
 function isMobileSafetyLayout(){return !!(window.matchMedia&&window.matchMedia('(max-width: 768px), (pointer: coarse)').matches);}
 function viewerNoticeMessages(value){
@@ -372,6 +391,7 @@ var vscApi=(typeof acquireVsCodeApi!=='undefined')?acquireVsCodeApi():null;
 
 /* Viewport waveform detail crosses the extension boundary; the standalone web
    app installs its own in-heap implementation instead. */
+waveformDetailNotice=function(message){setViewerNotice('waveformDetail',message);};
 if(vscApi)requestWaveformDetailWindow=function(request){
   vscApi.postMessage({
     command:'requestWaveformDetail',
@@ -599,7 +619,7 @@ window.addEventListener('message',function(e){
     try{
       detailBlocks=unpackSequenceBlocks(m.blocks,m.sampleTimes,m.sampleValues,m.sampleCount||0);
     }catch(err){
-      failWaveformDetail({generation:m.sequenceGeneration,message:(err&&err.message||String(err))});
+      failWaveformDetail({requestId:m.requestId,generation:m.sequenceGeneration,message:(err&&err.message||String(err))});
       return;
     }
     if(applyWaveformDetail({
@@ -608,7 +628,7 @@ window.addEventListener('message',function(e){
       startSec:m.startSec,endSec:m.endSec,blocks:detailBlocks
     }))draw();
   }else if(m.type==='waveformDetailError'){
-    failWaveformDetail({generation:m.sequenceGeneration,message:m.message});
+    failWaveformDetail({requestId:m.requestId,generation:m.sequenceGeneration,message:m.message});
   }else if(m.type==='loadError'){
     showSequenceLoadFailure(m.message||'The sequence could not be loaded.');
   }else if(m.type==='kspaceData'){
@@ -1577,7 +1597,7 @@ var panelMarkerTimeSec=NaN;
    Main draw loop
    ═══════════════════════════════════════════════════════════════════════ */
 function draw(){
-  var drawStarted=performance.now();derivedRenderPointCount=0;derivedEnvelopeCurveCount=0;derivedRawCurveCount=0;rfRenderPointCount=0;rfRawCurveCount=0;rfReducedCurveCount=0;rfOverviewBucketCount=0;viewerDrawCount++;
+  var drawStarted=performance.now();derivedRenderPointCount=0;derivedEnvelopeCurveCount=0;derivedRawCurveCount=0;rfRenderPointCount=0;rfRawCurveCount=0;rfReducedCurveCount=0;rfOverviewBucketCount=0;gradViewPointCount=0;viewerDrawCount++;
   var w=mc.width/(window.devicePixelRatio||1),h=mc.height/(window.devicePixelRatio||1);
   var s=getComputedStyle(document.body);
   ctx.clearRect(0,0,w,h);
@@ -1990,7 +2010,7 @@ function drawRfBlocks(start,end,vi,ch,colors,vs,ve,maxPoints){
   rowClip(vi,ch,function(){
     var visibleEvents=[];
     for(var bi=start;bi<end;bi++){
-      var rf=blockAt(bi).rf;if(!rf||rf.s+rf.d<vs||rf.s>ve)continue;
+      var rf=blockAt(BL,bi).rf;if(!rf||rf.s+rf.d<vs||rf.s>ve)continue;
       visibleEvents.push(rf);
     }
     var pointBudget=Math.max(4,Math.floor((maxPoints||Infinity)/Math.max(1,visibleEvents.length)));
@@ -2015,7 +2035,7 @@ function drawPhaseBlocks(start,end,vi,ch,colors,vs,ve){
   rowClip(vi,ch,function(){
     ctx.strokeStyle=colors.rf;ctx.lineWidth=.8;ctx.beginPath();var hasRf=false;
     for(var bi=start;bi<end;bi++){
-      var rf=blockAt(bi).rf,phaseTime=rf&&(rf.pt||rf.t);if(!rf||!rf.p||!phaseTime||rf.s+rf.d<vs||rf.s>ve)continue;
+      var rf=blockAt(BL,bi).rf,phaseTime=rf&&(rf.pt||rf.t);if(!rf||!rf.p||!phaseTime||rf.s+rf.d<vs||rf.s>ve)continue;
       var n=Math.min(phaseTime.length,rf.p.length);
       for(var i=0;i<n;i++){
         var sx=t2x(phaseTime[i]),sy=y+ch*.45-rf.p[i]*scale;
@@ -2050,13 +2070,16 @@ function drawGradientBlocks(start,end,key,vi,ci,ch,color,vs,ve){
   rowClip(vi,ch,function(){
     ctx.strokeStyle=color;ctx.lineWidth=1;ctx.beginPath();var hasPath=false;
     for(var bi=start;bi<end;bi++){
-      var g=blockAt(bi)[key];if(!g||g.ty==='none'||!g.t||!g.w||g.t.length<2)continue;
+      var g=blockAt(BL,bi)[key];if(!g||g.ty==='none'||!g.t||!g.w||g.t.length<2)continue;
       var n=Math.min(g.t.length,g.w.length);
       if(n<2)continue;
       if(g.t[n-1]<vs||g.t[0]>ve)continue;
       for(var i=0;i<n;i++){
         var sx=t2x(g.t[i]),sy=y-g.w[i]*scale;
         if(i===0)ctx.moveTo(sx,sy);else ctx.lineTo(sx,sy);
+        // Counted per visible point, not per event: an over-reduced waveform
+        // still draws a whole long event, it just has almost nothing in view.
+        if(g.t[i]>=vs&&g.t[i]<=ve)gradViewPointCount++;
       }
       hasPath=true;
     }

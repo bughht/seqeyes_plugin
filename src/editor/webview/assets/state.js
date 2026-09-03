@@ -27,7 +27,7 @@ var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
 var m1Data=null,m1WindowData=null,m1WindowPending=null,m1WindowRequestId=0,pnsData=null,pnsWindowData=null,pnsWindowPending=null,pnsWindowRequestId=0,pnsBusy=false,m1Busy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null;
 var viewerNotices={},viewerNoticesCollapsed=readViewerNoticesCollapsed();
 var kspaceSafetyWarning=null,kspaceSafetyBusy=false,kspaceSafetyPopupTimer=0;
-var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,waveformOverviewActive=false,rfRenderPointCount=0,rfRawCurveCount=0,rfReducedCurveCount=0,rfOverviewBucketCount=0,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
+var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,waveformOverviewActive=false,rfRenderPointCount=0,rfRawCurveCount=0,rfReducedCurveCount=0,rfOverviewBucketCount=0,gradViewPointCount=0,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
 var viewerDrawFrame=0,viewerDrawMinimap=false;
 function isMobileSafetyLayout(){return !!(window.matchMedia&&window.matchMedia('(max-width: 768px), (pointer: coarse)').matches);}
 function viewerNoticeMessages(value){
@@ -130,6 +130,7 @@ var vscApi=(typeof acquireVsCodeApi!=='undefined')?acquireVsCodeApi():null;
 
 /* Viewport waveform detail crosses the extension boundary; the standalone web
    app installs its own in-heap implementation instead. */
+waveformDetailNotice=function(message){setViewerNotice('waveformDetail',message);};
 if(vscApi)requestWaveformDetailWindow=function(request){
   vscApi.postMessage({
     command:'requestWaveformDetail',
@@ -357,7 +358,7 @@ window.addEventListener('message',function(e){
     try{
       detailBlocks=unpackSequenceBlocks(m.blocks,m.sampleTimes,m.sampleValues,m.sampleCount||0);
     }catch(err){
-      failWaveformDetail({generation:m.sequenceGeneration,message:(err&&err.message||String(err))});
+      failWaveformDetail({requestId:m.requestId,generation:m.sequenceGeneration,message:(err&&err.message||String(err))});
       return;
     }
     if(applyWaveformDetail({
@@ -366,7 +367,7 @@ window.addEventListener('message',function(e){
       startSec:m.startSec,endSec:m.endSec,blocks:detailBlocks
     }))draw();
   }else if(m.type==='waveformDetailError'){
-    failWaveformDetail({generation:m.sequenceGeneration,message:m.message});
+    failWaveformDetail({requestId:m.requestId,generation:m.sequenceGeneration,message:m.message});
   }else if(m.type==='loadError'){
     showSequenceLoadFailure(m.message||'The sequence could not be loaded.');
   }else if(m.type==='kspaceData'){

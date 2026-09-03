@@ -276,6 +276,36 @@ export function packSequenceBlockRange(
     return packBlocksAtCap(decoded, cap, undefined, clip);
 }
 
+/**
+ * Blocks a detail window needs, plus one on each side.
+ *
+ * Deliberately tighter than the padded range the analysis windows use: an
+ * analysis window wants surrounding context, while a detail window wants only
+ * what it will clip to, and padding it would decode blocks whose samples the
+ * clip then discards.  Both hosts resolve the range here so the VS Code and
+ * standalone lanes cannot select different blocks for the same viewport.
+ */
+export function resolveDetailBlockRange(
+    blockStartTimes: ArrayLike<number>,
+    blockCount: number,
+    startSec: number,
+    endSec: number,
+): { start: number; end: number } {
+    const lowerBound = (target: number): number => {
+        let lo = 0;
+        let hi = blockStartTimes.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (blockStartTimes[mid] < target) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    };
+    const start = Math.max(0, Math.min(blockCount, lowerBound(startSec) - 1));
+    const end = Math.max(start, Math.min(blockCount, lowerBound(endSec) + 1));
+    return { start, end };
+}
+
 function packBlocksAtCap(
     blocks: DecodedBlock[],
     cap: number,

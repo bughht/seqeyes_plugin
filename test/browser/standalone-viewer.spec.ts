@@ -32,6 +32,8 @@ interface DebugState {
   m1ReferenceMode: string;
   m1DetailActive: boolean;
   derivedDetailMaxViewSec: number;
+  gradViewPoints: number;
+  waveformDetailActive: boolean;
   title: string;
 }
 
@@ -128,6 +130,45 @@ test('preserves resolvable RF pulse shapes and bounds the full-sequence RF overv
   expect(overview.rfRenderPoints).toBeGreaterThan(overview.rfReducedCurves * 3);
   expect(overview.rfRenderPoints).toBeLessThan(12_000);
   await expectCanvasRegionVaried(page.locator('#mc'), 0.05, 0, 0.9, 0.18);
+});
+
+test('refills deep-zoom gradient detail instead of connecting overview extrema', async ({ page }) => {
+  await loadViewer(page, fixtures.largeSequence);
+
+  const event = await page.evaluate(() => window.__seqeyesDebug.longestGradientEvent('gx')) as {
+    start: number;
+    end: number;
+    points: number;
+    block: number;
+  };
+  // The initial transport reduces this readout to a few hundred points across
+  // tens of milliseconds, which is what used to draw as straight segments.
+  expect(event.points).toBeLessThan(600);
+  expect(event.end - event.start).toBeGreaterThan(0.01);
+
+  // Zoom to 0.5 ms in the middle of the readout — far below the transported
+  // sample spacing, so nothing but real detail can fill it.
+  const mid = 0.5 * (event.start + event.end);
+  const changed = await page.evaluate(
+    ({ start, end }) => window.__seqeyesDebug.setView(start, end),
+    { start: mid, end: mid + 0.0005 },
+  );
+  expect(changed).toBe(true);
+
+  const overviewOnly = await debugState(page);
+  expect(overviewOnly.waveformOverviewActive).toBe(false);
+
+  await expect
+    .poll(async () => (await debugState(page)).waveformDetailActive, { timeout: 5_000 })
+    .toBe(true);
+
+  const detailed = await debugState(page);
+  // Without the fix this window held single-digit gradient points inside the
+  // viewport; clipping before reduction recovers the native samples.
+  expect(detailed.gradViewPoints).toBeGreaterThan(overviewOnly.gradViewPoints * 4);
+  expect(detailed.gradViewPoints).toBeGreaterThan(40);
+  expect(detailed.waveformOverviewActive).toBe(false);
+  await expectCanvasRegionVaried(page.locator('#mc'), 0.05, 0.2, 0.9, 0.6);
 });
 
 test('labels multiband and inversion RF responses without treating carrier area as generic FA', async ({ page }) => {

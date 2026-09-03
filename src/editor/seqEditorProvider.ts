@@ -62,6 +62,7 @@ import {
     MAX_V8_STRING_LENGTH,
     packSequenceBlockRange,
     packSequenceBlocks,
+    resolveDetailBlockRange,
 } from './blockTransport';
 import { ByteBoundedLru } from './windowDetailCache';
 import { getWebviewContent } from './webviewContent';
@@ -494,7 +495,12 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                 }
                 const startSec = Number(msg.startSec);
                 const endSec = Number(msg.endSec);
-                const { start, end } = activeWindowBlockRange(startSec, endSec);
+                const { start, end } = resolveDetailBlockRange(
+                    activeDecodeContext.blockStartTimes,
+                    activeSequence.blocks.length,
+                    startSec,
+                    endSec,
+                );
                 if (!(endSec > startSec) || end - start > WINDOW_DETAIL_BLOCK_LIMIT) {
                     panel.webview.postMessage({
                         type: 'waveformDetailError',
