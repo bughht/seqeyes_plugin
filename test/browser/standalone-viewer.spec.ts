@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { expect, test, type Download, type Locator, type Page } from '@playwright/test';
+import sharp from 'sharp';
 
 interface DebugState {
   blocks: number;
@@ -375,6 +376,53 @@ test('adapts file controls and disables drop for MATLAB on macOS', async ({ page
   await expect(page.locator('#splashOpenBseq')).toBeVisible();
   await expect(page.locator('#dropZone')).toHaveClass(/matlab-drop-unavailable/);
   await expect(page.locator('#dropZone')).toContainText('Drag & drop is unavailable in MATLAB Desktop on macOS');
+});
+
+test('keeps every in-window k-space point when the visible range narrows', async ({ page }) => {
+  await loadViewer(page, fixtures.largeSequence);
+  await openKspace(page);
+
+  // Count composited pixels of the WebGL trajectory layer. The trajectory is
+  // drawn from a contiguous index range of the ADC buffer chosen for the
+  // visible time window; if that range ever excluded a point the shader would
+  // have kept, widening the window would stop restoring it.
+  // The layer is WebGL with preserveDrawingBuffer disabled, so its pixels
+  // cannot be read back through drawImage; the composited screenshot can.
+  const drawnPixels = async (): Promise<number> => {
+    const png = await page.locator('#kg').screenshot();
+    const { data, info } = await sharp(png).raw().toBuffer({ resolveWithObject: true });
+    const tally = new Map<number, number>();
+    for (let i = 0; i < data.length; i += info.channels) {
+      const key = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
+      tally.set(key, (tally.get(key) ?? 0) + 1);
+    }
+    let background = 0;
+    let most = -1;
+    for (const [key, count] of tally) if (count > most) { most = count; background = key; }
+    return (info.width * info.height) - (tally.get(background) ?? 0);
+  };
+
+  // Fit All redraws k-space over the whole sequence, so every ADC point is in
+  // window: the trajectory must be substantially drawn, never blanked.
+  await page.locator('#zf').click();
+  await expect.poll(drawnPixels, { timeout: 10_000 }).toBeGreaterThan(500);
+  const full = await drawnPixels();
+
+  // Zooming in narrows the time window, so the drawn set may only shrink.
+  const counts: number[] = [full];
+  for (let step = 0; step < 4; step++) {
+    await page.locator('#zi').click();
+    await page.waitForTimeout(400);
+    counts.push(await drawnPixels());
+  }
+  for (let i = 1; i < counts.length; i++) {
+    expect(counts[i], `zoom step ${i} drew more than the wider view`).toBeLessThanOrEqual(counts[i - 1]);
+  }
+
+  // Zooming back out must restore the full cloud — the range is a window, not
+  // a reduction, so nothing is permanently lost.
+  await page.locator('#zf').click();
+  await expect.poll(drawnPixels, { timeout: 10_000 }).toBeGreaterThan(full * 0.9);
 });
 
 test('offers an explicit dangerous K-space override from the desktop warning', async ({ page }) => {

@@ -4,6 +4,13 @@ var kCx=0, kCy=0, kCz=0, kScl=1;    // view center & zoom
 var kAutoFit=true;
 var kRotX=-0.5, kRotY=0.7;           // default 3D perspective
 var kDragging=false, kDragPrev=null, kDragBtn=0;
+/**
+ * Pending coalesced drag redraw.  A drag updates the rotation on every
+ * mousemove but only needs one draw per displayed frame; the frames in between
+ * are overwritten before anyone sees them.  The inertial path is already
+ * requestAnimationFrame-driven, so this only brings the drag into line with it.
+ */
+var _kDragRaf=0;
 var kCanvas=document.getElementById("kc"), kCtx=kCanvas.getContext("2d");
 var kDotSize=2, kUnit="cyc";         // cyc=1/m, rad=rad/m
 
@@ -151,6 +158,36 @@ function initWebGL(){
   glU_tMin=gl.getUniformLocation(glProgram,"uTMin");glU_tMax=gl.getUniformLocation(glProgram,"uTMax");
   glU_color=gl.getUniformLocation(glProgram,"uColor");
   return true;
+}
+
+/**
+ * First index and count of the ADC points whose time lies in `[vs, ve]`.
+ *
+ * `kAdcTime` ascends by construction — src/pulseq/kspace.ts fills it block by
+ * block in sequence order — and `uploadKSpaceGPU` writes the GPU buffer in that
+ * same order, so the visible window is one contiguous run of vertices.
+ *
+ * Drawing only that run is not a reduction.  The vertex shader already rejects
+ * everything outside the window with `gl_PointSize = 0` and a `discard`, so the
+ * pixels are identical; the GPU simply stops transforming millions of points in
+ * order to throw them away.  A 1.1 ms view of a 16 s sequence was submitting
+ * 3.38 million vertices to draw about 218 of them.
+ *
+ * The range is padded by one point on each side and the shader keeps its own
+ * time test, so an off-by-one here cannot change what is drawn.
+ *
+ * Pure and parameterised on purpose: the standalone app runs its renderer in an
+ * IIFE with its own state and calls this global.  Do not copy it into
+ * web/index.html — a copy there would shadow this one and diverge.
+ */
+function kSpaceWindowRange(times,total,vs,ve){
+  if(!times||!(total>0)||!(ve>=vs))return{first:0,count:0};
+  var n=Math.min(total,times.length),lo=0,hi=n,mid;
+  while(lo<hi){mid=(lo+hi)>>1;if(times[mid]<vs)lo=mid+1;else hi=mid;}
+  var first=Math.max(0,lo-1);
+  lo=first;hi=n;
+  while(lo<hi){mid=(lo+hi)>>1;if(times[mid]<=ve)lo=mid+1;else hi=mid;}
+  return{first:first,count:Math.max(0,Math.min(n,lo+1)-first)};
 }
 
 /* ── Upload ADC k‑space data to GPU (called after base64 decode) ────── */
@@ -344,9 +381,15 @@ window.addEventListener("mousemove",function(e){
     _tCy=kCy; _tCx=kCx; _tCz=kCz;  // sync targets
     kAutoFit=false;
   }
-  drawKsFast();
+  scheduleKsDragDraw();
 });
 window.addEventListener("mouseup",function(){kDragging=false;kDragPrev=null;});
+
+/** Draw at most once per frame, always from the latest rotation. */
+function scheduleKsDragDraw(){
+  if(_kDragRaf)return;
+  _kDragRaf=requestAnimationFrame(function(){_kDragRaf=0;drawKsFast();});
+}
 
 /* ── Touch: 3D k-space viewer ─────────────────────────────────────── */
 var _kTouchActive=false,_kTouchPrev=null,_kTouchPinch0=0,_kTouchMid=null,_kTouchBtn=0;
@@ -599,7 +642,8 @@ function drawKs_core(W,H,dpr){
     gl.vertexAttribPointer(glAttribTime,1,gl.FLOAT,false,16,12);
 
     kSpaceTrajectoryDrawCount++;
-    gl.drawArrays(gl.POINTS,0,glN);
+    var win=kSpaceWindowRange(kAdcTime,glN,vs,ve);
+    if(win.count>0)gl.drawArrays(gl.POINTS,win.first,win.count);
   }
 
   drawKsOverlay(W,H,dpr,cs);

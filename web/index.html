@@ -2245,6 +2245,12 @@ var kCx=0, kCy=0, kCz=0, kScl=1;
 var kAutoFit=true;
 var kRotX=-0.5, kRotY=0.7;
 var kDragging=false, kDragPrev=null, kDragBtn=0;
+/* One coalesced drag redraw per frame; the inertial path is already rAF-driven. */
+var _kDragRaf=0;
+function scheduleKsDragDraw(){
+  if(_kDragRaf)return;
+  _kDragRaf=requestAnimationFrame(function(){_kDragRaf=0;drawKsFast();});
+}
 var kCanvas=document.getElementById("kc"), kCtx=kCanvas.getContext("2d");
 var kDotSize=2, kUnit="cyc";
 // Smooth animation
@@ -2430,7 +2436,7 @@ window.addEventListener("mousemove",function(e){
   if(kDragBtn===0){kRotY+=dx*0.008;kRotX-=dy*0.008;_tRotY=kRotY;_tRotX=kRotX}
   else{var cz=Math.cos(kRotY),sz=Math.sin(kRotY),cx=Math.cos(kRotX),sx=Math.sin(kRotX);var dpr=window.devicePixelRatio||1;dx/=(dpr*kScl);dy/=(dpr*kScl);
     if(Math.abs(cz)>0.01){kCy+=dy/cx;kCx+=(-dx-sz*sx*(dy/cx))/cz}else{kCy+=dy/cx;kCz+=(dx-cz*sx*(dy/cx))/sz}kAutoFit=false;_tCy=kCy;_tCx=kCx;_tCz=kCz}
-  drawKsFast();
+  scheduleKsDragDraw();
 });
 window.addEventListener("mouseup",function(){kDragging=false;kDragPrev=null;});
 
@@ -2615,7 +2621,9 @@ function drawKs_core(W,H,dpr){
     gl.bindBuffer(gl.ARRAY_BUFFER,glBuf);
     gl.enableVertexAttribArray(glAttribPos);gl.vertexAttribPointer(glAttribPos,3,gl.FLOAT,false,16,0);
     gl.enableVertexAttribArray(glAttribTime);gl.vertexAttribPointer(glAttribTime,1,gl.FLOAT,false,16,12);
-    kSpaceTrajectoryDrawCount++;gl.drawArrays(gl.POINTS,0,glN);
+    kSpaceTrajectoryDrawCount++;
+    var win=kSpaceWindowRange(kAdcTime,glN,vs,ve);
+    if(win.count>0)gl.drawArrays(gl.POINTS,win.first,win.count);
   }
   drawKsOverlay(W,H,dpr,cs);
 }
