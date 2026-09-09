@@ -40,6 +40,8 @@ interface DebugState {
   waveformBandColumns: number;
   kDrawnPoints: number;
   kUploadedPoints: number;
+  kPanX: number;
+  kPanY: number;
   title: string;
 }
 
@@ -465,6 +467,51 @@ test('reduces the k-space cloud only while the camera moves, never at rest', asy
     const s = await debugState(page);
     return s.kDrawnPoints === s.kUploadedPoints;
   }, { timeout: 20_000 }).toBe(true);
+});
+
+test('rotates k-space about the origin regardless of panning', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openKspace(page);
+  // The drag listener lives on #kc, the 2D overlay stacked above the WebGL layer.
+  const box = await requireBox(page.locator('#kc'));
+  const cx = box.x + box.width / 2;
+  const cy = box.y + box.height / 2;
+
+  // Wait for auto-fit to settle: it targets pan 0, and its easing would
+  // otherwise pull the pan back underneath the drag.
+  await expect.poll(async () => {
+    const a = (await debugState(page)).kScale;
+    await page.waitForTimeout(250);
+    return (await debugState(page)).kScale === a;
+  }, { timeout: 10_000 }).toBe(true);
+  expect((await debugState(page)).kPanX).toBe(0);
+
+  // Panning is a screen offset: the view moves exactly as far as the cursor.
+  await page.mouse.move(cx, cy);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.move(cx + 90, cy + 40);
+  await page.mouse.up({ button: 'right' });
+  // Within a pixel, not exactly: synthetic drags can land sub-pixel. A
+  // rotation-dependent pan would be out by tens of pixels, not one.
+  await expect.poll(async () => Math.abs((await debugState(page)).kPanX - 90) <= 1, { timeout: 5_000 }).toBe(true);
+  const panned = await debugState(page);
+  expect(Math.abs(panned.kPanY - 40)).toBeLessThanOrEqual(1);
+
+  // Rotating must not disturb it. The pivot is k = 0 and never moves, so a
+  // pan can no longer relocate it and send the cloud orbiting off-centre.
+  await page.mouse.move(cx, cy);
+  await page.mouse.down();
+  await page.mouse.move(cx + 80, cy + 30);
+  await page.mouse.up();
+  await page.waitForTimeout(600);
+  const rotated = await debugState(page);
+  expect(rotated.kRotY).not.toBeCloseTo(panned.kRotY, 3);
+  expect(rotated.kPanX).toBeCloseTo(panned.kPanX, 6);
+  expect(rotated.kPanY).toBeCloseTo(panned.kPanY, 6);
+
+  // Reset restores the framing.
+  await page.locator('#krst').click();
+  await expect.poll(async () => Math.abs((await debugState(page)).kPanX) < 0.5, { timeout: 10_000 }).toBe(true);
 });
 
 test('offers an explicit dangerous K-space override from the desktop warning', async ({ page }) => {

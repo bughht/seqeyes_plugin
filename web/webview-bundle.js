@@ -2277,7 +2277,17 @@ function drawTriggerBlocks(start,end,vi,ch,colors,vs,ve){
 /* ══ kspace.js ══ */
 var kOpen=false, kView="3d";
 var kSpaceTrajectoryDrawCount=0,kSpaceOverlayDrawCount=0;
-var kCx=0, kCy=0, kCz=0, kScl=1;    // view center & zoom
+/**
+ * Pan is a screen offset in CSS pixels, applied after rotation; the rotation
+ * pivot is k = 0 and never moves.
+ *
+ * These used to be one world-space point that was both the pivot and whatever
+ * sat at canvas centre, so panning relocated the pivot and a later rotation
+ * swung the cloud around empty space beside it.  Separating them costs the
+ * ability to orbit an off-centre feature, which is recorded as a deliberate
+ * trade in plans/todo/KSPACE_ROTATION_CENTER.md.
+ */
+var kPanX=0, kPanY=0, kScl=1;
 var kAutoFit=true;
 var kRotX=-0.5, kRotY=0.7;           // default 3D perspective
 var kDragging=false, kDragPrev=null, kDragBtn=0;
@@ -2292,7 +2302,7 @@ var kCanvas=document.getElementById("kc"), kCtx=kCanvas.getContext("2d");
 var kDotSize=2, kUnit="cyc";         // cyc=1/m, rad=rad/m
 
 // ── Smooth animation targets ──────────────────────────────────────────
-var _tRotX=kRotX, _tRotY=kRotY, _tScl=kScl, _tCx=kCx, _tCy=kCy, _tCz=kCz;
+var _tRotX=kRotX, _tRotY=kRotY, _tScl=kScl, _tPanX=kPanX, _tPanY=kPanY;
 var _kAnimId=null;
 var _kEasing=0.12;  // higher = snappier, lower = smoother (0.06–0.20)
 
@@ -2304,15 +2314,14 @@ function startKSpaceAnim() {
     if (Math.abs(_tRotX - kRotX) > eps)  { kRotX += (_tRotX - kRotX) * _kEasing; changed = true; }
     if (Math.abs(_tRotY - kRotY) > eps)  { kRotY += (_tRotY - kRotY) * _kEasing; changed = true; }
     if (Math.abs(_tScl  - kScl)  > 0.001){ kScl  += (_tScl  - kScl)  * _kEasing; changed = true; }
-    if (Math.abs(_tCx   - kCx)   > 0.001){ kCx   += (_tCx   - kCx)   * _kEasing; changed = true; }
-    if (Math.abs(_tCy   - kCy)   > 0.001){ kCy   += (_tCy   - kCy)   * _kEasing; changed = true; }
-    if (Math.abs(_tCz   - kCz)   > 0.001){ kCz   += (_tCz   - kCz)   * _kEasing; changed = true; }
+    if (Math.abs(_tPanX - kPanX) > 0.01) { kPanX += (_tPanX - kPanX) * _kEasing; changed = true; }
+    if (Math.abs(_tPanY - kPanY) > 0.01) { kPanY += (_tPanY - kPanY) * _kEasing; changed = true; }
     if (changed) {
       drawKsFast();
       _kAnimId = requestAnimationFrame(tick);
     } else {
       // Snap to exact targets
-      kRotX=_tRotX; kRotY=_tRotY; kScl=_tScl; kCx=_tCx; kCy=_tCy; kCz=_tCz;
+      kRotX=_tRotX; kRotY=_tRotY; kScl=_tScl; kPanX=_tPanX; kPanY=_tPanY;
       _kAnimId = null;
       drawKsFast();   // no longer moving: redraw the complete cloud
     }
@@ -2320,12 +2329,12 @@ function startKSpaceAnim() {
   _kAnimId = requestAnimationFrame(tick);
 }
 
-function setKSpaceTarget(rx, ry, s, cx, cy, cz, instant) {
+function setKSpaceTarget(rx, ry, s, panX, panY, instant) {
   if (instant) {
-    kRotX=_tRotX=rx; kRotY=_tRotY=ry; kScl=_tScl=s; kCx=_tCx=cx; kCy=_tCy=cy; kCz=_tCz=cz;
+    kRotX=_tRotX=rx; kRotY=_tRotY=ry; kScl=_tScl=s; kPanX=_tPanX=panX; kPanY=_tPanY=panY;
     drawKs();
   } else {
-    _tRotX=rx; _tRotY=ry; _tScl=s; _tCx=cx; _tCy=cy; _tCz=cz;
+    _tRotX=rx; _tRotY=ry; _tScl=s; _tPanX=panX; _tPanY=panY;
     startKSpaceAnim();
   }
 }
@@ -2379,7 +2388,7 @@ if(systemThemeQuery){
    ═══════════════════════════════════════════════════════════════════════ */
 var gl=null, glProgram=null, glBuf=null, glN=0;
 var glAttribPos=-1, glAttribTime=-1;
-var glU_cy=-1,glU_sy=-1,glU_cx=-1,glU_sx=-1,glU_center=-1,glU_scale=-1;
+var glU_cy=-1,glU_sy=-1,glU_cx=-1,glU_sx=-1,glU_pan=-1,glU_scale=-1;
 var glU_halfRes=-1,glU_tMin=-1,glU_tMax=-1,glU_dot=-1,glU_color=-1;
 
 // ── Cached bounds (computed once when data is uploaded) ──────────────
@@ -2397,16 +2406,16 @@ function initWebGL(){
   gl.shaderSource(vs,'\
     attribute vec3 aPos; attribute float aTime;\
     uniform float uCy,uSy,uCx,uSx,uScale;\
-    uniform vec3 uCenter; uniform vec2 uHalfRes;\
+    uniform vec2 uPan; uniform vec2 uHalfRes;\
     uniform float uTMin,uTMax,uDot;\
     varying float vVis;\
     void main(){\
-      float dx=aPos.x-uCenter.x,dy=aPos.y-uCenter.y,dz=aPos.z-uCenter.z;\
+      float dx=aPos.x,dy=aPos.y,dz=aPos.z;\
       float rx=dx*uCy-dz*uSy;\
       float rz=dx*uSy+dz*uCy;\
       float ry=dy*uCx-rz*uSx;\
-      float sx=rx*uScale/uHalfRes.x;\
-      float sy=ry*uScale/uHalfRes.y;\
+      float sx=(rx*uScale+uPan.x)/uHalfRes.x;\
+      float sy=(ry*uScale-uPan.y)/uHalfRes.y;\
       vVis=(aTime>=uTMin&&aTime<=uTMax)?1.0:-1.0;\
       gl_Position=vec4(sx,sy,0.0,1.0);\
       gl_PointSize=vVis>0.0?uDot:0.0;\
@@ -2431,7 +2440,7 @@ function initWebGL(){
   glAttribTime=gl.getAttribLocation(glProgram,"aTime");
   glU_cy=gl.getUniformLocation(glProgram,"uCy");glU_sy=gl.getUniformLocation(glProgram,"uSy");
   glU_cx=gl.getUniformLocation(glProgram,"uCx");glU_sx=gl.getUniformLocation(glProgram,"uSx");
-  glU_center=gl.getUniformLocation(glProgram,"uCenter");glU_scale=gl.getUniformLocation(glProgram,"uScale");
+  glU_pan=gl.getUniformLocation(glProgram,"uPan");glU_scale=gl.getUniformLocation(glProgram,"uScale");
   glU_halfRes=gl.getUniformLocation(glProgram,"uHalfRes");glU_dot=gl.getUniformLocation(glProgram,"uDot");
   glU_tMin=gl.getUniformLocation(glProgram,"uTMin");glU_tMax=gl.getUniformLocation(glProgram,"uTMax");
   glU_color=gl.getUniformLocation(glProgram,"uColor");
@@ -2536,7 +2545,7 @@ document.getElementById("krst").onclick=function(){
   kView="3d";
   document.getElementById("kax").textContent="3D";
   var af=_kAutoFitVals();
-  setKSpaceTarget(-0.5, 0.7, af.scl, af.cx, af.cy, af.cz, false);
+  setKSpaceTarget(-0.5, 0.7, af.scl, af.panX, af.panY, false);
 };
 // Camera presets: smoothly rotate to look straight down an axis
 document.getElementById("kax").onclick=function(){
@@ -2549,7 +2558,7 @@ document.getElementById("kax").onclick=function(){
   else{trx=-0.5; tr=0.7;}  // 3d — default perspective
   document.getElementById("kax").textContent=kView.toUpperCase();
   var af=_kAutoFitVals();
-  setKSpaceTarget(trx, tr, af.scl, af.cx, af.cy, af.cz, false);
+  setKSpaceTarget(trx, tr, af.scl, af.panX, af.panY, false);
 };
 
 function resizeKc(){
@@ -2670,9 +2679,13 @@ kCanvas.addEventListener("wheel",function(e){e.preventDefault();
   var r=kCanvas.getBoundingClientRect(),dpr=window.devicePixelRatio||1;
   var mx=(e.clientX-r.left)/dpr, my=(e.clientY-r.top)/dpr;
   var zf=e.deltaY<0?1.25:0.8, W=kCanvas.width/dpr, H=kCanvas.height/dpr;
-  var dz=(1-1/zf)*dpr/kScl;
   kAutoFit=false;
-  setKSpaceTarget(kRotX, kRotY, kScl*zf, kCx+(mx-W/2)*dz, kCy-(my-H/2)*dz, kCz, false);
+  // Keep whatever is under the cursor under the cursor.  With pan in screen
+  // space this is the same arithmetic at every rotation; the previous form
+  // added a screen delta straight to world coordinates and only aimed
+  // correctly in the unrotated view.
+  setKSpaceTarget(kRotX, kRotY, kScl*zf,
+    kPanX+(mx-W/2-kPanX)*(1-zf), kPanY+(my-H/2-kPanY)*(1-zf), false);
 },{passive:false});
 
 window.addEventListener("mousemove",function(e){
@@ -2685,13 +2698,10 @@ window.addEventListener("mousemove",function(e){
     kRotY+=dx*0.008; kRotX-=dy*0.008;
     _tRotY=kRotY; _tRotX=kRotX;  // sync targets
   }else{
-    // right/middle drag = instant pan
-    var cz=Math.cos(kRotY),sz=Math.sin(kRotY),cx=Math.cos(kRotX),sx=Math.sin(kRotX);
-    var dpr=window.devicePixelRatio||1;
-    dx/=(dpr*kScl); dy/=(dpr*kScl);
-    if(Math.abs(cz)>0.01){kCy+=dy/cx;kCx+=(-dx-sz*sx*(dy/cx))/cz;}
-    else{kCy+=dy/cx;kCz+=(dx-cz*sx*(dy/cx))/sz;}
-    _tCy=kCy; _tCx=kCx; _tCz=kCz;  // sync targets
+    // right/middle drag = instant pan.  Pan is a screen offset now, so it
+    // needs no inverse rotation and cannot move the rotation pivot.
+    kPanX+=dx; kPanY+=dy;
+    _tPanX=kPanX; _tPanY=kPanY;  // sync targets
     kAutoFit=false;
   }
   scheduleKsDragDraw();
@@ -2746,12 +2756,8 @@ kCanvas.addEventListener("touchmove",function(e){
     var mid=getTouchMid(e.touches);
     var pdx=(mid.x-_kTouchPrev.x), pdy=(mid.y-_kTouchPrev.y);
     _kTouchPrev={x:mid.x,y:mid.y};
-    var cz=Math.cos(kRotY),sz=Math.sin(kRotY),cx=Math.cos(kRotX),sx=Math.sin(kRotX);
-    var dpr=window.devicePixelRatio||1;
-    pdx/=(dpr*kScl); pdy/=(dpr*kScl);
-    if(Math.abs(cz)>0.01){kCy+=pdy/cx;kCx+=(-pdx-sz*sx*(pdy/cx))/cz;}
-    else{kCy+=pdy/cx;kCz+=(pdx-cz*sx*(pdy/cx))/sz;}
-    _tCy=kCy; _tCx=kCx; _tCz=kCz; kAutoFit=false;
+    kPanX+=pdx; kPanY+=pdy;
+    _tPanX=kPanX; _tPanY=kPanY; kAutoFit=false;
     drawKsFast();
   }
   e.preventDefault();
@@ -2855,8 +2861,13 @@ function persistPanelSize(){
 function kNice(range){var ms=[1,2,5,10,20,50,100,200,500];for(var i=0;i<ms.length;i++){var b=Math.pow(10,Math.floor(Math.log10(range)));if(ms[i]*b>=range/4)return ms[i]*b;}return 1;}
 
 function _kAutoFitVals(){
-  var rng=_kBrng||1,W=kCanvas.width/(window.devicePixelRatio||1),H=kCanvas.height/(window.devicePixelRatio||1);
-  return{cx:(_kBxmin+_kBxmax)/2,cy:(_kBymin+_kBymax)/2,cz:(_kBzmin+_kBzmax)/2,scl:Math.min(W,H)/(rng*1.15)};
+  var W=kCanvas.width/(window.devicePixelRatio||1),H=kCanvas.height/(window.devicePixelRatio||1);
+  // The pivot is k = 0, so what has to fit is the furthest point from the
+  // origin, not the width of the bounding box.
+  var reach=Math.max(Math.abs(_kBxmin),Math.abs(_kBxmax),Math.abs(_kBymin),
+                     Math.abs(_kBymax),Math.abs(_kBzmin),Math.abs(_kBzmax));
+  if(!(reach>0)||!isFinite(reach))reach=(_kBrng||1)/2;
+  return{panX:0,panY:0,scl:Math.min(W,H)/(reach*2*1.15)};
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -2927,7 +2938,7 @@ function drawKs_core(W,H,dpr){
   if(kAutoFit){
     kAutoFit=false;
     var af=_kAutoFitVals();
-    setKSpaceTarget(kRotX, kRotY, af.scl, af.cx, af.cy, af.cz, false);
+    setKSpaceTarget(kRotX, kRotY, af.scl, af.panX, af.panY, false);
   }
 
   // ── Time window ──
@@ -2944,7 +2955,7 @@ function drawKs_core(W,H,dpr){
 
     gl.uniform1f(glU_cy,Math.cos(kRotY));gl.uniform1f(glU_sy,Math.sin(kRotY));
     gl.uniform1f(glU_cx,Math.cos(kRotX));gl.uniform1f(glU_sx,Math.sin(kRotX));
-    gl.uniform3f(glU_center,kCx,kCy,kCz);
+    gl.uniform2f(glU_pan,kPanX*dpr,kPanY*dpr);
     gl.uniform1f(glU_scale,kScl);
     gl.uniform2f(glU_halfRes,hW,hH);
     gl.uniform1f(glU_tMin,vs);gl.uniform1f(glU_tMax,ve);
@@ -2990,11 +3001,10 @@ function drawKsOverlay(W,H,dpr,cs){
   var cz=Math.cos(kRotY),sz=Math.sin(kRotY),cxR=Math.cos(kRotX),sxR=Math.sin(kRotX);
   var invDpr=1/dpr;
   function proj(px,py,pz){
-    var dx2=px-kCx, dy2=py-kCy, dz2=pz-kCz;
-    var rx=dx2*cz-dz2*sz;
-    var rz2=dx2*sz+dz2*cz;
-    var ry=dy2*cxR-rz2*sxR;
-    return {x:W/2+rx*kScl*invDpr, y:H/2-ry*kScl*invDpr};
+    var rx=px*cz-pz*sz;
+    var rz2=px*sz+pz*cz;
+    var ry=py*cxR-rz2*sxR;
+    return {x:W/2+rx*kScl*invDpr+kPanX, y:H/2-ry*kScl*invDpr+kPanY};
   }
   var tick=kNice(rng3);
   function drawAxis3D(fx,fy,fz,label,col){
