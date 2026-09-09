@@ -2260,7 +2260,7 @@ var kDotSize=2, kUnit="cyc";
 // Smooth animation
 var _tRotX=kRotX, _tRotY=kRotY, _tScl=kScl, _tCx=kCx, _tCy=kCy, _tCz=kCz;
 var _kAnimId=null, _kEasing=0.12;
-function startKSpaceAnim(){if(_kAnimId||kDragging)return;function t(){var c=false,e=0.0005;if(Math.abs(_tRotX-kRotX)>e){kRotX+=(_tRotX-kRotX)*_kEasing;c=true}if(Math.abs(_tRotY-kRotY)>e){kRotY+=(_tRotY-kRotY)*_kEasing;c=true}if(Math.abs(_tScl-kScl)>0.001){kScl+=(_tScl-kScl)*_kEasing;c=true}if(Math.abs(_tCx-kCx)>0.001){kCx+=(_tCx-kCx)*_kEasing;c=true}if(Math.abs(_tCy-kCy)>0.001){kCy+=(_tCy-kCy)*_kEasing;c=true}if(Math.abs(_tCz-kCz)>0.001){kCz+=(_tCz-kCz)*_kEasing;c=true}if(c){drawKsFast();_kAnimId=requestAnimationFrame(t)}else{kRotX=_tRotX;kRotY=_tRotY;kScl=_tScl;kCx=_tCx;kCy=_tCy;kCz=_tCz;_kAnimId=null}}_kAnimId=requestAnimationFrame(t)}
+function startKSpaceAnim(){if(_kAnimId||kDragging)return;function t(){var c=false,e=0.0005;if(Math.abs(_tRotX-kRotX)>e){kRotX+=(_tRotX-kRotX)*_kEasing;c=true}if(Math.abs(_tRotY-kRotY)>e){kRotY+=(_tRotY-kRotY)*_kEasing;c=true}if(Math.abs(_tScl-kScl)>0.001){kScl+=(_tScl-kScl)*_kEasing;c=true}if(Math.abs(_tCx-kCx)>0.001){kCx+=(_tCx-kCx)*_kEasing;c=true}if(Math.abs(_tCy-kCy)>0.001){kCy+=(_tCy-kCy)*_kEasing;c=true}if(Math.abs(_tCz-kCz)>0.001){kCz+=(_tCz-kCz)*_kEasing;c=true}if(c){drawKsFast();_kAnimId=requestAnimationFrame(t)}else{kRotX=_tRotX;kRotY=_tRotY;kScl=_tScl;kCx=_tCx;kCy=_tCy;kCz=_tCz;_kAnimId=null;drawKsFast()}}_kAnimId=requestAnimationFrame(t)}
 function setKSpaceTarget(rx,ry,s,cx,cy,cz,inst){if(inst){kRotX=_tRotX=rx;kRotY=_tRotY=ry;kScl=_tScl=s;kCx=_tCx=cx;kCy=_tCy=cy;kCz=_tCz=cz;drawKs()}else{_tRotX=rx;_tRotY=ry;_tScl=s;_tCx=cx;_tCy=cy;_tCz=cz;startKSpaceAnim()}}
 document.getElementById("kdot").oninput=function(){kDotSize=parseInt(this.value);drawKs();};
 document.getElementById("kunit").onclick=function(){
@@ -2442,7 +2442,10 @@ window.addEventListener("mousemove",function(e){
     if(Math.abs(cz)>0.01){kCy+=dy/cx;kCx+=(-dx-sz*sx*(dy/cx))/cz}else{kCy+=dy/cx;kCz+=(dx-cz*sx*(dy/cx))/sz}kAutoFit=false;_tCy=kCy;_tCx=kCx;_tCz=kCz}
   scheduleKsDragDraw();
 });
-window.addEventListener("mouseup",function(){kDragging=false;kDragPrev=null;});
+window.addEventListener("mouseup",function(){
+  if(!kDragging)return;
+  kDragging=false;kDragPrev=null;drawKsFast();
+});
 
 /* ── Touch: 3D k-space viewer ─────────────────────────────────────── */
 var _kTouchActive=false,_kTouchPrev=null,_kTouchPinch0=0,_kTouchMid=null,_kTouchBtn=0;
@@ -2492,6 +2495,7 @@ kCanvas.addEventListener("touchmove",function(e){
 },{passive:false});
 kCanvas.addEventListener("touchend",function(e){
   _kTouchActive=false;_kTouchPrev=null;_kTouchPinch0=0;_kTouchMid=null;
+  if(!e.touches.length)drawKsFast();
   if(e.touches.length===1){
     _kTouchActive=true;_kTouchBtn=0;
     _kTouchPrev={x:e.touches[0].clientX,y:e.touches[0].clientY};
@@ -2499,6 +2503,7 @@ kCanvas.addEventListener("touchend",function(e){
 });
 kCanvas.addEventListener("touchcancel",function(){
   _kTouchActive=false;_kTouchPrev=null;_kTouchPinch0=0;_kTouchMid=null;
+  drawKsFast();
 });
 
 /* ── K-space resize handle ────────────────────────────────────────────── */
@@ -2623,12 +2628,14 @@ function drawKs_core(W,H,dpr){
     var ac=cs.getPropertyValue("--adc").trim();var rgb=parseCSSColor(ac);
     gl.uniform4f(glU_color,rgb[0],rgb[1],rgb[2],0.85);
     gl.bindBuffer(gl.ARRAY_BUFFER,glBuf);
-    gl.enableVertexAttribArray(glAttribPos);gl.vertexAttribPointer(glAttribPos,3,gl.FLOAT,false,16,0);
-    gl.enableVertexAttribArray(glAttribTime);gl.vertexAttribPointer(glAttribTime,1,gl.FLOAT,false,16,12);
-    kSpaceTrajectoryDrawCount++;
     var win=kSpaceWindowRange(kAdcTime,glN,vs,ve);
-    kDrawnPointCount=win.count;
-    if(win.count>0)gl.drawArrays(gl.POINTS,win.first,win.count);
+    var stride=(kDragging||_kTouchActive||_kAnimId)?kSpaceMovingStride(win.count):1;
+    gl.enableVertexAttribArray(glAttribPos);gl.vertexAttribPointer(glAttribPos,3,gl.FLOAT,false,16*stride,0);
+    gl.enableVertexAttribArray(glAttribTime);gl.vertexAttribPointer(glAttribTime,1,gl.FLOAT,false,16*stride,12);
+    kSpaceTrajectoryDrawCount++;
+    // Stride reindexes the buffer, so the window offset and count scale with it.
+    kDrawnPointCount=Math.floor(win.count/stride);
+    if(kDrawnPointCount>0)gl.drawArrays(gl.POINTS,Math.floor(win.first/stride),kDrawnPointCount);
   }
   drawKsOverlay(W,H,dpr,cs);
 }

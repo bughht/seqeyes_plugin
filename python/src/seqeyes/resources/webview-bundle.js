@@ -2314,6 +2314,7 @@ function startKSpaceAnim() {
       // Snap to exact targets
       kRotX=_tRotX; kRotY=_tRotY; kScl=_tScl; kCx=_tCx; kCy=_tCy; kCz=_tCz;
       _kAnimId = null;
+      drawKsFast();   // no longer moving: redraw the complete cloud
     }
   }
   _kAnimId = requestAnimationFrame(tick);
@@ -2434,7 +2435,42 @@ function initWebGL(){
   glU_halfRes=gl.getUniformLocation(glProgram,"uHalfRes");glU_dot=gl.getUniformLocation(glProgram,"uDot");
   glU_tMin=gl.getUniformLocation(glProgram,"uTMin");glU_tMax=gl.getUniformLocation(glProgram,"uTMax");
   glU_color=gl.getUniformLocation(glProgram,"uColor");
-  return true;
+  return !!(kDragging||_kTouchActive||_kAnimId);
+}
+
+/** Points to keep on screen while the camera is moving. */
+var KSPACE_MOVING_POINT_TARGET = 600000;
+
+/**
+ * Stride to draw the cloud with while the camera is moving.
+ *
+ * Window culling cannot help when the whole sequence is in view: every point
+ * really is visible, and 6.4 million of them onto a few hundred thousand
+ * pixels costs about a second a frame.  While the camera moves, every k-th
+ * point is drawn instead.
+ *
+ * This is a true subset — each drawn point is a real ADC k-space location, and
+ * nothing is interpolated or invented.  The moment the drag or the easing
+ * settles the full set is redrawn, so the image actually being read is always
+ * exact; only the motion is cheaper.  A subset also needs no extra memory: the
+ * buffer is interleaved x,y,z,t at 16 bytes, so widening the attribute stride
+ * to 16k selects every k-th vertex with no CPU work and no second upload.
+ *
+ * Returns 1 below the target, so narrow views and modest sequences are drawn
+ * exactly even in motion.
+ */
+function kSpaceMovingStride(count){
+  // The target is overridable so the settle-exactness guarantee can be tested
+  // against a fixture small enough to ship; no repository fixture exceeds it.
+  var target=(typeof window!=='undefined'&&window.__kMovingPointTarget>0)
+    ?window.__kMovingPointTarget:KSPACE_MOVING_POINT_TARGET;
+  if(!(count>target))return 1;
+  return Math.ceil(count/target);
+}
+
+/** True while a drag, touch gesture, or camera easing is in progress. */
+function kSpaceCameraMoving(){
+  return !!(kDragging||_kTouchActive||_kAnimId);
 }
 
 /**
@@ -2660,7 +2696,11 @@ window.addEventListener("mousemove",function(e){
   }
   scheduleKsDragDraw();
 });
-window.addEventListener("mouseup",function(){kDragging=false;kDragPrev=null;});
+window.addEventListener("mouseup",function(){
+  if(!kDragging)return;
+  kDragging=false;kDragPrev=null;
+  drawKsFast();   // settled: replace the moving subset with every point
+});
 
 /** Draw at most once per frame, always from the latest rotation. */
 function scheduleKsDragDraw(){
@@ -2718,6 +2758,7 @@ kCanvas.addEventListener("touchmove",function(e){
 },{passive:false});
 kCanvas.addEventListener("touchend",function(e){
   _kTouchActive=false;_kTouchPrev=null;_kTouchPinch0=0;_kTouchMid=null;
+  if(!e.touches.length)drawKsFast();
   if(e.touches.length===1){
     // Transition from 2‑finger to 1‑finger
     _kTouchActive=true;_kTouchBtn=0;
@@ -2726,6 +2767,7 @@ kCanvas.addEventListener("touchend",function(e){
 });
 kCanvas.addEventListener("touchcancel",function(){
   _kTouchActive=false;_kTouchPrev=null;_kTouchPinch0=0;_kTouchMid=null;
+  drawKsFast();
 });
 
 /* ── Resize handle ───────────────────────────────────────────────────── */
@@ -2912,15 +2954,19 @@ function drawKs_core(W,H,dpr){
     var rgb=parseCSSColor(ac);
     gl.uniform4f(glU_color,rgb[0],rgb[1],rgb[2],0.85);
 
+    var win=kSpaceWindowRange(kAdcTime,glN,vs,ve);
+    var stride=kSpaceCameraMoving()?kSpaceMovingStride(win.count):1;
+
     gl.bindBuffer(gl.ARRAY_BUFFER,glBuf);
     gl.enableVertexAttribArray(glAttribPos);
-    gl.vertexAttribPointer(glAttribPos,3,gl.FLOAT,false,16,0);
+    gl.vertexAttribPointer(glAttribPos,3,gl.FLOAT,false,16*stride,0);
     gl.enableVertexAttribArray(glAttribTime);
-    gl.vertexAttribPointer(glAttribTime,1,gl.FLOAT,false,16,12);
+    gl.vertexAttribPointer(glAttribTime,1,gl.FLOAT,false,16*stride,12);
 
     kSpaceTrajectoryDrawCount++;
-    var win=kSpaceWindowRange(kAdcTime,glN,vs,ve);
-    if(win.count>0)gl.drawArrays(gl.POINTS,win.first,win.count);
+    // Stride reindexes the buffer, so the window offset and count scale with it.
+    var drawFirst=Math.floor(win.first/stride),drawCount=Math.floor(win.count/stride);
+    if(drawCount>0)gl.drawArrays(gl.POINTS,drawFirst,drawCount);
   }
 
   drawKsOverlay(W,H,dpr,cs);

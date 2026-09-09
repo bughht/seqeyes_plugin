@@ -38,6 +38,8 @@ interface DebugState {
   waveformDetailWindowSec: number;
   waveformBandActive: boolean;
   waveformBandColumns: number;
+  kDrawnPoints: number;
+  kUploadedPoints: number;
   title: string;
 }
 
@@ -423,6 +425,46 @@ test('keeps every in-window k-space point when the visible range narrows', async
   // a reduction, so nothing is permanently lost.
   await page.locator('#zf').click();
   await expect.poll(drawnPixels, { timeout: 10_000 }).toBeGreaterThan(full * 0.9);
+});
+
+test('reduces the k-space cloud only while the camera moves, never at rest', async ({ page }) => {
+  await loadViewer(page, fixtures.largeSequence);
+  await openKspace(page);
+
+  // The moving stride is a bundle global, so its policy can be checked directly.
+  const policy = await page.evaluate(() => {
+    const stride = (window as unknown as { kSpaceMovingStride: (n: number) => number }).kSpaceMovingStride;
+    return { small: stride(1000), atTarget: stride(600000), double: stride(1200000), tenfold: stride(6000000) };
+  });
+  // Below the target nothing is reduced, so modest sequences are always exact.
+  expect(policy.small).toBe(1);
+  expect(policy.atTarget).toBe(1);
+  // Above it the stride bounds the drawn count rather than growing with the data.
+  expect(policy.double).toBe(2);
+  expect(1200000 / policy.double).toBeLessThanOrEqual(600000);
+  expect(6000000 / policy.tenfold).toBeLessThanOrEqual(600000);
+
+  // At rest the cloud must be complete.
+  await page.locator('#zf').click();
+  await expect.poll(async () => {
+    const s = await debugState(page);
+    return s.kDrawnPoints > 0 && s.kDrawnPoints === s.kUploadedPoints;
+  }, { timeout: 10_000 }).toBe(true);
+  const uploaded = (await debugState(page)).kUploadedPoints;
+
+  // Drop the target below this fixture's point count so the moving path
+  // engages; no shipped fixture is large enough to reach the real target.
+  await page.evaluate(() => { (window as unknown as { __kMovingPointTarget: number }).__kMovingPointTarget = 1000; });
+
+  // Mid-rotation the cloud is a strided subset...
+  await page.locator('#kax').click();
+  await expect.poll(async () => (await debugState(page)).kDrawnPoints < uploaded, { timeout: 10_000 }).toBe(true);
+
+  // ...and once the easing stops, every point is back.
+  await expect.poll(async () => {
+    const s = await debugState(page);
+    return s.kDrawnPoints === s.kUploadedPoints;
+  }, { timeout: 20_000 }).toBe(true);
 });
 
 test('offers an explicit dangerous K-space override from the desktop warning', async ({ page }) => {
