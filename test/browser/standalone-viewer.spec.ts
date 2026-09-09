@@ -491,9 +491,11 @@ test('rotates k-space about the origin regardless of panning', async ({ page }) 
   await page.mouse.down({ button: 'right' });
   await page.mouse.move(cx + 90, cy + 40);
   await page.mouse.up({ button: 'right' });
-  await expect.poll(async () => Math.round((await debugState(page)).kPanX), { timeout: 5_000 }).toBe(90);
+  // Within a pixel, not exactly: synthetic drags can land sub-pixel. A
+  // rotation-dependent pan would be out by tens of pixels, not one.
+  await expect.poll(async () => Math.abs((await debugState(page)).kPanX - 90) <= 1, { timeout: 5_000 }).toBe(true);
   const panned = await debugState(page);
-  expect(Math.round(panned.kPanY)).toBe(40);
+  expect(Math.abs(panned.kPanY - 40)).toBeLessThanOrEqual(1);
 
   // Rotating must not disturb it. The pivot is k = 0 and never moves, so a
   // pan can no longer relocate it and send the cloud orbiting off-centre.

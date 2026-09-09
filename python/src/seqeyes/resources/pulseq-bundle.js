@@ -97,7 +97,7 @@ var Pulseq = (() => {
   });
 
   // package.json
-  var version = "0.3.5";
+  var version = "0.3.6";
 
   // src/pulseq/decompressor.ts
   function decompressShape(compressed, numSamples) {
