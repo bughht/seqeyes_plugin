@@ -2245,7 +2245,9 @@ function scrollMinimapToMouse(e){
    ═══════════════════════════════════════════════════════════════════════ */
 var kOpen=false, kView="3d";
 var kSpaceTrajectoryDrawCount=0,kSpaceOverlayDrawCount=0;
-var kCx=0, kCy=0, kCz=0, kScl=1;
+/* Pan is a screen offset in CSS px applied after rotation; the pivot is k=0
+   and never moves. See plans/todo/KSPACE_ROTATION_CENTER.md. */
+var kPanX=0, kPanY=0, kScl=1;
 var kAutoFit=true;
 var kRotX=-0.5, kRotY=0.7;
 var kDragging=false, kDragPrev=null, kDragBtn=0;
@@ -2258,10 +2260,10 @@ function scheduleKsDragDraw(){
 var kCanvas=document.getElementById("kc"), kCtx=kCanvas.getContext("2d");
 var kDotSize=2, kUnit="cyc";
 // Smooth animation
-var _tRotX=kRotX, _tRotY=kRotY, _tScl=kScl, _tCx=kCx, _tCy=kCy, _tCz=kCz;
+var _tRotX=kRotX, _tRotY=kRotY, _tScl=kScl, _tPanX=kPanX, _tPanY=kPanY;
 var _kAnimId=null, _kEasing=0.12;
-function startKSpaceAnim(){if(_kAnimId||kDragging)return;function t(){var c=false,e=0.0005;if(Math.abs(_tRotX-kRotX)>e){kRotX+=(_tRotX-kRotX)*_kEasing;c=true}if(Math.abs(_tRotY-kRotY)>e){kRotY+=(_tRotY-kRotY)*_kEasing;c=true}if(Math.abs(_tScl-kScl)>0.001){kScl+=(_tScl-kScl)*_kEasing;c=true}if(Math.abs(_tCx-kCx)>0.001){kCx+=(_tCx-kCx)*_kEasing;c=true}if(Math.abs(_tCy-kCy)>0.001){kCy+=(_tCy-kCy)*_kEasing;c=true}if(Math.abs(_tCz-kCz)>0.001){kCz+=(_tCz-kCz)*_kEasing;c=true}if(c){drawKsFast();_kAnimId=requestAnimationFrame(t)}else{kRotX=_tRotX;kRotY=_tRotY;kScl=_tScl;kCx=_tCx;kCy=_tCy;kCz=_tCz;_kAnimId=null;drawKsFast()}}_kAnimId=requestAnimationFrame(t)}
-function setKSpaceTarget(rx,ry,s,cx,cy,cz,inst){if(inst){kRotX=_tRotX=rx;kRotY=_tRotY=ry;kScl=_tScl=s;kCx=_tCx=cx;kCy=_tCy=cy;kCz=_tCz=cz;drawKs()}else{_tRotX=rx;_tRotY=ry;_tScl=s;_tCx=cx;_tCy=cy;_tCz=cz;startKSpaceAnim()}}
+function startKSpaceAnim(){if(_kAnimId||kDragging)return;function t(){var c=false,e=0.0005;if(Math.abs(_tRotX-kRotX)>e){kRotX+=(_tRotX-kRotX)*_kEasing;c=true}if(Math.abs(_tRotY-kRotY)>e){kRotY+=(_tRotY-kRotY)*_kEasing;c=true}if(Math.abs(_tScl-kScl)>0.001){kScl+=(_tScl-kScl)*_kEasing;c=true}if(Math.abs(_tPanX-kPanX)>0.01){kPanX+=(_tPanX-kPanX)*_kEasing;c=true}if(Math.abs(_tPanY-kPanY)>0.01){kPanY+=(_tPanY-kPanY)*_kEasing;c=true}if(c){drawKsFast();_kAnimId=requestAnimationFrame(t)}else{kRotX=_tRotX;kRotY=_tRotY;kScl=_tScl;kPanX=_tPanX;kPanY=_tPanY;_kAnimId=null;drawKsFast()}}_kAnimId=requestAnimationFrame(t)}
+function setKSpaceTarget(rx,ry,s,panX,panY,inst){if(inst){kRotX=_tRotX=rx;kRotY=_tRotY=ry;kScl=_tScl=s;kPanX=_tPanX=panX;kPanY=_tPanY=panY;drawKs()}else{_tRotX=rx;_tRotY=ry;_tScl=s;_tPanX=panX;_tPanY=panY;startKSpaceAnim()}}
 document.getElementById("kdot").oninput=function(){kDotSize=parseInt(this.value);drawKs();};
 document.getElementById("kunit").onclick=function(){
   kUnit=kUnit==="cyc"?"rad":"cyc";this.textContent=kUnit==="cyc"?"Unit: 1/m":"Unit: rad/m";drawKs();
@@ -2302,7 +2304,7 @@ if(systemThemeQuery){
 /* ── WebGL ────────────────────────────────────────────────────────────── */
 var gl=null, glProgram=null, glBuf=null, glN=0;
 var glAttribPos=-1, glAttribTime=-1;
-var glU_cy=-1,glU_sy=-1,glU_cx=-1,glU_sx=-1,glU_center=-1,glU_scale=-1;
+var glU_cy=-1,glU_sy=-1,glU_cx=-1,glU_sx=-1,glU_pan=-1,glU_scale=-1;
 var glU_halfRes=-1,glU_tMin=-1,glU_tMax=-1,glU_dot=-1,glU_color=-1;
 var _kBxmin=0,_kBxmax=0,_kBymin=0,_kBymax=0,_kBzmin=0,_kBzmax=0,_kBrng=0,_kBoundsDirty=true;
 
@@ -2313,7 +2315,7 @@ function initWebGL(){
   if(!gl){console.warn("[SeqEyes] WebGL unavailable");return false;}
   gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
   var vs=gl.createShader(gl.VERTEX_SHADER), fs=gl.createShader(gl.FRAGMENT_SHADER);
-  gl.shaderSource(vs,'attribute vec3 aPos;attribute float aTime;uniform float uCy,uSy,uCx,uSx,uScale;uniform vec3 uCenter;uniform vec2 uHalfRes;uniform float uTMin,uTMax,uDot;varying float vVis;void main(){float dx=aPos.x-uCenter.x,dy=aPos.y-uCenter.y,dz=aPos.z-uCenter.z;float rx=dx*uCy-dz*uSy;float rz=dx*uSy+dz*uCy;float ry=dy*uCx-rz*uSx;float sx=rx*uScale/uHalfRes.x;float sy=ry*uScale/uHalfRes.y;vVis=(aTime>=uTMin&&aTime<=uTMax)?1.0:-1.0;gl_Position=vec4(sx,sy,0.0,1.0);gl_PointSize=vVis>0.0?uDot:0.0;}');
+  gl.shaderSource(vs,'attribute vec3 aPos;attribute float aTime;uniform float uCy,uSy,uCx,uSx,uScale;uniform vec2 uPan;uniform vec2 uHalfRes;uniform float uTMin,uTMax,uDot;varying float vVis;void main(){float dx=aPos.x,dy=aPos.y,dz=aPos.z;float rx=dx*uCy-dz*uSy;float rz=dx*uSy+dz*uCy;float ry=dy*uCx-rz*uSx;float sx=(rx*uScale+uPan.x)/uHalfRes.x;float sy=(ry*uScale-uPan.y)/uHalfRes.y;vVis=(aTime>=uTMin&&aTime<=uTMax)?1.0:-1.0;gl_Position=vec4(sx,sy,0.0,1.0);gl_PointSize=vVis>0.0?uDot:0.0;}');
   gl.shaderSource(fs,'precision mediump float;uniform vec4 uColor;varying float vVis;void main(){if(vVis<0.0)discard;float d=length(gl_PointCoord-vec2(0.5));float a=1.0-smoothstep(0.40,0.50,d);gl_FragColor=vec4(uColor.rgb,uColor.a*a);}');
   gl.compileShader(vs);if(!gl.getShaderParameter(vs,gl.COMPILE_STATUS)){console.warn("[SeqEyes] VS:",gl.getShaderInfoLog(vs));return false;}
   gl.compileShader(fs);if(!gl.getShaderParameter(fs,gl.COMPILE_STATUS)){console.warn("[SeqEyes] FS:",gl.getShaderInfoLog(fs));return false;}
@@ -2322,7 +2324,7 @@ function initWebGL(){
   glAttribPos=gl.getAttribLocation(glProgram,"aPos");glAttribTime=gl.getAttribLocation(glProgram,"aTime");
   glU_cy=gl.getUniformLocation(glProgram,"uCy");glU_sy=gl.getUniformLocation(glProgram,"uSy");
   glU_cx=gl.getUniformLocation(glProgram,"uCx");glU_sx=gl.getUniformLocation(glProgram,"uSx");
-  glU_center=gl.getUniformLocation(glProgram,"uCenter");glU_scale=gl.getUniformLocation(glProgram,"uScale");
+  glU_pan=gl.getUniformLocation(glProgram,"uPan");glU_scale=gl.getUniformLocation(glProgram,"uScale");
   glU_halfRes=gl.getUniformLocation(glProgram,"uHalfRes");glU_dot=gl.getUniformLocation(glProgram,"uDot");
   glU_tMin=gl.getUniformLocation(glProgram,"uTMin");glU_tMax=gl.getUniformLocation(glProgram,"uTMax");
   glU_color=gl.getUniformLocation(glProgram,"uColor");
@@ -2353,7 +2355,7 @@ document.getElementById("kax").textContent="3D";
 document.getElementById("krst").onclick=function(){
   kView="3d";document.getElementById("kax").textContent="3D";
   var af=_kAutoFitVals();
-  setKSpaceTarget(-0.5,0.7,af.scl,af.cx,af.cy,af.cz,false);
+  setKSpaceTarget(-0.5,0.7,af.scl,af.panX,af.panY,false);
 };
 document.getElementById("kax").onclick=function(){
   var views=["3d","xy","xz","yz"];var idx=views.indexOf(kView);
@@ -2365,7 +2367,7 @@ document.getElementById("kax").onclick=function(){
   else{trx=-0.5;tr=0.7}
   document.getElementById("kax").textContent=kView.toUpperCase();
   var af=_kAutoFitVals();
-  setKSpaceTarget(trx,tr,af.scl,af.cx,af.cy,af.cz,false);
+  setKSpaceTarget(trx,tr,af.scl,af.panX,af.panY,false);
 };
 
 function resizeKc(){
@@ -2431,15 +2433,14 @@ kCanvas.addEventListener("wheel",function(e){e.preventDefault();
   var mx=(e.clientX-r.left)/dpr,my=(e.clientY-r.top)/dpr;
   var zf=e.deltaY<0?1.25:0.8,W=kCanvas.width/dpr,H=kCanvas.height/dpr;
   var dz=(1-1/zf)*dpr/kScl;kAutoFit=false;
-  setKSpaceTarget(kRotX,kRotY,kScl*zf,kCx+(mx-W/2)*dz,kCy-(my-H/2)*dz,kCz,false);
+  setKSpaceTarget(kRotX,kRotY,kScl*zf,kPanX+(mx-W/2-kPanX)*(1-zf),kPanY+(my-H/2-kPanY)*(1-zf),false);
 },{passive:false});
 window.addEventListener("mousemove",function(e){
   if(!kDragging||!kDragPrev||!kOpen)return;
   var dx=e.clientX-kDragPrev.x,dy=e.clientY-kDragPrev.y;kDragPrev={x:e.clientX,y:e.clientY};
   if(kView!=="3d"){kView="3d";document.getElementById("kax").textContent="3D";}
   if(kDragBtn===0){kRotY+=dx*0.008;kRotX-=dy*0.008;_tRotY=kRotY;_tRotX=kRotX}
-  else{var cz=Math.cos(kRotY),sz=Math.sin(kRotY),cx=Math.cos(kRotX),sx=Math.sin(kRotX);var dpr=window.devicePixelRatio||1;dx/=(dpr*kScl);dy/=(dpr*kScl);
-    if(Math.abs(cz)>0.01){kCy+=dy/cx;kCx+=(-dx-sz*sx*(dy/cx))/cz}else{kCy+=dy/cx;kCz+=(dx-cz*sx*(dy/cx))/sz}kAutoFit=false;_tCy=kCy;_tCx=kCx;_tCz=kCz}
+  else{kPanX+=dx;kPanY+=dy;kAutoFit=false;_tPanX=kPanX;_tPanY=kPanY}
   scheduleKsDragDraw();
 });
 window.addEventListener("mouseup",function(){
@@ -2483,12 +2484,8 @@ kCanvas.addEventListener("touchmove",function(e){
     var mid=getTouchMid(e.touches);
     var pdx=(mid.x-_kTouchPrev.x), pdy=(mid.y-_kTouchPrev.y);
     _kTouchPrev={x:mid.x,y:mid.y};
-    var cz=Math.cos(kRotY),sz=Math.sin(kRotY),cx=Math.cos(kRotX),sx=Math.sin(kRotX);
-    var dpr=window.devicePixelRatio||1;
-    pdx/=(dpr*kScl); pdy/=(dpr*kScl);
-    if(Math.abs(cz)>0.01){kCy+=pdy/cx;kCx+=(-pdx-sz*sx*(pdy/cx))/cz;}
-    else{kCy+=pdy/cx;kCz+=(pdx-cz*sx*(pdy/cx))/sz;}
-    _tCy=kCy; _tCx=kCx; _tCz=kCz; kAutoFit=false;
+    kPanX+=pdx; kPanY+=pdy;
+    _tPanX=kPanX; _tPanY=kPanY; kAutoFit=false;
     drawKsFast();
   }
   e.preventDefault();
@@ -2586,11 +2583,17 @@ window.addEventListener("resize",function(){if(kOpen){resizeKc();drawKs();}});
 function kNice(range){var ms=[1,2,5,10,20,50,100,200,500];for(var i=0;i<ms.length;i++){var b=Math.pow(10,Math.floor(Math.log10(range)));if(ms[i]*b>=range/4)return ms[i]*b;}return 1;}
 
 /* ── Auto-fit helper ────────────────────────────────────────────────── */
+/* The pivot is k=0, so what must fit is the furthest point from the origin. */
+function _kReachFromOrigin(){
+  var r=Math.max(Math.abs(_kBxmin),Math.abs(_kBxmax),Math.abs(_kBymin),
+                 Math.abs(_kBymax),Math.abs(_kBzmin),Math.abs(_kBzmax));
+  return (r>0&&isFinite(r))?r:((_kBrng||1)/2);
+}
 function _kAutoFitVals(){
   var rng=_kBrng||1;var W=kCanvas.width/(window.devicePixelRatio||1),H=kCanvas.height/(window.devicePixelRatio||1);
   return{
-    cx:(_kBxmin+_kBxmax)/2,cy:(_kBymin+_kBymax)/2,cz:(_kBzmin+_kBzmax)/2,
-    scl:Math.min(W,H)/(rng*1.15)
+    panX:0,panY:0,
+    scl:Math.min(W,H)/(_kReachFromOrigin()*2*1.15)
   };
 }
 
@@ -2614,7 +2617,7 @@ function drawKs_core(W,H,dpr){
   var adcX=kAdc[0],adcY=kAdc[1],adcZ=kAdc[2],nAdc=adcX.length;
   if(_kBoundsDirty||!isFinite(_kBxmin)){var xmin=Infinity,xmax=-Infinity,ymin=Infinity,ymax=-Infinity,zmin=Infinity,zmax=-Infinity;for(var a=0;a<nAdc;a++){var xi=adcX[a],yi=adcY[a],zi=adcZ[a];if(isFinite(xi)){if(xi<xmin)xmin=xi;if(xi>xmax)xmax=xi;}if(isFinite(yi)){if(yi<ymin)ymin=yi;if(yi>ymax)ymax=yi;}if(isFinite(zi)){if(zi<zmin)zmin=zi;if(zi>zmax)zmax=zi;}}_kBxmin=xmin;_kBxmax=xmax;_kBymin=ymin;_kBymax=ymax;_kBzmin=zmin;_kBzmax=zmax;_kBrng=Math.max(xmax-xmin,ymax-ymin,zmax-zmin,1e-6);_kBoundsDirty=false}
   if(!isFinite(_kBxmin)){ctx.fillStyle="#f00";ctx.font="11px monospace";ctx.fillText("ALL NaN",10,20);return;}
-  if(kAutoFit){kAutoFit=false;var af=_kAutoFitVals();setKSpaceTarget(kRotX,kRotY,af.scl,af.cx,af.cy,af.cz,false)}
+  if(kAutoFit){kAutoFit=false;var af=_kAutoFitVals();setKSpaceTarget(kRotX,kRotY,af.scl,af.panX,af.panY,false)}
   var mw2=mc.width/(window.devicePixelRatio||1),vs=ox,ve=ox+(mw2-M.l-M.r)/sc;
   // WebGL scatter
   if(gl&&glBuf&&glN>0){
@@ -2622,7 +2625,7 @@ function drawKs_core(W,H,dpr){
     gl.viewport(0,0,W*dpr,H*dpr);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);
     gl.uniform1f(glU_cy,Math.cos(kRotY));gl.uniform1f(glU_sy,Math.sin(kRotY));
     gl.uniform1f(glU_cx,Math.cos(kRotX));gl.uniform1f(glU_sx,Math.sin(kRotX));
-    gl.uniform3f(glU_center,kCx,kCy,kCz);gl.uniform1f(glU_scale,kScl);
+    gl.uniform2f(glU_pan,kPanX*dpr,kPanY*dpr);gl.uniform1f(glU_scale,kScl);
     gl.uniform2f(glU_halfRes,hW,hH);gl.uniform1f(glU_tMin,vs);gl.uniform1f(glU_tMax,ve);
     gl.uniform1f(glU_dot,kDotSize*dpr);
     var ac=cs.getPropertyValue("--adc").trim();var rgb=parseCSSColor(ac);
@@ -2649,7 +2652,7 @@ function drawKsOverlay(W,H,dpr,cs){
   kSpaceOverlayDrawCount++;var ctx=kCtx;ctx.clearRect(0,0,W,H);
   if(!kOpen||!isFinite(_kBxmin))return;var rng3=_kBrng;
   var cz=Math.cos(kRotY),sz=Math.sin(kRotY),cxR=Math.cos(kRotX),sxR=Math.sin(kRotX),invDpr=1/dpr;
-  function proj(px,py,pz){var dx2=px-kCx,dy2=py-kCy,dz2=pz-kCz;var rx=dx2*cz-dz2*sz;var rz2=dx2*sz+dz2*cz;var ry=dy2*cxR-rz2*sxR;return{x:W/2+rx*kScl*invDpr,y:H/2-ry*kScl*invDpr};}
+  function proj(px,py,pz){var rx=px*cz-pz*sz;var rz2=px*sz+pz*cz;var ry=py*cxR-rz2*sxR;return{x:W/2+rx*kScl*invDpr+kPanX,y:H/2-ry*kScl*invDpr+kPanY};}
   var tick=kNice(rng3);
   function drawAxis3D(fx,fy,fz,label,col){
     var al=rng3*0.65,t1=proj(fx*al,fy*al,fz*al),t2=proj(-fx*al,-fy*al,-fz*al);
@@ -2786,7 +2789,7 @@ if(location.search.indexOf("debug=1")>=0){
   window.__seqeyesDebug={
     state:function(){
       var adcCount=(kAdc&&kAdc[0])?kAdc[0].length:0;
-      return{blocks:BL.length,totalDuration:TD,offset:ox,scale:sc,visibleDuration:visibleDuration(),minRasterTime:minRasterTime(),kOpen:kOpen,kView:kView,kRotX:kRotX,kRotY:kRotY,kScale:kScl,adcCount:adcCount,exportEnabled:!!(exportBtn&&!exportBtn.disabled),derivedRenderPoints:derivedRenderPointCount,derivedEnvelopeCurves:derivedEnvelopeCurveCount,derivedRawCurves:derivedRawCurveCount,waveformOverviewActive:waveformOverviewActive,rfRenderPoints:rfRenderPointCount,rfRawCurves:rfRawCurveCount,rfReducedCurves:rfReducedCurveCount,rfOverviewBuckets:rfOverviewBucketCount,notices:Object.keys(viewerNotices).reduce(function(all,k){return all.concat(viewerNoticeMessages(viewerNotices[k]));},[]),lastDrawDurationMs:lastDrawDurationMs,drawCount:viewerDrawCount,cursorDrawCount:viewerCursorDrawCount,kTrajectoryDrawCount:kSpaceTrajectoryDrawCount,kOverlayDrawCount:kSpaceOverlayDrawCount,m1ReferenceMode:m1ReferenceMode,m1DetailActive:!!m1WindowData,derivedDetailMaxViewSec:derivedDetailMaxViewSec,gradViewPoints:gradViewPointCount,kDrawnPoints:kDrawnPointCount,kUploadedPoints:(typeof glN==='number'?glN:0),waveformDetailActive:!!activeWaveformDetail,waveformDetailWindowSec:activeWaveformDetail?activeWaveformDetail.endSec-activeWaveformDetail.startSec:0,waveformBandActive:!!activeWaveformBand,waveformBandColumns:activeWaveformBand?activeWaveformBand.columns:0,panelMode:panelMode,panelOpen:panelOpen,title:document.title};
+      return{blocks:BL.length,totalDuration:TD,offset:ox,scale:sc,visibleDuration:visibleDuration(),minRasterTime:minRasterTime(),kOpen:kOpen,kView:kView,kRotX:kRotX,kRotY:kRotY,kScale:kScl,adcCount:adcCount,exportEnabled:!!(exportBtn&&!exportBtn.disabled),derivedRenderPoints:derivedRenderPointCount,derivedEnvelopeCurves:derivedEnvelopeCurveCount,derivedRawCurves:derivedRawCurveCount,waveformOverviewActive:waveformOverviewActive,rfRenderPoints:rfRenderPointCount,rfRawCurves:rfRawCurveCount,rfReducedCurves:rfReducedCurveCount,rfOverviewBuckets:rfOverviewBucketCount,notices:Object.keys(viewerNotices).reduce(function(all,k){return all.concat(viewerNoticeMessages(viewerNotices[k]));},[]),lastDrawDurationMs:lastDrawDurationMs,drawCount:viewerDrawCount,cursorDrawCount:viewerCursorDrawCount,kTrajectoryDrawCount:kSpaceTrajectoryDrawCount,kOverlayDrawCount:kSpaceOverlayDrawCount,m1ReferenceMode:m1ReferenceMode,m1DetailActive:!!m1WindowData,derivedDetailMaxViewSec:derivedDetailMaxViewSec,gradViewPoints:gradViewPointCount,kDrawnPoints:kDrawnPointCount,kPanX:kPanX,kPanY:kPanY,kUploadedPoints:(typeof glN==='number'?glN:0),waveformDetailActive:!!activeWaveformDetail,waveformDetailWindowSec:activeWaveformDetail?activeWaveformDetail.endSec-activeWaveformDetail.startSec:0,waveformBandActive:!!activeWaveformBand,waveformBandColumns:activeWaveformBand?activeWaveformBand.columns:0,panelMode:panelMode,panelOpen:panelOpen,title:document.title};
     },
     hoverPoint:function(){
       var t=(kAdcTime&&kAdcTime.length)?kAdcTime[Math.floor(kAdcTime.length/2)]:TD*0.5;
