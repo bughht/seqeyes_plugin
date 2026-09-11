@@ -28,7 +28,16 @@ import {
     type PackedBlocks,
 } from './blockTransport';
 
-/** Blocks one detail request may span before it is refused outright. */
+/**
+ * Blocks one *sample* reply may span before it is refused.
+ *
+ * The ceiling exists because only `kind: 'samples'` carries a per-block
+ * envelope, and that envelope crosses the VS Code boundary as JSON under
+ * `MAX_V8_STRING_LENGTH`.  A band is `columns * 6` floats whatever the block
+ * count, and `unavailable` is nothing at all, so neither is bounded by this —
+ * which is why the test belongs inside the samples branch rather than ahead of
+ * the regime choice.
+ */
 export const WINDOW_DETAIL_BLOCK_LIMIT = 20_000;
 
 export interface WaveformDetailRequest {
@@ -55,6 +64,8 @@ export function buildWaveformDetailReply(
     request: WaveformDetailRequest,
     generation = 0,
     lookup?: (key: string) => PackedBlocks | undefined,
+    /** Injectable so the ceiling can be tested; no shipped fixture reaches it. */
+    blockLimit = WINDOW_DETAIL_BLOCK_LIMIT,
 ): WaveformDetailReply {
     const startSec = Number(request.startSec);
     const endSec = Number(request.endSec);
@@ -64,8 +75,8 @@ export function buildWaveformDetailReply(
         startSec,
         endSec,
     );
-    if (!(endSec > startSec) || end - start > WINDOW_DETAIL_BLOCK_LIMIT) {
-        return { kind: 'error', message: 'This waveform detail window is too large. Zoom in further.' };
+    if (!(endSec > startSec)) {
+        return { kind: 'error', message: 'This waveform detail window is empty.' };
     }
     const columns = Math.max(1, Math.min(
         MAX_ENVELOPE_COLUMNS,
@@ -76,7 +87,7 @@ export function buildWaveformDetailReply(
     const cacheKey = `${generation}:${start}:${end}:${startSec}:${endSec}`;
 
     const cached = lookup?.(cacheKey);
-    if (cached) {
+    if (cached && end - start <= blockLimit) {
         return { kind: 'samples', startBlock: start, endBlock: end, startSec, endSec, packed: cached, cacheKey };
     }
 
@@ -92,6 +103,11 @@ export function buildWaveformDetailReply(
         return { kind: 'band', startSec: band.startSec, endSec: band.endSec, columns: band.columns, values: band.values };
     }
 
+    // Only this reply carries a per-block envelope, so only this reply is
+    // bounded by the block count.
+    if (end - start > blockLimit) {
+        return { kind: 'error', message: 'This waveform detail window is too large. Zoom in further.' };
+    }
     const packed = packSequenceBlockRange(
         seq, start, end, context, MAX_DETAIL_PTS, undefined, { startSec, endSec },
     );

@@ -23,31 +23,24 @@ var Pulseq = (() => {
   // web/pulseq-browser.ts
   var pulseq_browser_exports = {};
   __export(pulseq_browser_exports, {
-    BAND_DETAIL_SAMPLES: () => BAND_DETAIL_SAMPLES,
-    EXACT_DETAIL_SAMPLES: () => EXACT_DETAIL_SAMPLES,
     INTERACTIVE_COMPUTE_LIMITS: () => INTERACTIVE_COMPUTE_LIMITS,
-    MAX_DETAIL_PTS: () => MAX_DETAIL_PTS,
-    MAX_DISPLAY_PTS: () => MAX_DISPLAY_PTS,
-    MAX_ENVELOPE_COLUMNS: () => MAX_ENVELOPE_COLUMNS,
     MAX_RF_RESPONSE_BANDS: () => MAX_RF_RESPONSE_BANDS,
     MAX_RF_RESPONSE_FFT_POINTS: () => MAX_RF_RESPONSE_FFT_POINTS,
     MAX_RF_RESPONSE_SAMPLES: () => MAX_RF_RESPONSE_SAMPLES,
     PACKAGE_VERSION: () => PACKAGE_VERSION,
     analyzeRfResponse: () => analyzeRfResponse,
     audioBudgetRefusal: () => audioBudgetRefusal,
+    buildWaveformDetailReply: () => buildWaveformDetailReply,
     calculateKspace: () => calculateKspace,
     calculateM1: () => calculateM1,
     calculateM1Coarse: () => calculateM1Coarse,
     calculatePns: () => calculatePns,
     calculatePnsCoarse: () => calculatePnsCoarse,
     computeGradSpectrumParity: () => computeGradSpectrumParity,
-    computeGradientEnvelope: () => computeGradientEnvelope,
     computeGradientSpectrogram: () => computeGradientSpectrogram,
     computeGradientSpectrumAverage: () => computeGradientSpectrumAverage,
     computeGradientSpectrumSlice: () => computeGradientSpectrumSlice,
     countBandsOutsideRange: () => countBandsOutsideRange,
-    countExactDetailSamples: () => countExactDetailSamples,
-    countGradientSamples: () => countGradientSamples,
     createSequenceDecodeContext: () => createSequenceDecodeContext,
     decodeAllBlocks: () => decodeAllBlocks,
     decodeBlockRange: () => decodeBlockRange,
@@ -72,8 +65,6 @@ var Pulseq = (() => {
     hasPulseqBinaryMagic: () => hasPulseqBinaryMagic,
     isEmptyAscProfile: () => isEmptyAscProfile,
     kspaceExceedsInteractiveBudget: () => kspaceExceedsInteractiveBudget,
-    packGradientEnvelope: () => packGradientEnvelope,
-    packSequenceBlockRange: () => packSequenceBlockRange,
     packSequenceBlocks: () => packSequenceBlocks,
     parseAcousticResonancesAsc: () => parseAcousticResonancesAsc,
     parseAscProfile: () => parseAscProfile,
@@ -84,7 +75,6 @@ var Pulseq = (() => {
     parseSequenceText: () => parseSequenceText,
     physicalGradientValueAt: () => physicalGradientValueAt,
     resamplePhysicalGradients: () => resamplePhysicalGradients,
-    resolveDetailBlockRange: () => resolveDetailBlockRange,
     resolveSpectrogramParams: () => resolveSpectrogramParams,
     rotateGradient: () => rotateGradient,
     safePnsModel: () => safePnsModel,
@@ -97,7 +87,7 @@ var Pulseq = (() => {
   });
 
   // package.json
-  var version = "0.3.6";
+  var version = "0.3.7";
 
   // src/pulseq/decompressor.ts
   function decompressShape(compressed, numSamples) {
@@ -2862,16 +2852,6 @@ var Pulseq = (() => {
     }
     return { startSec, endSec, columns: width, channels };
   }
-  function countGradientSamples(blocks) {
-    let total = 0;
-    for (const block of blocks) {
-      for (const key of GRADIENT_CHANNELS) {
-        const grad = block[key];
-        if (grad && grad.type !== "none") total += grad.timePoints.length;
-      }
-    }
-    return total;
-  }
   function packGradientEnvelope(envelope) {
     const { columns } = envelope;
     const out = new Float32Array(columns * 6);
@@ -2884,6 +2864,51 @@ var Pulseq = (() => {
       cursor += columns;
     }
     return { startSec: envelope.startSec, endSec: envelope.endSec, columns, values: out.buffer };
+  }
+
+  // src/editor/waveformDetailReply.ts
+  var WINDOW_DETAIL_BLOCK_LIMIT = 2e4;
+  function buildWaveformDetailReply(seq, context, request, generation = 0, lookup, blockLimit = WINDOW_DETAIL_BLOCK_LIMIT) {
+    const startSec = Number(request.startSec);
+    const endSec = Number(request.endSec);
+    const { start, end } = resolveDetailBlockRange(
+      context.blockStartTimes,
+      seq.blocks.length,
+      startSec,
+      endSec
+    );
+    if (!(endSec > startSec)) {
+      return { kind: "error", message: "This waveform detail window is empty." };
+    }
+    const columns = Math.max(1, Math.min(
+      MAX_ENVELOPE_COLUMNS,
+      Math.floor(Number(request.columns) || 0) || 1
+    ));
+    const cacheKey = `${generation}:${start}:${end}:${startSec}:${endSec}`;
+    const cached = lookup?.(cacheKey);
+    if (cached && end - start <= blockLimit) {
+      return { kind: "samples", startBlock: start, endBlock: end, startSec, endSec, packed: cached, cacheKey };
+    }
+    const decoded = decodeBlockRange(seq, start, end, context);
+    const windowSamples = countExactDetailSamples(decoded, { startSec, endSec });
+    if (windowSamples > EXACT_DETAIL_SAMPLES) {
+      if (windowSamples > BAND_DETAIL_SAMPLES) return { kind: "unavailable", startSec, endSec };
+      const band = packGradientEnvelope(computeGradientEnvelope(decoded, startSec, endSec, columns));
+      return { kind: "band", startSec: band.startSec, endSec: band.endSec, columns: band.columns, values: band.values };
+    }
+    if (end - start > blockLimit) {
+      return { kind: "error", message: "This waveform detail window is too large. Zoom in further." };
+    }
+    const packed = packSequenceBlockRange(
+      seq,
+      start,
+      end,
+      context,
+      MAX_DETAIL_PTS,
+      void 0,
+      { startSec, endSec }
+    );
+    return { kind: "samples", startBlock: start, endBlock: end, startSec, endSec, packed, cacheKey };
   }
 
   // src/pulseq/physicalGradients.ts
