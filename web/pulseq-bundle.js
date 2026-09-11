@@ -33,8 +33,10 @@ var Pulseq = (() => {
     MAX_RF_RESPONSE_FFT_POINTS: () => MAX_RF_RESPONSE_FFT_POINTS,
     MAX_RF_RESPONSE_SAMPLES: () => MAX_RF_RESPONSE_SAMPLES,
     PACKAGE_VERSION: () => PACKAGE_VERSION,
+    WINDOW_DETAIL_BLOCK_LIMIT: () => WINDOW_DETAIL_BLOCK_LIMIT,
     analyzeRfResponse: () => analyzeRfResponse,
     audioBudgetRefusal: () => audioBudgetRefusal,
+    buildWaveformDetailReply: () => buildWaveformDetailReply,
     calculateKspace: () => calculateKspace,
     calculateM1: () => calculateM1,
     calculateM1Coarse: () => calculateM1Coarse,
@@ -2884,6 +2886,51 @@ var Pulseq = (() => {
       cursor += columns;
     }
     return { startSec: envelope.startSec, endSec: envelope.endSec, columns, values: out.buffer };
+  }
+
+  // src/editor/waveformDetailReply.ts
+  var WINDOW_DETAIL_BLOCK_LIMIT = 2e4;
+  function buildWaveformDetailReply(seq, context, request, generation = 0, lookup, blockLimit = WINDOW_DETAIL_BLOCK_LIMIT) {
+    const startSec = Number(request.startSec);
+    const endSec = Number(request.endSec);
+    const { start, end } = resolveDetailBlockRange(
+      context.blockStartTimes,
+      seq.blocks.length,
+      startSec,
+      endSec
+    );
+    if (!(endSec > startSec)) {
+      return { kind: "error", message: "This waveform detail window is empty." };
+    }
+    const columns = Math.max(1, Math.min(
+      MAX_ENVELOPE_COLUMNS,
+      Math.floor(Number(request.columns) || 0) || 1
+    ));
+    const cacheKey = `${generation}:${start}:${end}:${startSec}:${endSec}`;
+    const cached = lookup?.(cacheKey);
+    if (cached && end - start <= blockLimit) {
+      return { kind: "samples", startBlock: start, endBlock: end, startSec, endSec, packed: cached, cacheKey };
+    }
+    const decoded = decodeBlockRange(seq, start, end, context);
+    const windowSamples = countExactDetailSamples(decoded, { startSec, endSec });
+    if (windowSamples > EXACT_DETAIL_SAMPLES) {
+      if (windowSamples > BAND_DETAIL_SAMPLES) return { kind: "unavailable", startSec, endSec };
+      const band = packGradientEnvelope(computeGradientEnvelope(decoded, startSec, endSec, columns));
+      return { kind: "band", startSec: band.startSec, endSec: band.endSec, columns: band.columns, values: band.values };
+    }
+    if (end - start > blockLimit) {
+      return { kind: "error", message: "This waveform detail window is too large. Zoom in further." };
+    }
+    const packed = packSequenceBlockRange(
+      seq,
+      start,
+      end,
+      context,
+      MAX_DETAIL_PTS,
+      void 0,
+      { startSec, endSec }
+    );
+    return { kind: "samples", startBlock: start, endBlock: end, startSec, endSec, packed, cacheKey };
   }
 
   // src/pulseq/physicalGradients.ts

@@ -980,37 +980,45 @@ function calculatePnsWithFallback(){
 function installWaveformDetailSource(seq){
   waveformDetailNotice=function(message){setViewerNotice('waveformDetail',message);};
   requestWaveformDetailWindow=function(request){
-    var range=Pulseq.resolveDetailBlockRange(
-      decodeContext.blockStartTimes,seq.blocks.length,request.startSec,request.endSec);
-    if(range.end<=range.start){failWaveformDetail({requestId:request.requestId,generation:request.generation,message:'no blocks in view'});return;}
-    var decoded=Pulseq.decodeBlockRange(seq,range.start,range.end,decodeContext);
-    var windowSamples=Pulseq.countExactDetailSamples(decoded,{startSec:request.startSec,endSec:request.endSec});
-    if(windowSamples>Pulseq.EXACT_DETAIL_SAMPLES){
-      // Too many to draw one segment each. Summarise into a band rather than
-      // reducing and connecting a subset; past the decode budget, leave the
-      // view to the precomputed hierarchy.
-      if(windowSamples>Pulseq.BAND_DETAIL_SAMPLES){
-        if(refuseWaveformDetail({requestId:request.requestId,generation:request.generation,
-          startSec:request.startSec,endSec:request.endSec}))draw();
-        return;
-      }
-      var band=Pulseq.packGradientEnvelope(
-        Pulseq.computeGradientEnvelope(decoded,request.startSec,request.endSec,request.columns));
+    // One implementation of the exact/band/defer decision, shared with the
+    // extension host. It used to be written twice and the two drifted: this
+    // lane had no block ceiling while the other applied it before choosing a
+    // regime, so a window of 20,000+ blocks got a band here and a refusal
+    // there.
+    var reply;
+    try{
+      reply=Pulseq.buildWaveformDetailReply(seq,decodeContext,{
+        startSec:request.startSec,endSec:request.endSec,columns:request.columns
+      },request.generation);
+    }catch(err){
+      failWaveformDetail({requestId:request.requestId,generation:request.generation,
+        message:(err&&err.message||String(err))});
+      return;
+    }
+    if(reply.kind==='error'){
+      failWaveformDetail({requestId:request.requestId,generation:request.generation,
+        message:reply.message});
+      return;
+    }
+    if(reply.kind==='unavailable'){
+      if(refuseWaveformDetail({requestId:request.requestId,generation:request.generation,
+        startSec:reply.startSec,endSec:reply.endSec}))draw();
+      return;
+    }
+    if(reply.kind==='band'){
       if(applyWaveformBand({
         requestId:request.requestId,generation:request.generation,
-        startSec:band.startSec,endSec:band.endSec,columns:band.columns,
-        values:new Float32Array(band.values)
+        startSec:reply.startSec,endSec:reply.endSec,columns:reply.columns,
+        values:new Float32Array(reply.values)
       }))draw();
       return;
     }
-    var packed=Pulseq.packSequenceBlockRange(
-      seq,range.start,range.end,decodeContext,Pulseq.MAX_DETAIL_PTS,undefined,
-      {startSec:request.startSec,endSec:request.endSec});
+    var packed=reply.packed;
     var blocks=unpackSequenceBlocks(packed.blocks,packed.sampleTimes,packed.sampleValues,packed.sampleCount);
     if(applyWaveformDetail({
       requestId:request.requestId,generation:request.generation,
-      startBlock:range.start,endBlock:range.end,
-      startSec:request.startSec,endSec:request.endSec,blocks:blocks
+      startBlock:reply.startBlock,endBlock:reply.endBlock,
+      startSec:reply.startSec,endSec:reply.endSec,blocks:blocks
     }))draw();
   };
 }

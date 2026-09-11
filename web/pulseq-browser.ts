@@ -26,6 +26,11 @@ export {
     MAX_ENVELOPE_COLUMNS,
     packGradientEnvelope,
 } from '../src/pulseq/gradientEnvelope';
+export {
+    buildWaveformDetailReply,
+    WINDOW_DETAIL_BLOCK_LIMIT,
+} from '../src/editor/waveformDetailReply';
+export type { WaveformDetailReply } from '../src/editor/waveformDetailReply';
 export { calculateKspace } from '../src/pulseq/kspace';
 export { calculateM1, calculateM1Coarse } from '../src/pulseq/m1';
 export { calculatePns, calculatePnsCoarse, parsePnsHardwareAsc, safePnsModel } from '../src/pulseq/pns';
