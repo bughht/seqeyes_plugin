@@ -637,15 +637,27 @@ buildLegend();
 tuSel.onchange=function(){timeUnit=tuSel.value;draw();};
 guSel.onchange=function(){gradUnit=guSel.value;draw();};
 function setExportButtonEnabled(enabled){if(exportBtn)exportBtn.disabled=!enabled;}
+/* Throws rather than drawing an empty panel when a trajectory arrives without
+   its ADC samples.  A reply that lost its arrays in transit used to clear the
+   safety notice and leave a blank k-space view, which reads as "this sequence
+   has no k-space" instead of "the trajectory never got here". */
 function applySerializedKspace(payload){
   kTraj=null;kAdc=null;kTime=null;kAdcTime=null;
   if(!payload)return;
   kTraj=[payload.kx,payload.ky,payload.kz];kTime=payload.tk;
-  var n=payload.nAdc||0;
-  if(n>0&&payload.axb){
-    kAdc=[decodeB64F32(payload.axb,n),decodeB64F32(payload.ayb,n),decodeB64F32(payload.azb,n)];
-    kAdcTime=decodeB64F32(payload.tab,n);uploadKSpaceGPU();
-  }
+  if(typeof payload.nAdc!=='number')
+    throw new Error('the trajectory arrived without its ADC sample count');
+  var n=payload.nAdc;
+  if(n<=0)return;
+  var ax=asTypedView(payload.adcX,Float32Array),ay=asTypedView(payload.adcY,Float32Array),
+      az=asTypedView(payload.adcZ,Float32Array),at=asTypedView(payload.adcTime,Float32Array);
+  if(!ax||!ay||!az||!at)
+    throw new Error('the K‑space ADC samples did not arrive as binary data');
+  if(ax.length<n||ay.length<n||az.length<n||at.length<n)
+    throw new Error('the K‑space ADC samples arrived truncated ('+
+      Math.min(ax.length,ay.length,az.length,at.length)+' of '+n+' samples)');
+  kAdc=[ax.subarray(0,n),ay.subarray(0,n),az.subarray(0,n)];
+  kAdcTime=at.subarray(0,n);uploadKSpaceGPU();
 }
 
 /* Report a load that did not arrive. Clearing the previous sequence matters as
@@ -739,7 +751,13 @@ window.addEventListener('message',function(e){
   }else if(m.type==='loadError'){
     showSequenceLoadFailure(m.message||'The sequence could not be loaded.');
   }else if(m.type==='kspaceData'){
-    applySerializedKspace(m.kspace);finishDangerousKspaceCalculation(null);drawKs();
+    try{
+      if(!m.kspace)throw new Error('the trajectory did not arrive from the extension host');
+      applySerializedKspace(m.kspace);
+    }catch(err){
+      finishDangerousKspaceCalculation(err&&err.message||String(err));drawKs();return;
+    }
+    finishDangerousKspaceCalculation(null);drawKs();
     SeqEyesPanel.showKspaceIfClosed();
     SeqEyesPanel.refreshKspace();
   }else if(m.type==='kspaceError'){
@@ -2387,6 +2405,11 @@ if(systemThemeQuery){
    WebGL state
    ═══════════════════════════════════════════════════════════════════════ */
 var gl=null, glProgram=null, glBuf=null, glN=0;
+/* Why the GPU layer has nothing to draw, or null when it is healthy.  A
+   failure here used to be a console warning at most, so the panel opened
+   with its axes and no points — indistinguishable from a sequence whose
+   trajectory never arrived. */
+var kGpuFailure=null;
 var glAttribPos=-1, glAttribTime=-1;
 var glU_cy=-1,glU_sy=-1,glU_cx=-1,glU_sx=-1,glU_pan=-1,glU_scale=-1;
 var glU_halfRes=-1,glU_tMin=-1,glU_tMax=-1,glU_dot=-1,glU_color=-1;
@@ -2399,7 +2422,18 @@ function initWebGL(){
   var c=document.getElementById("kg");
   gl=c.getContext("webgl2",{antialias:true,alpha:true,premultipliedAlpha:false})
      ||c.getContext("webgl",{antialias:true,alpha:true,premultipliedAlpha:false});
-  if(!gl){console.warn("[SeqEyes] WebGL unavailable");return false;}
+  if(!gl){
+    console.warn("[SeqEyes] WebGL unavailable");
+    kGpuFailure="this viewer has no WebGL context, so K\u2011space points cannot be drawn";
+    return false;
+  }
+  // A lost context blanks every later frame in silence; say so instead.
+  c.addEventListener("webglcontextlost",function(ev){
+    ev.preventDefault();
+    gl=null;glProgram=null;glBuf=null;glN=0;
+    kGpuFailure="the graphics context was lost while drawing K\u2011space";
+    if(typeof drawKs==="function")drawKs();
+  },false);
   gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
 
   var vs=gl.createShader(gl.VERTEX_SHADER), fs=gl.createShader(gl.FRAGMENT_SHADER);
@@ -2429,12 +2463,12 @@ function initWebGL(){
       float a=1.0-smoothstep(0.40,0.50,d);\
       gl_FragColor=vec4(uColor.rgb,uColor.a*a);\
     }');
-  gl.compileShader(vs);if(!gl.getShaderParameter(vs,gl.COMPILE_STATUS)){console.warn("[SeqEyes] VS:",gl.getShaderInfoLog(vs));return false;}
-  gl.compileShader(fs);if(!gl.getShaderParameter(fs,gl.COMPILE_STATUS)){console.warn("[SeqEyes] FS:",gl.getShaderInfoLog(fs));return false;}
+  gl.compileShader(vs);if(!gl.getShaderParameter(vs,gl.COMPILE_STATUS)){kGpuFailure="the K\u2011space vertex shader did not compile";console.warn("[SeqEyes] VS:",gl.getShaderInfoLog(vs));return false;}
+  gl.compileShader(fs);if(!gl.getShaderParameter(fs,gl.COMPILE_STATUS)){kGpuFailure="the K\u2011space fragment shader did not compile";console.warn("[SeqEyes] FS:",gl.getShaderInfoLog(fs));return false;}
   glProgram=gl.createProgram();
   gl.attachShader(glProgram,vs);gl.attachShader(glProgram,fs);
   gl.linkProgram(glProgram);
-  if(!gl.getProgramParameter(glProgram,gl.LINK_STATUS)){console.warn("[SeqEyes] Link:",gl.getProgramInfoLog(glProgram));return false;}
+  if(!gl.getProgramParameter(glProgram,gl.LINK_STATUS)){kGpuFailure="the K\u2011space shader program did not link";console.warn("[SeqEyes] Link:",gl.getProgramInfoLog(glProgram));return false;}
 
   glAttribPos=gl.getAttribLocation(glProgram,"aPos");
   glAttribTime=gl.getAttribLocation(glProgram,"aTime");
@@ -2515,15 +2549,33 @@ function kSpaceWindowRange(times,total,vs,ve){
 /* ── Upload ADC k‑space data to GPU (called after base64 decode) ────── */
 function uploadKSpaceGPU(){
   if(!kAdc||!kAdc[0]||kAdc[0].length===0){glN=0;return;}
-  if(!gl&&!initWebGL())return;
+  kGpuFailure=null;
+  if(!gl&&!initWebGL()){glN=0;return;}
   var n=kAdc[0].length;
-  var data=new Float32Array(n*4);
+  var data;
+  try{
+    data=new Float32Array(n*4);
+  }catch(err){
+    glN=0;
+    kGpuFailure="there was not enough memory to stage "+n.toLocaleString()+" K\u2011space points for the GPU";
+    return;
+  }
   var ax=kAdc[0],ay=kAdc[1],az=kAdc[2],at=kAdcTime;
   for(var i=0;i<n;i++){var j=i*4;data[j]=ax[i];data[j+1]=ay[i];data[j+2]=az[i];data[j+3]=at[i];}
   if(glBuf)gl.deleteBuffer(glBuf);
   glBuf=gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER,glBuf);
+  while(gl.getError()!==gl.NO_ERROR){/* drain errors from earlier frames */}
   gl.bufferData(gl.ARRAY_BUFFER,data,gl.STATIC_DRAW);
+  // An upload the driver refused reports here and nowhere else: every later
+  // draw call simply renders nothing.
+  var uploadError=gl.getError();
+  if(uploadError!==gl.NO_ERROR){
+    glN=0;
+    kGpuFailure=(uploadError===gl.OUT_OF_MEMORY?"the graphics driver ran out of memory uploading ":
+      "the graphics driver rejected ")+n.toLocaleString()+" K\u2011space points";
+    return;
+  }
   glN=n;
   // Compute bounds once
   var xmin=Infinity,xmax=-Infinity,ymin=Infinity,ymax=-Infinity,zmin=Infinity,zmax=-Infinity;
@@ -2920,6 +2972,19 @@ function drawKs_core(W,H,dpr){
   // ── Check data ──
   if(!kAdc||!kAdcTime||!kAdc[0]||kAdc[0].length===0){
     ctx.fillStyle="#f00";ctx.font="11px monospace";ctx.fillText("NO ADC data",10,20);return;
+  }
+  /* ADC samples are loaded but the GPU layer cannot draw them.  Without this
+     the panel shows its axes over an empty field, which looks like a
+     sequence that simply has no trajectory. */
+  // The panel may have been closed when the samples arrived, leaving the
+  // canvas unsized; retry once before calling it a failure.
+  if(!kGpuFailure&&(!gl||!glBuf||glN===0))uploadKSpaceGPU();
+  if(kGpuFailure||!gl||!glBuf||glN===0){
+    ctx.fillStyle="#f00";ctx.font="11px monospace";
+    ctx.fillText("K\u2011space cannot be drawn: "+
+      (kGpuFailure||"the GPU layer holds no points"),10,20);
+    ctx.fillText(kAdc[0].length.toLocaleString()+" ADC samples were received.",10,36);
+    return;
   }
   var adcX=kAdc[0],adcY=kAdc[1],adcZ=kAdc[2], nAdc=adcX.length;
 

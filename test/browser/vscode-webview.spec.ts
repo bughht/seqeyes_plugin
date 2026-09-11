@@ -18,7 +18,9 @@ import { expect, test, type Page } from '@playwright/test';
 
 import { packSequenceBlocks } from '../../src/editor/blockTransport';
 import { buildWaveformDetailReply, waveformDetailMessage } from '../../src/editor/waveformDetailReply';
-import { createSequenceDecodeContext, getTotalDuration } from '../../src/pulseq/decoder';
+import { serializeKSpace } from '../../src/editor/kspaceTransport';
+import { createSequenceDecodeContext, decodeAllBlocks, getTotalDuration } from '../../src/pulseq/decoder';
+import { calculateKspace } from '../../src/pulseq/kspace';
 import { parseSequenceBytes } from '../../src/pulseq/sequenceReader';
 import { detectSequenceTiming } from '../../src/pulseq/trdetect';
 
@@ -149,3 +151,136 @@ test('consumes exact detail and a band over the extension message contract', asy
   await expect(page.locator('#mc')).toBeVisible();
   expect(failures).toEqual([]);
 });
+
+/**
+ * K-space replies cross the same process boundary as the waveform samples.
+ *
+ * The failure these cover is a reply the webview accepts but cannot draw: a
+ * `kspaceData` message whose ADC arrays did not survive the trip cleared the
+ * safety notice — the viewer's only record that a calculation was running —
+ * and left a blank k-space panel, which reads as "this sequence has no
+ * k-space" rather than "the trajectory never arrived".
+ */
+test.describe('k-space reply contract', () => {
+  const SAFETY = 'This sequence needs an estimated 2.6 GiB to calculate K-space.';
+
+  /** Load a sequence that carries a safety warning, so the notice is showing. */
+  async function loadWithSafetyNotice(page: Page) {
+    const { seq } = loadSequence();
+    const packed = packSequenceBlocks(seq);
+    await openWebview(page);
+    await post(page, {
+      type: 'sequenceData',
+      sequenceGeneration: 1,
+      blocks: packed.blocks,
+      sampleCount: packed.sampleCount,
+      totalDuration: getTotalDuration(seq),
+      gradRaster: seq.rasterTimes.gradientRaster,
+      rfRaster: seq.rasterTimes.rfRaster,
+      adcRaster: seq.rasterTimes.adcRaster,
+      blockRaster: seq.rasterTimes.blockDurationRaster,
+      timing: detectSequenceTiming(seq),
+      kspaceSafety: SAFETY,
+      notices: [],
+    }, { sampleTimes: b64(packed.sampleTimes), sampleValues: b64(packed.sampleValues) });
+    await expect(page.locator('#viewerNoticeList')).toContainText('2.6 GiB');
+    return seq;
+  }
+
+  const noticeText = (page: Page) => page.locator('#viewerNoticeList').innerText();
+
+  /**
+   * Count the red pixels of the panel's "NO ADC data" glyph.
+   *
+   * This is the one thing the k-space panel says out loud when it has a
+   * trajectory but no ADC samples to plot, so it is what distinguishes a
+   * drawn trajectory from the blank panel the lost payload produced.
+   */
+  const noAdcGlyphPixels = (page: Page) => page.evaluate(() => {
+    const canvas = document.getElementById('kc') as HTMLCanvasElement | null;
+    if (!canvas || !canvas.width || !canvas.height) return -1;
+    const width = Math.min(120, canvas.width);
+    const height = Math.min(30, canvas.height);
+    const data = canvas.getContext('2d')?.getImageData(0, 0, width, height).data;
+    if (!data) return -1;
+    let red = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] > 0 && data[i] > 200 && data[i + 1] < 60 && data[i + 2] < 60) red++;
+    }
+    return red;
+  });
+
+  test('draws a trajectory the extension serialized', async ({ page }) => {
+    const failures: string[] = [];
+    page.on('pageerror', e => failures.push(e.message));
+
+    const seq = await loadWithSafetyNotice(page);
+    const ks = calculateKspace(
+      decodeAllBlocks(seq), seq.rasterTimes.gradientRaster, getTotalDuration(seq), 0,
+      { rfRaster: seq.rasterTimes.rfRaster },
+    );
+    expect(ks, 'the spiral fixture should produce a trajectory').toBeTruthy();
+    const payload = serializeKSpace(ks!);
+    // The ADC samples must leave the host as binary, not as base64 in the JSON
+    // envelope: that envelope was a single 59 MiB string for a large sequence.
+    expect(payload.adcX).toBeInstanceOf(ArrayBuffer);
+    expect(payload.nAdc).toBeGreaterThan(1000);
+
+    await postKspace(page, payload);
+
+    // Success clears the safety notice, and the ADC samples reach the viewer.
+    await expect.poll(async () => await noticeText(page)).not.toContain('2.6 GiB');
+    expect(await noticeText(page)).not.toContain('failed');
+    // And the panel plots them rather than reporting that it has none.
+    await expect.poll(async () => await noAdcGlyphPixels(page), { timeout: 5_000 })
+      .toBe(0);
+    expect(failures).toEqual([]);
+  });
+
+  test('reports a reply whose ADC samples did not arrive', async ({ page }) => {
+    const seq = await loadWithSafetyNotice(page);
+    const ks = calculateKspace(
+      decodeAllBlocks(seq), seq.rasterTimes.gradientRaster, getTotalDuration(seq), 0,
+      { rfRaster: seq.rasterTimes.rfRaster },
+    );
+    const payload = serializeKSpace(ks!) as unknown as Record<string, unknown>;
+    delete payload.adcX;  // what a lost buffer looks like on this side
+
+    await postKspace(page, payload);
+
+    // It must say so rather than clearing the notice and drawing nothing.
+    await expect.poll(async () => await noticeText(page)).toContain('failed');
+    expect(await noticeText(page)).toContain('binary data');
+    expect(await noticeText(page), 'the safety notice must survive a failure')
+      .toContain('2.6 GiB');
+  });
+
+  test('reports a reply that carried no trajectory at all', async ({ page }) => {
+    await loadWithSafetyNotice(page);
+    await post(page, { type: 'kspaceData', kspace: null });
+    await expect.poll(async () => await noticeText(page)).toContain('failed');
+    expect(await noticeText(page)).toContain('did not arrive');
+    expect(await noticeText(page)).toContain('2.6 GiB');
+  });
+});
+
+/** Post a k-space reply the way VS Code does, rebuilding its buffers in-page. */
+async function postKspace(page: Page, payload: Record<string, unknown>) {
+  const plain: Record<string, unknown> = {};
+  const buffers: Record<string, string> = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (value instanceof ArrayBuffer) buffers[key] = b64(value);
+    else plain[key] = value;
+  }
+  await page.evaluate(({ msg, bufs }) => {
+    const decode = (s: string) => {
+      const bin = atob(s);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return bytes.buffer;
+    };
+    const kspace = { ...msg } as Record<string, unknown>;
+    for (const [key, value] of Object.entries(bufs)) kspace[key] = decode(value);
+    window.dispatchEvent(new MessageEvent('message', { data: { type: 'kspaceData', kspace } }));
+  }, { msg: plain, bufs: buffers });
+}

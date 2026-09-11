@@ -14,6 +14,7 @@
  */
 
 import * as esbuild from 'esbuild';
+import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -40,7 +41,24 @@ const cliOutfile = path.join(ROOT, 'out', 'cli', 'exportKspace.js');
 const loadProfileEntry = path.join(ROOT, 'src', 'cli', 'profileLoad.ts');
 const loadProfileOutfile = path.join(ROOT, 'out', 'cli', 'profileLoad.js');
 
+/**
+ * Discard anything a previous build left behind.
+ *
+ * Nothing used to clear `out/`, so output from the old `tsc` build stayed
+ * there indefinitely and `.vscodeignore` does not exclude it: a packaged VSIX
+ * carried 39 stale modules beside the bundles that actually run, some of them
+ * months older than the source. They were dead weight at best and misleading
+ * to anyone debugging the package at worst.
+ *
+ * Watch mode skips this so an incremental rebuild does not delete the output
+ * a running host is holding.
+ */
+function cleanOutDir() {
+    fs.rmSync(path.join(ROOT, 'out'), { recursive: true, force: true });
+}
+
 async function build() {
+    if (!watch) cleanOutDir();
     if (watch) {
         // Watch mode: use esbuild context for incremental rebuilds
         const extCtx = await esbuild.context({
