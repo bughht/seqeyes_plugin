@@ -25,6 +25,7 @@ import {
     type SequenceDecodeContext,
 } from '../pulseq/decoder';
 import { calculateKspace, type KSpaceData } from '../pulseq/kspace';
+import { downsample, serializeKSpace } from './kspaceTransport';
 import { calculateM1, calculateM1Coarse, type CoarseM1Data, type M1Data } from '../pulseq/m1';
 import {
     calculatePns,
@@ -537,7 +538,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                         { rfRaster: activeRfRaster },
                     );
                     if (!kspace) throw new Error('The calculation did not produce a trajectory.');
-                    panel.webview.postMessage({ type: 'kspaceData', kspace: serializeKSpace(kspace) });
+                    postKspaceData(panel, kspace);
                     panel.webview.postMessage({ type: 'progress', phase: 'done', percent: 100, text: 'K-space ready' });
                 } catch (err) {
                     panel.webview.postMessage({
@@ -574,7 +575,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                         },
                     );
                     if (!kspace) throw new Error('The calculation did not produce a trajectory.');
-                    panel.webview.postMessage({ type: 'kspaceData', kspace: serializeKSpace(kspace) });
+                    postKspaceData(panel, kspace);
                     panel.webview.postMessage({ type: 'progress', phase: 'done', percent: 100, text: 'K-space ready' });
                     if (diagnosticState.lastLoad?.activeUri === activeUri.toString()) {
                         diagnosticState.lastLoad.adcCount = kspace.t_adc.length;
@@ -983,23 +984,22 @@ async function readAndParseSequence(uri: vscode.Uri, didRead: () => void) {
     return parseSequenceBytes(fileBytes, uriFileName(uri));
 }
 
-/** Convert k‑space data for webview transfer.
- *  ADC arrays are binary‑encoded (Float32 → base64) to reduce payload ~3×;
- *  the trajectory is JSON (already down‑sampled to MAX_KPTS).  */
-function serializeKSpace(ks: KSpaceData): Record<string, unknown> {
-    const MAX_KPTS = 30000;
-    return {
-        kx: downsample(ks.ktraj[0], MAX_KPTS),
-        ky: downsample(ks.ktraj[1], MAX_KPTS),
-        kz: downsample(ks.ktraj[2], MAX_KPTS),
-        tk: downsample(ks.t_ktraj, MAX_KPTS),
-        // Binary‑encoded ADC arrays — Float32 base64, ~3× smaller than JSON arrays
-        axb: encodeF32B64(ks.ktraj_adc[0]),
-        ayb: encodeF32B64(ks.ktraj_adc[1]),
-        azb: encodeF32B64(ks.ktraj_adc[2]),
-        tab: encodeF32B64(ks.t_adc),
-        nAdc: ks.ktraj_adc[0].length,
-    };
+/**
+ * Deliver a trajectory, reporting a transfer that failed.
+ *
+ * `postMessage` serialises synchronously and rejects if it cannot; without a
+ * rejection handler that failure is an unhandled promise and the viewer waits
+ * for a reply that will never come.  `sequenceData` is guarded the same way.
+ */
+function postKspaceData(panel: vscode.WebviewPanel, kspace: KSpaceData): void {
+    const delivery = panel.webview.postMessage({ type: 'kspaceData', kspace: serializeKSpace(kspace) });
+    delivery.then(undefined, (err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        panel.webview.postMessage({
+            type: 'kspaceError',
+            message: `The viewer could not transfer this trajectory to its renderer: ${message}`,
+        });
+    });
 }
 
 function serializeM1(m1: M1Data | CoarseM1Data): Record<string, unknown> {
@@ -1229,22 +1229,4 @@ function selectWindowBlocks(blocks: DecodedBlock[], startSec: number, endSec: nu
     const from = startSec - pad;
     const to = endSec + pad;
     return blocks.filter(block => block.startTime + block.duration >= from && block.startTime <= to);
-}
-
-/** Encode a Float64Array (or number[]) as a base64‑encoded Float32 blob.
- *  Uses Node's Buffer for efficient base64 conversion. */
-function encodeF32B64(data: Float64Array | Float32Array | number[]): string {
-    const f32 = new Float32Array(data);
-    return Buffer.from(f32.buffer).toString('base64');
-}
-
-/** Uniformly downsample an array to at most `maxPts` elements. */
-function downsample(arr: Float64Array | number[], maxPts: number): number[] {
-    if (!arr) return [];
-    const n = arr.length;
-    if (n <= maxPts) return Array.from(arr);
-    const step = n / maxPts;
-    const out = new Array<number>(maxPts);
-    for (let i = 0; i < maxPts; i++) out[i] = arr[Math.floor(i * step)];
-    return out;
 }

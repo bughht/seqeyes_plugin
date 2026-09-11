@@ -283,15 +283,27 @@ buildLegend();
 tuSel.onchange=function(){timeUnit=tuSel.value;draw();};
 guSel.onchange=function(){gradUnit=guSel.value;draw();};
 function setExportButtonEnabled(enabled){if(exportBtn)exportBtn.disabled=!enabled;}
+/* Throws rather than drawing an empty panel when a trajectory arrives without
+   its ADC samples.  A reply that lost its arrays in transit used to clear the
+   safety notice and leave a blank k-space view, which reads as "this sequence
+   has no k-space" instead of "the trajectory never got here". */
 function applySerializedKspace(payload){
   kTraj=null;kAdc=null;kTime=null;kAdcTime=null;
   if(!payload)return;
   kTraj=[payload.kx,payload.ky,payload.kz];kTime=payload.tk;
-  var n=payload.nAdc||0;
-  if(n>0&&payload.axb){
-    kAdc=[decodeB64F32(payload.axb,n),decodeB64F32(payload.ayb,n),decodeB64F32(payload.azb,n)];
-    kAdcTime=decodeB64F32(payload.tab,n);uploadKSpaceGPU();
-  }
+  if(typeof payload.nAdc!=='number')
+    throw new Error('the trajectory arrived without its ADC sample count');
+  var n=payload.nAdc;
+  if(n<=0)return;
+  var ax=asTypedView(payload.adcX,Float32Array),ay=asTypedView(payload.adcY,Float32Array),
+      az=asTypedView(payload.adcZ,Float32Array),at=asTypedView(payload.adcTime,Float32Array);
+  if(!ax||!ay||!az||!at)
+    throw new Error('the K‑space ADC samples did not arrive as binary data');
+  if(ax.length<n||ay.length<n||az.length<n||at.length<n)
+    throw new Error('the K‑space ADC samples arrived truncated ('+
+      Math.min(ax.length,ay.length,az.length,at.length)+' of '+n+' samples)');
+  kAdc=[ax.subarray(0,n),ay.subarray(0,n),az.subarray(0,n)];
+  kAdcTime=at.subarray(0,n);uploadKSpaceGPU();
 }
 
 /* Report a load that did not arrive. Clearing the previous sequence matters as
@@ -385,7 +397,13 @@ window.addEventListener('message',function(e){
   }else if(m.type==='loadError'){
     showSequenceLoadFailure(m.message||'The sequence could not be loaded.');
   }else if(m.type==='kspaceData'){
-    applySerializedKspace(m.kspace);finishDangerousKspaceCalculation(null);drawKs();
+    try{
+      if(!m.kspace)throw new Error('the trajectory did not arrive from the extension host');
+      applySerializedKspace(m.kspace);
+    }catch(err){
+      finishDangerousKspaceCalculation(err&&err.message||String(err));drawKs();return;
+    }
+    finishDangerousKspaceCalculation(null);drawKs();
     SeqEyesPanel.showKspaceIfClosed();
     SeqEyesPanel.refreshKspace();
   }else if(m.type==='kspaceError'){
