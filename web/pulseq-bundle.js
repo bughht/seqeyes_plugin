@@ -23,17 +23,11 @@ var Pulseq = (() => {
   // web/pulseq-browser.ts
   var pulseq_browser_exports = {};
   __export(pulseq_browser_exports, {
-    BAND_DETAIL_SAMPLES: () => BAND_DETAIL_SAMPLES,
-    EXACT_DETAIL_SAMPLES: () => EXACT_DETAIL_SAMPLES,
     INTERACTIVE_COMPUTE_LIMITS: () => INTERACTIVE_COMPUTE_LIMITS,
-    MAX_DETAIL_PTS: () => MAX_DETAIL_PTS,
-    MAX_DISPLAY_PTS: () => MAX_DISPLAY_PTS,
-    MAX_ENVELOPE_COLUMNS: () => MAX_ENVELOPE_COLUMNS,
     MAX_RF_RESPONSE_BANDS: () => MAX_RF_RESPONSE_BANDS,
     MAX_RF_RESPONSE_FFT_POINTS: () => MAX_RF_RESPONSE_FFT_POINTS,
     MAX_RF_RESPONSE_SAMPLES: () => MAX_RF_RESPONSE_SAMPLES,
     PACKAGE_VERSION: () => PACKAGE_VERSION,
-    WINDOW_DETAIL_BLOCK_LIMIT: () => WINDOW_DETAIL_BLOCK_LIMIT,
     analyzeRfResponse: () => analyzeRfResponse,
     audioBudgetRefusal: () => audioBudgetRefusal,
     buildWaveformDetailReply: () => buildWaveformDetailReply,
@@ -43,13 +37,10 @@ var Pulseq = (() => {
     calculatePns: () => calculatePns,
     calculatePnsCoarse: () => calculatePnsCoarse,
     computeGradSpectrumParity: () => computeGradSpectrumParity,
-    computeGradientEnvelope: () => computeGradientEnvelope,
     computeGradientSpectrogram: () => computeGradientSpectrogram,
     computeGradientSpectrumAverage: () => computeGradientSpectrumAverage,
     computeGradientSpectrumSlice: () => computeGradientSpectrumSlice,
     countBandsOutsideRange: () => countBandsOutsideRange,
-    countExactDetailSamples: () => countExactDetailSamples,
-    countGradientSamples: () => countGradientSamples,
     createSequenceDecodeContext: () => createSequenceDecodeContext,
     decodeAllBlocks: () => decodeAllBlocks,
     decodeBlockRange: () => decodeBlockRange,
@@ -74,8 +65,6 @@ var Pulseq = (() => {
     hasPulseqBinaryMagic: () => hasPulseqBinaryMagic,
     isEmptyAscProfile: () => isEmptyAscProfile,
     kspaceExceedsInteractiveBudget: () => kspaceExceedsInteractiveBudget,
-    packGradientEnvelope: () => packGradientEnvelope,
-    packSequenceBlockRange: () => packSequenceBlockRange,
     packSequenceBlocks: () => packSequenceBlocks,
     parseAcousticResonancesAsc: () => parseAcousticResonancesAsc,
     parseAscProfile: () => parseAscProfile,
@@ -86,7 +75,6 @@ var Pulseq = (() => {
     parseSequenceText: () => parseSequenceText,
     physicalGradientValueAt: () => physicalGradientValueAt,
     resamplePhysicalGradients: () => resamplePhysicalGradients,
-    resolveDetailBlockRange: () => resolveDetailBlockRange,
     resolveSpectrogramParams: () => resolveSpectrogramParams,
     rotateGradient: () => rotateGradient,
     safePnsModel: () => safePnsModel,
@@ -99,7 +87,7 @@ var Pulseq = (() => {
   });
 
   // package.json
-  var version = "0.3.6";
+  var version = "0.3.7";
 
   // src/pulseq/decompressor.ts
   function decompressShape(compressed, numSamples) {
@@ -2863,16 +2851,6 @@ var Pulseq = (() => {
       }
     }
     return { startSec, endSec, columns: width, channels };
-  }
-  function countGradientSamples(blocks) {
-    let total = 0;
-    for (const block of blocks) {
-      for (const key of GRADIENT_CHANNELS) {
-        const grad = block[key];
-        if (grad && grad.type !== "none") total += grad.timePoints.length;
-      }
-    }
-    return total;
   }
   function packGradientEnvelope(envelope) {
     const { columns } = envelope;
