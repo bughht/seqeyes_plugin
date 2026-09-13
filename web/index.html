@@ -195,10 +195,12 @@ var exportBtn=document.getElementById('exportKspaceBtn');
 var pnsBtn=document.getElementById('pnsBtn');
 var BL=[],TD=0,GR=1e-5,RR=1e-6,AR=1e-7,BR=1e-5;
 var M={t:8,r:30,b:22,l:92};
-var CH=['RF','\u03c6','Gx','Gy','Gz','ADC','Trig','PNS','M1x','M1y','M1z'];
-var chColors=['var(--rf)','var(--rf)','var(--gx)','var(--gy)','var(--gz)','var(--adc)','var(--tr)','var(--fg)','var(--gx)','var(--gy)','var(--gz)'];
-var chVis=[true,true,true,true,true,true,true,false,false,false,false];
-var gMax=[1,6.28318,1,1,1,0,0,1,0.001,0.001,0.001];
+var CH=['RF','\u03c6','Gx','Gy','Gz','ADC','Trig','PNS','M1x','M1y','M1z','Label'];
+var chColors=['var(--rf)','var(--rf)','var(--gx)','var(--gy)','var(--gz)','var(--adc)','var(--tr)','var(--fg)','var(--gx)','var(--gy)','var(--gz)','var(--fg)'];
+var chVis=[true,true,true,true,true,true,true,false,false,false,false,false];
+var gMax=[1,6.28318,1,1,1,0,0,1,0.001,0.001,0.001,0];
+// Label is channel 11 so existing indices keep their meaning; it shows after Trig.
+var CH_ORDER=[0,1,2,3,4,5,6,11,7,8,9,10];
 var ox=0,sc=1;
 var dr=false,dsx=0,dso=0;
 var cursorT=0,cursorActive=false;
@@ -206,9 +208,11 @@ var timeUnit='ms',gradUnit='Hz/m';
 var showBB=false;
 var GAMMA=42576;
 var ampZoom=[1,1,1,1,1,1,1];
-ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;
+ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;ampZoom[11]=1;
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
 var decodedBlocks=null,decodeContext=null,waveformOverview=null,m1Data=null,m1WindowData=null,m1WindowPending=null,m1WindowTimer=0,pnsData=null,pnsWindowData=null,pnsWindowPending=null,pnsWindowTimer=0,pnsHardware=null,m1Busy=false,pnsBusy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null,derivedDetailMaxViewSec=0;
+/* MDH labels: names on load, per-ADC values when the Label row is first shown. */
+var labelInfo={names:[],kinds:[]},labelTable=null,labelBusy=false,labelMarkerCount=0;
 var viewerNotices={},viewerNoticesCollapsed=readViewerNoticesCollapsed();
 var kspaceSafetyWarning=null,kspaceSafetyBusy=false,kspaceSafetyPopupTimer=0;
 var kDrawnPointCount=0,derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,waveformOverviewActive=false,rfRenderPointCount=0,rfRawCurveCount=0,rfReducedCurveCount=0,rfOverviewBucketCount=0,gradViewPointCount=0,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
@@ -397,17 +401,21 @@ if(typeof window.matchMedia==='function'){window.matchMedia('(orientation: portr
 /* ── Legend ──────────────────────────────────────────────────────────── */
 function buildLegend(){
   legend.innerHTML='';
-  chColors.forEach(function(c,i){
+  CH_ORDER.forEach(function(i){
+    var c=chColors[i];
     var d=document.createElement('div');d.className='li'+(chVis[i]?'':' off');d.title='Toggle '+CH[i];
     d.innerHTML='<div class="ld" style="background:'+c+'"></div>'+CH[i];
     if(i>=8&&i<=10&&!m1Data)d.title='Calculate and show '+CH[i];
     else if(i===7&&!pnsData)d.title='Select a PNS ASC file before showing PNS';
+    else if(i===11)d.title=!labelInfo.names.length?'This sequence sets no labels':(labelBusy?'Evaluating labels…':'Toggle the MDH label row');
     d.onclick=function(){
       if(i>=8&&i<=10&&!m1Data){requestM1(i);return;}
       if(i===7&&!pnsData)return;
+      if(i===11){requestLabels();return;}
       chVis[i]=!chVis[i];buildLegend();computeGlobalMax();draw();
     };
     legend.appendChild(d);
+    if(i===11&&labelInfo.names.length)legend.appendChild(SeqEyesLabels.createGearChip(labelInfo,draw));
   });
 }
 buildLegend();
@@ -415,7 +423,7 @@ tuSel.onchange=function(){timeUnit=tuSel.value;draw();};
 guSel.onchange=function(){gradUnit=guSel.value;draw();};
 
 /* ── Coordinate mapping ──────────────────────────────────────────────── */
-function visChannels(){var v=[];for(var i=0;i<CH.length;i++)if(chVis[i])v.push(i);return v;}
+function visChannels(){var v=[];for(var k=0;k<CH_ORDER.length;k++)if(chVis[CH_ORDER[k]])v.push(CH_ORDER[k]);return v;}
 function cy(vi){var vc=visChannels(),h=(mc.height/(window.devicePixelRatio||1)-M.t-M.b)/Math.max(vc.length,1);return M.t+vi*h+h/2;}
 function cH(){var vc=visChannels();return(mc.height/(window.devicePixelRatio||1)-M.t-M.b)/Math.max(vc.length,1);}
 function t2x(t){return M.l+(t-ox)*sc}
@@ -450,7 +458,7 @@ function zoomAtCenter(zf){return zoomAt(M.l+plotWidth()/2,zf);}
 
 /* ── Global amplitude ranges ──────────────────────────────────────────── */
 function computeGlobalMax(){
-  gMax=[0.001,6.28318,0.001,0.001,0.001,1,1,0.001,0.001,0.001,0.001];
+  gMax=[0.001,6.28318,0.001,0.001,0.001,1,1,0.001,0.001,0.001,0.001,0];
   for(var i=0;i<BL.length;i++){var b=BL[i];
     if(b.rf){var a=Math.abs(b.rf.a||0);if(a>gMax[0])gMax[0]=a;}
     if(b.gx&&b.gx.ty!=='none'&&Math.abs(b.gx.a||0)>gMax[2])gMax[2]=Math.abs(b.gx.a);
@@ -760,7 +768,9 @@ function loadSequenceSource(sourceBytes,fileName,parseSource){
     setViewerNotice('displayDetail',packed.notice);
     waveformOverview=createWaveformOverview(BL);
     installWaveformDetailSource(seq);
-    m1Data=null;m1WindowData=null;m1WindowPending=null;pnsData=null;pnsWindowData=null;pnsWindowPending=null;chVis[7]=false;chVis[8]=false;chVis[9]=false;chVis[10]=false;buildLegend();
+    m1Data=null;m1WindowData=null;m1WindowPending=null;pnsData=null;pnsWindowData=null;pnsWindowPending=null;chVis[7]=false;chVis[8]=false;chVis[9]=false;chVis[10]=false;
+    labelInfo=Pulseq.listSequenceLabels(seq);labelTable=null;labelBusy=false;chVis[11]=false;
+    SeqEyesLabels.closeControls(false);setViewerNotice('labels',null);buildLegend();
 
     // Build block positions for minimap
     var cum=0;blockPos=[];
@@ -920,6 +930,25 @@ function showM1Result(result){
 function derivedNeedsCoarseFallback(){
   var estimate=Pulseq.estimateDerivedCost(ensureDecodedBlocks(),GR);
   return estimate.rasterSamples>Pulseq.INTERACTIVE_COMPUTE_LIMITS.derivedRasterSamples;
+}
+
+/* Evaluated on first use, like M1: most views never open the Label row. */
+function requestLabels(){
+  if(labelBusy||!labelInfo.names.length)return;
+  if(labelTable){chVis[11]=!chVis[11];buildLegend();draw();return;}
+  if(!currentSequence)return;
+  var seq=currentSequence;
+  labelBusy=true;buildLegend();
+  setTimeout(function(){
+    if(seq!==currentSequence)return;
+    labelBusy=false;
+    try{
+      labelTable=SeqEyesLabels.fromTable(Pulseq.evaluateAdcLabels(seq));
+    }catch(err){
+      buildLegend();setViewerNotice('labels','The MDH labels could not be evaluated: '+(err.message||String(err))+'.');return;
+    }
+    setViewerNotice('labels',null);chVis[11]=true;buildLegend();draw();
+  },0);
 }
 
 function requestM1(channel){
@@ -1430,6 +1459,7 @@ function draw(){
   if(showBB)drawBlockBounds(w,h,s);
   drawBlocks(vs,ve,s);
   drawDerivedChannels(vs,ve,s);
+  drawLabelRow(vs,ve,s);
   drawAxes(w,h,vs,ve,s);
   lastDrawDurationMs=performance.now()-drawStarted;
   drawCursorOverlay();
@@ -1534,11 +1564,26 @@ function drawAxes(w,h,vs,ve,s){
     else if(ci===6){ctx.fillText('ch',lblX,M.t+vi*ch+12);}
     else if(ci===7){ctx.fillText(fmtAmp(channelRange(7))+'%',lblX,M.t+vi*ch+12);ctx.fillText('0',lblX,M.t+(vi+1)*ch-4);}
     else if(ci>=8&&ci<=10){ctx.fillText('\u00b1'+fmtAmp(channelRange(ci))+'s/m',lblX,M.t+vi*ch+12);ctx.fillText('0',lblX,y0+4);}
+    else if(ci===11){ctx.fillText('max',lblX,M.t+vi*ch+12);ctx.fillText('min',lblX,M.t+(vi+1)*ch-4);}
     ctx.strokeStyle=s.getPropertyValue('--ax').trim();ctx.lineWidth=0.5;
     ctx.beginPath();ctx.moveTo(M.l-2,M.t+vi*ch);ctx.lineTo(M.l+2,M.t+vi*ch);ctx.stroke();
     ctx.beginPath();ctx.moveTo(M.l-2,y0);ctx.lineTo(M.l+2,y0);ctx.stroke();
     ctx.beginPath();ctx.moveTo(M.l-2,M.t+(vi+1)*ch);ctx.lineTo(M.l+2,M.t+(vi+1)*ch);ctx.stroke();
   }
+}
+
+/* MDH label row (markers drawn by labels.js from the bundle). */
+function drawLabelRow(vs,ve,s){
+  labelMarkerCount=0;
+  if(!chVis[11]||!labelTable)return;
+  var vi=visChannels().indexOf(11);if(vi<0)return;
+  var ch=cH(),w=mc.width/(window.devicePixelRatio||1);
+  rowClip(vi,ch,function(){
+    labelMarkerCount=SeqEyesLabels.drawRow(ctx,labelTable,{
+      left:M.l,right:w-M.r,top:M.t+vi*ch,height:ch,
+      background:s.getPropertyValue('--bg').trim(),foreground:s.getPropertyValue('--fg').trim()
+    },vs,ve,t2x);
+  });
 }
 
 function drawDerivedChannels(vs,ve,s){
@@ -2180,6 +2225,7 @@ function showTooltipAt(cx,cy,ct){
       if(found.gz&&found.gz.ty!=='none')lines.push('Gz: '+fmtG(found.gz,ct));
       if(found.adc){lines.push('ADC: '+found.adc.n+'pts @'+(found.adc.dw*1e6).toFixed(1)+'\u00b5s  fo='+(found.adc.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.adc.po||0)%6.283).toFixed(2)+' rad');}
       if(found.trg)lines.push('Trig: ch'+found.trg.map(function(x){return x.c}).join(',')+' \u0394'+found.trg.map(function(x){return fmtT(timeConv(x.dr))+' '+timeUnitStr()}).join(','));
+      if(chVis[11]&&labelTable){var labelLine=SeqEyesLabels.tooltipLine(labelTable,found);if(labelLine)lines.push(labelLine);}
     }else{
       lines=['Time: '+fmtT(timeConv(ct))+' '+timeUnitStr()];
     }
@@ -2797,7 +2843,7 @@ if(location.search.indexOf("debug=1")>=0){
   window.__seqeyesDebug={
     state:function(){
       var adcCount=(kAdc&&kAdc[0])?kAdc[0].length:0;
-      return{blocks:BL.length,totalDuration:TD,offset:ox,scale:sc,visibleDuration:visibleDuration(),minRasterTime:minRasterTime(),kOpen:kOpen,kView:kView,kRotX:kRotX,kRotY:kRotY,kScale:kScl,adcCount:adcCount,exportEnabled:!!(exportBtn&&!exportBtn.disabled),derivedRenderPoints:derivedRenderPointCount,derivedEnvelopeCurves:derivedEnvelopeCurveCount,derivedRawCurves:derivedRawCurveCount,waveformOverviewActive:waveformOverviewActive,rfRenderPoints:rfRenderPointCount,rfRawCurves:rfRawCurveCount,rfReducedCurves:rfReducedCurveCount,rfOverviewBuckets:rfOverviewBucketCount,notices:Object.keys(viewerNotices).reduce(function(all,k){return all.concat(viewerNoticeMessages(viewerNotices[k]));},[]),lastDrawDurationMs:lastDrawDurationMs,drawCount:viewerDrawCount,cursorDrawCount:viewerCursorDrawCount,kTrajectoryDrawCount:kSpaceTrajectoryDrawCount,kOverlayDrawCount:kSpaceOverlayDrawCount,m1ReferenceMode:m1ReferenceMode,m1DetailActive:!!m1WindowData,derivedDetailMaxViewSec:derivedDetailMaxViewSec,gradViewPoints:gradViewPointCount,kDrawnPoints:kDrawnPointCount,kPanX:kPanX,kPanY:kPanY,kUploadedPoints:(typeof glN==='number'?glN:0),waveformDetailActive:!!activeWaveformDetail,waveformDetailWindowSec:activeWaveformDetail?activeWaveformDetail.endSec-activeWaveformDetail.startSec:0,waveformBandActive:!!activeWaveformBand,waveformBandColumns:activeWaveformBand?activeWaveformBand.columns:0,panelMode:panelMode,panelOpen:panelOpen,title:document.title};
+      return{blocks:BL.length,totalDuration:TD,offset:ox,scale:sc,visibleDuration:visibleDuration(),minRasterTime:minRasterTime(),kOpen:kOpen,kView:kView,kRotX:kRotX,kRotY:kRotY,kScale:kScl,adcCount:adcCount,exportEnabled:!!(exportBtn&&!exportBtn.disabled),derivedRenderPoints:derivedRenderPointCount,derivedEnvelopeCurves:derivedEnvelopeCurveCount,derivedRawCurves:derivedRawCurveCount,waveformOverviewActive:waveformOverviewActive,rfRenderPoints:rfRenderPointCount,rfRawCurves:rfRawCurveCount,rfReducedCurves:rfReducedCurveCount,rfOverviewBuckets:rfOverviewBucketCount,notices:Object.keys(viewerNotices).reduce(function(all,k){return all.concat(viewerNoticeMessages(viewerNotices[k]));},[]),lastDrawDurationMs:lastDrawDurationMs,drawCount:viewerDrawCount,cursorDrawCount:viewerCursorDrawCount,kTrajectoryDrawCount:kSpaceTrajectoryDrawCount,kOverlayDrawCount:kSpaceOverlayDrawCount,m1ReferenceMode:m1ReferenceMode,m1DetailActive:!!m1WindowData,derivedDetailMaxViewSec:derivedDetailMaxViewSec,gradViewPoints:gradViewPointCount,kDrawnPoints:kDrawnPointCount,kPanX:kPanX,kPanY:kPanY,kUploadedPoints:(typeof glN==='number'?glN:0),waveformDetailActive:!!activeWaveformDetail,waveformDetailWindowSec:activeWaveformDetail?activeWaveformDetail.endSec-activeWaveformDetail.startSec:0,waveformBandActive:!!activeWaveformBand,waveformBandColumns:activeWaveformBand?activeWaveformBand.columns:0,panelMode:panelMode,panelOpen:panelOpen,labelNames:labelInfo.names.slice(),labelRowVisible:!!chVis[11],visibleChannels:visChannels().map(function(i){return CH[i];}),labelMarkersDrawn:labelMarkerCount,labelPopupOpen:SeqEyesLabels.isOpen(),title:document.title};
     },
     hoverPoint:function(){
       var t=(kAdcTime&&kAdcTime.length)?kAdcTime[Math.floor(kAdcTime.length/2)]:TD*0.5;

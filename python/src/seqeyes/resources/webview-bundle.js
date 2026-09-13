@@ -351,6 +351,441 @@ function failWaveformDetail(payload){
 }
 
 
+/* ══ labels.js ══ */
+/* ═══════════════════════════════════════════════════════════════════════
+   MDH label row — markers at each ADC centre, and their style controls
+   ═══════════════════════════════════════════════════════════════════════
+   Shared by all three renderers: the VS Code webview, web/index.html (which
+   the MATLAB toolbox also loads) and the Python viewer.html.  Each declares
+   its own canvas state, so nothing here reads renderer globals — callers pass
+   the 2-D context, the time→x mapping and the row geometry.  The Python
+   viewer loads this file on its own, without the rest of the bundle.
+
+   The DOM and localStorage are only touched inside functions, so the tests
+   can run the shipped file in a bare VM context.
+
+   A "labels" argument is anything with `names` and `kinds`: the popup and the
+   styles need nothing more, so ⚙ works before the per-ADC values arrive. */
+var SeqEyesLabels = (function () {
+  var STORAGE_KEY = 'seqeyes.labelStyles.v1';
+  // Tableau 10: distinct hues that stay readable on light and dark themes.
+  var PALETTE = ['#4e79a7', '#f28e2b', '#e15759', '#76b7b2', '#59a14f', '#edc948', '#b07aa1', '#ff9da7', '#9c755f', '#bab0ac'];
+  var SHAPES = ['circle', 'square', 'triangle', 'triangleDown', 'diamond', 'cross', 'plus'];
+  var SHAPE_NAMES = {
+    circle: '● Circle', square: '■ Square', triangle: '▲ Triangle', triangleDown: '▼ Triangle down',
+    diamond: '◆ Diamond', cross: '✕ Cross', plus: '＋ Plus'
+  };
+
+  var overrides = null;
+  var popover = null, popoverAnchor = null, popoverLabels = null, popoverChange = null, popoverRows = [];
+
+  /* ── Table ─────────────────────────────────────────────────────────── */
+
+  /* Same contract as asTypedView in block-transport.js, repeated because the
+     Python viewer loads this file without the bundle. */
+  function typedView(buffer, Ctor) {
+    if (buffer instanceof Ctor) return buffer;
+    if (buffer instanceof ArrayBuffer) return new Ctor(buffer);
+    if (buffer && buffer.buffer instanceof ArrayBuffer && typeof buffer.byteLength === 'number')
+      return new Ctor(buffer.buffer, buffer.byteOffset || 0, Math.floor(buffer.byteLength / Ctor.BYTES_PER_ELEMENT));
+    return null;
+  }
+
+  function makeTable(names, kinds, count, timeSec, block, values, min, max) {
+    var width = names.length, table = {
+      names: Array.prototype.slice.call(names), kinds: [], count: count,
+      timeSec: timeSec, block: block, values: values, min: [], max: []
+    };
+    for (var i = 0; i < width; i++) {
+      table.kinds.push(kinds && kinds[i] === 'flag' ? 'flag' : 'counter');
+      table.min.push(min && isFinite(min[i]) ? min[i] : 0);
+      table.max.push(max && isFinite(max[i]) ? max[i] : 0);
+    }
+    return table;
+  }
+
+  /* Rebuild the table the extension host serialized (labelTransport.ts). */
+  function fromPayload(payload) {
+    if (!payload || !payload.names) throw new Error('the label table did not arrive from the extension host');
+    var count = payload.count | 0, width = payload.names.length;
+    var time = typedView(payload.timeSec, Float64Array), block = typedView(payload.block, Uint32Array),
+        values = typedView(payload.values, Int32Array);
+    if (!time || !block || !values) throw new Error('the label values did not arrive as binary data');
+    if (time.length < count || block.length < count || values.length < count * width)
+      throw new Error('the label values arrived truncated');
+    return makeTable(payload.names, payload.kinds, count, time.subarray(0, count), block.subarray(0, count),
+      values.subarray(0, count * width), payload.min, payload.max);
+  }
+
+  /* Wrap a table evaluated in the page by Pulseq.evaluateAdcLabels. */
+  function fromTable(table) {
+    return makeTable(table.names, table.kinds, table.count, table.timeSec, table.block, table.values, table.min, table.max);
+  }
+
+  /* ── Styles ────────────────────────────────────────────────────────── */
+
+  function readOverrides() {
+    if (overrides) return overrides;
+    overrides = {};
+    try {
+      var saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+      if (saved && typeof saved === 'object') overrides = saved;
+    } catch (_) {}
+    return overrides;
+  }
+
+  function writeOverrides() {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(overrides)); } catch (_) {}
+  }
+
+  /* Defaults follow the label's position in its sequence, so one sequence's
+     labels get distinct colours.  A user's choice is saved per name and
+     follows that label into every sequence. */
+  function styleFor(labels, index) {
+    var saved = readOverrides()[labels.names[index]] || {};
+    return {
+      shape: SHAPES.indexOf(saved.shape) >= 0 ? saved.shape : SHAPES[index % SHAPES.length],
+      color: /^#[0-9a-f]{6}$/i.test(saved.color || '') ? saved.color : PALETTE[index % PALETTE.length],
+      visible: saved.visible !== false
+    };
+  }
+
+  function setStyle(name, patch) {
+    var all = readOverrides(), current = all[name] || {};
+    for (var key in patch) if (Object.prototype.hasOwnProperty.call(patch, key)) current[key] = patch[key];
+    all[name] = current;
+    writeOverrides();
+  }
+
+  function resetStyles(names) {
+    var all = readOverrides();
+    for (var i = 0; i < names.length; i++) delete all[names[i]];
+    writeOverrides();
+  }
+
+  /* ── Drawing ───────────────────────────────────────────────────────── */
+
+  function lowerBound(values, target, count) {
+    var lo = 0, hi = count;
+    while (lo < hi) { var mid = (lo + hi) >> 1; if (values[mid] < target) lo = mid + 1; else hi = mid; }
+    return lo;
+  }
+
+  function upperBound(values, target, count) {
+    var lo = 0, hi = count;
+    while (lo < hi) { var mid = (lo + hi) >> 1; if (values[mid] <= target) lo = mid + 1; else hi = mid; }
+    return lo;
+  }
+
+  function addMarker(ctx, shape, x, y, r) {
+    if (shape === 'circle') { ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, 6.283185); }
+    else if (shape === 'square') { var h = r * .85; ctx.rect(x - h, y - h, 2 * h, 2 * h); }
+    else if (shape === 'triangle') { ctx.moveTo(x, y - r); ctx.lineTo(x + r, y + r * .8); ctx.lineTo(x - r, y + r * .8); ctx.closePath(); }
+    else if (shape === 'triangleDown') { ctx.moveTo(x, y + r); ctx.lineTo(x + r, y - r * .8); ctx.lineTo(x - r, y - r * .8); ctx.closePath(); }
+    else if (shape === 'diamond') { ctx.moveTo(x, y - r); ctx.lineTo(x + r, y); ctx.lineTo(x, y + r); ctx.lineTo(x - r, y); ctx.closePath(); }
+    else if (shape === 'cross') { ctx.moveTo(x - r, y - r); ctx.lineTo(x + r, y + r); ctx.moveTo(x + r, y - r); ctx.lineTo(x - r, y + r); }
+    else { ctx.moveTo(x - r, y); ctx.lineTo(x + r, y); ctx.moveTo(x, y - r); ctx.lineTo(x, y + r); }
+  }
+
+  function paint(ctx, style) {
+    if (style.shape === 'cross' || style.shape === 'plus') {
+      ctx.strokeStyle = style.color; ctx.lineWidth = 1.5; ctx.stroke();
+    } else {
+      ctx.fillStyle = style.color; ctx.fill();
+    }
+  }
+
+  /* Each counter spans its own min–max, so SLC 0–3 stays readable beside
+     LIN 0–255.  Flags are pinned to 0/1; a constant label sits mid-row. */
+  function valueScale(labels, index, top, span) {
+    var flag = labels.kinds[index] === 'flag';
+    var lo = flag ? 0 : labels.min[index], hi = flag ? 1 : labels.max[index];
+    return { lo: lo, k: hi > lo ? span / (hi - lo) : 0, bottom: top + span, mid: top + span / 2 };
+  }
+
+  function yFor(scale, value) { return scale.k ? scale.bottom - (value - scale.lo) * scale.k : scale.mid; }
+
+  /* Keep one pixel column's lowest and highest value per label. */
+  function addColumnExtremes(ctx, table, label, first, last, left, plotW, scale, shape, r, t2x) {
+    var width = table.names.length, columns = Math.max(1, Math.floor(plotW)), column = -1, lo = 0, hi = 0, drawn = 0;
+    for (var adc = first; adc <= last; adc++) {
+      var c = -2, v = 0;
+      if (adc < last) {
+        c = Math.floor(t2x(table.timeSec[adc]) - left);
+        c = c < 0 ? 0 : (c >= columns ? columns - 1 : c);
+        v = table.values[adc * width + label];
+        if (c === column) { if (v < lo) lo = v; if (v > hi) hi = v; continue; }
+      }
+      if (column >= 0) {
+        addMarker(ctx, shape, left + column + .5, yFor(scale, lo), r); drawn++;
+        if (hi !== lo) { addMarker(ctx, shape, left + column + .5, yFor(scale, hi), r); drawn++; }
+      }
+      column = c; lo = v; hi = v;
+    }
+    return drawn;
+  }
+
+  /* A compact key in the row's top-left corner, so the markers read without
+     opening the controls. */
+  function drawKey(ctx, labels, geom) {
+    var x = geom.left + 5, y = geom.top + 8, limit = geom.right - 8, items = [], widths = [], total = 6;
+    ctx.save();
+    ctx.font = '9px monospace'; ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+    for (var i = 0; i < labels.names.length; i++) {
+      var style = styleFor(labels, i);
+      if (!style.visible) continue;
+      var w = 10 + ctx.measureText(labels.names[i]).width + 8;
+      if (x + total + w > limit) break;
+      items.push({ index: i, style: style }); widths.push(w); total += w;
+    }
+    if (items.length) {
+      ctx.globalAlpha = .78; ctx.fillStyle = geom.background || 'rgba(128,128,128,.15)';
+      ctx.fillRect(x, y - 6, total, 12);
+      ctx.globalAlpha = 1;
+      var cursor = x + 6;
+      for (var j = 0; j < items.length; j++) {
+        ctx.beginPath(); addMarker(ctx, items[j].style.shape, cursor + 3, y, 3); paint(ctx, items[j].style);
+        ctx.fillStyle = geom.foreground || items[j].style.color;
+        ctx.fillText(labels.names[items[j].index], cursor + 10, y + .5);
+        cursor += widths[j];
+      }
+    }
+    ctx.restore();
+  }
+
+  /* Draw the label row.  geom = {left, right, top, height, background,
+     foreground} in CSS pixels; t2x maps seconds to x.  Every ADC gets a
+     marker while they sit at least three pixels apart; beyond that each pixel
+     column keeps only its lowest and highest value per label, so the cost is
+     bounded by the plot width rather than the ADC count.  Returns the number
+     of markers drawn. */
+  function drawRow(ctx, table, geom, vs, ve, t2x) {
+    if (!table || !table.count || !table.names.length) return 0;
+    var first = lowerBound(table.timeSec, vs, table.count), last = upperBound(table.timeSec, ve, table.count);
+    var width = table.names.length, plotW = Math.max(1, geom.right - geom.left), drawn = 0;
+    if (last > first) {
+      var pad = Math.max(5, Math.min(16, geom.height * .2)), top = geom.top + pad, span = Math.max(1, geom.height - 2 * pad);
+      var r = Math.max(2.5, Math.min(4.5, geom.height * .05)), dense = last - first > plotW / 3;
+      ctx.save();
+      for (var label = 0; label < width; label++) {
+        var style = styleFor(table, label);
+        if (!style.visible) continue;
+        var scale = valueScale(table, label, top, span);
+        ctx.beginPath();
+        if (dense) drawn += addColumnExtremes(ctx, table, label, first, last, geom.left, plotW, scale, style.shape, r, t2x);
+        else {
+          for (var adc = first; adc < last; adc++) {
+            addMarker(ctx, style.shape, t2x(table.timeSec[adc]), yFor(scale, table.values[adc * width + label]), r);
+            drawn++;
+          }
+        }
+        paint(ctx, style);
+      }
+      ctx.restore();
+    }
+    if (geom.height >= 34) drawKey(ctx, table, geom);
+    return drawn;
+  }
+
+  /* The label state at the ADC of `block` ({i, s, d}, as in the renderers'
+     block lists), or null when that block has no ADC. */
+  function tooltipLine(table, block) {
+    if (!table || !table.count || !block) return null;
+    var index = lowerBound(table.timeSec, block.s, table.count);
+    if (index >= table.count || table.block[index] !== block.i || table.timeSec[index] > block.s + block.d) return null;
+    var width = table.names.length, parts = [];
+    for (var label = 0; label < width; label++) {
+      if (styleFor(table, label).visible) parts.push(table.names[label] + '=' + table.values[index * width + label]);
+    }
+    return parts.length ? 'Labels: ' + parts.join('  ') : null;
+  }
+
+  /* ── Controls popup ────────────────────────────────────────────────── */
+
+  function isCompactLayout() {
+    return !!(window.matchMedia && window.matchMedia('(max-width: 768px), (pointer: coarse)').matches);
+  }
+
+  function element(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function drawPreview(canvas, style) {
+    var dpr = window.devicePixelRatio || 1, size = 16, context = canvas.getContext('2d');
+    canvas.width = size * dpr; canvas.height = size * dpr;
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    context.clearRect(0, 0, size, size);
+    context.beginPath(); addMarker(context, style.shape, size / 2, size / 2, 5); paint(context, style);
+  }
+
+  function controlRow(index) {
+    var name = popoverLabels.names[index], row = element('div', 'lblc-row');
+    var toggle = element('input'); toggle.type = 'checkbox'; toggle.setAttribute('aria-label', 'Show ' + name);
+    var preview = element('canvas'); preview.setAttribute('aria-hidden', 'true');
+    var title = element('span', 'lblc-name', name);
+    if (popoverLabels.kinds[index] === 'flag') title.appendChild(element('span', 'lblc-kind', 'flag'));
+    var shape = element('select'); shape.setAttribute('aria-label', name + ' marker shape');
+    for (var s = 0; s < SHAPES.length; s++) {
+      var option = element('option', null, SHAPE_NAMES[SHAPES[s]]); option.value = SHAPES[s]; shape.appendChild(option);
+    }
+    var custom = element('input'); custom.type = 'color'; custom.title = 'Custom colour';
+    custom.setAttribute('aria-label', name + ' custom marker colour');
+    var swatches = element('div', 'lblc-swatches'), swatchButtons = [];
+    PALETTE.forEach(function (color) {
+      var swatch = element('button', 'lblc-swatch'); swatch.type = 'button';
+      swatch.style.background = color; swatch.title = color;
+      swatch.setAttribute('aria-label', 'Use ' + color + ' for ' + name);
+      swatch.onclick = function () { update({ color: color }); };
+      swatches.appendChild(swatch); swatchButtons.push(swatch);
+    });
+
+    function refresh() {
+      var style = styleFor(popoverLabels, index);
+      row.classList.toggle('off', !style.visible);
+      toggle.checked = style.visible; shape.value = style.shape;
+      if (custom.value.toLowerCase() !== style.color.toLowerCase()) custom.value = style.color;
+      for (var i = 0; i < swatchButtons.length; i++)
+        swatchButtons[i].setAttribute('aria-pressed', PALETTE[i].toLowerCase() === style.color.toLowerCase() ? 'true' : 'false');
+      drawPreview(preview, style);
+    }
+    function update(patch) { setStyle(name, patch); refresh(); if (popoverChange) popoverChange(); }
+
+    toggle.onchange = function () { update({ visible: toggle.checked }); };
+    shape.onchange = function () { update({ shape: shape.value }); };
+    // Updating in place, never re-rendering, keeps a native picker open while it drags.
+    custom.oninput = function () { update({ color: custom.value }); };
+
+    row.appendChild(toggle); row.appendChild(preview); row.appendChild(title);
+    row.appendChild(shape); row.appendChild(custom); row.appendChild(swatches);
+    refresh();
+    return { row: row, refresh: refresh };
+  }
+
+  function renderControls() {
+    popover.textContent = ''; popoverRows = [];
+    var head = element('div', 'lblc-head');
+    head.appendChild(element('span', null, 'Label markers'));
+    var close = element('button', 'lblc-close', '✕'); close.type = 'button'; close.setAttribute('aria-label', 'Close');
+    close.onclick = function () { closeControls(true); };
+    head.appendChild(close);
+    var list = element('div', 'lblc-list');
+    for (var i = 0; i < popoverLabels.names.length; i++) {
+      var entry = controlRow(i); popoverRows.push(entry); list.appendChild(entry.row);
+    }
+    var foot = element('div', 'lblc-foot');
+    function action(text, apply) {
+      var button = element('button', null, text); button.type = 'button';
+      button.onclick = function () {
+        apply();
+        for (var r = 0; r < popoverRows.length; r++) popoverRows[r].refresh();
+        if (popoverChange) popoverChange();
+      };
+      foot.appendChild(button);
+    }
+    action('Show all', function () { popoverLabels.names.forEach(function (name) { setStyle(name, { visible: true }); }); });
+    action('Hide all', function () { popoverLabels.names.forEach(function (name) { setStyle(name, { visible: false }); }); });
+    action('Reset', function () { resetStyles(popoverLabels.names); });
+    popover.appendChild(head); popover.appendChild(list); popover.appendChild(foot);
+  }
+
+  function positionPopover() {
+    if (!popover) return;
+    var compact = isCompactLayout();
+    popover.classList.toggle('sheet', compact);
+    if (compact) { popover.style.left = ''; popover.style.top = ''; return; }
+    var rect = popoverAnchor && popoverAnchor.isConnected ? popoverAnchor.getBoundingClientRect() : { left: 8, top: 8, bottom: 8 };
+    var width = popover.offsetWidth, height = popover.offsetHeight, vw = window.innerWidth, vh = window.innerHeight;
+    var top = rect.bottom + 4;
+    if (top + height > vh - 8) top = Math.max(8, rect.top - height - 4);
+    if (top + height > vh - 8) top = Math.max(8, vh - height - 8);
+    popover.style.left = Math.max(8, Math.min(rect.left, vw - width - 8)) + 'px';
+    popover.style.top = top + 'px';
+  }
+
+  function onKeyDown(event) {
+    if (event.key !== 'Escape') return;
+    event.preventDefault(); event.stopPropagation();
+    closeControls(true);
+  }
+
+  function onPointerDown(event) {
+    var target = event.target;
+    if (popover.contains(target)) return;
+    // The chip toggles on its own click; closing here first would reopen it.
+    if (target && target.closest && target.closest('.lbl-gear')) return;
+    closeControls(false);
+  }
+
+  function openControls(anchor, labels, onChange) {
+    closeControls(false);
+    if (!labels || !labels.names || !labels.names.length) return;
+    popover = element('div', 'lblc'); popover.id = 'labelControls';
+    popover.setAttribute('role', 'dialog'); popover.setAttribute('aria-label', 'Label markers');
+    popoverAnchor = anchor; popoverLabels = labels; popoverChange = onChange;
+    renderControls();
+    document.body.appendChild(popover);
+    if (anchor) anchor.setAttribute('aria-expanded', 'true');
+    positionPopover();
+    document.addEventListener('keydown', onKeyDown, true);
+    document.addEventListener('pointerdown', onPointerDown, true);
+    window.addEventListener('resize', positionPopover);
+    var first = popover.querySelector('.lblc-row input');
+    if (first) first.focus();
+  }
+
+  function closeControls(restoreFocus) {
+    if (!popover) return;
+    document.removeEventListener('keydown', onKeyDown, true);
+    document.removeEventListener('pointerdown', onPointerDown, true);
+    window.removeEventListener('resize', positionPopover);
+    if (popover.parentNode) popover.parentNode.removeChild(popover);
+    var anchor = popoverAnchor;
+    popover = null; popoverAnchor = null; popoverLabels = null; popoverChange = null; popoverRows = [];
+    if (anchor) {
+      anchor.setAttribute('aria-expanded', 'false');
+      if (restoreFocus && anchor.isConnected) anchor.focus();
+    }
+  }
+
+  /* The ⚙ chip that follows the Label chip.  Legends are rebuilt wholesale,
+     so a fresh chip takes over as the anchor of a popup that is still open. */
+  function createGearChip(labels, onChange) {
+    var chip = element('div', 'li lbl-gear', '⚙');
+    chip.title = 'Label marker shapes, colours and visibility';
+    chip.tabIndex = 0;
+    chip.setAttribute('role', 'button');
+    chip.setAttribute('aria-haspopup', 'dialog');
+    chip.setAttribute('aria-expanded', popover ? 'true' : 'false');
+    if (popover) { popoverAnchor = chip; popoverLabels = labels; popoverChange = onChange; }
+    function toggle() { if (popover) closeControls(false); else openControls(chip, labels, onChange); }
+    chip.onclick = toggle;
+    chip.onkeydown = function (event) {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggle(); }
+    };
+    return chip;
+  }
+
+  return {
+    PALETTE: PALETTE,
+    SHAPES: SHAPES,
+    fromPayload: fromPayload,
+    fromTable: fromTable,
+    styleFor: styleFor,
+    setStyle: setStyle,
+    resetStyles: resetStyles,
+    drawRow: drawRow,
+    tooltipLine: tooltipLine,
+    createGearChip: createGearChip,
+    openControls: openControls,
+    closeControls: closeControls,
+    isOpen: function () { return !!popover; }
+  };
+})();
+
+
 /* ══ state.js ══ */
 /* ═══════════════════════════════════════════════════════════════════════
    Application state & configuration
@@ -363,10 +798,13 @@ var exportBtn=document.getElementById('exportKspaceBtn');
 var pnsBtn=document.getElementById('pnsBtn');
 var BL=[],waveformOverview=null,TD=0,GR=1e-5,RR=1e-6,AR=1e-7,BR=1e-5; // blocks, duration, rasters [s]
 var M={t:8,r:30,b:22,l:92};                // margins
-var CH=['RF','\u03c6','Gx','Gy','Gz','ADC','Trig','PNS','M1x','M1y','M1z'];
-var chColors=['var(--rf)','var(--rf)','var(--gx)','var(--gy)','var(--gz)','var(--adc)','var(--tr)','var(--fg)','var(--gx)','var(--gy)','var(--gz)'];
-var chVis=[true,true,true,true,true,true,true,false,false,false,false];                   // visibility toggles
-var gMax=[1,6.28318,1,1,1,0,0,1,0.001,0.001,0.001];          // global max per channel
+var CH=['RF','\u03c6','Gx','Gy','Gz','ADC','Trig','PNS','M1x','M1y','M1z','Label'];
+var chColors=['var(--rf)','var(--rf)','var(--gx)','var(--gy)','var(--gz)','var(--adc)','var(--tr)','var(--fg)','var(--gx)','var(--gy)','var(--gz)','var(--fg)'];
+var chVis=[true,true,true,true,true,true,true,false,false,false,false,false];                   // visibility toggles
+var gMax=[1,6.28318,1,1,1,0,0,1,0.001,0.001,0.001,0];          // global max per channel
+// Row and legend order.  Label is channel 11 so every existing index keeps its
+// meaning, but it is shown directly after Trig.
+var CH_ORDER=[0,1,2,3,4,5,6,11,7,8,9,10];
 var ox=0,sc=1;                             // view offset [s] & scale [px/s]
 var dr=false,dsx=0,dso=0;                  // drag state
 var cursorT=0,cursorActive=false;            // mouse time position
@@ -375,10 +813,13 @@ var showBB=false;                            // show block boundaries (default o
 var GAMMA=42576;                            // Hz/m per mT/m for 1H
 
 var ampZoom=[1,1,1,1,1,1,1];
-ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;
+ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;ampZoom[11]=1;
 /* K‑space data — pre‑computed on the extension side */
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
 var m1Data=null,m1WindowData=null,m1WindowPending=null,m1WindowRequestId=0,pnsData=null,pnsWindowData=null,pnsWindowPending=null,pnsWindowRequestId=0,pnsBusy=false,m1Busy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null;
+/* MDH labels: the names arrive with the sequence, the per-ADC values only when
+   the Label row is first switched on (see requestLabels). */
+var labelInfo={names:[],kinds:[]},labelTable=null,labelBusy=false,labelGeneration=null,labelMarkerCount=0;
 var viewerNotices={},viewerNoticesCollapsed=readViewerNoticesCollapsed();
 var kspaceSafetyWarning=null,kspaceSafetyBusy=false,kspaceSafetyPopupTimer=0;
 var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,waveformOverviewActive=false,rfRenderPointCount=0,rfRawCurveCount=0,rfReducedCurveCount=0,rfOverviewBucketCount=0,gradViewPointCount=0,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
@@ -619,18 +1060,22 @@ function timeUnitStr(){return timeUnit;}
 /* ── Build legend ─────────────────────────────────────────────────────── */
 function buildLegend(){
   legend.innerHTML='';
-  chColors.forEach(function(c,i){
+  CH_ORDER.forEach(function(i){
+    var c=chColors[i];
     var d=document.createElement('div');d.className='li'+(chVis[i]?'':' off');d.title='Toggle '+CH[i];
     d.innerHTML='<div class="ld" style="background:'+c+'"></div>'+CH[i];
     if(i>=8&&i<=10&&!m1Data)d.title='Calculate and show '+CH[i];
     else if(i===7&&!pnsData)d.title='Select a PNS ASC file before showing PNS';
+    else if(i===11)d.title=!labelInfo.names.length?'This sequence sets no labels':(labelBusy?'Evaluating labels…':'Toggle the MDH label row');
     d.onclick=function(){
       if(i>=8&&i<=10&&!m1Data){requestM1(i);return;}
       if(i===7&&!pnsData)return;
+      if(i===11){requestLabels();return;}
       chVis[i]=!chVis[i];
       buildLegend();computeGlobalMax();draw();
     };
     legend.appendChild(d);
+    if(i===11&&labelInfo.names.length)legend.appendChild(SeqEyesLabels.createGearChip(labelInfo,draw));
   });
 }
 buildLegend();
@@ -665,6 +1110,7 @@ function applySerializedKspace(payload){
    leaving stale blocks on screen would read as a successful load. */
 function showSequenceLoadFailure(message){
   BL=[];waveformOverview=null;blockPos=[];mmCache=null;resetWaveformDetail();
+  labelInfo={names:[],kinds:[]};labelTable=null;labelBusy=false;chVis[11]=false;SeqEyesLabels.closeControls(false);buildLegend();
   setViewerNotice('sequence',message);
   setExportButtonEnabled(false);
   draw();drawMinimap();
@@ -709,6 +1155,8 @@ window.addEventListener('message',function(e){
     mmCache=null;  // invalidate minimap cache on new data
     applySerializedKspace(m.kspace);
     m1Data=null;m1WindowData=null;m1WindowPending=null;pnsData=null;pnsWindowData=null;pnsWindowPending=null;chVis[7]=false;chVis[8]=false;chVis[9]=false;chVis[10]=false;
+    labelInfo=m.labels&&m.labels.names?m.labels:{names:[],kinds:[]};labelTable=null;labelBusy=false;labelGeneration=m.sequenceGeneration;chVis[11]=false;
+    SeqEyesLabels.closeControls(false);setViewerNotice('labels',null);
     // Store timing metadata for minimap tooltip
     if(m.timing) seqTiming=m.timing; else seqTiming=null;
     computeGlobalMax();
@@ -785,6 +1233,22 @@ window.addEventListener('message',function(e){
   }else if(m.type==='m1Error'){
     m1Busy=false;
     setViewerNotice('m1',(m.message||'M1 calculation failed.')+(m.message&&/zoom in/i.test(m.message)?'':' Zoom in to inspect waveform detail.'));
+  }else if(m.type==='labelData'){
+    // A reply for a sequence that has since been replaced must not draw.
+    if(m.sequenceGeneration!==labelGeneration)return;
+    labelBusy=false;
+    try{
+      labelTable=SeqEyesLabels.fromPayload(m.labels);
+    }catch(err){
+      labelTable=null;buildLegend();
+      setViewerNotice('labels','The MDH labels could not be shown: '+(err&&err.message||String(err))+'.');
+      return;
+    }
+    setViewerNotice('labels',null);chVis[11]=true;buildLegend();draw();
+  }else if(m.type==='labelError'){
+    if(m.sequenceGeneration!==labelGeneration)return;
+    labelBusy=false;buildLegend();
+    setViewerNotice('labels','The MDH labels could not be evaluated: '+(m.message||'unknown error')+'.');
   }else if(m.type==='pnsData'){
     pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
     if(m.pns&&m.pns.valid){
@@ -851,7 +1315,7 @@ function setAscButtonLabel(fileName,bandCount,hasPns){
 
 /* ── Global amplitude ranges ──────────────────────────────────────────── */
 function computeGlobalMax(){
-  gMax=[0.001,6.28318,0.001,0.001,0.001,1,1,0.001,0.001,0.001,0.001];
+  gMax=[0.001,6.28318,0.001,0.001,0.001,1,1,0.001,0.001,0.001,0.001,0];
   for(var i=0;i<BL.length;i++){var b=BL[i];
     if(b.rf){var a=Math.abs(b.rf.a||0);if(a>gMax[0])gMax[0]=a;}
     if(b.gx&&b.gx.ty!=='none'&&Math.abs(b.gx.a||0)>gMax[2])gMax[2]=Math.abs(b.gx.a);
@@ -1187,7 +1651,7 @@ function rs(){
 window.addEventListener('resize',rs);new ResizeObserver(rs).observe(cc);
 
 /* ── Coordinate mapping ───────────────────────────────────────────────── */
-function visChannels(){var v=[];for(var i=0;i<CH.length;i++)if(chVis[i])v.push(i);return v;}
+function visChannels(){var v=[];for(var k=0;k<CH_ORDER.length;k++)if(chVis[CH_ORDER[k]])v.push(CH_ORDER[k]);return v;}
 function cy(vi){var vc=visChannels(),h=(mc.height/(window.devicePixelRatio||1)-M.t-M.b)/Math.max(vc.length,1);return M.t+vi*h+h/2;}
 function cH(){var vc=visChannels();return(mc.height/(window.devicePixelRatio||1)-M.t-M.b)/Math.max(vc.length,1);}
 function t2x(t){return M.l+(t-ox)*sc}
@@ -1733,6 +2197,7 @@ function draw(){
   if(showBB)drawBlockBounds(w,h,vs,ve,s);
   drawBlocks(vs,ve,s);
   drawDerivedChannels(vs,ve,s);
+  drawLabelRow(vs,ve,s);
   drawAxes(w,h,vs,ve,s);
   lastDrawDurationMs=performance.now()-drawStarted;
   drawCursorOverlay();
@@ -1846,6 +2311,7 @@ function drawAxes(w,h,vs,ve,s){
     else if(ci===6){ctx.fillText('ch',lblX,M.t+vi*ch+12);}
     else if(ci===7){ctx.fillText(fmtAmp(channelRange(7))+'%',lblX,M.t+vi*ch+12);ctx.fillText('0',lblX,M.t+(vi+1)*ch-4);}
     else if(ci>=8&&ci<=10){ctx.fillText('\u00b1'+fmtAmp(channelRange(ci))+'s/m',lblX,M.t+vi*ch+12);ctx.fillText('0',lblX,y0+4);}
+    else if(ci===11){ctx.fillText('max',lblX,M.t+vi*ch+12);ctx.fillText('min',lblX,M.t+(vi+1)*ch-4);}
 
     // Small tick marks
     ctx.strokeStyle=s.getPropertyValue('--ax').trim();ctx.lineWidth=0.5;
@@ -1877,6 +2343,20 @@ function drawDerivedChannels(vs,ve,s){
     if(viM1y>=0)drawBipolarSeries(m1DrawData.y,viM1y,9,s.getPropertyValue('--gy').trim(),ch,vs,ve);
     if(viM1z>=0)drawBipolarSeries(m1DrawData.z,viM1z,10,s.getPropertyValue('--gz').trim(),ch,vs,ve);
   }
+}
+
+/* ── MDH label row (markers drawn by labels.js) ───────────────────────── */
+function drawLabelRow(vs,ve,s){
+  labelMarkerCount=0;
+  if(!chVis[11]||!labelTable)return;
+  var vi=visChannels().indexOf(11);if(vi<0)return;
+  var ch=cH(),w=mc.width/(window.devicePixelRatio||1);
+  rowClip(vi,ch,function(){
+    labelMarkerCount=SeqEyesLabels.drawRow(ctx,labelTable,{
+      left:M.l,right:w-M.r,top:M.t+vi*ch,height:ch,
+      background:s.getPropertyValue('--bg').trim(),foreground:s.getPropertyValue('--fg').trim()
+    },vs,ve,t2x);
+  });
 }
 
 function groupEnvelopeRanges(ranges,maxGapPx){
@@ -6134,6 +6614,7 @@ function showTooltipAt(cx,cy,ct){
       if(found.gz&&found.gz.ty!=='none')lines.push('Gz: '+fmtG(found.gz,ct));
       if(found.adc){lines.push('ADC: '+found.adc.n+'pts @'+(found.adc.dw*1e6).toFixed(1)+'\u00b5s  fo='+(found.adc.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.adc.po||0)%6.283).toFixed(2)+' rad');}
       if(found.trg)lines.push('Trig: ch'+found.trg.map(function(x){return x.c}).join(',')+' \u0394'+found.trg.map(function(x){return fmtT(timeConv(x.dr))+' '+timeUnitStr()}).join(','));
+      if(chVis[11]&&labelTable){var labelLine=SeqEyesLabels.tooltipLine(labelTable,found);if(labelLine)lines.push(labelLine);}
     }else{
       lines=['Time: '+fmtT(timeConv(ct))+' '+timeUnitStr()];
     }
@@ -6167,6 +6648,14 @@ document.getElementById('openBtn').onclick=function(){
 document.getElementById('exportKspaceBtn').onclick=function(){
   if(vscApi){vscApi.postMessage({command:'exportKspace'});}
 };
+/* The label values are evaluated on first use: most views never open the row,
+   and a long acquisition has one table row per ADC. */
+function requestLabels(){
+  if(labelBusy||!labelInfo.names.length)return;
+  if(labelTable){chVis[11]=!chVis[11];buildLegend();draw();return;}
+  labelBusy=true;buildLegend();
+  if(vscApi)vscApi.postMessage({command:'requestLabels',sequenceGeneration:labelGeneration});
+}
 function requestM1(channel){
   if(m1Busy)return;
   if(m1Data){chVis[channel]=!chVis[channel];buildLegend();draw();return;}

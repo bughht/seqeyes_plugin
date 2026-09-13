@@ -42,6 +42,11 @@ interface DebugState {
   kUploadedPoints: number;
   kPanX: number;
   kPanY: number;
+  labelNames: string[];
+  labelRowVisible: boolean;
+  labelMarkersDrawn: number;
+  labelPopupOpen: boolean;
+  visibleChannels: string[];
   title: string;
 }
 
@@ -57,6 +62,7 @@ const fixtures = {
   spiral: resolve('test/kspace_baselines/v151_spiral/seq/writeSpiral.seq'),
   rotExt: resolve('test/seqeyes_demo_seq_files/writeRadialGradientEcho_rotExt.seq'),
   binaryGre: resolve('test/pulseq/binary/gre.bseq'),
+  greLabel: resolve('test/seqeyes_demo_seq_files/writeGradientEcho_label.seq'),
 };
 
 const consoleFailures = new WeakMap<Page, string[]>();
@@ -611,6 +617,89 @@ test('keeps theme, zoom clamp, hover readout, and k-space drag interactive', asy
   await page.mouse.up();
   const kAfter = await debugState(page);
   expect(Math.abs(kAfter.kRotX - kBefore.kRotX) + Math.abs(kAfter.kRotY - kBefore.kRotY)).toBeGreaterThan(0.05);
+});
+
+const labelChip = (page: Page) => page.locator('#legend .li', { hasText: /^Label$/ });
+
+test('keeps the Label row off by default and shows it after Trig on request', async ({ page }) => {
+  await loadViewer(page, fixtures.greLabel);
+
+  const loaded = await debugState(page);
+  expect(loaded.labelNames).toEqual(['SLC', 'REP', 'LIN', 'REV']);
+  expect(loaded.labelRowVisible).toBe(false);
+  expect(loaded.visibleChannels).toEqual(['RF', 'φ', 'Gx', 'Gy', 'Gz', 'ADC', 'Trig']);
+  expect(await page.locator('#legend .li').allTextContents())
+    .toEqual(['RF', 'φ', 'Gx', 'Gy', 'Gz', 'ADC', 'Trig', 'Label', '⚙', 'PNS', 'M1x', 'M1y', 'M1z']);
+
+  const before = await page.locator('#mc').screenshot();
+  await labelChip(page).click();
+  await expect.poll(async () => (await debugState(page)).labelRowVisible).toBe(true);
+  const shown = await debugState(page);
+  expect(shown.visibleChannels).toEqual(['RF', 'φ', 'Gx', 'Gy', 'Gz', 'ADC', 'Trig', 'Label']);
+  expect(shown.labelMarkersDrawn).toBeGreaterThan(0);
+  await expect.poll(async () => (await page.locator('#mc').screenshot()).equals(before)).toBe(false);
+
+  // The first ADC is centred at 5.9 ms (see labels.test.ts); hover it.
+  await page.evaluate(() => window.__seqeyesDebug.setView(0.004, 0.008));
+  const view = await debugState(page);
+  const box = await requireBox(page.locator('#mc'));
+  await page.mouse.move(box.x + 92 + (0.0059 - view.offset) * view.scale, box.y + box.height * 0.5);
+  await expect(page.locator('#tt')).toContainText('Labels: SLC=0  REP=0  LIN=0  REV=1');
+});
+
+test('lists only the mentioned labels in the marker popup and remembers their styles', async ({ page }) => {
+  await loadViewer(page, fixtures.greLabel);
+  await labelChip(page).click();
+  await expect.poll(async () => (await debugState(page)).labelRowVisible).toBe(true);
+  const allMarkers = (await debugState(page)).labelMarkersDrawn;
+
+  await page.locator('#legend .lbl-gear').click();
+  const popup = page.locator('#labelControls');
+  await expect(popup).toBeVisible();
+  await expect(popup.locator('.lblc-row input[type=checkbox]')).toHaveCount(4);
+  for (const name of ['SLC', 'REP', 'LIN', 'REV']) await expect(popup.getByLabel(`Show ${name}`, { exact: true })).toBeChecked();
+
+  await popup.getByLabel('Show LIN', { exact: true }).uncheck();
+  await expect.poll(async () => (await debugState(page)).labelMarkersDrawn).toBeLessThan(allMarkers);
+  await popup.getByLabel('SLC marker shape').selectOption('diamond');
+  await popup.getByLabel('Use #59a14f for REP').click();
+  await expect(popup.getByLabel('Use #59a14f for REP')).toHaveAttribute('aria-pressed', 'true');
+
+  await page.keyboard.press('Escape');
+  await expect(popup).toBeHidden();
+  expect((await debugState(page)).labelPopupOpen).toBe(false);
+
+  // A reload keeps the choices, which are stored per label name.
+  await loadViewer(page, fixtures.greLabel);
+  await page.locator('#legend .lbl-gear').click();
+  await expect(popup.getByLabel('Show LIN', { exact: true })).not.toBeChecked();
+  await expect(popup.getByLabel('SLC marker shape')).toHaveValue('diamond');
+  await expect(popup.getByLabel('Use #59a14f for REP')).toHaveAttribute('aria-pressed', 'true');
+  await popup.getByRole('button', { name: 'Reset' }).click();
+  await expect(popup.getByLabel('Show LIN', { exact: true })).toBeChecked();
+});
+
+test('offers no label row or controls for a sequence without labels', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await expect(labelChip(page)).toHaveAttribute('title', 'This sequence sets no labels');
+  await expect(page.locator('#legend .lbl-gear')).toHaveCount(0);
+  await labelChip(page).click();
+  const state = await debugState(page);
+  expect(state.labelNames).toEqual([]);
+  expect(state.labelRowVisible).toBe(false);
+});
+
+test('shows the marker popup as a sheet inside a phone viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await loadViewer(page, fixtures.greLabel);
+  await page.locator('#legend .lbl-gear').click();
+  const popup = page.locator('#labelControls');
+  await expect(popup).toBeVisible();
+  await expect(popup).toHaveClass(/sheet/);
+  const box = await requireBox(popup);
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(390 + 0.5);
+  expect(box.y + box.height).toBeLessThanOrEqual(844 + 0.5);
 });
 
 test('downloads ktraj_adc text and matching metadata from the web export button', async ({ page }) => {

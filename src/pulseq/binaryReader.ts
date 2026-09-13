@@ -369,8 +369,9 @@ function readLabels(reader: BinaryReader, seq: PulseqSequence, isSet: boolean): 
         if (labelIndex < 1 || labelIndex > BINARY_LABELS.length) {
             reader.fail(`invalid binary label index ${labelIndex}`);
         }
-        const { labelId, flagId } = decodeLabel(BINARY_LABELS[labelIndex - 1]);
-        const spec: LabelSetSpec | LabelIncSpec = { id, value, labelId, flagId };
+        const name = BINARY_LABELS[labelIndex - 1];
+        const { labelId, flagId } = decodeLabel(name);
+        const spec: LabelSetSpec | LabelIncSpec = { id, value, labelId, flagId, name };
         library.push(spec);
     }
 }

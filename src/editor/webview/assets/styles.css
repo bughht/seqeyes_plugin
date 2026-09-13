@@ -164,3 +164,34 @@ body.layout-vertical.sg-split-drag{cursor:col-resize}
   body.layout-vertical #spane.mobile-spectrum #spPane{display:block;flex:1 1 auto}
   #viewerNotice .viewer-notice-item{align-items:flex-start;padding:5px 7px}
 }
+/* ── Label row: ⚙ chip and marker controls (labels.js) ─────────────── */
+#tb .lbl-gear{font-size:12px;line-height:1;padding:1px 3px}
+#tb .lbl-gear:focus-visible{outline:1px solid var(--adc)}
+.lblc{position:fixed;z-index:560;width:max-content;max-width:min(380px,calc(100vw - 16px));max-height:calc(100vh - 16px);overflow:auto;background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:6px;box-shadow:0 8px 28px rgba(0,0,0,.28);font-size:11px}
+.lblc.sheet{left:0;right:0;top:auto;bottom:0;width:auto;max-width:none;max-height:60vh;border-radius:10px 10px 0 0;padding-bottom:env(safe-area-inset-bottom)}
+.lblc-head{display:flex;align-items:center;gap:8px;padding:6px 8px 6px 10px;border-bottom:1px solid var(--gr);font-weight:600;position:sticky;top:0;background:var(--bg)}
+.lblc button,.lblc select{background:var(--gr);border:1px solid var(--ax);color:var(--fg);border-radius:3px;font-size:11px;cursor:pointer}
+.lblc button{padding:2px 7px}
+.lblc button:hover{opacity:.75}
+.lblc-close{margin-left:auto}
+.lblc-list{padding:2px 0}
+.lblc-row{display:flex;flex-wrap:wrap;align-items:center;gap:4px 6px;padding:5px 10px}
+.lblc-row+.lblc-row{border-top:1px solid var(--gr)}
+.lblc-row.off .lblc-name,.lblc-row.off canvas{opacity:.4}
+.lblc-row canvas{width:16px;height:16px;flex:none}
+.lblc-row input[type=checkbox]{margin:0;cursor:pointer}
+.lblc-name{font:600 11px monospace;min-width:52px}
+.lblc-kind{font:400 9px sans-serif;color:var(--lb);margin-left:4px}
+.lblc-row select{padding:1px 2px}
+.lblc-row input[type=color]{width:24px;height:18px;padding:0;border:1px solid var(--ax);border-radius:3px;background:none;cursor:pointer}
+.lblc-swatches{display:flex;flex-wrap:wrap;gap:3px;flex-basis:100%;padding-left:42px}
+.lblc button.lblc-swatch{width:14px;height:14px;padding:0;border:1px solid rgba(0,0,0,.2);border-radius:3px}
+.lblc button.lblc-swatch[aria-pressed=true]{outline:2px solid var(--fg);outline-offset:1px}
+.lblc-foot{display:flex;gap:6px;padding:6px 10px;border-top:1px solid var(--gr);position:sticky;bottom:0;background:var(--bg)}
+@media(max-width:768px),(pointer:coarse){
+  .lblc-row{padding:8px 12px}
+  .lblc-row input[type=checkbox]{width:18px;height:18px}
+  .lblc button.lblc-swatch{width:24px;height:24px}
+  .lblc-swatches{gap:6px;padding-left:0}
+  .lblc-foot button{min-height:34px;flex:1}
+}

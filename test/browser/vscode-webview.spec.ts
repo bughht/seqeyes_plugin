@@ -19,6 +19,8 @@ import { expect, test, type Page } from '@playwright/test';
 import { packSequenceBlocks } from '../../src/editor/blockTransport';
 import { buildWaveformDetailReply, waveformDetailMessage } from '../../src/editor/waveformDetailReply';
 import { serializeKSpace } from '../../src/editor/kspaceTransport';
+import { serializeLabelTable, type SerializedLabelTable } from '../../src/editor/labelTransport';
+import { evaluateAdcLabels, listSequenceLabels } from '../../src/pulseq/labels';
 import { createSequenceDecodeContext, decodeAllBlocks, getTotalDuration } from '../../src/pulseq/decoder';
 import { calculateKspace } from '../../src/pulseq/kspace';
 import { parseSequenceBytes } from '../../src/pulseq/sequenceReader';
@@ -263,6 +265,73 @@ test.describe('k-space reply contract', () => {
     expect(await noticeText(page)).toContain('2.6 GiB');
   });
 });
+
+/**
+ * Label values are requested on first use, and the reply carries its per-ADC
+ * arrays as buffers nested inside the message.
+ */
+test('asks for label values on first use and draws only the current sequence\'s reply', async ({ page }) => {
+  const failures: string[] = [];
+  page.on('pageerror', e => failures.push(e.message));
+  page.on('console', m => { if (m.type() === 'error') failures.push(m.text()); });
+
+  const { seq } = loadSequence();  // spiral_inout.seq sets REP and LIN
+  const packed = packSequenceBlocks(seq);
+  await openWebview(page);
+  await post(page, {
+    type: 'sequenceData',
+    sequenceGeneration: 2,
+    labels: listSequenceLabels(seq),
+    blocks: packed.blocks,
+    sampleCount: packed.sampleCount,
+    totalDuration: getTotalDuration(seq),
+    gradRaster: seq.rasterTimes.gradientRaster,
+    rfRaster: seq.rasterTimes.rfRaster,
+    adcRaster: seq.rasterTimes.adcRaster,
+    blockRaster: seq.rasterTimes.blockDurationRaster,
+    timing: detectSequenceTiming(seq),
+    notices: [],
+  }, { sampleTimes: b64(packed.sampleTimes), sampleValues: b64(packed.sampleValues) });
+
+  const chip = page.locator('#legend .li', { hasText: /^Label$/ });
+  await expect(chip).toHaveClass(/off/);
+  await expect(page.locator('#legend .lbl-gear')).toHaveCount(1);
+  expect((await posted(page)).some(m => m.command === 'requestLabels'), 'nothing is requested before the row is used')
+    .toBe(false);
+
+  await chip.click();
+  await expect.poll(async () => (await posted(page)).some(m => m.command === 'requestLabels')).toBe(true);
+  const request = (await posted(page)).find(m => m.command === 'requestLabels')!;
+  expect(Number(request.sequenceGeneration)).toBe(2);
+
+  const payload = serializeLabelTable(evaluateAdcLabels(seq));
+  expect(payload.values).toBeInstanceOf(ArrayBuffer);
+
+  // A reply for a sequence the webview has since replaced must not draw.
+  await postLabels(page, 1, payload);
+  await expect(chip).toHaveClass(/off/);
+
+  const before = await canvasShot(page);
+  await postLabels(page, 2, payload);
+  await expect(chip).not.toHaveClass(/off/);
+  await expect.poll(async () => (await canvasShot(page)).equals(before) === false, { timeout: 5_000 }).toBe(true);
+  expect(failures).toEqual([]);
+});
+
+/** Post a label reply the way VS Code does, rebuilding its buffers in-page. */
+async function postLabels(page: Page, sequenceGeneration: number, payload: SerializedLabelTable) {
+  const { timeSec, block, values, ...scalars } = payload;
+  await page.evaluate(({ generation, msg, bufs }) => {
+    const decode = (s: string) => {
+      const bin = atob(s);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return bytes.buffer;
+    };
+    const labels = { ...msg, timeSec: decode(bufs.timeSec), block: decode(bufs.block), values: decode(bufs.values) };
+    window.dispatchEvent(new MessageEvent('message', { data: { type: 'labelData', sequenceGeneration: generation, labels } }));
+  }, { generation: sequenceGeneration, msg: scalars, bufs: { timeSec: b64(timeSec), block: b64(block), values: b64(values) } });
+}
 
 /** Post a k-space reply the way VS Code does, rebuilding its buffers in-page. */
 async function postKspace(page: Page, payload: Record<string, unknown>) {

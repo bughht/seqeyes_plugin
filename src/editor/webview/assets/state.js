@@ -9,10 +9,13 @@ var exportBtn=document.getElementById('exportKspaceBtn');
 var pnsBtn=document.getElementById('pnsBtn');
 var BL=[],waveformOverview=null,TD=0,GR=1e-5,RR=1e-6,AR=1e-7,BR=1e-5; // blocks, duration, rasters [s]
 var M={t:8,r:30,b:22,l:92};                // margins
-var CH=['RF','\u03c6','Gx','Gy','Gz','ADC','Trig','PNS','M1x','M1y','M1z'];
-var chColors=['var(--rf)','var(--rf)','var(--gx)','var(--gy)','var(--gz)','var(--adc)','var(--tr)','var(--fg)','var(--gx)','var(--gy)','var(--gz)'];
-var chVis=[true,true,true,true,true,true,true,false,false,false,false];                   // visibility toggles
-var gMax=[1,6.28318,1,1,1,0,0,1,0.001,0.001,0.001];          // global max per channel
+var CH=['RF','\u03c6','Gx','Gy','Gz','ADC','Trig','PNS','M1x','M1y','M1z','Label'];
+var chColors=['var(--rf)','var(--rf)','var(--gx)','var(--gy)','var(--gz)','var(--adc)','var(--tr)','var(--fg)','var(--gx)','var(--gy)','var(--gz)','var(--fg)'];
+var chVis=[true,true,true,true,true,true,true,false,false,false,false,false];                   // visibility toggles
+var gMax=[1,6.28318,1,1,1,0,0,1,0.001,0.001,0.001,0];          // global max per channel
+// Row and legend order.  Label is channel 11 so every existing index keeps its
+// meaning, but it is shown directly after Trig.
+var CH_ORDER=[0,1,2,3,4,5,6,11,7,8,9,10];
 var ox=0,sc=1;                             // view offset [s] & scale [px/s]
 var dr=false,dsx=0,dso=0;                  // drag state
 var cursorT=0,cursorActive=false;            // mouse time position
@@ -21,10 +24,13 @@ var showBB=false;                            // show block boundaries (default o
 var GAMMA=42576;                            // Hz/m per mT/m for 1H
 
 var ampZoom=[1,1,1,1,1,1,1];
-ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;
+ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;ampZoom[11]=1;
 /* K‑space data — pre‑computed on the extension side */
 var kTraj=null,kAdc=null,kTime=null,kAdcTime=null;
 var m1Data=null,m1WindowData=null,m1WindowPending=null,m1WindowRequestId=0,pnsData=null,pnsWindowData=null,pnsWindowPending=null,pnsWindowRequestId=0,pnsBusy=false,m1Busy=false,m1RequestedChannel=8,m1ReferenceMode=readM1ReferenceMode(),m1RestoreChannels=null;
+/* MDH labels: the names arrive with the sequence, the per-ADC values only when
+   the Label row is first switched on (see requestLabels). */
+var labelInfo={names:[],kinds:[]},labelTable=null,labelBusy=false,labelGeneration=null,labelMarkerCount=0;
 var viewerNotices={},viewerNoticesCollapsed=readViewerNoticesCollapsed();
 var kspaceSafetyWarning=null,kspaceSafetyBusy=false,kspaceSafetyPopupTimer=0;
 var derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,waveformOverviewActive=false,rfRenderPointCount=0,rfRawCurveCount=0,rfReducedCurveCount=0,rfOverviewBucketCount=0,gradViewPointCount=0,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
@@ -265,18 +271,22 @@ function timeUnitStr(){return timeUnit;}
 /* ── Build legend ─────────────────────────────────────────────────────── */
 function buildLegend(){
   legend.innerHTML='';
-  chColors.forEach(function(c,i){
+  CH_ORDER.forEach(function(i){
+    var c=chColors[i];
     var d=document.createElement('div');d.className='li'+(chVis[i]?'':' off');d.title='Toggle '+CH[i];
     d.innerHTML='<div class="ld" style="background:'+c+'"></div>'+CH[i];
     if(i>=8&&i<=10&&!m1Data)d.title='Calculate and show '+CH[i];
     else if(i===7&&!pnsData)d.title='Select a PNS ASC file before showing PNS';
+    else if(i===11)d.title=!labelInfo.names.length?'This sequence sets no labels':(labelBusy?'Evaluating labels…':'Toggle the MDH label row');
     d.onclick=function(){
       if(i>=8&&i<=10&&!m1Data){requestM1(i);return;}
       if(i===7&&!pnsData)return;
+      if(i===11){requestLabels();return;}
       chVis[i]=!chVis[i];
       buildLegend();computeGlobalMax();draw();
     };
     legend.appendChild(d);
+    if(i===11&&labelInfo.names.length)legend.appendChild(SeqEyesLabels.createGearChip(labelInfo,draw));
   });
 }
 buildLegend();
@@ -311,6 +321,7 @@ function applySerializedKspace(payload){
    leaving stale blocks on screen would read as a successful load. */
 function showSequenceLoadFailure(message){
   BL=[];waveformOverview=null;blockPos=[];mmCache=null;resetWaveformDetail();
+  labelInfo={names:[],kinds:[]};labelTable=null;labelBusy=false;chVis[11]=false;SeqEyesLabels.closeControls(false);buildLegend();
   setViewerNotice('sequence',message);
   setExportButtonEnabled(false);
   draw();drawMinimap();
@@ -355,6 +366,8 @@ window.addEventListener('message',function(e){
     mmCache=null;  // invalidate minimap cache on new data
     applySerializedKspace(m.kspace);
     m1Data=null;m1WindowData=null;m1WindowPending=null;pnsData=null;pnsWindowData=null;pnsWindowPending=null;chVis[7]=false;chVis[8]=false;chVis[9]=false;chVis[10]=false;
+    labelInfo=m.labels&&m.labels.names?m.labels:{names:[],kinds:[]};labelTable=null;labelBusy=false;labelGeneration=m.sequenceGeneration;chVis[11]=false;
+    SeqEyesLabels.closeControls(false);setViewerNotice('labels',null);
     // Store timing metadata for minimap tooltip
     if(m.timing) seqTiming=m.timing; else seqTiming=null;
     computeGlobalMax();
@@ -431,6 +444,22 @@ window.addEventListener('message',function(e){
   }else if(m.type==='m1Error'){
     m1Busy=false;
     setViewerNotice('m1',(m.message||'M1 calculation failed.')+(m.message&&/zoom in/i.test(m.message)?'':' Zoom in to inspect waveform detail.'));
+  }else if(m.type==='labelData'){
+    // A reply for a sequence that has since been replaced must not draw.
+    if(m.sequenceGeneration!==labelGeneration)return;
+    labelBusy=false;
+    try{
+      labelTable=SeqEyesLabels.fromPayload(m.labels);
+    }catch(err){
+      labelTable=null;buildLegend();
+      setViewerNotice('labels','The MDH labels could not be shown: '+(err&&err.message||String(err))+'.');
+      return;
+    }
+    setViewerNotice('labels',null);chVis[11]=true;buildLegend();draw();
+  }else if(m.type==='labelError'){
+    if(m.sequenceGeneration!==labelGeneration)return;
+    labelBusy=false;buildLegend();
+    setViewerNotice('labels','The MDH labels could not be evaluated: '+(m.message||'unknown error')+'.');
   }else if(m.type==='pnsData'){
     pnsBusy=false;if(pnsBtn)pnsBtn.disabled=false;
     if(m.pns&&m.pns.valid){
@@ -497,7 +526,7 @@ function setAscButtonLabel(fileName,bandCount,hasPns){
 
 /* ── Global amplitude ranges ──────────────────────────────────────────── */
 function computeGlobalMax(){
-  gMax=[0.001,6.28318,0.001,0.001,0.001,1,1,0.001,0.001,0.001,0.001];
+  gMax=[0.001,6.28318,0.001,0.001,0.001,1,1,0.001,0.001,0.001,0.001,0];
   for(var i=0;i<BL.length;i++){var b=BL[i];
     if(b.rf){var a=Math.abs(b.rf.a||0);if(a>gMax[0])gMax[0]=a;}
     if(b.gx&&b.gx.ty!=='none'&&Math.abs(b.gx.a||0)>gMax[2])gMax[2]=Math.abs(b.gx.a);
@@ -833,7 +862,7 @@ function rs(){
 window.addEventListener('resize',rs);new ResizeObserver(rs).observe(cc);
 
 /* ── Coordinate mapping ───────────────────────────────────────────────── */
-function visChannels(){var v=[];for(var i=0;i<CH.length;i++)if(chVis[i])v.push(i);return v;}
+function visChannels(){var v=[];for(var k=0;k<CH_ORDER.length;k++)if(chVis[CH_ORDER[k]])v.push(CH_ORDER[k]);return v;}
 function cy(vi){var vc=visChannels(),h=(mc.height/(window.devicePixelRatio||1)-M.t-M.b)/Math.max(vc.length,1);return M.t+vi*h+h/2;}
 function cH(){var vc=visChannels();return(mc.height/(window.devicePixelRatio||1)-M.t-M.b)/Math.max(vc.length,1);}
 function t2x(t){return M.l+(t-ox)*sc}

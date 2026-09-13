@@ -487,6 +487,7 @@ function parseLabelSpecs(seq: PulseqSequence, lines: string[], isSet: boolean): 
             id: toInt(p[0], isSet ? 'LABELSET' : 'LABELINC', line),
             value: toNumber(p[1], isSet ? 'LABELSET' : 'LABELINC', line),
             labelId, flagId,
+            name: p[2],
         };
         if (isSet) seq.labelSets.push(spec);
         else seq.labelIncs.push(spec);

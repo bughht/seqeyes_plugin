@@ -212,6 +212,7 @@ function showTooltipAt(cx,cy,ct){
       if(found.gz&&found.gz.ty!=='none')lines.push('Gz: '+fmtG(found.gz,ct));
       if(found.adc){lines.push('ADC: '+found.adc.n+'pts @'+(found.adc.dw*1e6).toFixed(1)+'\u00b5s  fo='+(found.adc.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.adc.po||0)%6.283).toFixed(2)+' rad');}
       if(found.trg)lines.push('Trig: ch'+found.trg.map(function(x){return x.c}).join(',')+' \u0394'+found.trg.map(function(x){return fmtT(timeConv(x.dr))+' '+timeUnitStr()}).join(','));
+      if(chVis[11]&&labelTable){var labelLine=SeqEyesLabels.tooltipLine(labelTable,found);if(labelLine)lines.push(labelLine);}
     }else{
       lines=['Time: '+fmtT(timeConv(ct))+' '+timeUnitStr()];
     }
@@ -245,6 +246,14 @@ document.getElementById('openBtn').onclick=function(){
 document.getElementById('exportKspaceBtn').onclick=function(){
   if(vscApi){vscApi.postMessage({command:'exportKspace'});}
 };
+/* The label values are evaluated on first use: most views never open the row,
+   and a long acquisition has one table row per ADC. */
+function requestLabels(){
+  if(labelBusy||!labelInfo.names.length)return;
+  if(labelTable){chVis[11]=!chVis[11];buildLegend();draw();return;}
+  labelBusy=true;buildLegend();
+  if(vscApi)vscApi.postMessage({command:'requestLabels',sequenceGeneration:labelGeneration});
+}
 function requestM1(channel){
   if(m1Busy)return;
   if(m1Data){chVis[channel]=!chVis[channel];buildLegend();draw();return;}

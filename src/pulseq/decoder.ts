@@ -178,7 +178,7 @@ export function getBlockStartTime(seq: PulseqSequence, blockIdx: number): number
     return cumulative;
 }
 
-function blockDurationSeconds(seq: PulseqSequence, block: BlockEntry): number {
+export function blockDurationSeconds(seq: PulseqSequence, block: BlockEntry): number {
     if (seq.versionCombined < VER_PRE_14) return block.dur * 1e-6;
     return block.dur * seq.rasterTimes.blockDurationRaster;
 }

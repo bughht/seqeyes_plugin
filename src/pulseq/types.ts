@@ -155,6 +155,7 @@ export interface LabelSetSpec {
     value: number;
     labelId: number;   // decoded label enum value
     flagId: number;    // decoded flag enum value
+    name: string;      // label name as written in the file (LIN, SLC, TRID, …)
 }
 
 /** Increment MDH label counters */
@@ -163,6 +164,7 @@ export interface LabelIncSpec {
     value: number;
     labelId: number;
     flagId: number;
+    name: string;
 }
 
 /** Soft delay (v1.5+) */
@@ -274,6 +276,7 @@ export interface DecodedLabelEvent {
     value: number;
     labelId: number;
     flagId: number;
+    name: string;
 }
 
 export interface DecodedSoftDelayEvent {

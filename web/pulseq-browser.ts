@@ -16,6 +16,7 @@ export { packSequenceBlocks } from '../src/editor/blockTransport';
 // no longer need to cross into the bundle.
 export { buildWaveformDetailReply } from '../src/editor/waveformDetailReply';
 export { calculateKspace } from '../src/pulseq/kspace';
+export { evaluateAdcLabels, listSequenceLabels } from '../src/pulseq/labels';
 export { calculateM1, calculateM1Coarse } from '../src/pulseq/m1';
 export { calculatePns, calculatePnsCoarse, parsePnsHardwareAsc, safePnsModel } from '../src/pulseq/pns';
 export { parseAscText } from '../src/pulseq/ascText';

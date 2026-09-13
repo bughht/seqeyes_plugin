@@ -1,7 +1,7 @@
 /**
  * build-webview.mjs — Bundle the shared SeqEyes webview rendering assets.
  *
- * Concatenates the webview JS files (block-transport, state, derived-series,
+ * Concatenates the webview JS files (block-transport, labels, state, derived-series,
  * drawing, kspace, colormaps, spectrogram, audio, panel, interaction) into a
  * single self-contained script.  The files
  * communicate via shared globals so they are concatenated without IIFE
@@ -23,6 +23,7 @@ const ASSETS_DIR = path.join(ROOT, 'src', 'editor', 'webview', 'assets');
 
 const files = [
     'block-transport.js',
+    'labels.js',
     'state.js',
     'derived-series.js',
     'drawing.js',
