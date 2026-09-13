@@ -14,6 +14,7 @@ function draw(){
   if(showBB)drawBlockBounds(w,h,vs,ve,s);
   drawBlocks(vs,ve,s);
   drawDerivedChannels(vs,ve,s);
+  drawLabelRow(vs,ve,s);
   drawAxes(w,h,vs,ve,s);
   lastDrawDurationMs=performance.now()-drawStarted;
   drawCursorOverlay();
@@ -127,6 +128,7 @@ function drawAxes(w,h,vs,ve,s){
     else if(ci===6){ctx.fillText('ch',lblX,M.t+vi*ch+12);}
     else if(ci===7){ctx.fillText(fmtAmp(channelRange(7))+'%',lblX,M.t+vi*ch+12);ctx.fillText('0',lblX,M.t+(vi+1)*ch-4);}
     else if(ci>=8&&ci<=10){ctx.fillText('\u00b1'+fmtAmp(channelRange(ci))+'s/m',lblX,M.t+vi*ch+12);ctx.fillText('0',lblX,y0+4);}
+    else if(ci===11){ctx.fillText('max',lblX,M.t+vi*ch+12);ctx.fillText('min',lblX,M.t+(vi+1)*ch-4);}
 
     // Small tick marks
     ctx.strokeStyle=s.getPropertyValue('--ax').trim();ctx.lineWidth=0.5;
@@ -158,6 +160,20 @@ function drawDerivedChannels(vs,ve,s){
     if(viM1y>=0)drawBipolarSeries(m1DrawData.y,viM1y,9,s.getPropertyValue('--gy').trim(),ch,vs,ve);
     if(viM1z>=0)drawBipolarSeries(m1DrawData.z,viM1z,10,s.getPropertyValue('--gz').trim(),ch,vs,ve);
   }
+}
+
+/* ── MDH label row (markers drawn by labels.js) ───────────────────────── */
+function drawLabelRow(vs,ve,s){
+  labelMarkerCount=0;
+  if(!chVis[11]||!labelTable)return;
+  var vi=visChannels().indexOf(11);if(vi<0)return;
+  var ch=cH(),w=mc.width/(window.devicePixelRatio||1);
+  rowClip(vi,ch,function(){
+    labelMarkerCount=SeqEyesLabels.drawRow(ctx,labelTable,{
+      left:M.l,right:w-M.r,top:M.t+vi*ch,height:ch,
+      background:s.getPropertyValue('--bg').trim(),foreground:s.getPropertyValue('--fg').trim()
+    },vs,ve,t2x);
+  });
 }
 
 function groupEnvelopeRanges(ranges,maxGapPx){

@@ -26,6 +26,8 @@ import {
 } from '../pulseq/decoder';
 import { calculateKspace, type KSpaceData } from '../pulseq/kspace';
 import { downsample, serializeKSpace } from './kspaceTransport';
+import { evaluateAdcLabels, listSequenceLabels } from '../pulseq/labels';
+import { serializeLabelTable } from './labelTransport';
 import { calculateM1, calculateM1Coarse, type CoarseM1Data, type M1Data } from '../pulseq/m1';
 import {
     calculatePns,
@@ -393,6 +395,8 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                 const delivery = panel.webview.postMessage({
                     type: 'sequenceData',
                     sequenceGeneration,
+                    // Names only: the per-ADC values follow on request.
+                    labels: listSequenceLabels(seq),
                     blocks: packed.blocks,
                     sampleTimes: packed.sampleTimes,
                     sampleValues: packed.sampleValues,
@@ -588,6 +592,26 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                         message: err instanceof Error ? err.message : String(err),
                     });
                     panel.webview.postMessage({ type: 'progress', phase: 'done', percent: 100, text: 'K-space failed' });
+                }
+            } else if (msg.command === 'requestLabels') {
+                const requestedGeneration = Number(msg.sequenceGeneration);
+                if (!activeSequence || requestedGeneration !== sequenceGeneration) {
+                    panel.webview.postMessage({
+                        type: 'labelError',
+                        sequenceGeneration: requestedGeneration,
+                        message: 'The label request belongs to an inactive sequence.',
+                    });
+                    return;
+                }
+                try {
+                    const table = evaluateAdcLabels(activeSequence);
+                    panel.webview.postMessage({ type: 'labelData', sequenceGeneration, labels: serializeLabelTable(table) });
+                } catch (err) {
+                    panel.webview.postMessage({
+                        type: 'labelError',
+                        sequenceGeneration,
+                        message: err instanceof Error ? err.message : String(err),
+                    });
                 }
             } else if (msg.command === 'calculateM1') {
                 if (!activeSequence || activeGradientRaster <= 0) {

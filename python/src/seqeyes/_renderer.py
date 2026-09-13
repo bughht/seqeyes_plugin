@@ -26,6 +26,13 @@ _BUNDLE_CANDIDATES = [
     Path(__file__).resolve().parent.parent.parent.parent / "web" / "pulseq-bundle.js",
     Path.cwd() / "web" / "pulseq-bundle.js",
 ]
+# The label-row module shared with the web renderers.  build:web copies it into
+# resources/; a source checkout can read it from the webview assets instead.
+_LABELS_SCRIPT_CANDIDATES = [
+    _RESOURCES_DIR / "seqeyes-labels.js",
+    Path(__file__).resolve().parent.parent.parent.parent / "src" / "editor" / "webview" / "assets" / "labels.js",
+    Path.cwd() / "src" / "editor" / "webview" / "assets" / "labels.js",
+]
 _VALID_GRAD_UNITS = {"Hz/m", "mT/m", "G/cm"}
 SequenceSource = Union[str, bytes, bytearray, memoryview]
 
@@ -39,6 +46,18 @@ def _find_bundle() -> str:
         "pulseq-bundle.js not found.  "
         "Build it with: npm run build:web  (from the repo root), "
         "or copy it to python/src/seqeyes/resources/"
+    )
+
+
+def _find_labels_script() -> str:
+    """Locate and read the label-row script (SeqEyesLabels)."""
+    for p in _LABELS_SCRIPT_CANDIDATES:
+        if p.is_file():
+            return p.read_text(encoding="utf-8")
+    raise FileNotFoundError(
+        "seqeyes-labels.js not found.  "
+        "Build it with: npm run build:web  (from the repo root), "
+        "or copy src/editor/webview/assets/labels.js to python/src/seqeyes/resources/seqeyes-labels.js"
     )
 
 
@@ -108,6 +127,15 @@ def _build_html(
         )
     elif bundle_placeholder in template:
         template = template.replace(bundle_placeholder, "")
+
+    labels_placeholder = "<!-- LABELS_SCRIPT_PLACEHOLDER -->"
+    if inject_bundle and labels_placeholder in template:
+        template = template.replace(
+            labels_placeholder,
+            f"<script>\n{_find_labels_script()}\n</script>",
+        )
+    elif labels_placeholder in template:
+        template = template.replace(labels_placeholder, "")
 
     # 2. Build options injection block (sequence data + display opts)
     opts = [

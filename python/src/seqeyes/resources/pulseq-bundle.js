@@ -55,6 +55,7 @@ var Pulseq = (() => {
     estimateRfCarrierAreaDeg: () => estimateRfCarrierAreaDeg,
     estimateSequenceKspaceCost: () => estimateSequenceKspaceCost,
     estimateSpectrogramCost: () => estimateSpectrogramCost,
+    evaluateAdcLabels: () => evaluateAdcLabels,
     exportKspaceArtifacts: () => exportKspaceArtifacts,
     exportKspaceArtifactsFromBytes: () => exportKspaceArtifactsFromBytes,
     exportKspaceArtifactsFromSequence: () => exportKspaceArtifactsFromSequence,
@@ -65,6 +66,7 @@ var Pulseq = (() => {
     hasPulseqBinaryMagic: () => hasPulseqBinaryMagic,
     isEmptyAscProfile: () => isEmptyAscProfile,
     kspaceExceedsInteractiveBudget: () => kspaceExceedsInteractiveBudget,
+    listSequenceLabels: () => listSequenceLabels,
     packSequenceBlocks: () => packSequenceBlocks,
     parseAcousticResonancesAsc: () => parseAcousticResonancesAsc,
     parseAscProfile: () => parseAscProfile,
@@ -777,7 +779,8 @@ var Pulseq = (() => {
         id: toInt(p[0], isSet ? "LABELSET" : "LABELINC", line),
         value: toNumber(p[1], isSet ? "LABELSET" : "LABELINC", line),
         labelId,
-        flagId
+        flagId,
+        name: p[2]
       };
       if (isSet) seq.labelSets.push(spec);
       else seq.labelIncs.push(spec);
@@ -1226,8 +1229,9 @@ var Pulseq = (() => {
       if (labelIndex < 1 || labelIndex > BINARY_LABELS.length) {
         reader.fail(`invalid binary label index ${labelIndex}`);
       }
-      const { labelId, flagId } = decodeLabel(BINARY_LABELS[labelIndex - 1]);
-      const spec = { id, value, labelId, flagId };
+      const name = BINARY_LABELS[labelIndex - 1];
+      const { labelId, flagId } = decodeLabel(name);
+      const spec = { id, value, labelId, flagId, name };
       library.push(spec);
     }
   }
@@ -3323,6 +3327,95 @@ var Pulseq = (() => {
     const i0 = lo - 1, i1 = lo, dt = g[i1] - g[i0];
     if (dt <= 0) return d[i1];
     return d[i0] + (d[i1] - d[i0]) * (t - g[i0]) / dt;
+  }
+
+  // src/pulseq/labels.ts
+  var COUNTER_ORDER = ["SLC", "SEG", "REP", "AVG", "SET", "ECO", "PHS", "LIN", "PAR", "ACQ", "TRID", "ONCE"];
+  var FLAG_ORDER = ["NAV", "REV", "SMS", "REF", "IMA", "OFF", "NOISE", "PMC", "NOROT", "NOPOS", "NOSCL"];
+  function labelRank(name) {
+    const counter = COUNTER_ORDER.indexOf(name);
+    if (counter >= 0) return counter;
+    const flag = FLAG_ORDER.indexOf(name);
+    return flag >= 0 ? 2e3 + flag : 1e3;
+  }
+  function labelKind(name) {
+    return FLAG_ORDER.includes(name) ? "flag" : "counter";
+  }
+  function listSequenceLabels(seq) {
+    const seen = /* @__PURE__ */ new Set();
+    for (const spec of seq.labelSets) seen.add(spec.name);
+    for (const spec of seq.labelIncs) seen.add(spec.name);
+    const names = [...seen].sort((a, b) => labelRank(a) - labelRank(b) || (a < b ? -1 : a > b ? 1 : 0));
+    return { names, kinds: names.map(labelKind) };
+  }
+  function labelOpsForChain(seq, headId, column, sets, incs) {
+    const ops = [];
+    const visited = /* @__PURE__ */ new Set();
+    let cur = seq.extensions.get(headId);
+    while (cur && !visited.has(cur.id)) {
+      visited.add(cur.id);
+      const type = seq.extensionTypes.get(cur.type) ?? 999 /* EXT_UNKNOWN */;
+      if (type === 3 /* EXT_LABELSET */ || type === 4 /* EXT_LABELINC */) {
+        const increment = type === 4 /* EXT_LABELINC */;
+        const spec = increment ? incs.get(cur.ref) : sets.get(cur.ref);
+        const index = spec ? column.get(spec.name) : void 0;
+        if (spec && index !== void 0) ops.push({ column: index, value: spec.value, increment });
+      }
+      cur = cur.nextId > 0 ? seq.extensions.get(cur.nextId) : void 0;
+    }
+    return ops;
+  }
+  function evaluateAdcLabels(seq) {
+    const { names, kinds } = listSequenceLabels(seq);
+    const width = names.length;
+    const column = new Map(names.map((name, index) => [name, index]));
+    const sets = new Map(seq.labelSets.map((spec) => [spec.id, spec]));
+    const incs = new Map(seq.labelIncs.map((spec) => [spec.id, spec]));
+    let count = 0;
+    for (const block of seq.blocks) {
+      if (block.adcId > 0 && seq.adcs.has(block.adcId)) count++;
+    }
+    const timeSec = new Float64Array(count);
+    const blockNumbers = new Uint32Array(count);
+    const values = new Int32Array(count * width);
+    const state = new Int32Array(width);
+    const chains = /* @__PURE__ */ new Map();
+    let start = 0;
+    let row = 0;
+    for (const block of seq.blocks) {
+      if (width > 0 && block.extId > 0) {
+        let ops = chains.get(block.extId);
+        if (!ops) {
+          ops = labelOpsForChain(seq, block.extId, column, sets, incs);
+          chains.set(block.extId, ops);
+        }
+        for (const op of ops) state[op.column] = op.increment ? state[op.column] + op.value : op.value;
+      }
+      const adc = block.adcId > 0 ? seq.adcs.get(block.adcId) : void 0;
+      if (adc) {
+        timeSec[row] = start + adc.delay * 1e-6 + adc.numSamples * adc.dwell * 1e-9 / 2;
+        blockNumbers[row] = block.num;
+        values.set(state, row * width);
+        row++;
+      }
+      start += blockDurationSeconds(seq, block);
+    }
+    const min = new Array(width).fill(0);
+    const max = new Array(width).fill(0);
+    for (let label = 0; label < width; label++) {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let adc = 0; adc < count; adc++) {
+        const value = values[adc * width + label];
+        if (value < lo) lo = value;
+        if (value > hi) hi = value;
+      }
+      if (count > 0) {
+        min[label] = lo;
+        max[label] = hi;
+      }
+    }
+    return { names, kinds, count, timeSec, block: blockNumbers, values, min, max };
   }
 
   // src/pulseq/boundedSeries.ts

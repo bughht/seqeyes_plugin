@@ -82,6 +82,22 @@ class TestBuildHtml:
         assert "<body" in html
         assert "</body>" in html
 
+    def test_build_html_injects_label_script(self):
+        """The label row's shared module should be inlined with the bundles."""
+        from seqeyes._renderer import _build_html
+
+        html = _build_html(SAMPLE_SEQ_TEXT, inject_bundle=True)
+        assert "var SeqEyesLabels" in html
+        assert "LABELS_SCRIPT_PLACEHOLDER" not in html
+
+    def test_build_html_without_bundle_drops_label_placeholder(self):
+        """Without bundles, no placeholder comment should leak into the page."""
+        from seqeyes._renderer import _build_html
+
+        html = _build_html(SAMPLE_SEQ_TEXT, inject_bundle=False)
+        assert "LABELS_SCRIPT_PLACEHOLDER" not in html
+        assert "var SeqEyesLabels" not in html
+
 
 class TestViewerTemplate:
     """Tests that the viewer template exists and is well-formed."""
@@ -100,4 +116,5 @@ class TestViewerTemplate:
 
         html = _read_viewer_template()
         assert "<!-- PULSEQ_BUNDLE_PLACEHOLDER -->" in html
+        assert "<!-- LABELS_SCRIPT_PLACEHOLDER -->" in html
         assert "/* SEQEYES_DATA_PLACEHOLDER */" in html

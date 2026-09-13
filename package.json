@@ -147,7 +147,7 @@
     "check": "npm run lint && npm test && npm run build:web && npm run compile",
     "export:kspace": "node out/cli/exportKspace.js",
     "package": "npm run compile && vsce package",
-    "build:web": "node scripts/build-webview.mjs && npx esbuild web/pulseq-browser.ts --bundle --format=iife --global-name=Pulseq --outfile=web/pulseq-bundle.js --target=es2020 && node -e \"const fs=require('fs');fs.copyFileSync('images/logo.png','web/logo.png');fs.copyFileSync('web/pulseq-bundle.js','python/src/seqeyes/resources/pulseq-bundle.js');fs.copyFileSync('web/webview-bundle.js','python/src/seqeyes/resources/webview-bundle.js')\"",
+    "build:web": "node scripts/build-webview.mjs && npx esbuild web/pulseq-browser.ts --bundle --format=iife --global-name=Pulseq --outfile=web/pulseq-bundle.js --target=es2020 && node -e \"const fs=require('fs');fs.copyFileSync('images/logo.png','web/logo.png');fs.copyFileSync('web/pulseq-bundle.js','python/src/seqeyes/resources/pulseq-bundle.js');fs.copyFileSync('web/webview-bundle.js','python/src/seqeyes/resources/webview-bundle.js');fs.copyFileSync('src/editor/webview/assets/labels.js','python/src/seqeyes/resources/seqeyes-labels.js')\"",
     "predeploy": "npm run build:web"
   },
   "devDependencies": {
