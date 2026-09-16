@@ -270,7 +270,9 @@ document.getElementById('zi').onclick=function(){if(zoomAtCenter(1.5))scheduleVi
 document.getElementById('zo').onclick=function(){if(zoomAtCenter(1/1.5))scheduleViewerDraw(true);};
 document.getElementById('zf').onclick=function(){fit();drawMinimap();};
 document.getElementById('zr').onclick=function(){fit();drawMinimap();};
-document.getElementById('bbc').onchange=function(){showBB=this.checked;draw();};
+var bbCheck=document.getElementById('bbc');
+bbCheck.checked=showBB;   // state.js read the remembered value; match the box to it
+bbCheck.onchange=function(){showBB=this.checked;SeqEyesPrefs.setBool(SeqEyesPrefs.KEYS.showBlocks,showBB);draw();};
 
 /* ── Mobile hamburger menu ─────────────────────────────────────────── */
 var menuBtn=document.getElementById('menuBtn');
@@ -371,6 +373,7 @@ rs();
    the host adapter to exist. web/index.html installs its own adapter over
    this one — install() swaps the host without re-binding the DOM. */
 SeqEyesPanel.install(window.SeqEyesPanelHost);
+SeqEyesPrefsUi.install();
 /* Deferred by one macrotask so web/index.html, whose inline IIFE runs after
    this bundle, has installed its own adapter before the persisted mode is
    restored against it. */

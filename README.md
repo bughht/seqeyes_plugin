@@ -143,6 +143,7 @@ All the same features as the other versions — interactive waveforms, k‑space
 - **Unit switchers** for time (s / ms / µs) and gradient (Hz/m / mT/m / G/cm)
 - **K‑space unit toggle** (1/m ↔ rad/m) with auto‑updating axis ticks
 - **Block boundary lines** — toggle in toolbar
+- **Remembered settings** — theme, units, toggles, panel sizes and the loaded ASC profile come back next session; a ⚙ toolbar button turns that off and throws away what is stored
 - **Optimized for large files** — binary k‑space encoding, bounds-checked parsers, and no text conversion for `.bseq`
 - **Pulseq format support** — text `.seq` v1.2.0–v1.5.x and official binary `.bseq` v1.5.2 reading
 - **Current `.bseq` hosts** — standalone web, VS Code, MATLAB `seqeyes('file.bseq')`, Python `SeqEyesViewer.from_file()`, and the k-space export CLI
@@ -239,6 +240,39 @@ where k-space is refused, and the k-space safety dialog offers it as a way out.
 | Change colormap | Colormap dropdown — Viridis (default), Magma, Inferno, Turbo, Greyscale, Theme |
 | Analyse slew rate instead of amplitude | Source dropdown: `G` → `dG/dt` |
 | Play the simulated gradient sound | `▶` at the top-left of the panel. Playback runs from the marker (or the window start) to the end of the visible window |
+| Stop remembering settings | ⚙ in the toolbar, then untick **Remember my settings**. **Forget stored settings** deletes what is already there |
+
+## Remembered settings
+
+The viewer comes back the way you left it. Theme, time and gradient units, the
+`Blocks` toggle, k-space unit, projection and marker size, spectrogram
+parameters, label marker styles, panel sizes and the loaded ASC profile all
+survive a restart, so a session starts where the last one ended rather than at
+the defaults.
+
+How the ASC profile is kept differs by host, because the two have different
+things to work with:
+
+- **VS Code** stores the profile's *path*. The file is re-read when you open a
+  sequence, so editing the ASC takes effect on the next open, and a profile you
+  move or delete is quietly forgotten rather than reported as an error.
+- **Standalone web and MATLAB** get a file through a picker with no re-openable
+  path, so the profile's *text* is stored in the browser, up to 2 MB. Larger
+  files are not kept.
+
+Everything lives in the browser's (or the webview's) local storage under the
+`seqeyes.` prefix, on your own machine. Nothing is uploaded.
+
+### Turning it off
+
+The ⚙ button in the toolbar opens a settings popover:
+
+- **Remember my settings** — on by default. Unticking it deletes everything
+  stored and stops new writes. Controls still work for the rest of the session;
+  they just start fresh next time. Ticking it again keeps the choices you made
+  while it was off.
+- **Forget stored settings** — deletes what is stored, including a cached ASC
+  profile, without changing the setting itself.
 
 ## License
 

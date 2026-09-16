@@ -15,6 +15,8 @@ import {
     exportKspaceToDirectoryForTest,
     loadAscProfileForTest,
     getSeqEyesDiagnosticState,
+    rememberAscUri,
+    rememberedAscUri,
     resetSeqEyesDiagnosticState,
 } from './editor/seqEditorProvider';
 
@@ -60,6 +62,16 @@ export function activate(context: vscode.ExtensionContext): void {
             vscode.commands.registerCommand(
                 'seqeyes.test.loadAscProfile',
                 async (sourceUri: vscode.Uri) => await loadAscProfileForTest(sourceUri),
+            ),
+            // Reads and writes the remembered ASC path the way the picker and
+            // the restore path do, so the round trip is testable without
+            // driving a native file dialog.
+            vscode.commands.registerCommand(
+                'seqeyes.test.ascMemory',
+                async (next?: vscode.Uri | null) => {
+                    if (next !== undefined) await rememberAscUri(context.globalState, next ?? undefined);
+                    return rememberedAscUri(context.globalState)?.toString();
+                },
             ),
             vscode.commands.registerCommand(
                 'seqeyes.test.exportKspace',

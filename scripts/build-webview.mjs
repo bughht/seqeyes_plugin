@@ -1,9 +1,9 @@
 /**
  * build-webview.mjs — Bundle the shared SeqEyes webview rendering assets.
  *
- * Concatenates the webview JS files (block-transport, labels, state, derived-series,
- * drawing, kspace, colormaps, spectrogram, audio, panel, interaction) into a
- * single self-contained script.  The files
+ * Concatenates the webview JS files (prefs, block-transport, labels, state,
+ * derived-series, drawing, kspace, colormaps, spectrogram, audio, panel,
+ * prefs-ui, interaction) into a single self-contained script.  The files
  * communicate via shared globals so they are concatenated without IIFE
  * wrapping — they run in the global scope.  The VS Code extension wraps
  * them in an IIFE when inlining into the webview; the standalone web app
@@ -22,6 +22,10 @@ const ROOT = path.resolve(__dirname, '..');
 const ASSETS_DIR = path.join(ROOT, 'src', 'editor', 'webview', 'assets');
 
 const files = [
+    // prefs first: every later file reads its remembered values while
+    // initialising.  prefs-ui sits just before interaction.js, which calls
+    // its install() — a later slot would leave the var still unassigned.
+    'prefs.js',
     'block-transport.js',
     'labels.js',
     'state.js',
@@ -32,6 +36,7 @@ const files = [
     'spectrogram.js',
     'audio.js',
     'panel.js',
+    'prefs-ui.js',
     'interaction.js',
 ];
 

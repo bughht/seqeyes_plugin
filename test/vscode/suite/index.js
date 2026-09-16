@@ -148,6 +148,27 @@ async function run() {
     assert.match(empty.notice, /neither PNS coefficients nor acoustic resonances/);
   });
 
+  await step('remember the ASC profile across sessions, by path', async () => {
+    const ascMemory = (next) => vscode.commands.executeCommand('seqeyes.test.ascMemory', next);
+
+    await ascMemory(null);
+    assert.equal(await ascMemory(), undefined, 'nothing is remembered until a profile is picked');
+
+    await ascMemory(combinedAscUri);
+    assert.equal(await ascMemory(), combinedAscUri.toString(),
+      'the picked profile should come back as the same URI');
+
+    // Only a path is kept, so the file stays the source of truth and an edited
+    // profile takes effect the next time a sequence is opened.
+    const reread = await vscode.commands.executeCommand(
+      'seqeyes.test.loadAscProfile', vscode.Uri.parse(await ascMemory()));
+    assert.equal(reread.hasPns, true);
+    assert.equal(reread.acousticCount, 2);
+
+    await ascMemory(null);
+    assert.equal(await ascMemory(), undefined, 'clearing the memory should leave nothing behind');
+  });
+
   await step('invalid fixture reports parse error without crashing host', async () => {
     await vscode.commands.executeCommand('vscode.openWith', invalidUri, 'seqeyes.sequenceViewer');
     const error = await waitForError(invalidUri);

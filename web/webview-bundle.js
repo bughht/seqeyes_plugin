@@ -1,5 +1,205 @@
 /* SeqEyes WebView Bundle — auto-generated, do not edit */
 "use strict";
+/* ══ prefs.js ══ */
+/* ═══════════════════════════════════════════════════════════════════════
+   Viewer preferences — one consent-gated gateway to localStorage
+
+   Every host (VS Code webview, standalone web page, MATLAB) keeps its
+   remembered settings under the `seqeyes.` prefix.  Before this module there
+   were three near-identical copies of the get/set pair — kspace.js, panel.js
+   and the inline script in web/index.html — and none of them asked whether
+   the user wanted anything written down at all.
+
+   Two rules shape the API:
+
+     - Persistence is opt-out, not unconditional.  `seqeyes.rememberSettings`
+       is the master switch.  With it off, `set()` keeps the value in memory
+       so the control still behaves for the rest of the session and nothing
+       reaches the disk; turning it off purges every key this module owns.
+
+     - localStorage is only ever touched inside a function, so the file loads
+       in a bare `node:vm` context for the unit tests the same way labels.js
+       does.  Nothing here runs at load time.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+var SeqEyesPrefs = (function () {
+  var PREFIX = 'seqeyes.';
+
+  /* Named so the standalone page's inline fork spells the keys the same way
+     the bundle does; a typo there would look like "my settings reset again". */
+  var KEYS = {
+    remember: 'seqeyes.rememberSettings',
+    theme: 'seqeyes.theme',
+    timeUnit: 'seqeyes.timeUnit',
+    gradUnit: 'seqeyes.gradUnit',
+    showBlocks: 'seqeyes.showBlocks',
+    panelWidth: 'seqeyes.panelWidth',
+    panelHeight: 'seqeyes.panelHeight',
+    noticesCollapsed: 'seqeyes.viewerNoticesCollapsed',
+    kspaceUnit: 'seqeyes.kspace.unit',
+    kspaceDotSize: 'seqeyes.kspace.dotSize',
+    kspaceProjection: 'seqeyes.kspace.projection',
+    ascName: 'seqeyes.asc.name',
+    ascText: 'seqeyes.asc.text'
+  };
+
+  /* A profile bigger than this is not worth fighting the quota over: the
+     whole origin gets about 5 MB, and a real Siemens gradient ASC is tens of
+     kilobytes.  Anything this large means the picker found the wrong file. */
+  var ASC_MAX_CHARS = 2 * 1024 * 1024;
+
+  /* Values written while persistence is off, or refused by a full quota.
+     Keeping them is what lets someone switch units, decide they do want the
+     choice kept, and tick the box without redoing the work. */
+  var session = {};
+
+  function store() {
+    try { return (typeof localStorage !== 'undefined') ? localStorage : null; } catch (e) { return null; }
+  }
+  function rawGet(key) {
+    var s = store(); if (!s) return null;
+    try { return s.getItem(key); } catch (e) { return null; }
+  }
+  function rawSet(key, value) {
+    var s = store(); if (!s) return false;
+    try { s.setItem(key, value); return true; } catch (e) { return false; }
+  }
+  function rawRemove(key) {
+    var s = store(); if (!s) return;
+    try { s.removeItem(key); } catch (e) { /* private mode */ }
+  }
+
+  /* Default on.  localStorage was already load-bearing here — theme, panel
+     size and every spectrogram parameter — so defaulting off would quietly
+     take away persistence people are already relying on. */
+  function enabled() { return rawGet(KEYS.remember) !== '0'; }
+
+  function get(key) {
+    if (enabled()) {
+      var stored = rawGet(key);
+      if (stored !== null) return stored;
+    }
+    return Object.prototype.hasOwnProperty.call(session, key) ? session[key] : null;
+  }
+
+  /* Returns whether the value reached the disk, which setAsc uses to decide
+     whether a restore will actually be possible next time.
+
+     A successful write drops any session copy instead of mirroring it: the
+     disk is then the single source of truth, so a key that later goes missing
+     reads as missing rather than being answered from a stale shadow. */
+  function set(key, value) {
+    var text = String(value);
+    if (enabled() && rawSet(key, text)) { delete session[key]; return true; }
+    session[key] = text;
+    return false;
+  }
+
+  function remove(key) {
+    delete session[key];
+    rawRemove(key);
+  }
+
+  function getNum(key, fallback) {
+    var raw = get(key);
+    var value = raw === null ? NaN : parseFloat(raw);
+    return isFinite(value) ? value : fallback;
+  }
+  function getBool(key, fallback) {
+    var raw = get(key);
+    return raw === null ? !!fallback : raw === '1';
+  }
+  function setBool(key, value) { return set(key, value ? '1' : '0'); }
+
+  /* The guard that keeps a stale or hand-edited key from putting the viewer
+     into a state its own controls cannot express. */
+  function getEnum(key, allowed, fallback) {
+    var raw = get(key);
+    return (raw !== null && allowed.indexOf(raw) >= 0) ? raw : fallback;
+  }
+
+  /* Every key this module owns, minus the master switch: a "no" has to
+     survive the purge it triggers. */
+  function storedKeys() {
+    var s = store(); if (!s) return [];
+    var found = [];
+    try {
+      for (var i = 0; i < s.length; i++) {
+        var key = s.key(i);
+        if (key && key.indexOf(PREFIX) === 0 && key !== KEYS.remember) found.push(key);
+      }
+    } catch (e) { return []; }
+    return found;
+  }
+
+  function clearStored() {
+    var doomed = storedKeys();
+    for (var i = 0; i < doomed.length; i++) rawRemove(doomed[i]);
+  }
+
+  /* "Forget stored settings": wipe the disk and the in-memory shadow, so the
+     next reload really does start from defaults. */
+  function forget() {
+    session = {};
+    clearStored();
+  }
+
+  function setEnabled(on) {
+    if (on) {
+      rawSet(KEYS.remember, '1');
+      /* Write through whatever the session accumulated while we were not
+         allowed to, so ticking the box keeps the state now on screen. */
+      var keys = Object.keys(session);
+      for (var i = 0; i < keys.length; i++) rawSet(keys[i], session[keys[i]]);
+    } else {
+      clearStored();
+      rawSet(KEYS.remember, '0');
+    }
+    return enabled();
+  }
+
+  /* ── ASC profile cache (standalone web and MATLAB hosts) ───────────────
+     The VS Code host stores a path on the extension side instead; a browser
+     file input hands over a File with no re-openable path, so the text is
+     the only thing worth keeping. */
+  function setAsc(name, text) {
+    if (!name || typeof text !== 'string' || text.length > ASC_MAX_CHARS) { clearAsc(); return false; }
+    var ok = set(KEYS.ascText, text);
+    set(KEYS.ascName, name);
+    return ok;
+  }
+  function getAsc() {
+    var name = get(KEYS.ascName), text = get(KEYS.ascText);
+    /* Both or nothing: a half-written pair (quota hit between the two sets)
+       must not restore a button label for a profile we cannot re-parse. */
+    return (name && text) ? { name: name, text: text } : null;
+  }
+  function clearAsc() {
+    remove(KEYS.ascName);
+    remove(KEYS.ascText);
+  }
+
+  return {
+    KEYS: KEYS,
+    ASC_MAX_CHARS: ASC_MAX_CHARS,
+    enabled: enabled,
+    setEnabled: setEnabled,
+    get: get,
+    set: set,
+    remove: remove,
+    getNum: getNum,
+    getBool: getBool,
+    setBool: setBool,
+    getEnum: getEnum,
+    storedKeys: storedKeys,
+    forget: forget,
+    setAsc: setAsc,
+    getAsc: getAsc,
+    clearAsc: clearAsc
+  };
+})();
+
+
 /* ══ block-transport.js ══ */
 /* ══════════════════════════════════════════════════════════════════════════
    block-transport.js — rehydrate the packed block payload from the extension.
@@ -361,13 +561,29 @@ function failWaveformDetail(payload){
    the 2-D context, the time→x mapping and the row geometry.  The Python
    viewer loads this file on its own, without the rest of the bundle.
 
-   The DOM and localStorage are only touched inside functions, so the tests
-   can run the shipped file in a bare VM context.
+   The DOM and storage are only touched inside functions, so the tests can
+   run the shipped file in a bare VM context.
 
    A "labels" argument is anything with `names` and `kinds`: the popup and the
    styles need nothing more, so ⚙ works before the per-ADC values arrive. */
 var SeqEyesLabels = (function () {
   var STORAGE_KEY = 'seqeyes.labelStyles.v1';
+
+  /* The Python viewer inlines this file on its own, so the bundle's
+     preferences gateway may not be there.  Go through it when it is, so the
+     settings popover's master switch and Forget button cover marker styles
+     too, and fall back to raw storage when it is not. */
+  function prefsApi() { return (typeof SeqEyesPrefs !== 'undefined') ? SeqEyesPrefs : null; }
+  function readStored(key) {
+    var api = prefsApi();
+    if (api) return api.get(key);
+    try { return localStorage.getItem(key); } catch (_) { return null; }
+  }
+  function writeStored(key, value) {
+    var api = prefsApi();
+    if (api) { api.set(key, value); return; }
+    try { localStorage.setItem(key, value); } catch (_) {}
+  }
   // Tableau 10: distinct hues that stay readable on light and dark themes.
   var PALETTE = ['#4e79a7', '#f28e2b', '#e15759', '#76b7b2', '#59a14f', '#edc948', '#b07aa1', '#ff9da7', '#9c755f', '#bab0ac'];
   var SHAPES = ['circle', 'square', 'triangle', 'triangleDown', 'diamond', 'cross', 'plus'];
@@ -428,14 +644,14 @@ var SeqEyesLabels = (function () {
     if (overrides) return overrides;
     overrides = {};
     try {
-      var saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+      var saved = JSON.parse(readStored(STORAGE_KEY) || '{}');
       if (saved && typeof saved === 'object') overrides = saved;
     } catch (_) {}
     return overrides;
   }
 
   function writeOverrides() {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(overrides)); } catch (_) {}
+    writeStored(STORAGE_KEY, JSON.stringify(overrides));
   }
 
   /* Defaults follow the label's position in its sequence, so one sequence's
@@ -808,8 +1024,13 @@ var CH_ORDER=[0,1,2,3,4,5,6,11,7,8,9,10];
 var ox=0,sc=1;                             // view offset [s] & scale [px/s]
 var dr=false,dsx=0,dso=0;                  // drag state
 var cursorT=0,cursorActive=false;            // mouse time position
-var timeUnit='ms',gradUnit='Hz/m';          // display unit selections
-var showBB=false;                            // show block boundaries (default off)
+/* Validating a remembered unit against the dropdown it came from, rather than
+   against a second hard-coded list, keeps a stale or hand-edited key from
+   putting the viewer in a state its own toolbar cannot express. */
+function selectOptionValues(sel){var out=[],i;if(!sel)return out;for(i=0;i<sel.options.length;i++)out.push(sel.options[i].value);return out;}
+var timeUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.timeUnit,selectOptionValues(tuSel),'ms'),
+    gradUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.gradUnit,selectOptionValues(guSel),'Hz/m');
+var showBB=SeqEyesPrefs.getBool(SeqEyesPrefs.KEYS.showBlocks,false);  // show block boundaries
 var GAMMA=42576;                            // Hz/m per mT/m for 1H
 
 var ampZoom=[1,1,1,1,1,1,1];
@@ -830,10 +1051,10 @@ function viewerNoticeMessages(value){
   for(var i=0;i<values.length;i++)if(values[i])messages.push(String(values[i]));
   return messages;
 }
-function readViewerNoticesCollapsed(){try{var saved=localStorage.getItem('seqeyes.viewerNoticesCollapsed');return saved===null?isMobileSafetyLayout():saved==='1';}catch(_){return isMobileSafetyLayout();}}
+function readViewerNoticesCollapsed(){var saved=SeqEyesPrefs.get(SeqEyesPrefs.KEYS.noticesCollapsed);return saved===null?isMobileSafetyLayout():saved==='1';}
 function setViewerNoticesCollapsed(collapsed){
   viewerNoticesCollapsed=!!collapsed;
-  try{localStorage.setItem('seqeyes.viewerNoticesCollapsed',viewerNoticesCollapsed?'1':'0');}catch(_){}
+  SeqEyesPrefs.setBool(SeqEyesPrefs.KEYS.noticesCollapsed,viewerNoticesCollapsed);
   renderViewerNotices();
 }
 function renderViewerNotices(){
@@ -1021,9 +1242,9 @@ function applyLayoutMode(){
     }
   }
 }
-function panelStoredWidth(){try{var v=parseFloat(localStorage.getItem('seqeyes.panelWidth'));return isFinite(v)?v:500;}catch(_){return 500;}}
+function panelStoredWidth(){return SeqEyesPrefs.getNum(SeqEyesPrefs.KEYS.panelWidth,500);}
 function panelMaxHeight(){var main=document.getElementById('main'),available=main?main.getBoundingClientRect().height:window.innerHeight;return Math.max(100,available-120);}
-function panelStoredHeight(){var available=document.getElementById('main'),height=available?available.getBoundingClientRect().height:window.innerHeight,raw,max=panelMaxHeight(),min=Math.min(180,max);try{var v=parseFloat(localStorage.getItem('seqeyes.panelHeight'));raw=isFinite(v)?v:(isMobileSafetyLayout()?height*.58:300);}catch(_){raw=isMobileSafetyLayout()?height*.58:300;}return Math.max(min,Math.min(raw,max));}
+function panelStoredHeight(){var available=document.getElementById('main'),height=available?available.getBoundingClientRect().height:window.innerHeight,max=panelMaxHeight(),min=Math.min(180,max);var raw=SeqEyesPrefs.getNum(SeqEyesPrefs.KEYS.panelHeight,isMobileSafetyLayout()?height*.58:300);return Math.max(min,Math.min(raw,max));}
 function refreshLayout(){
   var changed=detectLayoutMode();
   if(changed){
@@ -1079,8 +1300,9 @@ function buildLegend(){
   });
 }
 buildLegend();
-tuSel.onchange=function(){timeUnit=tuSel.value;draw();};
-guSel.onchange=function(){gradUnit=guSel.value;draw();};
+tuSel.value=timeUnit;guSel.value=gradUnit;
+tuSel.onchange=function(){timeUnit=tuSel.value;SeqEyesPrefs.set(SeqEyesPrefs.KEYS.timeUnit,timeUnit);draw();};
+guSel.onchange=function(){gradUnit=guSel.value;SeqEyesPrefs.set(SeqEyesPrefs.KEYS.gradUnit,gradUnit);draw();};
 function setExportButtonEnabled(enabled){if(exportBtn)exportBtn.disabled=!enabled;}
 /* Throws rather than drawing an empty panel when a trajectory arrives without
    its ADC samples.  A reply that lost its arrays in transit used to clear the
@@ -1166,6 +1388,12 @@ window.addEventListener('message',function(e){
     draw();drawKs();drawMinimap();
     setExportButtonEnabled(true);
     SeqEyesPanel.onSequenceLoaded();
+    /* Ask the host to re-apply the ASC profile it remembered from an earlier
+       session.  Sent only now because PNS needs the sequence's blocks, and
+       gated on the settings switch so one "no" covers both hosts.  The
+       extension ignores it once a profile is loaded, so a second sequence in
+       the same tab costs nothing. */
+    if(vscApi&&SeqEyesPrefs.enabled())vscApi.postMessage({command:'restoreAsc'});
     requestAnimationFrame(function(){refreshLayout();draw();drawKs();drawMinimap();});
   }else if(m.type==='waveformDetailData'){
     var detailBlocks;
@@ -2773,7 +3001,16 @@ function drawTriggerBlocks(start,end,vi,ch,colors,vs,ve){
 
 
 /* ══ kspace.js ══ */
-var kOpen=false, kView="3d";
+/* Camera presets, declared first because the remembered projection is
+   validated against this list and seeds the opening rotation. */
+var K_VIEWS=["3d","xy","xz","yz"];
+function kProjectionAngles(view){
+  if(view==="xy")return{x:0,y:0};
+  if(view==="xz")return{x:-Math.PI/2,y:0};
+  if(view==="yz")return{x:0,y:Math.PI/2};
+  return{x:-0.5,y:0.7};   // 3d — default perspective
+}
+var kOpen=false, kView=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.kspaceProjection,K_VIEWS,"3d");
 var kSpaceTrajectoryDrawCount=0,kSpaceOverlayDrawCount=0;
 /**
  * Pan is a screen offset in CSS pixels, applied after rotation; the rotation
@@ -2787,7 +3024,8 @@ var kSpaceTrajectoryDrawCount=0,kSpaceOverlayDrawCount=0;
  */
 var kPanX=0, kPanY=0, kScl=1;
 var kAutoFit=true;
-var kRotX=-0.5, kRotY=0.7;           // default 3D perspective
+var _kOpeningAngles=kProjectionAngles(kView);
+var kRotX=_kOpeningAngles.x, kRotY=_kOpeningAngles.y;   // matches the restored projection
 var kDragging=false, kDragPrev=null, kDragBtn=0;
 /**
  * Pending coalesced drag redraw.  A drag updates the rotation on every
@@ -2797,7 +3035,10 @@ var kDragging=false, kDragPrev=null, kDragBtn=0;
  */
 var _kDragRaf=0;
 var kCanvas=document.getElementById("kc"), kCtx=kCanvas.getContext("2d");
-var kDotSize=2, kUnit="cyc";         // cyc=1/m, rad=rad/m
+/* Clamped to the slider's own range so a hand-edited key cannot produce a dot
+   size the control has no position for. */
+var kDotSize=Math.max(1,Math.min(12,Math.round(SeqEyesPrefs.getNum(SeqEyesPrefs.KEYS.kspaceDotSize,2)))),
+    kUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.kspaceUnit,["cyc","rad"],"cyc");   // cyc=1/m, rad=rad/m
 
 // ── Smooth animation targets ──────────────────────────────────────────
 var _tRotX=kRotX, _tRotY=kRotY, _tScl=kScl, _tPanX=kPanX, _tPanY=kPanY;
@@ -2836,17 +3077,22 @@ function setKSpaceTarget(rx, ry, s, panX, panY, instant) {
     startKSpaceAnim();
   }
 }
-document.getElementById("kdot").oninput=function(){kDotSize=parseInt(this.value);drawKs();};
-document.getElementById("kunit").onclick=function(){
-  kUnit=kUnit==="cyc"?"rad":"cyc";this.textContent=kUnit==="cyc"?"Unit: 1/m":"Unit: rad/m";drawKs();
+function kUnitLabel(){return kUnit==="cyc"?"Unit: 1/m":"Unit: rad/m";}
+var kDotSlider=document.getElementById("kdot"),kUnitBtn=document.getElementById("kunit");
+kDotSlider.value=String(kDotSize);
+kUnitBtn.textContent=kUnitLabel();
+kDotSlider.oninput=function(){
+  kDotSize=parseInt(this.value);SeqEyesPrefs.set(SeqEyesPrefs.KEYS.kspaceDotSize,kDotSize);drawKs();
+};
+kUnitBtn.onclick=function(){
+  kUnit=kUnit==="cyc"?"rad":"cyc";this.textContent=kUnitLabel();
+  SeqEyesPrefs.set(SeqEyesPrefs.KEYS.kspaceUnit,kUnit);drawKs();
 };
 
 /* ── Theme selector (toolbar) ─────────────────────────────────────── */
 var themeSelect=document.getElementById("theme");
 var systemThemeQuery=(typeof window.matchMedia==="function")?window.matchMedia("(prefers-color-scheme: dark)"):null;
 var inVsCode=!!vscApi;
-function storageGet(k){try{return localStorage.getItem(k);}catch(_){return null;}}
-function storageSet(k,v){try{localStorage.setItem(k,v);}catch(_){}}
 function clearThemeClasses(){
   var b=document.body,rm=[];
   b.classList.forEach(function(c){if(c.indexOf("theme-")===0)rm.push(c);});
@@ -2866,11 +3112,11 @@ function applyThemeChoice(value,persist){
     document.body.classList.add(systemThemeQuery&&systemThemeQuery.matches?"theme-github":"theme-githublight");
   }
   if(themeSelect&&themeSelect.value!==value)themeSelect.value=value;
-  if(persist)storageSet("seqeyes.theme",value);
+  if(persist)SeqEyesPrefs.set(SeqEyesPrefs.KEYS.theme,value);
   redrawAfterThemeChange();
 }
 if(themeSelect){
-  var savedTheme=storageGet("seqeyes.theme")||"system";
+  var savedTheme=SeqEyesPrefs.get(SeqEyesPrefs.KEYS.theme)||"system";
   if(!themeSelect.querySelector('option[value="'+savedTheme+'"]'))savedTheme="system";
   themeSelect.onchange=function(){applyThemeChoice(this.value,true);};
   applyThemeChoice(savedTheme,false);
@@ -3072,25 +3318,28 @@ function uploadKSpaceGPU(){
    off -> k-space -> spectrogram -> off, and only the off -> k-space
    transition passes through the safety gate. `kOpen` is still the flag the
    drawing and interaction code reads, and panel.js keeps it in sync. */
-document.getElementById("kax").textContent="3D";
-document.getElementById("krst").onclick=function(){
+/* A free rotation is no longer any of the axis presets.  Guarded on the
+   current value so the drag handlers that call it on every move write once. */
+function kLeavePreset(){
+  if(kView==="3d")return;
   kView="3d";
   document.getElementById("kax").textContent="3D";
-  var af=_kAutoFitVals();
-  setKSpaceTarget(-0.5, 0.7, af.scl, af.panX, af.panY, false);
-};
+  SeqEyesPrefs.set(SeqEyesPrefs.KEYS.kspaceProjection,"3d");
+}
+/* One place that moves the camera to a named projection, so the reset button,
+   the cycle button and the restore path cannot drift apart on the angles. */
+function applyKProjection(view,persist){
+  kView=view;
+  var angles=kProjectionAngles(view),af=_kAutoFitVals();
+  document.getElementById("kax").textContent=view.toUpperCase();
+  if(persist)SeqEyesPrefs.set(SeqEyesPrefs.KEYS.kspaceProjection,view);
+  setKSpaceTarget(angles.x, angles.y, af.scl, af.panX, af.panY, false);
+}
+document.getElementById("kax").textContent=kView.toUpperCase();
+document.getElementById("krst").onclick=function(){applyKProjection("3d",true);};
 // Camera presets: smoothly rotate to look straight down an axis
 document.getElementById("kax").onclick=function(){
-  var views=["3d","xy","xz","yz"];var idx=views.indexOf(kView);
-  kView=views[(idx+1)%4];
-  var trx=_tRotX, tr=_tRotY;
-  if(kView==="xy"){trx=0; tr=0;}
-  else if(kView==="xz"){trx=-Math.PI/2; tr=0;}
-  else if(kView==="yz"){trx=0; tr=Math.PI/2;}
-  else{trx=-0.5; tr=0.7;}  // 3d — default perspective
-  document.getElementById("kax").textContent=kView.toUpperCase();
-  var af=_kAutoFitVals();
-  setKSpaceTarget(trx, tr, af.scl, af.panX, af.panY, false);
+  applyKProjection(K_VIEWS[(K_VIEWS.indexOf(kView)+1)%K_VIEWS.length],true);
 };
 
 function resizeKc(){
@@ -3224,7 +3473,7 @@ window.addEventListener("mousemove",function(e){
   if(!kDragging||!kDragPrev||!kOpen||panelMode!=="kspace")return;
   var dx=e.clientX-kDragPrev.x, dy=e.clientY-kDragPrev.y;
   kDragPrev={x:e.clientX,y:e.clientY};
-  if(kView!=="3d"){kView="3d";document.getElementById("kax").textContent="3D";}
+  kLeavePreset();
   if(kDragBtn===0){
     // left drag = instant rotate (no lerp — feels responsive)
     kRotY+=dx*0.008; kRotX-=dy*0.008;
@@ -3267,7 +3516,7 @@ kCanvas.addEventListener("touchstart",function(e){
 },{passive:false});
 kCanvas.addEventListener("touchmove",function(e){
   if(!_kTouchActive||!_kTouchPrev||!kOpen||panelMode!=="kspace")return;
-  if(kView!=="3d"){kView="3d";document.getElementById("kax").textContent="3D";}
+  kLeavePreset();
   if(e.touches.length===1&&_kTouchBtn===0){
     // 1‑finger rotate
     var dx=e.touches[0].clientX-_kTouchPrev.x;
@@ -3382,8 +3631,8 @@ window.addEventListener("resize",function(){if(kOpen){resizeKc();drawKs();}});
    applyLayoutMode()/setPanelMode() read it back on every open. */
 function persistPanelSize(){
   try{
-    if(typeof layoutMode!=='undefined'&&layoutMode==='vertical')localStorage.setItem('seqeyes.panelHeight',String(kResizeH));
-    else localStorage.setItem('seqeyes.panelWidth',String(kResizeW));
+    if(typeof layoutMode!=='undefined'&&layoutMode==='vertical')SeqEyesPrefs.set('seqeyes.panelHeight',kResizeH);
+    else SeqEyesPrefs.set('seqeyes.panelWidth',kResizeW);
   }catch(_){/* private mode */}
 }
 
@@ -4724,18 +4973,12 @@ var SeqEyesPanel = (function () {
   var host = null;
   var wired = false;
 
-  /* ── Persistence ──────────────────────────────────────────────────── */
-  function get(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
-  function set(key, value) { try { localStorage.setItem(key, value); } catch (e) { /* private mode */ } }
-  function getNum(key, fallback) {
-    var raw = get(key);
-    var value = raw === null ? NaN : parseFloat(raw);
-    return isFinite(value) ? value : fallback;
-  }
-  function getBool(key, fallback) {
-    var raw = get(key);
-    return raw === null ? fallback : raw === '1';
-  }
+  /* ── Persistence ──────────────────────────────────────────────────────
+     Delegated so the master switch in the settings popover governs the
+     spectrogram parameters too; this module used to own a fourth copy of
+     the same get/set pair. */
+  var get = SeqEyesPrefs.get, set = SeqEyesPrefs.set;
+  var getNum = SeqEyesPrefs.getNum, getBool = SeqEyesPrefs.getBool;
 
   /* ── Parameters and view state ────────────────────────────────────── */
   var params = {
@@ -6399,6 +6642,196 @@ window.SeqEyesDev.setSplitRatio = function (r) { SeqEyesPanel.setSplitRatio(r); 
 window.SeqEyesDev.getSplitRatio = function () { return SeqEyesPanel.getSplitRatio(); };
 
 
+/* ══ prefs-ui.js ══ */
+/* ═══════════════════════════════════════════════════════════════════════
+   Settings popover — the consent surface for SeqEyesPrefs
+
+   One ⚙ chip in the toolbar overflow, opening a small dialog that says what
+   the viewer keeps, lets the user turn that off, and throws away what is
+   already stored.  Persistence is useless to someone who cannot see it or
+   revoke it, and the ASC cache in particular puts the contents of a scanner
+   hardware file into browser storage — that deserves a visible switch rather
+   than a line in the README.
+
+   It borrows the `.lblc` popover styles from the label marker controls
+   instead of growing a second popup look.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+var SeqEyesPrefsUi = (function () {
+  var popover = null, anchor = null, rememberBox = null, summaryEl = null;
+
+  function element(tag, className, text) {
+    var el = document.createElement(tag);
+    if (className) el.className = className;
+    if (text !== undefined && text !== null) el.textContent = text;
+    return el;
+  }
+
+  function inVsCode() { return typeof vscApi !== 'undefined' && !!vscApi; }
+
+  function whereText() {
+    return inVsCode()
+      ? 'this copy of VS Code'
+      : 'this browser';
+  }
+
+  /* Plain counts rather than a key dump: enough to tell whether "Forget" will
+     do anything, without turning the dialog into a storage inspector. */
+  function summarise() {
+    if (!SeqEyesPrefs.enabled()) return 'Nothing is being stored.';
+    var stored = SeqEyesPrefs.storedKeys();
+    if (!stored.length) return 'Nothing stored yet.';
+    var asc = SeqEyesPrefs.getAsc();
+    var line = stored.length + ' setting' + (stored.length === 1 ? '' : 's') + ' stored';
+    return asc ? line + ', including the ASC profile ' + asc.name + '.' : line + '.';
+  }
+
+  function refresh() {
+    if (rememberBox) rememberBox.checked = SeqEyesPrefs.enabled();
+    if (summaryEl) summaryEl.textContent = summarise();
+  }
+
+  function render() {
+    popover.textContent = '';
+
+    var head = element('div', 'lblc-head');
+    head.appendChild(element('span', null, 'SeqEyes settings'));
+    var close = element('button', 'lblc-close', '✕');
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Close');
+    close.onclick = function () { closeControls(true); };
+    head.appendChild(close);
+
+    var list = element('div', 'lblc-list');
+
+    var row = element('div', 'lblc-row');
+    rememberBox = document.createElement('input');
+    rememberBox.type = 'checkbox';
+    rememberBox.id = 'prefsRemember';
+    rememberBox.checked = SeqEyesPrefs.enabled();
+    var label = element('label', 'prefs-label', 'Remember my settings on ' + whereText());
+    label.setAttribute('for', 'prefsRemember');
+    rememberBox.onchange = function () {
+      SeqEyesPrefs.setEnabled(this.checked);
+      refresh();
+    };
+    row.appendChild(rememberBox);
+    row.appendChild(label);
+    list.appendChild(row);
+
+    var note = element('div', 'prefs-note');
+    note.appendChild(element('div', null,
+      'Theme, time and gradient units, the Blocks toggle, k-space and '
+      + 'spectrogram options, and panel sizes are kept between sessions.'));
+    note.appendChild(element('div', null, inVsCode()
+      /* Different sentences because the two hosts really do keep different
+         things: a path the extension re-reads, versus the file's text. */
+      ? 'A loaded ASC profile is remembered by its file path and re-read when '
+        + 'you open a sequence. If the file moves, it is quietly forgotten.'
+      : 'A loaded ASC profile is stored as text in this browser so it can be '
+        + 'restored without picking the file again.'));
+    list.appendChild(note);
+
+    summaryEl = element('div', 'prefs-note prefs-summary', summarise());
+    list.appendChild(summaryEl);
+
+    var foot = element('div', 'lblc-foot');
+    var forget = element('button', null, 'Forget stored settings');
+    forget.type = 'button';
+    forget.title = 'Delete everything SeqEyes has stored. The current view is left as it is.';
+    forget.onclick = function () {
+      SeqEyesPrefs.forget();
+      refresh();
+    };
+    foot.appendChild(forget);
+
+    popover.appendChild(head);
+    popover.appendChild(list);
+    popover.appendChild(foot);
+  }
+
+  /* Same placement rules as the label popover: below the chip when it fits,
+     flipped above when it does not, and a bottom sheet on narrow screens. */
+  function positionPopover() {
+    if (!popover) return;
+    var compact = !!(window.matchMedia && window.matchMedia('(max-width: 768px), (pointer: coarse)').matches);
+    popover.classList.toggle('sheet', compact);
+    if (compact) { popover.style.left = ''; popover.style.top = ''; return; }
+    var rect = anchor && anchor.isConnected ? anchor.getBoundingClientRect() : { left: 8, top: 8, bottom: 8 };
+    var width = popover.offsetWidth, height = popover.offsetHeight;
+    var vw = window.innerWidth, vh = window.innerHeight;
+    var top = rect.bottom + 4;
+    if (top + height > vh - 8) top = Math.max(8, rect.top - height - 4);
+    if (top + height > vh - 8) top = Math.max(8, vh - height - 8);
+    popover.style.left = Math.max(8, Math.min(rect.left, vw - width - 8)) + 'px';
+    popover.style.top = top + 'px';
+  }
+
+  function onKeyDown(event) {
+    if (event.key !== 'Escape') return;
+    event.preventDefault(); event.stopPropagation();
+    closeControls(true);
+  }
+
+  function onPointerDown(event) {
+    var target = event.target;
+    if (popover.contains(target)) return;
+    // The chip toggles on its own click; closing here first would reopen it.
+    if (target && target.closest && target.closest('#prefsBtn')) return;
+    closeControls(false);
+  }
+
+  function openControls(chip) {
+    closeControls(false);
+    popover = element('div', 'lblc prefs-pop');
+    popover.id = 'prefsControls';
+    popover.setAttribute('role', 'dialog');
+    popover.setAttribute('aria-label', 'SeqEyes settings');
+    anchor = chip;
+    render();
+    document.body.appendChild(popover);
+    if (anchor) anchor.setAttribute('aria-expanded', 'true');
+    positionPopover();
+    document.addEventListener('keydown', onKeyDown, true);
+    document.addEventListener('pointerdown', onPointerDown, true);
+    window.addEventListener('resize', positionPopover);
+    if (rememberBox) rememberBox.focus();
+  }
+
+  function closeControls(restoreFocus) {
+    if (!popover) return;
+    document.removeEventListener('keydown', onKeyDown, true);
+    document.removeEventListener('pointerdown', onPointerDown, true);
+    window.removeEventListener('resize', positionPopover);
+    if (popover.parentNode) popover.parentNode.removeChild(popover);
+    var chip = anchor;
+    popover = null; anchor = null; rememberBox = null; summaryEl = null;
+    if (chip) {
+      chip.setAttribute('aria-expanded', 'false');
+      if (restoreFocus && chip.isConnected) chip.focus();
+    }
+  }
+
+  /* Idempotent, because web/index.html installs its own handlers over the
+     bundle's and may call this again. */
+  var wired = false;
+  function install() {
+    if (wired) return;
+    var chip = document.getElementById('prefsBtn');
+    if (!chip) return;
+    wired = true;
+    chip.onclick = function () { if (popover) closeControls(false); else openControls(chip); };
+  }
+
+  return {
+    install: install,
+    open: openControls,
+    close: closeControls,
+    isOpen: function () { return !!popover; }
+  };
+})();
+
+
 /* ══ interaction.js ══ */
 /* ═══════════════════════════════════════════════════════════════════════
    Mouse interaction
@@ -6672,7 +7105,9 @@ document.getElementById('zi').onclick=function(){if(zoomAtCenter(1.5))scheduleVi
 document.getElementById('zo').onclick=function(){if(zoomAtCenter(1/1.5))scheduleViewerDraw(true);};
 document.getElementById('zf').onclick=function(){fit();drawMinimap();};
 document.getElementById('zr').onclick=function(){fit();drawMinimap();};
-document.getElementById('bbc').onchange=function(){showBB=this.checked;draw();};
+var bbCheck=document.getElementById('bbc');
+bbCheck.checked=showBB;   // state.js read the remembered value; match the box to it
+bbCheck.onchange=function(){showBB=this.checked;SeqEyesPrefs.setBool(SeqEyesPrefs.KEYS.showBlocks,showBB);draw();};
 
 /* ── Mobile hamburger menu ─────────────────────────────────────────── */
 var menuBtn=document.getElementById('menuBtn');
@@ -6773,6 +7208,7 @@ rs();
    the host adapter to exist. web/index.html installs its own adapter over
    this one — install() swaps the host without re-binding the DOM. */
 SeqEyesPanel.install(window.SeqEyesPanelHost);
+SeqEyesPrefsUi.install();
 /* Deferred by one macrotask so web/index.html, whose inline IIFE runs after
    this bundle, has installed its own adapter before the persisted mode is
    restored against it. */

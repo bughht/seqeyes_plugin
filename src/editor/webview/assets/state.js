@@ -19,8 +19,13 @@ var CH_ORDER=[0,1,2,3,4,5,6,11,7,8,9,10];
 var ox=0,sc=1;                             // view offset [s] & scale [px/s]
 var dr=false,dsx=0,dso=0;                  // drag state
 var cursorT=0,cursorActive=false;            // mouse time position
-var timeUnit='ms',gradUnit='Hz/m';          // display unit selections
-var showBB=false;                            // show block boundaries (default off)
+/* Validating a remembered unit against the dropdown it came from, rather than
+   against a second hard-coded list, keeps a stale or hand-edited key from
+   putting the viewer in a state its own toolbar cannot express. */
+function selectOptionValues(sel){var out=[],i;if(!sel)return out;for(i=0;i<sel.options.length;i++)out.push(sel.options[i].value);return out;}
+var timeUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.timeUnit,selectOptionValues(tuSel),'ms'),
+    gradUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.gradUnit,selectOptionValues(guSel),'Hz/m');
+var showBB=SeqEyesPrefs.getBool(SeqEyesPrefs.KEYS.showBlocks,false);  // show block boundaries
 var GAMMA=42576;                            // Hz/m per mT/m for 1H
 
 var ampZoom=[1,1,1,1,1,1,1];
@@ -41,10 +46,10 @@ function viewerNoticeMessages(value){
   for(var i=0;i<values.length;i++)if(values[i])messages.push(String(values[i]));
   return messages;
 }
-function readViewerNoticesCollapsed(){try{var saved=localStorage.getItem('seqeyes.viewerNoticesCollapsed');return saved===null?isMobileSafetyLayout():saved==='1';}catch(_){return isMobileSafetyLayout();}}
+function readViewerNoticesCollapsed(){var saved=SeqEyesPrefs.get(SeqEyesPrefs.KEYS.noticesCollapsed);return saved===null?isMobileSafetyLayout():saved==='1';}
 function setViewerNoticesCollapsed(collapsed){
   viewerNoticesCollapsed=!!collapsed;
-  try{localStorage.setItem('seqeyes.viewerNoticesCollapsed',viewerNoticesCollapsed?'1':'0');}catch(_){}
+  SeqEyesPrefs.setBool(SeqEyesPrefs.KEYS.noticesCollapsed,viewerNoticesCollapsed);
   renderViewerNotices();
 }
 function renderViewerNotices(){
@@ -232,9 +237,9 @@ function applyLayoutMode(){
     }
   }
 }
-function panelStoredWidth(){try{var v=parseFloat(localStorage.getItem('seqeyes.panelWidth'));return isFinite(v)?v:500;}catch(_){return 500;}}
+function panelStoredWidth(){return SeqEyesPrefs.getNum(SeqEyesPrefs.KEYS.panelWidth,500);}
 function panelMaxHeight(){var main=document.getElementById('main'),available=main?main.getBoundingClientRect().height:window.innerHeight;return Math.max(100,available-120);}
-function panelStoredHeight(){var available=document.getElementById('main'),height=available?available.getBoundingClientRect().height:window.innerHeight,raw,max=panelMaxHeight(),min=Math.min(180,max);try{var v=parseFloat(localStorage.getItem('seqeyes.panelHeight'));raw=isFinite(v)?v:(isMobileSafetyLayout()?height*.58:300);}catch(_){raw=isMobileSafetyLayout()?height*.58:300;}return Math.max(min,Math.min(raw,max));}
+function panelStoredHeight(){var available=document.getElementById('main'),height=available?available.getBoundingClientRect().height:window.innerHeight,max=panelMaxHeight(),min=Math.min(180,max);var raw=SeqEyesPrefs.getNum(SeqEyesPrefs.KEYS.panelHeight,isMobileSafetyLayout()?height*.58:300);return Math.max(min,Math.min(raw,max));}
 function refreshLayout(){
   var changed=detectLayoutMode();
   if(changed){
@@ -290,8 +295,9 @@ function buildLegend(){
   });
 }
 buildLegend();
-tuSel.onchange=function(){timeUnit=tuSel.value;draw();};
-guSel.onchange=function(){gradUnit=guSel.value;draw();};
+tuSel.value=timeUnit;guSel.value=gradUnit;
+tuSel.onchange=function(){timeUnit=tuSel.value;SeqEyesPrefs.set(SeqEyesPrefs.KEYS.timeUnit,timeUnit);draw();};
+guSel.onchange=function(){gradUnit=guSel.value;SeqEyesPrefs.set(SeqEyesPrefs.KEYS.gradUnit,gradUnit);draw();};
 function setExportButtonEnabled(enabled){if(exportBtn)exportBtn.disabled=!enabled;}
 /* Throws rather than drawing an empty panel when a trajectory arrives without
    its ADC samples.  A reply that lost its arrays in transit used to clear the
@@ -377,6 +383,12 @@ window.addEventListener('message',function(e){
     draw();drawKs();drawMinimap();
     setExportButtonEnabled(true);
     SeqEyesPanel.onSequenceLoaded();
+    /* Ask the host to re-apply the ASC profile it remembered from an earlier
+       session.  Sent only now because PNS needs the sequence's blocks, and
+       gated on the settings switch so one "no" covers both hosts.  The
+       extension ignores it once a profile is loaded, so a second sequence in
+       the same tab costs nothing. */
+    if(vscApi&&SeqEyesPrefs.enabled())vscApi.postMessage({command:'restoreAsc'});
     requestAnimationFrame(function(){refreshLayout();draw();drawKs();drawMinimap();});
   }else if(m.type==='waveformDetailData'){
     var detailBlocks;
