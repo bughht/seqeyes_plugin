@@ -367,3 +367,71 @@ async function postKspace(page: Page, payload: Record<string, unknown>) {
     window.dispatchEvent(new MessageEvent('message', { data: { type: 'kspaceData', kspace } }));
   }, { msg: plain, bufs: buffers });
 }
+
+test('carries every RF audio and spectrogram option across the extension boundary', async ({ page }) => {
+  // The RF proxy worked in the standalone lane and produced silence in the
+  // packaged extension, because this adapter enumerated the audio fields and
+  // dropped the ones panel.js had gained. The contract worth pinning is not a
+  // list of field names — it is that whatever the panel sends arrives.
+  const failures: string[] = [];
+  page.on('pageerror', e => failures.push(e.message));
+  page.on('console', m => { if (m.type() === 'error') failures.push(m.text()); });
+
+  const { seq } = loadSequence();
+  const packed = packSequenceBlocks(seq);
+  await openWebview(page);
+
+  await post(page, {
+    type: 'sequenceData',
+    sequenceGeneration: 1,
+    blocks: packed.blocks,
+    sampleCount: packed.sampleCount,
+    totalDuration: getTotalDuration(seq),
+    gradRaster: seq.rasterTimes.gradientRaster,
+    rfRaster: seq.rasterTimes.rfRaster,
+    adcRaster: seq.rasterTimes.adcRaster,
+    blockRaster: seq.rasterTimes.blockDurationRaster,
+    timing: detectSequenceTiming(seq),
+    notices: [],
+  }, { sampleTimes: b64(packed.sampleTimes), sampleValues: b64(packed.sampleValues) });
+
+  await page.evaluate(() => (window as unknown as { SeqEyesDev: { setPanelMode(m: string): string } })
+    .SeqEyesDev.setPanelMode('spectrogram'));
+  await expect(page.locator('#spane')).toHaveClass(/on/);
+
+  await page.locator('#sgRf').click();
+  await expect(page.locator('#sgRfMix')).toBeEnabled();
+  await page.locator('#sgRfMix').fill('80');
+  await page.locator('#sgRfMix').dispatchEvent('input');
+  await page.locator('#sgRfScale').fill('0');
+  await page.locator('#sgRfScale').dispatchEvent('change');
+
+  // The spectrogram request already shipped `params` wholesale; assert it too,
+  // so the two halves of the panel stay covered by the same test.
+  await expect.poll(async () => {
+    const calc = (await posted(page)).filter(m => m.command === 'calculateSpectrogram').pop();
+    return (calc?.params as Record<string, unknown> | undefined)?.includeRf;
+  }, { timeout: 15_000 }).toBe(true);
+
+  await page.locator('#sgPlay').click();
+
+  const audio = await expect.poll(async () => {
+    const all = await posted(page);
+    return all.filter(m => m.command === 'synthesizeGradientSound').pop();
+  }, { timeout: 15_000 }).toBeTruthy().then(() => page.evaluate(() =>
+    (window as unknown as { __posted: Record<string, unknown>[] }).__posted
+      .filter(m => m.command === 'synthesizeGradientSound').pop()));
+
+  expect(audio!.includeRf).toBe(true);
+  expect(audio!.rfMix).toBeCloseTo(0.8, 6);
+  expect(audio!.rfScale).toBe(0);
+  expect(audio!.rfThermoWeight).toBe(1);
+  expect(audio!.rfControlWeight).toBe(1);
+  expect(audio!.rfEdgeMode).toBe('signed');
+  // The pre-existing options must still cross unchanged.
+  expect(audio!.sampleRate).toBe(44100);
+  expect(audio!.source).toBe('G');
+  expect(audio!.channelWeights).toEqual([1, 1, 1]);
+
+  expect(failures).toEqual([]);
+});

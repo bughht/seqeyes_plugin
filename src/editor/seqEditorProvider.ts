@@ -136,6 +136,12 @@ export interface SeqEyesDiagnosticExportResult {
     sequenceName: string;
 }
 
+/** A finite number from a webview message, or `undefined` when it sent none. */
+function optionalNumber(value: unknown): number | undefined {
+    const n = Number(value);
+    return value !== undefined && value !== null && value !== '' && Number.isFinite(n) ? n : undefined;
+}
+
 const diagnosticState: SeqEyesDiagnosticState = {};
 
 export function getSeqEyesDiagnosticState(): SeqEyesDiagnosticState {
@@ -916,11 +922,15 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                             channelWeights: msg.channelWeights,
                             source: msg.source === 'dGdt' ? 'dGdt' : 'G',
                             includeRf: msg.includeRf === true,
-                            rfScale: Number(msg.rfScale),
-                            rfThermoWeight: Number(msg.rfThermoWeight),
-                            rfControlWeight: Number(msg.rfControlWeight),
+                            // `optionalNumber`, not `Number`: coercing an absent
+                            // field to NaN turns "the webview sent nothing" into
+                            // "the webview sent something invalid", and the
+                            // synthesiser's fallback then hides the difference.
+                            rfScale: optionalNumber(msg.rfScale),
+                            rfThermoWeight: optionalNumber(msg.rfThermoWeight),
+                            rfControlWeight: optionalNumber(msg.rfControlWeight),
                             rfEdgeMode: msg.rfEdgeMode === 'absolute' ? 'absolute' : 'signed',
-                            rfMix: Number(msg.rfMix),
+                            rfMix: optionalNumber(msg.rfMix),
                         },
                     );
                     panel.webview.postMessage({

@@ -1986,10 +1986,18 @@ window.SeqEyesPanelHost={
   },
   requestAudio:function(requestId,startSec,endSec,options){
     if(!vscApi)return;
-    vscApi.postMessage({
-      command:'synthesizeGradientSound',requestId:requestId,startSec:startSec,endSec:endSec,
-      sampleRate:options.sampleRate,channelWeights:options.channelWeights,source:options.source
-    });
+    /* The whole options object crosses, the way requestSpectrogram already
+       ships `params`. Enumerating fields here meant every audio option added to
+       panel.js was silently dropped on this lane only: the RF proxy reached the
+       extension as `undefined`, so it synthesised no RF and fell back to its
+       default mix. There is no per-field list left to drift. */
+    var message={};
+    for(var key in options)if(Object.prototype.hasOwnProperty.call(options,key))message[key]=options[key];
+    message.command='synthesizeGradientSound';
+    message.requestId=requestId;
+    message.startSec=startSec;
+    message.endSec=endSec;
+    vscApi.postMessage(message);
   }
 };
 
