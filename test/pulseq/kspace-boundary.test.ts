@@ -148,9 +148,18 @@ function summarize(result: NonNullable<ReturnType<typeof calculateKspace>>) {
   const count = result.t_adc.length;
   const middle = Math.floor((count - 1) / 2);
   const vector = (index: number) => result.ktraj_adc.map(axis => axis[index]);
-  const bounds = (mode: 'min' | 'max') => result.ktraj_adc.map(axis => (
-    mode === 'min' ? Math.min(...axis) : Math.max(...axis)
-  ));
+  /* Folded rather than spread: these axes hold 76k samples for the EPI-RS
+     fixture, and `Math.min(...axis)` passes every one as a separate argument.
+     Whether that fits depends on the stack space left at the call site, which
+     differs between the main thread and a vitest worker, so it is a per-runner
+     coin flip rather than a fixed limit. */
+  const bounds = (mode: 'min' | 'max') => result.ktraj_adc.map((axis) => {
+    let bound = mode === 'min' ? Infinity : -Infinity;
+    for (let i = 0; i < axis.length; i++) {
+      if (mode === 'min' ? axis[i] < bound : axis[i] > bound) bound = axis[i];
+    }
+    return bound;
+  });
   return {
     first: vector(0),
     middle: vector(middle),
