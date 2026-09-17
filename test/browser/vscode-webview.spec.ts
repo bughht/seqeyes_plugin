@@ -19,9 +19,12 @@ import { expect, test, type Page } from '@playwright/test';
 import { packSequenceBlocks } from '../../src/editor/blockTransport';
 import { buildWaveformDetailReply, waveformDetailMessage } from '../../src/editor/waveformDetailReply';
 import { serializeKSpace } from '../../src/editor/kspaceTransport';
+import { serializeGradientSound } from '../../src/editor/spectrogramTransport';
+import { synthesizeGradientSound } from '../../src/pulseq/gradientSound';
+import { resolveDetailBlockRange } from '../../src/editor/blockTransport';
 import { serializeLabelTable, type SerializedLabelTable } from '../../src/editor/labelTransport';
 import { evaluateAdcLabels, listSequenceLabels } from '../../src/pulseq/labels';
-import { createSequenceDecodeContext, decodeAllBlocks, getTotalDuration } from '../../src/pulseq/decoder';
+import { createSequenceDecodeContext, decodeAllBlocks, decodeBlockRange, getTotalDuration } from '../../src/pulseq/decoder';
 import { calculateKspace } from '../../src/pulseq/kspace';
 import { parseSequenceBytes } from '../../src/pulseq/sequenceReader';
 import { detectSequenceTiming } from '../../src/pulseq/trdetect';
@@ -432,6 +435,92 @@ test('carries every RF audio and spectrogram option across the extension boundar
   expect(audio!.sampleRate).toBe(44100);
   expect(audio!.source).toBe('G');
   expect(audio!.channelWeights).toEqual([1, 1, 1]);
+
+  expect(failures).toEqual([]);
+});
+
+test('plays the RF proxy end to end over the extension round trip', async ({ page }) => {
+  // The option-forwarding test above only proves the request leaves the
+  // webview. This closes the loop: the extension's own synthesis and
+  // serialisation run on the posted options, the reply goes back the way the
+  // extension sends it, and the webview has to end up with an audio buffer.
+  const failures: string[] = [];
+  page.on('pageerror', e => failures.push(e.message));
+  page.on('console', m => { if (m.type() === 'error') failures.push(m.text()); });
+
+  const { seq, context } = loadSequence();
+  const packed = packSequenceBlocks(seq);
+  await openWebview(page);
+
+  await post(page, {
+    type: 'sequenceData',
+    sequenceGeneration: 1,
+    blocks: packed.blocks,
+    sampleCount: packed.sampleCount,
+    totalDuration: getTotalDuration(seq),
+    gradRaster: seq.rasterTimes.gradientRaster,
+    rfRaster: seq.rasterTimes.rfRaster,
+    adcRaster: seq.rasterTimes.adcRaster,
+    blockRaster: seq.rasterTimes.blockDurationRaster,
+    timing: detectSequenceTiming(seq),
+    notices: [],
+  }, { sampleTimes: b64(packed.sampleTimes), sampleValues: b64(packed.sampleValues) });
+
+  await page.evaluate(() => (window as unknown as { SeqEyesDev: { setPanelMode(m: string): string } })
+    .SeqEyesDev.setPanelMode('spectrogram'));
+  await expect(page.locator('#spane')).toHaveClass(/on/);
+
+  await page.locator('#sgRf').click();
+  await expect(page.locator('#sgRfMix')).toBeEnabled();
+  await page.locator('#sgRfMix').fill('100');          // RF only, so silence is unambiguous
+  await page.locator('#sgRfMix').dispatchEvent('input');
+
+  await page.locator('#sgPlay').click();
+  await expect.poll(async () =>
+    (await posted(page)).some(m => m.command === 'synthesizeGradientSound'), { timeout: 15_000 },
+  ).toBe(true);
+
+  const request = (await posted(page)).filter(m => m.command === 'synthesizeGradientSound').pop()!;
+  expect(request.includeRf).toBe(true);
+  expect(request.rfMix).toBe(1);
+
+  // Exactly what seqEditorProvider's handler does with that message.
+  const startSec = Number(request.startSec);
+  const endSec = Number(request.endSec);
+  const range = resolveDetailBlockRange(
+    context.blockStartTimes, seq.blocks.length,
+    startSec - 0.05, endSec + 0.05,
+  );
+  const sound = synthesizeGradientSound(
+    decodeBlockRange(seq, range.start, range.end, context),
+    {
+      startSec, endSec,
+      sampleRate: Number(request.sampleRate) || 44100,
+      channelWeights: request.channelWeights as [number, number, number],
+      source: request.source === 'dGdt' ? 'dGdt' : 'G',
+      includeRf: request.includeRf === true,
+      rfScale: request.rfScale as number,
+      rfThermoWeight: request.rfThermoWeight as number,
+      rfControlWeight: request.rfControlWeight as number,
+      rfEdgeMode: request.rfEdgeMode === 'absolute' ? 'absolute' : 'signed',
+      rfMix: request.rfMix as number,
+    },
+  );
+
+  // The synthesis itself must have produced RF, or the webview assertion below
+  // would be testing the wrong half of the round trip.
+  expect(sound.rfIncluded).toBe(true);
+  expect(sound.silent).toBe(false);
+
+  await post(page, {
+    type: 'gradientSoundData',
+    requestId: request.requestId,
+    ...serializeGradientSound(sound),
+  });
+
+  await expect.poll(async () => page.evaluate(() =>
+    (window as unknown as { SeqEyesDev: { audioState(): { hasBuffer: boolean } } })
+      .SeqEyesDev.audioState().hasBuffer), { timeout: 15_000 }).toBe(true);
 
   expect(failures).toEqual([]);
 });
