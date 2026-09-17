@@ -12,6 +12,7 @@ import * as vscode from 'vscode';
 import {
     SeqEditorProvider,
     computeSpectrogramForTest,
+    synthesizeGradientSoundForTest,
     exportKspaceToDirectoryForTest,
     loadAscProfileForTest,
     getSeqEyesDiagnosticState,
@@ -58,6 +59,11 @@ export function activate(context: vscode.ExtensionContext): void {
                 'seqeyes.test.computeSpectrogram',
                 async (sourceUri: vscode.Uri, startSec: number, endSec: number, params?: Record<string, unknown>) =>
                     await computeSpectrogramForTest(sourceUri, startSec, endSec, params),
+            ),
+            vscode.commands.registerCommand(
+                'seqeyes.test.synthesizeGradientSound',
+                async (sourceUri: vscode.Uri, startSec: number, endSec: number, options?: Record<string, unknown>) =>
+                    await synthesizeGradientSoundForTest(sourceUri, startSec, endSec, options),
             ),
             vscode.commands.registerCommand(
                 'seqeyes.test.loadAscProfile',

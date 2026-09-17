@@ -188,6 +188,55 @@ export async function computeSpectrogramForTest(
     };
 }
 
+export interface SeqEyesDiagnosticSoundResult {
+    sampleRate: number;
+    frames: number;
+    silent: boolean;
+    rfIncluded: boolean;
+    rawPeak: number;
+    rfRawPeak: number;
+    /** Peak of the delivered buffer, after the mix and normalisation. */
+    bufferPeak: number;
+    warnings: string[];
+}
+
+/**
+ * Run the `synthesizeGradientSound` message path end to end, without a live
+ * webview, the way `computeSpectrogramForTest` does for the spectrogram.
+ *
+ * Added because the RF proxy was audible in the standalone viewer and silent in
+ * the packaged extension: every layer checked out in isolation, and the one
+ * environment with no coverage at all was the real extension host.
+ */
+export async function synthesizeGradientSoundForTest(
+    sourceUri: vscode.Uri,
+    startSec: number,
+    endSec: number,
+    options?: Record<string, unknown>,
+): Promise<SeqEyesDiagnosticSoundResult> {
+    const bytes = await vscode.workspace.fs.readFile(sourceUri);
+    const sequence = parseSequenceBytes(bytes, uriFileName(sourceUri));
+    const blocks = decodeAllBlocks(sequence);
+    const sound = synthesizeGradientSound(
+        selectWindowBlocks(blocks, startSec, endSec),
+        { ...(options ?? {}), startSec, endSec },
+    );
+    let bufferPeak = 0;
+    for (let i = 0; i < sound.n; i++) {
+        bufferPeak = Math.max(bufferPeak, Math.abs(sound.left[i]), Math.abs(sound.right[i]));
+    }
+    return {
+        sampleRate: sound.sampleRate,
+        frames: sound.n,
+        silent: sound.silent,
+        rfIncluded: sound.rfIncluded,
+        rawPeak: sound.rawPeak,
+        rfRawPeak: sound.rfRawPeak,
+        bufferPeak,
+        warnings: sound.warnings,
+    };
+}
+
 /**
  * Run the ASC side of the `openPnsAsc` handler, including `$include`
  * resolution, and report all four outcomes of the partial-success contract.
