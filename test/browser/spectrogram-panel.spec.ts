@@ -38,6 +38,7 @@ interface PanelState {
   decimationFactor: number | null;
   includeRf: boolean;
   rfScale: number;
+  rfMix: number;
   imageChannel: string;
   rfIncluded: boolean;
   rfMaxValue: number;
@@ -1058,6 +1059,28 @@ test('adds the RF acoustic proxy channels on request and keeps them opt-in', asy
   await expect(page.locator('#sgLegend')).toContainText('RF ctrl');
   // The panel must say what the numbers are worth, unprompted.
   await expect(page.locator('#viewerNotice')).toContainText('research proxy');
+});
+
+test('gates the RF playback mix on the RF toggle and keeps it out of recompute', async ({ page }) => {
+  await loadViewer(page, fixtures.spiral);
+  await openSpectrogram(page);
+
+  await expect(page.locator('#sgRfMix')).toBeDisabled();
+  expect((await panelState(page)).rfMix).toBe(0.5);
+
+  await page.locator('#sgRf').click();
+  await expect.poll(async () => (await panelState(page)).rfIncluded, { timeout: 20_000 }).toBe(true);
+  await settlePanel(page);
+  await expect(page.locator('#sgRfMix')).toBeEnabled();
+
+  const before = (await panelState(page)).computeCount;
+  await page.locator('#sgRfMix').fill('100');
+  await page.locator('#sgRfMix').dispatchEvent('input');
+  await expect.poll(async () => (await panelState(page)).rfMix, { timeout: 10_000 }).toBe(1);
+
+  // The mix is a playback control; the spectrogram keeps the mechanisms on
+  // separate channels, so moving it must not trigger a recompute.
+  expect((await panelState(page)).computeCount).toBe(before);
 });
 
 test('switches the image to the RF proxy and recalibrates its contrast', async ({ page }) => {

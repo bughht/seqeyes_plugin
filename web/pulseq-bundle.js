@@ -5337,17 +5337,78 @@ var Pulseq = (() => {
       if (l > rawPeak) rawPeak = l;
       if (r > rawPeak) rawPeak = r;
     }
-    const silent = !(rawPeak > 0);
+    const rfMix = clamp01(Number.isFinite(options.rfMix) ? options.rfMix : 0.5);
+    let rfRawPeak = 0;
+    let rfMono = null;
+    if (options.includeRf && rfMix > 0) {
+      const sources = resampleRfAcousticSources(blocks, {
+        startSec,
+        dt,
+        sampleCount: n,
+        rfScale: options.rfScale,
+        edgeMode: options.rfEdgeMode
+      });
+      if (!sources.silent) {
+        const combined = combineRfSources(
+          sources,
+          Number.isFinite(options.rfThermoWeight) ? options.rfThermoWeight : 1,
+          Number.isFinite(options.rfControlWeight) ? options.rfControlWeight : 1
+        );
+        rfMono = convolveSame(combined, kernel);
+        for (let i = 0; i < n; i++) {
+          const v = Math.abs(rfMono[i]);
+          if (v > rfRawPeak) rfRawPeak = v;
+        }
+      }
+    }
+    const rfIncluded = !!(rfMono && rfRawPeak > 0);
+    if (rfIncluded) {
+      const gradGain = rawPeak > 0 ? (1 - rfMix) / rawPeak : 0;
+      const rfGain = rfMix / rfRawPeak;
+      for (let i = 0; i < n; i++) {
+        const rfSample = rfMono[i] * rfGain;
+        left[i] = left[i] * gradGain + rfSample;
+        right[i] = right[i] * gradGain + rfSample;
+      }
+    }
+    let mixedPeak = 0;
+    for (let i = 0; i < n; i++) {
+      const l = Math.abs(left[i]);
+      const r = Math.abs(right[i]);
+      if (l > mixedPeak) mixedPeak = l;
+      if (r > mixedPeak) mixedPeak = r;
+    }
+    const silent = !(mixedPeak > 0);
     if (silent) {
-      warnings.push("No gradient activity in this window \u2014 nothing to play.");
+      warnings.push(options.includeRf ? "Nothing to play in this window \u2014 no gradient activity and no RF events." : "No gradient activity in this window \u2014 nothing to play.");
     } else {
-      const scale = AUDIO_PEAK / rawPeak;
+      const scale = AUDIO_PEAK / mixedPeak;
       for (let i = 0; i < n; i++) {
         left[i] *= scale;
         right[i] *= scale;
       }
+      if (options.includeRf && !rfIncluded && rfMix > 0) {
+        warnings.push("No RF events in this window; you are hearing the gradients only.");
+      } else if (rfIncluded && rawPeak === 0) {
+        warnings.push("No gradient activity in this window; you are hearing the RF proxy only.");
+      }
     }
-    return { sampleRate, n, left, right, startSec, endSec, rawPeak, silent, warnings };
+    return {
+      sampleRate,
+      n,
+      left,
+      right,
+      startSec,
+      endSec,
+      rawPeak,
+      rfRawPeak,
+      rfIncluded,
+      silent,
+      warnings
+    };
+  }
+  function clamp01(value) {
+    return value < 0 ? 0 : value > 1 ? 1 : value;
   }
 
   // src/pulseq/derivedWindow.ts

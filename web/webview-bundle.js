@@ -316,6 +316,8 @@ function deserializeGradientSound(payload){
     startSec:payload.startSec,
     endSec:payload.endSec,
     silent:!!payload.silent,
+    rfIncluded:!!payload.rfIncluded,
+    warnings:payload.warnings||[],
     left:decodeB64F32(payload.leftB64,payload.n),
     right:decodeB64F32(payload.rightB64,payload.n)
   };
@@ -5051,7 +5053,11 @@ var SeqEyesPanel = (function () {
     rfScale: getNum('seqeyes.spectrogram.rfscale', 1),
     rfThermoWeight: 1,
     rfControlWeight: 1,
-    rfEdgeMode: 'signed'
+    rfEdgeMode: 'signed',
+    /* Playback only: crossfade between the gradient sound and the RF proxy,
+       each normalised to its own peak first. There is no correct default —
+       the two have no common unit — so an even blend is the honest one. */
+    rfMix: getNum('seqeyes.spectrogram.rfmix', 0.5)
   };
   /* Which matrix the image layer paints. The spectrum pane still draws every
      visible trace; this only picks the colourmapped one. */
@@ -5867,7 +5873,13 @@ var SeqEyesPanel = (function () {
     h.requestAudio(pendingAudioId, range.startSec, range.endSec, {
       sampleRate: 44100,
       source: params.source,
-      channelWeights: [1, 1, 1]
+      channelWeights: [1, 1, 1],
+      includeRf: params.includeRf,
+      rfScale: params.rfScale,
+      rfThermoWeight: params.rfThermoWeight,
+      rfControlWeight: params.rfControlWeight,
+      rfEdgeMode: params.rfEdgeMode,
+      rfMix: params.rfMix
     });
     syncTransport();
   }
@@ -5920,16 +5932,27 @@ var SeqEyesPanel = (function () {
   function deliverAudio(id, payload) {
     if (id !== pendingAudioId) return;
     pendingAudioId = 0;
+    // The host knows which sources were enabled, so it words the refusal; the
+    // panel used to say "no gradient activity" even when RF was the source the
+    // user was listening for.
+    var emptyMessage = params.includeRf
+      ? 'Nothing to play in this window — no gradient activity and no RF events.'
+      : 'No gradient activity in this window — nothing to play.';
     if (!payload || !payload.left || !payload.left.length) {
-      notice('gradientSound', 'No gradient activity in this window — nothing to play.');
+      notice('gradientSound', (payload && payload.warnings && payload.warnings.length)
+        ? payload.warnings : emptyMessage);
       syncTransport();
       return;
     }
     if (payload.silent) {
-      notice('gradientSound', 'No gradient activity in this window — nothing to play.');
+      notice('gradientSound', (payload.warnings && payload.warnings.length)
+        ? payload.warnings : emptyMessage);
       syncTransport();
       return;
     }
+    // Partial-source notes ("hearing the RF proxy only") are advisory, not a
+    // refusal, so they are published without stopping playback.
+    notice('gradientSound', (payload.warnings && payload.warnings.length) ? payload.warnings : null);
     if (!SeqEyesAudio.load(payload.sampleRate, payload.left, payload.right, payload.startSec)) {
       if (SeqEyesAudio.contextState() !== 'running') audioActivationFailure();
       else notice('gradientSound', 'This host could not create an audio buffer.');
@@ -6149,6 +6172,11 @@ var SeqEyesPanel = (function () {
       setValue('sgRfScale', String(params.rfScale));
       rfScale.disabled = !params.includeRf;
     }
+    var rfMix = el('sgRfMix');
+    if (rfMix) {
+      setValue('sgRfMix', String(Math.round(params.rfMix * 100)));
+      rfMix.disabled = !params.includeRf;
+    }
     var image = el('sgImageChannel');
     if (image) {
       // RF options are removed rather than disabled: a disabled option that the
@@ -6286,8 +6314,11 @@ var SeqEyesPanel = (function () {
       render();
     };
 
+    // Each RF control changes what is being synthesised, so a buffer already
+    // playing is stale the moment one moves.
     var rfToggle = el('sgRf');
     if (rfToggle) rfToggle.onclick = function () {
+      stopPlayback();
       params.includeRf = !params.includeRf;
       set('seqeyes.spectrogram.rf', params.includeRf ? '1' : '0');
       if (!params.includeRf && sgIsRfChannel(imageChannel)) {
@@ -6300,10 +6331,23 @@ var SeqEyesPanel = (function () {
 
     var rfScale = el('sgRfScale');
     if (rfScale) rfScale.onchange = function () {
+      stopPlayback();
       var value = parseFloat(this.value);
       params.rfScale = isFinite(value) && value >= 0 ? value : 1;
       set('seqeyes.spectrogram.rfscale', String(params.rfScale));
       onParamChanged(true);
+    };
+
+    var rfMix = el('sgRfMix');
+    if (rfMix) rfMix.oninput = function () {
+      stopPlayback();
+      var value = parseFloat(this.value);
+      params.rfMix = isFinite(value) ? Math.max(0, Math.min(1, value / 100)) : 0.5;
+      set('seqeyes.spectrogram.rfmix', String(params.rfMix));
+      // Playback only: the spectrogram keeps the mechanisms on separate
+      // channels, so this must not trigger a recompute.
+      syncControls();
+      syncTransport();
     };
 
     var win = el('sgWin');
@@ -6805,6 +6849,7 @@ var SeqEyesPanel = (function () {
         decimationFactor: currentSpec ? currentSpec.decimationFactor : null,
         includeRf: params.includeRf,
         rfScale: params.rfScale,
+        rfMix: params.rfMix,
         imageChannel: activeImageChannel(),
         rfIncluded: !!(currentSpec && currentSpec.rfIncluded),
         rfMaxValue: currentSpec ? (currentSpec.rfMaxValue || 0) : 0,

@@ -915,6 +915,12 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                             sampleRate,
                             channelWeights: msg.channelWeights,
                             source: msg.source === 'dGdt' ? 'dGdt' : 'G',
+                            includeRf: msg.includeRf === true,
+                            rfScale: Number(msg.rfScale),
+                            rfThermoWeight: Number(msg.rfThermoWeight),
+                            rfControlWeight: Number(msg.rfControlWeight),
+                            rfEdgeMode: msg.rfEdgeMode === 'absolute' ? 'absolute' : 'signed',
+                            rfMix: Number(msg.rfMix),
                         },
                     );
                     panel.webview.postMessage({

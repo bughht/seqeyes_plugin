@@ -63,6 +63,8 @@ export function serializeGradientSound(sound: GradientSound): Record<string, unk
         startSec: sound.startSec,
         endSec: sound.endSec,
         silent: sound.silent,
+        rfIncluded: sound.rfIncluded,
+        warnings: sound.warnings,
         leftB64: encodeF32B64(sound.left),
         rightB64: encodeF32B64(sound.right),
     };

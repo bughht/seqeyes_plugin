@@ -113,6 +113,8 @@ function deserializeGradientSound(payload){
     startSec:payload.startSec,
     endSec:payload.endSec,
     silent:!!payload.silent,
+    rfIncluded:!!payload.rfIncluded,
+    warnings:payload.warnings||[],
     left:decodeB64F32(payload.leftB64,payload.n),
     right:decodeB64F32(payload.rightB64,payload.n)
   };
