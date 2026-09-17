@@ -860,6 +860,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     overlap: Number(params.overlap) || 0.75,
                     oversample: Number(params.oversample) || 3,
                     targetColumns: Number(params.targetColumns) || 256,
+                    includeRf: params.includeRf === true,
                 });
                 // Unlike k-space there is no dangerous override here: the
                 // spectrogram is scoped to the visible window, so the remedy is

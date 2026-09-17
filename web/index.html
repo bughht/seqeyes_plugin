@@ -124,6 +124,19 @@
       <option value="G" selected>G</option>
       <option value="dGdt">dG/dt</option>
     </select>
+    <select id="sgImageChannel" aria-label="Image channel" title="Which matrix the colourmapped image shows">
+      <option value="rss" selected>Σ</option>
+      <option value="gx">Gx</option>
+      <option value="gy">Gy</option>
+      <option value="gz">Gz</option>
+      <option value="rf" hidden>RF proxy</option>
+      <option value="rfThermo" hidden>RF thermo</option>
+      <option value="rfControl" hidden>RF ctrl</option>
+    </select>
+    <div class="sep"></div>
+    <button id="sgRf" type="button" aria-pressed="false" title="Add the RF acoustic proxy channels: a reduced-order research model (thermoacoustic d|B1|²/dt plus a hypothesised TX-switching term). Uncalibrated and on its own relative scale — not comparable with the gradient channels.">RF proxy</button>
+    <span class="ulbl">scale</span>
+    <input type="number" id="sgRfScale" min="0" step="0.1" value="1" disabled aria-label="RF amplitude scale" title="RF amplitude scale, as a protocol flip-angle scale applies it. 0 keeps RF-event timing but removes transmit power, which isolates the switching term.">
     <div class="sep"></div>
     <span class="ulbl">f</span>
     <input type="number" id="sgFMin" min="0" step="50" value="0" aria-label="Minimum frequency in hertz" title="Lowest displayed frequency (Hz)">
@@ -2811,7 +2824,8 @@ window.SeqEyesPanelHost={
     var estimate=Pulseq.estimateSpectrogramCost({
       startSec:startSec,endSec:endSec,gradientRaster:GR,
       fMaxHz:params.fMaxHz,windowSamples:params.windowSamples||512,
-      overlap:params.overlap,oversample:params.oversample,targetColumns:params.targetColumns
+      overlap:params.overlap,oversample:params.oversample,targetColumns:params.targetColumns,
+      includeRf:params.includeRf===true
     });
     var refusal=Pulseq.spectrogramBudgetRefusal(estimate);
     if(refusal){SeqEyesPanel.deliverSpectrogramError(requestId,refusal);return;}

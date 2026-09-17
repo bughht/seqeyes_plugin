@@ -210,7 +210,7 @@ export interface SpectrogramCostEstimate {
     columns: number;
     /** Zero-padded FFT length. */
     fftPoints: number;
-    /** Cells across the four stored matrices (gx, gy, gz, rss). */
+    /** Cells across every stored matrix: four gradient, plus three for RF. */
     totalCells: number;
     /** Integer decimation factor the plan will use. */
     decimationFactor: number;
@@ -225,6 +225,8 @@ export interface SpectrogramCostInput {
     overlap: number;
     oversample: number;
     targetColumns: number;
+    /** RF proxy channels add three more matrices to store and transport. */
+    includeRf?: boolean;
 }
 
 /**
@@ -261,7 +263,7 @@ export function estimateSpectrogramCost(input: SpectrogramCostInput): Spectrogra
         decimatedSamples,
         columns,
         fftPoints,
-        totalCells: columns * bins * 4,
+        totalCells: columns * bins * (input.includeRf ? 7 : 4),
         decimationFactor,
     };
 }
