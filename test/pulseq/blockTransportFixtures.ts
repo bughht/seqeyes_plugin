@@ -33,9 +33,17 @@ export interface UnpackApi {
  * unpacker the extension actually bundles, not a re-implementation of it.
  */
 export function loadWebviewAssets<T>(files: string[], extraGlobals: Record<string, unknown> = {}): T {
+    /* Only the typed arrays and a handful of helpers are handed over from the
+       host, so buffers cross the boundary as host objects the assertions can
+       compare.  Everything else the assets need — Object, String, JSON,
+       parseFloat — is already present as the new context's own intrinsics, and
+       injecting the host's copies instead detaches the global binding from the
+       prototype that literals inside the VM actually get. `toEqual` compares
+       exactly that, so overriding them turns passing tests into confusing
+       deep-equality failures. */
     const context = createContext({
         Float64Array, Float32Array, Int32Array, Uint32Array, ArrayBuffer,
-        Infinity, isFinite, Math, Error, JSON, Object, String, parseFloat,
+        Infinity, isFinite, Math, Error,
         ...extraGlobals,
     });
     for (const file of files) {
