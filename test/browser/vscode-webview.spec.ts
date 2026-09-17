@@ -106,7 +106,13 @@ test('consumes exact detail and a band over the extension message contract', asy
     notices: [],
   }, { sampleTimes: b64(packed.sampleTimes), sampleValues: b64(packed.sampleValues) });
 
-  await expect.poll(async () => (await posted(page)).length, { timeout: 10_000 }).toBeGreaterThan(0);
+  // Wait for this specific command rather than for any message at all: the
+  // webview also posts unrelated ones on load, and a bare length check passes
+  // on whichever happens to arrive first.
+  await expect.poll(
+    async () => (await posted(page)).some(m => m.command === 'requestWaveformDetail'),
+    { timeout: 10_000 },
+  ).toBe(true);
   const request = (await posted(page)).find(m => m.command === 'requestWaveformDetail');
   expect(request, 'the webview must ask for detail once a sequence is loaded').toBeTruthy();
   // It must ask for the window it is showing, and for columns to draw it with.
@@ -115,6 +121,14 @@ test('consumes exact detail and a band over the extension message contract', asy
   // Regression: this field was dropped by the extension adapter, which left the
   // provider building every band from a single column.
   expect(Number(request!.columns)).toBeGreaterThan(100);
+
+  // The webview also asks the host to re-apply the ASC profile it remembered
+  // from a previous session; it can only do that once a sequence has landed,
+  // because PNS needs the sequence's blocks.
+  await expect.poll(
+    async () => (await posted(page)).some(m => m.command === 'restoreAsc'),
+    { timeout: 10_000 },
+  ).toBe(true);
 
   const before = await canvasShot(page);
 

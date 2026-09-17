@@ -1,4 +1,13 @@
-var kOpen=false, kView="3d";
+/* Camera presets, declared first because the remembered projection is
+   validated against this list and seeds the opening rotation. */
+var K_VIEWS=["3d","xy","xz","yz"];
+function kProjectionAngles(view){
+  if(view==="xy")return{x:0,y:0};
+  if(view==="xz")return{x:-Math.PI/2,y:0};
+  if(view==="yz")return{x:0,y:Math.PI/2};
+  return{x:-0.5,y:0.7};   // 3d — default perspective
+}
+var kOpen=false, kView=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.kspaceProjection,K_VIEWS,"3d");
 var kSpaceTrajectoryDrawCount=0,kSpaceOverlayDrawCount=0;
 /**
  * Pan is a screen offset in CSS pixels, applied after rotation; the rotation
@@ -12,7 +21,8 @@ var kSpaceTrajectoryDrawCount=0,kSpaceOverlayDrawCount=0;
  */
 var kPanX=0, kPanY=0, kScl=1;
 var kAutoFit=true;
-var kRotX=-0.5, kRotY=0.7;           // default 3D perspective
+var _kOpeningAngles=kProjectionAngles(kView);
+var kRotX=_kOpeningAngles.x, kRotY=_kOpeningAngles.y;   // matches the restored projection
 var kDragging=false, kDragPrev=null, kDragBtn=0;
 /**
  * Pending coalesced drag redraw.  A drag updates the rotation on every
@@ -22,7 +32,10 @@ var kDragging=false, kDragPrev=null, kDragBtn=0;
  */
 var _kDragRaf=0;
 var kCanvas=document.getElementById("kc"), kCtx=kCanvas.getContext("2d");
-var kDotSize=2, kUnit="cyc";         // cyc=1/m, rad=rad/m
+/* Clamped to the slider's own range so a hand-edited key cannot produce a dot
+   size the control has no position for. */
+var kDotSize=Math.max(1,Math.min(12,Math.round(SeqEyesPrefs.getNum(SeqEyesPrefs.KEYS.kspaceDotSize,2)))),
+    kUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.kspaceUnit,["cyc","rad"],"cyc");   // cyc=1/m, rad=rad/m
 
 // ── Smooth animation targets ──────────────────────────────────────────
 var _tRotX=kRotX, _tRotY=kRotY, _tScl=kScl, _tPanX=kPanX, _tPanY=kPanY;
@@ -61,17 +74,22 @@ function setKSpaceTarget(rx, ry, s, panX, panY, instant) {
     startKSpaceAnim();
   }
 }
-document.getElementById("kdot").oninput=function(){kDotSize=parseInt(this.value);drawKs();};
-document.getElementById("kunit").onclick=function(){
-  kUnit=kUnit==="cyc"?"rad":"cyc";this.textContent=kUnit==="cyc"?"Unit: 1/m":"Unit: rad/m";drawKs();
+function kUnitLabel(){return kUnit==="cyc"?"Unit: 1/m":"Unit: rad/m";}
+var kDotSlider=document.getElementById("kdot"),kUnitBtn=document.getElementById("kunit");
+kDotSlider.value=String(kDotSize);
+kUnitBtn.textContent=kUnitLabel();
+kDotSlider.oninput=function(){
+  kDotSize=parseInt(this.value);SeqEyesPrefs.set(SeqEyesPrefs.KEYS.kspaceDotSize,kDotSize);drawKs();
+};
+kUnitBtn.onclick=function(){
+  kUnit=kUnit==="cyc"?"rad":"cyc";this.textContent=kUnitLabel();
+  SeqEyesPrefs.set(SeqEyesPrefs.KEYS.kspaceUnit,kUnit);drawKs();
 };
 
 /* ── Theme selector (toolbar) ─────────────────────────────────────── */
 var themeSelect=document.getElementById("theme");
 var systemThemeQuery=(typeof window.matchMedia==="function")?window.matchMedia("(prefers-color-scheme: dark)"):null;
 var inVsCode=!!vscApi;
-function storageGet(k){try{return localStorage.getItem(k);}catch(_){return null;}}
-function storageSet(k,v){try{localStorage.setItem(k,v);}catch(_){}}
 function clearThemeClasses(){
   var b=document.body,rm=[];
   b.classList.forEach(function(c){if(c.indexOf("theme-")===0)rm.push(c);});
@@ -91,11 +109,11 @@ function applyThemeChoice(value,persist){
     document.body.classList.add(systemThemeQuery&&systemThemeQuery.matches?"theme-github":"theme-githublight");
   }
   if(themeSelect&&themeSelect.value!==value)themeSelect.value=value;
-  if(persist)storageSet("seqeyes.theme",value);
+  if(persist)SeqEyesPrefs.set(SeqEyesPrefs.KEYS.theme,value);
   redrawAfterThemeChange();
 }
 if(themeSelect){
-  var savedTheme=storageGet("seqeyes.theme")||"system";
+  var savedTheme=SeqEyesPrefs.get(SeqEyesPrefs.KEYS.theme)||"system";
   if(!themeSelect.querySelector('option[value="'+savedTheme+'"]'))savedTheme="system";
   themeSelect.onchange=function(){applyThemeChoice(this.value,true);};
   applyThemeChoice(savedTheme,false);
@@ -297,25 +315,28 @@ function uploadKSpaceGPU(){
    off -> k-space -> spectrogram -> off, and only the off -> k-space
    transition passes through the safety gate. `kOpen` is still the flag the
    drawing and interaction code reads, and panel.js keeps it in sync. */
-document.getElementById("kax").textContent="3D";
-document.getElementById("krst").onclick=function(){
+/* A free rotation is no longer any of the axis presets.  Guarded on the
+   current value so the drag handlers that call it on every move write once. */
+function kLeavePreset(){
+  if(kView==="3d")return;
   kView="3d";
   document.getElementById("kax").textContent="3D";
-  var af=_kAutoFitVals();
-  setKSpaceTarget(-0.5, 0.7, af.scl, af.panX, af.panY, false);
-};
+  SeqEyesPrefs.set(SeqEyesPrefs.KEYS.kspaceProjection,"3d");
+}
+/* One place that moves the camera to a named projection, so the reset button,
+   the cycle button and the restore path cannot drift apart on the angles. */
+function applyKProjection(view,persist){
+  kView=view;
+  var angles=kProjectionAngles(view),af=_kAutoFitVals();
+  document.getElementById("kax").textContent=view.toUpperCase();
+  if(persist)SeqEyesPrefs.set(SeqEyesPrefs.KEYS.kspaceProjection,view);
+  setKSpaceTarget(angles.x, angles.y, af.scl, af.panX, af.panY, false);
+}
+document.getElementById("kax").textContent=kView.toUpperCase();
+document.getElementById("krst").onclick=function(){applyKProjection("3d",true);};
 // Camera presets: smoothly rotate to look straight down an axis
 document.getElementById("kax").onclick=function(){
-  var views=["3d","xy","xz","yz"];var idx=views.indexOf(kView);
-  kView=views[(idx+1)%4];
-  var trx=_tRotX, tr=_tRotY;
-  if(kView==="xy"){trx=0; tr=0;}
-  else if(kView==="xz"){trx=-Math.PI/2; tr=0;}
-  else if(kView==="yz"){trx=0; tr=Math.PI/2;}
-  else{trx=-0.5; tr=0.7;}  // 3d — default perspective
-  document.getElementById("kax").textContent=kView.toUpperCase();
-  var af=_kAutoFitVals();
-  setKSpaceTarget(trx, tr, af.scl, af.panX, af.panY, false);
+  applyKProjection(K_VIEWS[(K_VIEWS.indexOf(kView)+1)%K_VIEWS.length],true);
 };
 
 function resizeKc(){
@@ -449,7 +470,7 @@ window.addEventListener("mousemove",function(e){
   if(!kDragging||!kDragPrev||!kOpen||panelMode!=="kspace")return;
   var dx=e.clientX-kDragPrev.x, dy=e.clientY-kDragPrev.y;
   kDragPrev={x:e.clientX,y:e.clientY};
-  if(kView!=="3d"){kView="3d";document.getElementById("kax").textContent="3D";}
+  kLeavePreset();
   if(kDragBtn===0){
     // left drag = instant rotate (no lerp — feels responsive)
     kRotY+=dx*0.008; kRotX-=dy*0.008;
@@ -492,7 +513,7 @@ kCanvas.addEventListener("touchstart",function(e){
 },{passive:false});
 kCanvas.addEventListener("touchmove",function(e){
   if(!_kTouchActive||!_kTouchPrev||!kOpen||panelMode!=="kspace")return;
-  if(kView!=="3d"){kView="3d";document.getElementById("kax").textContent="3D";}
+  kLeavePreset();
   if(e.touches.length===1&&_kTouchBtn===0){
     // 1‑finger rotate
     var dx=e.touches[0].clientX-_kTouchPrev.x;
@@ -607,8 +628,8 @@ window.addEventListener("resize",function(){if(kOpen){resizeKc();drawKs();}});
    applyLayoutMode()/setPanelMode() read it back on every open. */
 function persistPanelSize(){
   try{
-    if(typeof layoutMode!=='undefined'&&layoutMode==='vertical')localStorage.setItem('seqeyes.panelHeight',String(kResizeH));
-    else localStorage.setItem('seqeyes.panelWidth',String(kResizeW));
+    if(typeof layoutMode!=='undefined'&&layoutMode==='vertical')SeqEyesPrefs.set('seqeyes.panelHeight',kResizeH);
+    else SeqEyesPrefs.set('seqeyes.panelWidth',kResizeW);
   }catch(_){/* private mode */}
 }
 

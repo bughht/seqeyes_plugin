@@ -80,6 +80,8 @@ import type { DecodedBlock, PulseqSequence } from '../pulseq/types';
 
 const VIEW_TYPE = 'seqeyes.sequenceViewer';
 const WINDOW_DETAIL_CACHE_BYTES = 64 * 1024 * 1024;
+/** globalState key holding the path of the ASC profile last loaded by the user. */
+const ASC_MEMORY_KEY = 'seqeyes.lastAscUri';
 
 export interface SeqEyesDiagnosticLoadState {
     activeUri: string;
@@ -217,6 +219,32 @@ class SeqDocument implements vscode.CustomDocument {
     }
 }
 
+/**
+ * The ASC profile the user last picked, remembered as a path rather than as
+ * parsed contents: the file is the source of truth, it can be large, and
+ * re-reading it picks up edits.  Global rather than workspace state because a
+ * gradient profile describes the scanner, not the project.
+ *
+ * A stored value that no longer parses as a URI reads as nothing, so a
+ * corrupted entry costs one restore instead of throwing on every sequence.
+ */
+export function rememberedAscUri(memory: vscode.Memento): vscode.Uri | undefined {
+    const stored = memory.get<string>(ASC_MEMORY_KEY);
+    if (!stored) return undefined;
+    try {
+        return vscode.Uri.parse(stored, true);
+    } catch {
+        return undefined;
+    }
+}
+
+export async function rememberAscUri(
+    memory: vscode.Memento,
+    uri: vscode.Uri | undefined,
+): Promise<void> {
+    await memory.update(ASC_MEMORY_KEY, uri ? uri.toString() : undefined);
+}
+
 // ─── Provider class ───────────────────────────────────────────────────────
 
 export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<SeqDocument> {
@@ -230,6 +258,14 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
     }
 
     constructor(private readonly _ctx: vscode.ExtensionContext) { }
+
+    private _rememberedAscUri(): vscode.Uri | undefined {
+        return rememberedAscUri(this._ctx.globalState);
+    }
+
+    private async _rememberAscUri(uri: vscode.Uri | undefined): Promise<void> {
+        await rememberAscUri(this._ctx.globalState, uri);
+    }
 
     openCustomDocument(
         uri: vscode.Uri,
@@ -302,6 +338,78 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                 );
                 return coarse;
             }
+        };
+
+        /**
+         * Read, parse and publish one ASC profile.  Shared by the file picker
+         * and by the restore path so the two cannot drift on the
+         * partial-success contract: a file may carry PNS coefficients, or an
+         * acoustic resonance table, or both, and failing one must not discard
+         * the other.
+         *
+         * `silent` suppresses the error messages, because a restore the user
+         * did not ask for has no business reporting that a file they may have
+         * moved months ago is missing.
+         */
+        const applyAscUri = async (uri: vscode.Uri, silent: boolean): Promise<boolean> => {
+            try {
+                const profile = parseAscProfile(await readAscProfileText(uri));
+                activeAcousticBands = profile.acoustic;
+                panel.webview.postMessage({
+                    type: 'ascProfileData',
+                    fileName: uriFileName(uri),
+                    acoustic: profile.acoustic,
+                    hasPns: !!profile.pns,
+                    notice: profile.notice,
+                });
+                if (profile.pns) {
+                    activePnsHardware = profile.pns;
+                    const pns = calculatePnsForDisplay(profile.pns);
+                    panel.webview.postMessage({ type: 'pnsData', pns: serializePns(pns) });
+                } else if (!profile.acoustic.length) {
+                    if (!silent) {
+                        panel.webview.postMessage({
+                            type: 'pnsError',
+                            message: profile.pnsError
+                                ?? 'This ASC contains neither PNS coefficients nor acoustic resonances.',
+                        });
+                    }
+                    return false;
+                } else if (!silent) {
+                    panel.webview.postMessage({ type: 'pnsSelectionCancelled' });
+                }
+                return true;
+            } catch (err) {
+                if (!silent) {
+                    panel.webview.postMessage({
+                        type: 'pnsError',
+                        message: err instanceof Error ? err.message : String(err),
+                    });
+                }
+                return false;
+            }
+        };
+
+        /**
+         * Re-apply the ASC the user last picked, so units, theme and profile
+         * all survive a restart rather than only the first two.  Only a path
+         * is remembered; the file is re-read, so an edited profile takes
+         * effect on the next open.  A path that no longer resolves is dropped
+         * without a word — the alternative is nagging about a file the user
+         * may have deliberately moved.
+         */
+        const restoreRememberedAsc = async (): Promise<void> => {
+            if (activePnsHardware || activeAcousticBands.length) return;
+            const remembered = this._rememberedAscUri();
+            if (!remembered) return;
+            allActiveBlocks();
+            try {
+                await vscode.workspace.fs.stat(remembered);
+            } catch {
+                await this._rememberAscUri(undefined);
+                return;
+            }
+            if (!await applyAscUri(remembered, true)) await this._rememberAscUri(undefined);
         };
 
         // ── Core: parse, decode, prepare waveforms, send ──
@@ -684,39 +792,9 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     }
                     return;
                 }
-                try {
-                    const ascText = await readAscProfileText(uris[0]);
-                    // Parse both concerns independently: after the button rename the
-                    // same picker must still succeed for a file that carries only one
-                    // of them, and failing PNS must not discard acoustic bands.
-                    const profile = parseAscProfile(ascText);
-                    activeAcousticBands = profile.acoustic;
-                    panel.webview.postMessage({
-                        type: 'ascProfileData',
-                        fileName: uriFileName(uris[0]),
-                        acoustic: profile.acoustic,
-                        hasPns: !!profile.pns,
-                        notice: profile.notice,
-                    });
-                    if (profile.pns) {
-                        activePnsHardware = profile.pns;
-                        const pns = calculatePnsForDisplay(profile.pns);
-                        panel.webview.postMessage({ type: 'pnsData', pns: serializePns(pns) });
-                    } else if (!profile.acoustic.length) {
-                        panel.webview.postMessage({
-                            type: 'pnsError',
-                            message: profile.pnsError
-                                ?? 'This ASC contains neither PNS coefficients nor acoustic resonances.',
-                        });
-                    } else {
-                        panel.webview.postMessage({ type: 'pnsSelectionCancelled' });
-                    }
-                } catch (err) {
-                    panel.webview.postMessage({
-                        type: 'pnsError',
-                        message: err instanceof Error ? err.message : String(err),
-                    });
-                }
+                if (await applyAscUri(uris[0], false)) await this._rememberAscUri(uris[0]);
+            } else if (msg.command === 'restoreAsc') {
+                await restoreRememberedAsc();
             } else if (msg.command === 'calculatePnsWindow') {
                 if (!activePnsHardware) {
                     panel.webview.postMessage({
@@ -850,12 +928,6 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                         message: err instanceof Error ? err.message : String(err),
                     });
                 }
-            } else if (msg.command === 'requestAcousticBands') {
-                panel.webview.postMessage({
-                    type: 'ascProfileData',
-                    acoustic: activeAcousticBands,
-                    hasPns: !!activePnsHardware,
-                });
             }
         });
     }

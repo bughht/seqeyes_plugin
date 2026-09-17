@@ -32,10 +32,11 @@ export interface UnpackApi {
  * Loading the shipped files is the point: these tests must exercise the
  * unpacker the extension actually bundles, not a re-implementation of it.
  */
-export function loadWebviewAssets<T>(files: string[]): T {
+export function loadWebviewAssets<T>(files: string[], extraGlobals: Record<string, unknown> = {}): T {
     const context = createContext({
         Float64Array, Float32Array, Int32Array, Uint32Array, ArrayBuffer,
-        Infinity, isFinite, Math, Error,
+        Infinity, isFinite, Math, Error, JSON, Object, String, parseFloat,
+        ...extraGlobals,
     });
     for (const file of files) {
         runInContext(readFileSync(join(ASSETS, file), 'utf8'), context);

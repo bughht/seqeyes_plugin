@@ -7,13 +7,29 @@
    the 2-D context, the time→x mapping and the row geometry.  The Python
    viewer loads this file on its own, without the rest of the bundle.
 
-   The DOM and localStorage are only touched inside functions, so the tests
-   can run the shipped file in a bare VM context.
+   The DOM and storage are only touched inside functions, so the tests can
+   run the shipped file in a bare VM context.
 
    A "labels" argument is anything with `names` and `kinds`: the popup and the
    styles need nothing more, so ⚙ works before the per-ADC values arrive. */
 var SeqEyesLabels = (function () {
   var STORAGE_KEY = 'seqeyes.labelStyles.v1';
+
+  /* The Python viewer inlines this file on its own, so the bundle's
+     preferences gateway may not be there.  Go through it when it is, so the
+     settings popover's master switch and Forget button cover marker styles
+     too, and fall back to raw storage when it is not. */
+  function prefsApi() { return (typeof SeqEyesPrefs !== 'undefined') ? SeqEyesPrefs : null; }
+  function readStored(key) {
+    var api = prefsApi();
+    if (api) return api.get(key);
+    try { return localStorage.getItem(key); } catch (_) { return null; }
+  }
+  function writeStored(key, value) {
+    var api = prefsApi();
+    if (api) { api.set(key, value); return; }
+    try { localStorage.setItem(key, value); } catch (_) {}
+  }
   // Tableau 10: distinct hues that stay readable on light and dark themes.
   var PALETTE = ['#4e79a7', '#f28e2b', '#e15759', '#76b7b2', '#59a14f', '#edc948', '#b07aa1', '#ff9da7', '#9c755f', '#bab0ac'];
   var SHAPES = ['circle', 'square', 'triangle', 'triangleDown', 'diamond', 'cross', 'plus'];
@@ -74,14 +90,14 @@ var SeqEyesLabels = (function () {
     if (overrides) return overrides;
     overrides = {};
     try {
-      var saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+      var saved = JSON.parse(readStored(STORAGE_KEY) || '{}');
       if (saved && typeof saved === 'object') overrides = saved;
     } catch (_) {}
     return overrides;
   }
 
   function writeOverrides() {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(overrides)); } catch (_) {}
+    writeStored(STORAGE_KEY, JSON.stringify(overrides));
   }
 
   /* Defaults follow the label's position in its sequence, so one sequence's

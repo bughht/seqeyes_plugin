@@ -20,18 +20,12 @@ var SeqEyesPanel = (function () {
   var host = null;
   var wired = false;
 
-  /* ── Persistence ──────────────────────────────────────────────────── */
-  function get(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
-  function set(key, value) { try { localStorage.setItem(key, value); } catch (e) { /* private mode */ } }
-  function getNum(key, fallback) {
-    var raw = get(key);
-    var value = raw === null ? NaN : parseFloat(raw);
-    return isFinite(value) ? value : fallback;
-  }
-  function getBool(key, fallback) {
-    var raw = get(key);
-    return raw === null ? fallback : raw === '1';
-  }
+  /* ── Persistence ──────────────────────────────────────────────────────
+     Delegated so the master switch in the settings popover governs the
+     spectrogram parameters too; this module used to own a fourth copy of
+     the same get/set pair. */
+  var get = SeqEyesPrefs.get, set = SeqEyesPrefs.set;
+  var getNum = SeqEyesPrefs.getNum, getBool = SeqEyesPrefs.getBool;
 
   /* ── Parameters and view state ────────────────────────────────────── */
   var params = {

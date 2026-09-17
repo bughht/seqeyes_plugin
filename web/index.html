@@ -80,6 +80,8 @@
 <span class="ulbl">Grad:</span><select id="gu"><option value="Hz/m" selected>Hz/m</option><option value="mT/m">mT/m</option><option value="G/cm">G/cm</option></select>
 <div class="sep"></div>
 <label class="li" id="bbt" title="Toggle block boundary lines"><input type="checkbox" id="bbc" style="margin:0;cursor:pointer"><span style="font-size:11px;color:var(--fg)">Blocks</span></label>
+<div class="sep"></div>
+<button id="prefsBtn" class="lbl-gear" type="button" aria-haspopup="dialog" aria-expanded="false" title="Settings: choose whether SeqEyes remembers your theme, units and ASC profile">⚙</button>
 </span>
 <div class="sep"></div><div class="lg" id="legend"></div>
 <button id="panelBtn" type="button" aria-pressed="false" title="Show the k-space trajectory" style="margin-left:4px">K-Space / Spectrum</button>
@@ -204,8 +206,12 @@ var CH_ORDER=[0,1,2,3,4,5,6,11,7,8,9,10];
 var ox=0,sc=1;
 var dr=false,dsx=0,dso=0;
 var cursorT=0,cursorActive=false;
-var timeUnit='ms',gradUnit='Hz/m';
-var showBB=false;
+/* Validated against the dropdowns themselves, so a stale key cannot leave
+   the viewer in a state its own toolbar cannot express. */
+function selectOptionValues(sel){var out=[],i;if(!sel)return out;for(i=0;i<sel.options.length;i++)out.push(sel.options[i].value);return out;}
+var timeUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.timeUnit,selectOptionValues(tuSel),'ms'),
+    gradUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.gradUnit,selectOptionValues(guSel),'Hz/m');
+var showBB=SeqEyesPrefs.getBool(SeqEyesPrefs.KEYS.showBlocks,false);
 var GAMMA=42576;
 var ampZoom=[1,1,1,1,1,1,1];
 ampZoom[7]=1;ampZoom[8]=1;ampZoom[9]=1;ampZoom[10]=1;ampZoom[11]=1;
@@ -223,10 +229,10 @@ function viewerNoticeMessages(value){
   for(var i=0;i<values.length;i++)if(values[i])messages.push(String(values[i]));
   return messages;
 }
-function readViewerNoticesCollapsed(){try{var saved=localStorage.getItem('seqeyes.viewerNoticesCollapsed');return saved===null?isMobileSafetyLayout():saved==='1';}catch(_){return isMobileSafetyLayout();}}
+function readViewerNoticesCollapsed(){var saved=SeqEyesPrefs.get(SeqEyesPrefs.KEYS.noticesCollapsed);return saved===null?isMobileSafetyLayout():saved==='1';}
 function setViewerNoticesCollapsed(collapsed){
   viewerNoticesCollapsed=!!collapsed;
-  try{localStorage.setItem('seqeyes.viewerNoticesCollapsed',viewerNoticesCollapsed?'1':'0');}catch(_){}
+  SeqEyesPrefs.setBool(SeqEyesPrefs.KEYS.noticesCollapsed,viewerNoticesCollapsed);
   renderViewerNotices();
 }
 function renderViewerNotices(){
@@ -379,9 +385,9 @@ function applyLayoutMode(){
     if(panelOpen){right.style.width=panelStoredSize('seqeyes.panelWidth',500)+'px';}
   }
 }
-function panelStoredSize(key,fallback){try{var v=parseFloat(localStorage.getItem(key));return isFinite(v)?v:fallback;}catch(_){return fallback;}}
+function panelStoredSize(key,fallback){return SeqEyesPrefs.getNum(key,fallback);}
 function panelMaxHeight(){var main=document.getElementById('main'),available=main?main.getBoundingClientRect().height:window.innerHeight;return Math.max(100,available-120);}
-function panelStoredHeight(){var main=document.getElementById('main'),height=main?main.getBoundingClientRect().height:window.innerHeight,raw,max=panelMaxHeight(),min=Math.min(180,max);try{var v=parseFloat(localStorage.getItem('seqeyes.panelHeight'));raw=isFinite(v)?v:(isMobileSafetyLayout()?height*.58:300);}catch(_){raw=isMobileSafetyLayout()?height*.58:300;}return Math.max(min,Math.min(raw,max));}
+function panelStoredHeight(){var main=document.getElementById('main'),height=main?main.getBoundingClientRect().height:window.innerHeight,max=panelMaxHeight(),min=Math.min(180,max);var raw=SeqEyesPrefs.getNum(SeqEyesPrefs.KEYS.panelHeight,isMobileSafetyLayout()?height*.58:300);return Math.max(min,Math.min(raw,max));}
 function refreshLayout(){
   var changed=detectLayoutMode();
   if(changed){
@@ -419,8 +425,9 @@ function buildLegend(){
   });
 }
 buildLegend();
-tuSel.onchange=function(){timeUnit=tuSel.value;draw();};
-guSel.onchange=function(){gradUnit=guSel.value;draw();};
+tuSel.value=timeUnit;guSel.value=gradUnit;
+tuSel.onchange=function(){timeUnit=tuSel.value;SeqEyesPrefs.set(SeqEyesPrefs.KEYS.timeUnit,timeUnit);draw();};
+guSel.onchange=function(){gradUnit=guSel.value;SeqEyesPrefs.set(SeqEyesPrefs.KEYS.gradUnit,gradUnit);draw();};
 
 /* ── Coordinate mapping ──────────────────────────────────────────────── */
 function visChannels(){var v=[];for(var k=0;k<CH_ORDER.length;k++)if(chVis[CH_ORDER[k]])v.push(CH_ORDER[k]);return v;}
@@ -804,6 +811,11 @@ function loadSequenceSource(sourceBytes,fileName,parseSource){
     setExportButtonEnabled(true);
     document.title='SeqEyes: '+name.replace(/\.(?:seq|bseq)$/i,'');
     if(splash)splash.style.display='none';
+    /* An ASC that is already loaded — picked this session or restored from the
+       last one — describes the scanner, not the sequence, so it applies to
+       whatever just opened.  Without this the toolbar would keep saying
+       "ASC: …" while the PNS row stayed unavailable. */
+    if(pnsHardware){pnsBusy=true;if(pnsBtn)pnsBtn.disabled=true;calculatePnsWithFallback();}
     SeqEyesPanel.onSequenceLoaded();
     requestAnimationFrame(function(){refreshLayout();draw();drawKs();drawMinimap();});
     return true;
@@ -1391,6 +1403,9 @@ document.getElementById('ascInput').onchange=function(){
            carry only one of them, and failing PNS must not discard bands. */
         var profile=Pulseq.parseAscProfile(reader.result);
         applyAscProfile(file.name,profile);
+        /* A browser file input hands over a File with no re-openable path, so
+           the text is the only thing a later session can restore from. */
+        SeqEyesPrefs.setAsc(file.name,String(reader.result));
         if(profile.pns){
           pnsHardware=profile.pns;
           calculatePnsWithFallback();
@@ -2246,7 +2261,9 @@ document.getElementById('zi').onclick=function(){if(zoomAtCenter(1.5))scheduleVi
 document.getElementById('zo').onclick=function(){if(zoomAtCenter(1/1.5))scheduleViewerDraw(true);};
 document.getElementById('zf').onclick=function(){fit();drawMinimap();};
 document.getElementById('zr').onclick=function(){fit();drawMinimap();};
-document.getElementById('bbc').onchange=function(){showBB=this.checked;draw();};
+var bbCheck=document.getElementById('bbc');
+bbCheck.checked=showBB;
+bbCheck.onchange=function(){showBB=this.checked;SeqEyesPrefs.setBool(SeqEyesPrefs.KEYS.showBlocks,showBB);draw();};
 
 /* ── Minimap mouse ───────────────────────────────────────────────────── */
 mmCanvas.addEventListener('mousedown',function(e){mmDrag=true;scrollMinimapToMouse(e);e.preventDefault();});
@@ -2297,13 +2314,21 @@ function scrollMinimapToMouse(e){
 /* ═══════════════════════════════════════════════════════════════════════
    K-SPACE VIEWER  (identical to js_kspace.ts)
    ═══════════════════════════════════════════════════════════════════════ */
-var kOpen=false, kView="3d";
+var K_VIEWS=["3d","xy","xz","yz"];
+function kProjectionAngles(view){
+  if(view==="xy")return{x:0,y:0};
+  if(view==="xz")return{x:-Math.PI/2,y:0};
+  if(view==="yz")return{x:0,y:Math.PI/2};
+  return{x:-0.5,y:0.7};   // 3d — default perspective
+}
+var kOpen=false, kView=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.kspaceProjection,K_VIEWS,"3d");
 var kSpaceTrajectoryDrawCount=0,kSpaceOverlayDrawCount=0;
 /* Pan is a screen offset in CSS px applied after rotation; the pivot is k=0
    and never moves. See plans/todo/KSPACE_ROTATION_CENTER.md. */
 var kPanX=0, kPanY=0, kScl=1;
 var kAutoFit=true;
-var kRotX=-0.5, kRotY=0.7;
+var _kOpeningAngles=kProjectionAngles(kView);
+var kRotX=_kOpeningAngles.x, kRotY=_kOpeningAngles.y;   // matches the restored projection
 var kDragging=false, kDragPrev=null, kDragBtn=0;
 /* One coalesced drag redraw per frame; the inertial path is already rAF-driven. */
 var _kDragRaf=0;
@@ -2312,22 +2337,26 @@ function scheduleKsDragDraw(){
   _kDragRaf=requestAnimationFrame(function(){_kDragRaf=0;drawKsFast();});
 }
 var kCanvas=document.getElementById("kc"), kCtx=kCanvas.getContext("2d");
-var kDotSize=2, kUnit="cyc";
+var kDotSize=Math.max(1,Math.min(12,Math.round(SeqEyesPrefs.getNum(SeqEyesPrefs.KEYS.kspaceDotSize,2)))),
+    kUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.kspaceUnit,["cyc","rad"],"cyc");
 // Smooth animation
 var _tRotX=kRotX, _tRotY=kRotY, _tScl=kScl, _tPanX=kPanX, _tPanY=kPanY;
 var _kAnimId=null, _kEasing=0.12;
 function startKSpaceAnim(){if(_kAnimId||kDragging)return;function t(){var c=false,e=0.0005;if(Math.abs(_tRotX-kRotX)>e){kRotX+=(_tRotX-kRotX)*_kEasing;c=true}if(Math.abs(_tRotY-kRotY)>e){kRotY+=(_tRotY-kRotY)*_kEasing;c=true}if(Math.abs(_tScl-kScl)>0.001){kScl+=(_tScl-kScl)*_kEasing;c=true}if(Math.abs(_tPanX-kPanX)>0.01){kPanX+=(_tPanX-kPanX)*_kEasing;c=true}if(Math.abs(_tPanY-kPanY)>0.01){kPanY+=(_tPanY-kPanY)*_kEasing;c=true}if(c){drawKsFast();_kAnimId=requestAnimationFrame(t)}else{kRotX=_tRotX;kRotY=_tRotY;kScl=_tScl;kPanX=_tPanX;kPanY=_tPanY;_kAnimId=null;drawKsFast()}}_kAnimId=requestAnimationFrame(t)}
 function setKSpaceTarget(rx,ry,s,panX,panY,inst){if(inst){kRotX=_tRotX=rx;kRotY=_tRotY=ry;kScl=_tScl=s;kPanX=_tPanX=panX;kPanY=_tPanY=panY;drawKs()}else{_tRotX=rx;_tRotY=ry;_tScl=s;_tPanX=panX;_tPanY=panY;startKSpaceAnim()}}
-document.getElementById("kdot").oninput=function(){kDotSize=parseInt(this.value);drawKs();};
-document.getElementById("kunit").onclick=function(){
-  kUnit=kUnit==="cyc"?"rad":"cyc";this.textContent=kUnit==="cyc"?"Unit: 1/m":"Unit: rad/m";drawKs();
+function kUnitLabel(){return kUnit==="cyc"?"Unit: 1/m":"Unit: rad/m";}
+var kDotSlider=document.getElementById("kdot"),kUnitBtn=document.getElementById("kunit");
+kDotSlider.value=String(kDotSize);
+kUnitBtn.textContent=kUnitLabel();
+kDotSlider.oninput=function(){kDotSize=parseInt(this.value);SeqEyesPrefs.set(SeqEyesPrefs.KEYS.kspaceDotSize,kDotSize);drawKs();};
+kUnitBtn.onclick=function(){
+  kUnit=kUnit==="cyc"?"rad":"cyc";this.textContent=kUnitLabel();
+  SeqEyesPrefs.set(SeqEyesPrefs.KEYS.kspaceUnit,kUnit);drawKs();
 };
 
 /* ── Theme selector ───────────────────────────────────────────────────── */
 var themeSelect=document.getElementById("theme");
 var systemThemeQuery=(typeof window.matchMedia==="function")?window.matchMedia("(prefers-color-scheme: dark)"):null;
-function storageGet(k){try{return localStorage.getItem(k);}catch(_){return null;}}
-function storageSet(k,v){try{localStorage.setItem(k,v);}catch(_){}}
 function clearThemeClasses(){
   var b=document.body,rm=[];
   b.classList.forEach(function(c){if(c.indexOf("theme-")===0)rm.push(c);});
@@ -2339,12 +2368,12 @@ function applyThemeChoice(value,persist){
   if(value!=="system")document.body.classList.add("theme-"+value);
   else document.body.classList.add(systemThemeQuery&&systemThemeQuery.matches?"theme-github":"theme-githublight");
   if(themeSelect&&themeSelect.value!==value)themeSelect.value=value;
-  if(persist)storageSet("seqeyes.theme",value);
+  if(persist)SeqEyesPrefs.set(SeqEyesPrefs.KEYS.theme,value);
   mmCache=null;draw();drawKs();drawMinimap();
   SeqEyesPanel.onThemeChanged();
 }
 if(themeSelect){
-  var savedTheme=storageGet("seqeyes.theme")||"system";
+  var savedTheme=SeqEyesPrefs.get(SeqEyesPrefs.KEYS.theme)||"system";
   if(!themeSelect.querySelector('option[value="'+savedTheme+'"]'))savedTheme="system";
   themeSelect.onchange=function(){applyThemeChoice(this.value,true);};
   applyThemeChoice(savedTheme,false);
@@ -2405,23 +2434,27 @@ function uploadKSpaceGPU(){
 /* The panel toggle lives in panel.js (shared bundle); this host supplies the
    adapter at the bottom of this file. `kOpen` stays the local flag the
    k-space drawing code reads, and the adapter keeps it in sync. */
-document.getElementById("kax").textContent="3D";
-document.getElementById("krst").onclick=function(){
-  kView="3d";document.getElementById("kax").textContent="3D";
-  var af=_kAutoFitVals();
-  setKSpaceTarget(-0.5,0.7,af.scl,af.panX,af.panY,false);
-};
+/* One place that moves the camera to a named projection, so the reset button,
+   the cycle button and the restore path cannot drift apart on the angles. */
+function applyKProjection(view,persist){
+  kView=view;
+  var angles=kProjectionAngles(view),af=_kAutoFitVals();
+  document.getElementById("kax").textContent=view.toUpperCase();
+  if(persist)SeqEyesPrefs.set(SeqEyesPrefs.KEYS.kspaceProjection,view);
+  setKSpaceTarget(angles.x,angles.y,af.scl,af.panX,af.panY,false);
+}
+/* A free rotation is no longer any of the axis presets.  Guarded on the
+   current value so the drag handlers that call it on every move write once. */
+function kLeavePreset(){
+  if(kView==="3d")return;
+  kView="3d";
+  document.getElementById("kax").textContent="3D";
+  SeqEyesPrefs.set(SeqEyesPrefs.KEYS.kspaceProjection,"3d");
+}
+document.getElementById("kax").textContent=kView.toUpperCase();
+document.getElementById("krst").onclick=function(){applyKProjection("3d",true);};
 document.getElementById("kax").onclick=function(){
-  var views=["3d","xy","xz","yz"];var idx=views.indexOf(kView);
-  kView=views[(idx+1)%4];
-  var trx=_tRotX,tr=_tRotY;
-  if(kView==="xy"){trx=0;tr=0}
-  else if(kView==="xz"){trx=-Math.PI/2;tr=0}
-  else if(kView==="yz"){trx=0;tr=Math.PI/2}
-  else{trx=-0.5;tr=0.7}
-  document.getElementById("kax").textContent=kView.toUpperCase();
-  var af=_kAutoFitVals();
-  setKSpaceTarget(trx,tr,af.scl,af.panX,af.panY,false);
+  applyKProjection(K_VIEWS[(K_VIEWS.indexOf(kView)+1)%K_VIEWS.length],true);
 };
 
 function resizeKc(){
@@ -2492,7 +2525,7 @@ kCanvas.addEventListener("wheel",function(e){e.preventDefault();
 window.addEventListener("mousemove",function(e){
   if(!kDragging||!kDragPrev||!kOpen)return;
   var dx=e.clientX-kDragPrev.x,dy=e.clientY-kDragPrev.y;kDragPrev={x:e.clientX,y:e.clientY};
-  if(kView!=="3d"){kView="3d";document.getElementById("kax").textContent="3D";}
+  kLeavePreset();
   if(kDragBtn===0){kRotY+=dx*0.008;kRotX-=dy*0.008;_tRotY=kRotY;_tRotX=kRotX}
   else{kPanX+=dx;kPanY+=dy;kAutoFit=false;_tPanX=kPanX;_tPanY=kPanY}
   scheduleKsDragDraw();
@@ -2519,7 +2552,7 @@ kCanvas.addEventListener("touchstart",function(e){
 },{passive:false});
 kCanvas.addEventListener("touchmove",function(e){
   if(!_kTouchActive||!_kTouchPrev||!kOpen)return;
-  if(kView!=="3d"){kView="3d";document.getElementById("kax").textContent="3D";}
+  kLeavePreset();
   if(e.touches.length===1&&_kTouchBtn===0){
     var dx=e.touches[0].clientX-_kTouchPrev.x;
     var dy=e.touches[0].clientY-_kTouchPrev.y;
@@ -2566,8 +2599,8 @@ function panelHandleResize(){
 }
 function persistPanelSize(){
   try{
-    if(typeof layoutMode!=='undefined'&&layoutMode==='vertical')localStorage.setItem('seqeyes.panelHeight',String(kResizeH));
-    else localStorage.setItem('seqeyes.panelWidth',String(kResizeW));
+    if(typeof layoutMode!=='undefined'&&layoutMode==='vertical')SeqEyesPrefs.set(SeqEyesPrefs.KEYS.panelHeight,kResizeH);
+    else SeqEyesPrefs.set(SeqEyesPrefs.KEYS.panelWidth,kResizeW);
   }catch(_){/* private mode */}
 }
 /* Seeded from storage: the panel size survives a reload, so starting a drag
@@ -2838,6 +2871,25 @@ function selectPanelWindowBlocks(startSec,endSec){
 }
 
 SeqEyesPanel.install(window.SeqEyesPanelHost);
+SeqEyesPrefsUi.install();
+
+/* Re-apply the ASC profile cached from an earlier session.  Only the display
+   side runs here: there is no sequence open yet, so PNS waits for
+   loadSequenceSource to recalculate it against whatever gets loaded. */
+(function restoreRememberedAsc(){
+  if(!SeqEyesPrefs.enabled())return;
+  var cached=SeqEyesPrefs.getAsc();
+  if(!cached)return;
+  try{
+    var profile=Pulseq.parseAscProfile(cached.text);
+    applyAscProfile(cached.name,profile);
+    if(profile.pns)pnsHardware=profile.pns;
+  }catch(_){
+    /* A cached profile we can no longer parse is worse than none: drop it
+       rather than leave a button labelled for an ASC that does nothing. */
+    SeqEyesPrefs.clearAsc();
+  }
+})();
 
 if(location.search.indexOf("debug=1")>=0){
   window.__seqeyesDebug={
