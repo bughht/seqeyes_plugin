@@ -136,6 +136,12 @@ export interface SeqEyesDiagnosticExportResult {
     sequenceName: string;
 }
 
+/** A finite number from a webview message, or `undefined` when it sent none. */
+function optionalNumber(value: unknown): number | undefined {
+    const n = Number(value);
+    return value !== undefined && value !== null && value !== '' && Number.isFinite(n) ? n : undefined;
+}
+
 const diagnosticState: SeqEyesDiagnosticState = {};
 
 export function getSeqEyesDiagnosticState(): SeqEyesDiagnosticState {
@@ -179,6 +185,55 @@ export async function computeSpectrogramForTest(
         maxValue: spectrogram.maxValue,
         payloadBytes: JSON.stringify(payload).length,
         warnings: spectrogram.warnings,
+    };
+}
+
+export interface SeqEyesDiagnosticSoundResult {
+    sampleRate: number;
+    frames: number;
+    silent: boolean;
+    rfIncluded: boolean;
+    rawPeak: number;
+    rfRawPeak: number;
+    /** Peak of the delivered buffer, after the mix and normalisation. */
+    bufferPeak: number;
+    warnings: string[];
+}
+
+/**
+ * Run the `synthesizeGradientSound` message path end to end, without a live
+ * webview, the way `computeSpectrogramForTest` does for the spectrogram.
+ *
+ * Added because the RF proxy was audible in the standalone viewer and silent in
+ * the packaged extension: every layer checked out in isolation, and the one
+ * environment with no coverage at all was the real extension host.
+ */
+export async function synthesizeGradientSoundForTest(
+    sourceUri: vscode.Uri,
+    startSec: number,
+    endSec: number,
+    options?: Record<string, unknown>,
+): Promise<SeqEyesDiagnosticSoundResult> {
+    const bytes = await vscode.workspace.fs.readFile(sourceUri);
+    const sequence = parseSequenceBytes(bytes, uriFileName(sourceUri));
+    const blocks = decodeAllBlocks(sequence);
+    const sound = synthesizeGradientSound(
+        selectWindowBlocks(blocks, startSec, endSec),
+        { ...(options ?? {}), startSec, endSec },
+    );
+    let bufferPeak = 0;
+    for (let i = 0; i < sound.n; i++) {
+        bufferPeak = Math.max(bufferPeak, Math.abs(sound.left[i]), Math.abs(sound.right[i]));
+    }
+    return {
+        sampleRate: sound.sampleRate,
+        frames: sound.n,
+        silent: sound.silent,
+        rfIncluded: sound.rfIncluded,
+        rawPeak: sound.rawPeak,
+        rfRawPeak: sound.rfRawPeak,
+        bufferPeak,
+        warnings: sound.warnings,
     };
 }
 
@@ -860,6 +915,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     overlap: Number(params.overlap) || 0.75,
                     oversample: Number(params.oversample) || 3,
                     targetColumns: Number(params.targetColumns) || 256,
+                    includeRf: params.includeRf === true,
                 });
                 // Unlike k-space there is no dangerous override here: the
                 // spectrogram is scoped to the visible window, so the remedy is
@@ -914,6 +970,16 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                             sampleRate,
                             channelWeights: msg.channelWeights,
                             source: msg.source === 'dGdt' ? 'dGdt' : 'G',
+                            includeRf: msg.includeRf === true,
+                            // `optionalNumber`, not `Number`: coercing an absent
+                            // field to NaN turns "the webview sent nothing" into
+                            // "the webview sent something invalid", and the
+                            // synthesiser's fallback then hides the difference.
+                            rfScale: optionalNumber(msg.rfScale),
+                            rfThermoWeight: optionalNumber(msg.rfThermoWeight),
+                            rfControlWeight: optionalNumber(msg.rfControlWeight),
+                            rfEdgeMode: msg.rfEdgeMode === 'absolute' ? 'absolute' : 'signed',
+                            rfMix: optionalNumber(msg.rfMix),
                         },
                     );
                     panel.webview.postMessage({

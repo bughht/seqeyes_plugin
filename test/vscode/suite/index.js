@@ -73,6 +73,42 @@ async function run() {
     assert.equal(metadata.adcSampleCount, 4096);
   });
 
+  await step('synthesize RF proxy audio in the real extension host', async () => {
+    // The RF proxy played in the standalone viewer and was silent in the
+    // packaged extension. Every layer checked out in isolation; the real
+    // extension host was the one environment with no coverage, so it gets some.
+    const gradientOnly = await vscode.commands.executeCommand(
+      'seqeyes.test.synthesizeGradientSound', spiralUri, 0, 0.05,
+    );
+    assert.equal(gradientOnly.rfIncluded, false, 'RF must stay out unless it is asked for');
+    assert.equal(gradientOnly.silent, false, 'the fixture should produce gradient sound');
+
+    const withRf = await vscode.commands.executeCommand(
+      'seqeyes.test.synthesizeGradientSound', spiralUri, 0, 0.05,
+      { includeRf: true, rfMix: 1 },
+    );
+    assert.equal(withRf.rfIncluded, true, 'RF proxy should reach the buffer in the extension host');
+    assert.equal(withRf.silent, false, 'a fully-RF mix should not be silent');
+    assert.ok(withRf.rfRawPeak > 0, 'the RF proxy should have a non-zero peak');
+    assert.ok(withRf.bufferPeak > 0.9, 'the delivered buffer should be normalised to near full scale');
+
+    // At a fully-RF mix the gradient gain is exactly zero, so the buffer must
+    // differ from the gradient-only one even though both are normalised.
+    assert.notEqual(
+      withRf.rfRawPeak, gradientOnly.rfRawPeak,
+      'the RF mix must actually change what is in the buffer',
+    );
+
+    // The switching term survives a zero transmit scale, which is the property
+    // the whole separation exists for.
+    const zeroB1 = await vscode.commands.executeCommand(
+      'seqeyes.test.synthesizeGradientSound', spiralUri, 0, 0.05,
+      { includeRf: true, rfMix: 1, rfScale: 0 },
+    );
+    assert.equal(zeroB1.rfIncluded, true, 'RF switching should survive rfScale = 0');
+    assert.equal(zeroB1.silent, false);
+  });
+
   await step('compute a gradient spectrogram over a view window', async () => {
     // The command reads the sequence itself, exactly as the message handler
     // does; re-opening an already-open editor would not re-fire a load anyway.

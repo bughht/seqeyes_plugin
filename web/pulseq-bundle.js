@@ -89,7 +89,7 @@ var Pulseq = (() => {
   });
 
   // package.json
-  var version = "0.3.10";
+  var version = "0.3.11";
 
   // src/pulseq/decompressor.ts
   function decompressShape(compressed, numSamples) {
@@ -2399,7 +2399,7 @@ var Pulseq = (() => {
       decimatedSamples,
       columns,
       fftPoints,
-      totalCells: columns * bins * 4,
+      totalCells: columns * bins * (input.includeRf ? 7 : 4),
       decimationFactor
     };
   }
@@ -4657,6 +4657,125 @@ var Pulseq = (() => {
     return Math.floor((coreSamples - 1) / Math.max(1, factor)) + 1;
   }
 
+  // src/pulseq/rfAcoustic.ts
+  function normalizePeak(values) {
+    let peak = 0;
+    for (let i = 0; i < values.length; i++) {
+      const v = values[i] < 0 ? -values[i] : values[i];
+      if (v > peak) peak = v;
+    }
+    if (peak > 0) for (let i = 0; i < values.length; i++) values[i] /= peak;
+  }
+  function rfPowerAt(rf, t) {
+    const tp = rf.timePoints, mag = rf.magnitude;
+    const last = tp.length - 1;
+    if (last < 0) return 0;
+    if (last === 0) return mag[0] * mag[0];
+    if (t < tp[0] - GRADIENT_ENDPOINT_TOLERANCE_SEC || t > tp[last] + GRADIENT_ENDPOINT_TOLERANCE_SEC) return 0;
+    if (t <= tp[0]) return mag[0] * mag[0];
+    if (t >= tp[last]) return mag[last] * mag[last];
+    let lo = 0, hi = last;
+    while (hi - lo > 1) {
+      const m = lo + hi >> 1;
+      if (tp[m] <= t) lo = m;
+      else hi = m;
+    }
+    const span = tp[hi] - tp[lo];
+    const pLo = mag[lo] * mag[lo];
+    if (span <= 0) return pLo;
+    const pHi = mag[hi] * mag[hi];
+    return pLo + (pHi - pLo) * (t - tp[lo]) / span;
+  }
+  function rfPowerArea(rf) {
+    const tp = rf.timePoints, mag = rf.magnitude;
+    let area = 0;
+    for (let i = 1; i < tp.length; i++) {
+      const pPrev = mag[i - 1] * mag[i - 1];
+      const pCurr = mag[i] * mag[i];
+      area += 0.5 * (pPrev + pCurr) * (tp[i] - tp[i - 1]);
+    }
+    return area;
+  }
+  function resampleRfAcousticSources(blocks, options) {
+    const dt = options.dt;
+    if (!(dt > 0)) throw new Error("resampleRfAcousticSources requires a positive dt.");
+    const t0 = Number.isFinite(options.startSec) ? options.startSec : 0;
+    const n = Math.max(0, Math.floor(options.sampleCount));
+    const rfScale = Math.max(0, Number.isFinite(options.rfScale) ? options.rfScale : 1);
+    const edgeMode = options.edgeMode === "absolute" ? "absolute" : "signed";
+    const power = new Float32Array(n);
+    const gate = new Float32Array(n);
+    const thermo = new Float32Array(n);
+    const control = new Float32Array(n);
+    const empty = {
+      t0,
+      dt,
+      n,
+      power,
+      gate,
+      thermo,
+      control,
+      silent: true,
+      eventCount: 0,
+      subSampleEventCount: 0
+    };
+    if (!n) return empty;
+    const tEnd = t0 + (n - 1) * dt;
+    let eventCount = 0;
+    let subSampleEventCount = 0;
+    for (const block of blocks) {
+      const rf = block.rf;
+      if (!rf || !rf.timePoints || !rf.timePoints.length || !rf.magnitude.length) continue;
+      const last = rf.timePoints.length - 1;
+      const rfStart = rf.timePoints[0];
+      const rfEnd = rf.timePoints[last];
+      if (rfEnd < t0 - GRADIENT_ENDPOINT_TOLERANCE_SEC || rfStart > tEnd + GRADIENT_ENDPOINT_TOLERANCE_SEC) continue;
+      eventCount++;
+      const gateLo = clampIndex(Math.floor((rfStart - t0) / dt), n);
+      const gateHi = clampIndex(Math.ceil((rfEnd - t0) / dt), n);
+      for (let i = gateLo; i <= gateHi; i++) gate[i] = 1;
+      const coverLo = clampIndex(Math.ceil((rfStart - t0) / dt), n);
+      const coverHi = clampIndex(Math.floor((rfEnd - t0) / dt), n);
+      const spansASample = rfEnd - rfStart >= dt && coverHi >= coverLo;
+      if (spansASample) {
+        for (let i = coverLo; i <= coverHi; i++) power[i] += rfPowerAt(rf, t0 + i * dt);
+      } else {
+        subSampleEventCount++;
+        const area = last === 0 ? rf.magnitude[0] * rf.magnitude[0] * dt : rfPowerArea(rf);
+        const mid = clampIndex(Math.round((0.5 * (rfStart + rfEnd) - t0) / dt), n);
+        power[mid] += area / dt;
+      }
+    }
+    const silent = eventCount === 0;
+    if (silent) return { ...empty, silent: true };
+    normalizePeak(power);
+    const invDt = 1 / dt;
+    for (let i = 1; i < n; i++) thermo[i] = (power[i] - power[i - 1]) * invDt;
+    normalizePeak(thermo);
+    const amplitudeGain = rfScale * rfScale;
+    if (amplitudeGain !== 1) for (let i = 0; i < n; i++) thermo[i] *= amplitudeGain;
+    for (let i = 1; i < n; i++) {
+      const d = gate[i] - gate[i - 1];
+      control[i] = edgeMode === "absolute" ? Math.abs(d) : d;
+    }
+    return { t0, dt, n, power, gate, thermo, control, silent: false, eventCount, subSampleEventCount };
+  }
+  function clampIndex(index, n) {
+    if (!Number.isFinite(index)) return 0;
+    if (index < 0) return 0;
+    if (index > n - 1) return n - 1;
+    return index;
+  }
+  function combineRfSources(sources, thermoWeight, controlWeight) {
+    const wThermo = Number.isFinite(thermoWeight) ? thermoWeight : 1;
+    const wControl = Number.isFinite(controlWeight) ? controlWeight : 1;
+    const out = new Float32Array(sources.n);
+    for (let i = 0; i < sources.n; i++) {
+      out[i] = wThermo * sources.thermo[i] + wControl * sources.control[i];
+    }
+    return out;
+  }
+
   // src/pulseq/gradSpectrum.ts
   var GAMMA_HZ_PER_M_PER_MT_PER_M = 42576;
   var GAMMA_HZ_PER_M_PER_T_PER_M = 42576e3;
@@ -4669,7 +4788,15 @@ var Pulseq = (() => {
     overlap: 0.75,
     oversample: 3,
     targetColumns: 256,
-    normalize: true
+    normalize: true,
+    // Off by default: the RF terms are research proxies with no calibrated
+    // level, so they are opt-in rather than something a user meets by accident
+    // in a panel whose other channels are in mT/m.
+    includeRf: false,
+    rfScale: 1,
+    rfThermoWeight: 1,
+    rfControlWeight: 1,
+    rfEdgeMode: "signed"
   });
   function resolveSpectrogramParams(params) {
     const merged = { ...DEFAULT_SPECTROGRAM_PARAMS, ...params ?? {} };
@@ -4682,7 +4809,12 @@ var Pulseq = (() => {
       overlap: clamp2(finite(merged.overlap, 0.75), 0, 0.9375),
       oversample: clamp2(Math.round(finite(merged.oversample, 3)), 1, 4),
       targetColumns: clamp2(Math.round(finite(merged.targetColumns, 256)), 64, 512),
-      normalize: merged.normalize !== false
+      normalize: merged.normalize !== false,
+      includeRf: merged.includeRf === true,
+      rfScale: clamp2(finite(merged.rfScale, 1), 0, 1e3),
+      rfThermoWeight: clamp2(finite(merged.rfThermoWeight, 1), 0, 1e3),
+      rfControlWeight: clamp2(finite(merged.rfControlWeight, 1), 0, 1e3),
+      rfEdgeMode: merged.rfEdgeMode === "absolute" ? "absolute" : "signed"
     };
   }
   function chooseWindowSamples(params, decimatedDt, viewDurationSec, warnings) {
@@ -4786,6 +4918,29 @@ var Pulseq = (() => {
     const dx = decimatePadded(sx, plan, padSamples, nDecimated);
     const dy = decimatePadded(sy, plan, padSamples, nDecimated);
     const dz = decimatePadded(sz, plan, padSamples, nDecimated);
+    let dRfThermo = null;
+    let dRfControl = null;
+    let dRfCombined = null;
+    if (params.includeRf) {
+      const rfSources = resampleRfAcousticSources(blocks, {
+        startSec: startSec - padSamples * raster,
+        dt: raster,
+        sampleCount: totalSamples,
+        rfScale: params.rfScale,
+        edgeMode: params.rfEdgeMode
+      });
+      if (rfSources.silent) {
+        warnings.push("No RF events in the visible window; the RF proxy channels are empty.");
+      } else if (rfSources.subSampleEventCount > 0) {
+        warnings.push(
+          `${rfSources.subSampleEventCount} RF event(s) are shorter than the ${formatSeconds(raster)} gradient raster and were deposited as area-preserving impulses; their edge timing is raster-quantised.`
+        );
+      }
+      const combined = combineRfSources(rfSources, params.rfThermoWeight, params.rfControlWeight);
+      dRfThermo = decimatePadded(rfSources.thermo, plan, padSamples, nDecimated);
+      dRfControl = decimatePadded(rfSources.control, plan, padSamples, nDecimated);
+      dRfCombined = decimatePadded(combined, plan, padSamples, nDecimated);
+    }
     const binLow = Math.max(0, Math.floor(params.fMinHz / dfBin));
     const binHigh = Math.min(fftPoints / 2, Math.ceil(params.fMaxHz / dfBin));
     const nFreq = Math.max(1, binHigh - binLow + 1);
@@ -4794,6 +4949,9 @@ var Pulseq = (() => {
     const gyOut = new Float32Array(cells);
     const gzOut = new Float32Array(cells);
     const rssOut = new Float32Array(cells);
+    const rfThermoOut = dRfThermo ? new Float32Array(cells) : null;
+    const rfControlOut = dRfControl ? new Float32Array(cells) : null;
+    const rfOut = dRfCombined ? new Float32Array(cells) : null;
     const w = hannWindow(windowSamples);
     const gain = params.normalize ? windowCoherentGain(w) : 1;
     const invGain = gain > 0 ? 1 / gain : 1;
@@ -4806,8 +4964,18 @@ var Pulseq = (() => {
     const magA = new Float64Array(fftPoints / 2 + 1);
     const magB = new Float64Array(fftPoints / 2 + 1);
     const magC = new Float64Array(fftPoints / 2 + 1);
+    const rfActive = !!(dRfThermo && dRfControl && dRfCombined && rfThermoOut && rfControlOut && rfOut);
+    const frameD = rfActive ? new Float64Array(fftPoints) : null;
+    const frameE = rfActive ? new Float64Array(fftPoints) : null;
+    const frameF = rfActive ? new Float64Array(fftPoints) : null;
+    const magD = rfActive ? new Float64Array(fftPoints / 2 + 1) : null;
+    const magE = rfActive ? new Float64Array(fftPoints / 2 + 1) : null;
+    const magF = rfActive ? new Float64Array(fftPoints / 2 + 1) : null;
+    const thermoSilent = rfActive && isAllZero(dRfThermo);
+    const controlSilent = rfActive && isAllZero(dRfControl);
     let minValue = Number.POSITIVE_INFINITY;
     let maxValue = 0;
+    let rfMaxValue = 0;
     for (let col = 0; col < columns; col++) {
       const offset = col * hop;
       prepareFrame(frameA, dx, offset, windowSamples, w, fftPoints);
@@ -4815,6 +4983,23 @@ var Pulseq = (() => {
       prepareFrame(frameC, dz, offset, windowSamples, w, fftPoints);
       realFFTPairMagnitude(frameA, frameB, fftPoints, scratchRe, scratchIm, magA, magB);
       realFFTMagnitude(frameC, fftPoints, scratchRe, scratchIm, magC);
+      if (rfActive) {
+        prepareFrame(frameF, dRfCombined, offset, windowSamples, w, fftPoints);
+        realFFTMagnitude(frameF, fftPoints, scratchRe, scratchIm, magF);
+        if (thermoSilent) magD.fill(0);
+        if (controlSilent) magE.fill(0);
+        if (!thermoSilent && !controlSilent) {
+          prepareFrame(frameD, dRfThermo, offset, windowSamples, w, fftPoints);
+          prepareFrame(frameE, dRfControl, offset, windowSamples, w, fftPoints);
+          realFFTPairMagnitude(frameD, frameE, fftPoints, scratchRe, scratchIm, magD, magE);
+        } else if (!thermoSilent) {
+          prepareFrame(frameD, dRfThermo, offset, windowSamples, w, fftPoints);
+          realFFTMagnitude(frameD, fftPoints, scratchRe, scratchIm, magD);
+        } else if (!controlSilent) {
+          prepareFrame(frameE, dRfControl, offset, windowSamples, w, fftPoints);
+          realFFTMagnitude(frameE, fftPoints, scratchRe, scratchIm, magE);
+        }
+      }
       for (let bin = binLow; bin <= binHigh; bin++) {
         const row = bin - binLow;
         const index = row * columns + col;
@@ -4828,6 +5013,13 @@ var Pulseq = (() => {
         rssOut[index] = vr;
         if (vr > maxValue) maxValue = vr;
         if (vr < minValue) minValue = vr;
+        if (rfActive) {
+          const vRf = magF[bin] * invGain;
+          rfThermoOut[index] = magD[bin] * invGain;
+          rfControlOut[index] = magE[bin] * invGain;
+          rfOut[index] = vRf;
+          if (vRf > rfMaxValue) rfMaxValue = vRf;
+        }
       }
     }
     if (!Number.isFinite(minValue)) minValue = 0;
@@ -4845,9 +5037,17 @@ var Pulseq = (() => {
       dfResolutionHz: decimatedRate / windowSamples,
       unit: params.source === "dGdt" ? "T/m/s" : "mT/m",
       source: params.source,
-      data: { gx: gxOut, gy: gyOut, gz: gzOut, rss: rssOut },
+      data: {
+        gx: gxOut,
+        gy: gyOut,
+        gz: gzOut,
+        rss: rssOut,
+        ...rfActive ? { rfThermo: rfThermoOut, rfControl: rfControlOut, rf: rfOut } : {}
+      },
       minValue,
       maxValue,
+      rfIncluded: rfActive,
+      rfMaxValue,
       decimationFactor: plan.factor,
       decimatedRateHz: decimatedRate,
       windowSamples,
@@ -4904,10 +5104,17 @@ var Pulseq = (() => {
         gx: new Float32Array(0),
         gy: new Float32Array(0),
         gz: new Float32Array(0),
-        rss: new Float32Array(0)
+        rss: new Float32Array(0),
+        ...params.includeRf ? {
+          rfThermo: new Float32Array(0),
+          rfControl: new Float32Array(0),
+          rf: new Float32Array(0)
+        } : {}
       },
       minValue: 0,
       maxValue: 0,
+      rfIncluded: params.includeRf,
+      rfMaxValue: 0,
       decimationFactor,
       decimatedRateHz: decimatedRate,
       windowSamples,
@@ -5047,6 +5254,15 @@ var Pulseq = (() => {
     if (value >= 10) return `${value.toFixed(0)} Hz`;
     return `${value.toFixed(1)} Hz`;
   }
+  function isAllZero(values) {
+    for (let i = 0; i < values.length; i++) if (values[i] !== 0) return false;
+    return true;
+  }
+  function formatSeconds(value) {
+    if (!Number.isFinite(value)) return "\u2014";
+    if (value >= 1e-3) return `${(value * 1e3).toFixed(2)} ms`;
+    return `${(value * 1e6).toFixed(1)} \xB5s`;
+  }
 
   // src/pulseq/gradientSound.ts
   var DEFAULT_AUDIO_SAMPLE_RATE = 44100;
@@ -5121,17 +5337,78 @@ var Pulseq = (() => {
       if (l > rawPeak) rawPeak = l;
       if (r > rawPeak) rawPeak = r;
     }
-    const silent = !(rawPeak > 0);
+    const rfMix = clamp01(Number.isFinite(options.rfMix) ? options.rfMix : 0.5);
+    let rfRawPeak = 0;
+    let rfMono = null;
+    if (options.includeRf && rfMix > 0) {
+      const sources = resampleRfAcousticSources(blocks, {
+        startSec,
+        dt,
+        sampleCount: n,
+        rfScale: options.rfScale,
+        edgeMode: options.rfEdgeMode
+      });
+      if (!sources.silent) {
+        const combined = combineRfSources(
+          sources,
+          Number.isFinite(options.rfThermoWeight) ? options.rfThermoWeight : 1,
+          Number.isFinite(options.rfControlWeight) ? options.rfControlWeight : 1
+        );
+        rfMono = convolveSame(combined, kernel);
+        for (let i = 0; i < n; i++) {
+          const v = Math.abs(rfMono[i]);
+          if (v > rfRawPeak) rfRawPeak = v;
+        }
+      }
+    }
+    const rfIncluded = !!(rfMono && rfRawPeak > 0);
+    if (rfIncluded) {
+      const gradGain = rawPeak > 0 ? (1 - rfMix) / rawPeak : 0;
+      const rfGain = rfMix / rfRawPeak;
+      for (let i = 0; i < n; i++) {
+        const rfSample = rfMono[i] * rfGain;
+        left[i] = left[i] * gradGain + rfSample;
+        right[i] = right[i] * gradGain + rfSample;
+      }
+    }
+    let mixedPeak = 0;
+    for (let i = 0; i < n; i++) {
+      const l = Math.abs(left[i]);
+      const r = Math.abs(right[i]);
+      if (l > mixedPeak) mixedPeak = l;
+      if (r > mixedPeak) mixedPeak = r;
+    }
+    const silent = !(mixedPeak > 0);
     if (silent) {
-      warnings.push("No gradient activity in this window \u2014 nothing to play.");
+      warnings.push(options.includeRf ? "Nothing to play in this window \u2014 no gradient activity and no RF events." : "No gradient activity in this window \u2014 nothing to play.");
     } else {
-      const scale = AUDIO_PEAK / rawPeak;
+      const scale = AUDIO_PEAK / mixedPeak;
       for (let i = 0; i < n; i++) {
         left[i] *= scale;
         right[i] *= scale;
       }
+      if (options.includeRf && !rfIncluded && rfMix > 0) {
+        warnings.push("No RF events in this window; you are hearing the gradients only.");
+      } else if (rfIncluded && rawPeak === 0) {
+        warnings.push("No gradient activity in this window; you are hearing the RF proxy only.");
+      }
     }
-    return { sampleRate, n, left, right, startSec, endSec, rawPeak, silent, warnings };
+    return {
+      sampleRate,
+      n,
+      left,
+      right,
+      startSec,
+      endSec,
+      rawPeak,
+      rfRawPeak,
+      rfIncluded,
+      silent,
+      warnings
+    };
+  }
+  function clamp01(value) {
+    return value < 0 ? 0 : value > 1 ? 1 : value;
   }
 
   // src/pulseq/derivedWindow.ts

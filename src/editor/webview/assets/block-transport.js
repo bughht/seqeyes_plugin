@@ -76,18 +76,26 @@ function decodeB64F32(b64,n){
 function deserializeSpectrogram(payload){
   if(!payload)return null;
   var cells=payload.nTime*payload.nFreq;
+  var data={
+    gx:decodeB64F32(payload.gxB64,cells),
+    gy:decodeB64F32(payload.gyB64,cells),
+    gz:decodeB64F32(payload.gzB64,cells),
+    rss:decodeB64F32(payload.rssB64,cells)
+  };
+  /* RF blobs travel only when the RF proxy was computed. */
+  if(payload.rfB64&&payload.rfThermoB64&&payload.rfControlB64){
+    data.rfThermo=decodeB64F32(payload.rfThermoB64,cells);
+    data.rfControl=decodeB64F32(payload.rfControlB64,cells);
+    data.rf=decodeB64F32(payload.rfB64,cells);
+  }
   return{
     nTime:payload.nTime,nFreq:payload.nFreq,
     tStartSec:payload.tStartSec,tStepSec:payload.tStepSec,
     fStartHz:payload.fStartHz,fStepHz:payload.fStepHz,
     dtResolutionSec:payload.dtResolutionSec,dfResolutionHz:payload.dfResolutionHz,
     unit:payload.unit,source:payload.source,
-    data:{
-      gx:decodeB64F32(payload.gxB64,cells),
-      gy:decodeB64F32(payload.gyB64,cells),
-      gz:decodeB64F32(payload.gzB64,cells),
-      rss:decodeB64F32(payload.rssB64,cells)
-    },
+    data:data,
+    rfIncluded:!!payload.rfIncluded,rfMaxValue:payload.rfMaxValue||0,
     minValue:payload.minValue,maxValue:payload.maxValue,
     decimationFactor:payload.decimationFactor,decimatedRateHz:payload.decimatedRateHz,
     windowSamples:payload.windowSamples,hopSamples:payload.hopSamples,fftPoints:payload.fftPoints,
@@ -105,6 +113,8 @@ function deserializeGradientSound(payload){
     startSec:payload.startSec,
     endSec:payload.endSec,
     silent:!!payload.silent,
+    rfIncluded:!!payload.rfIncluded,
+    warnings:payload.warnings||[],
     left:decodeB64F32(payload.leftB64,payload.n),
     right:decodeB64F32(payload.rightB64,payload.n)
   };

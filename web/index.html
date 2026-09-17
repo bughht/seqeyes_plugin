@@ -124,6 +124,21 @@
       <option value="G" selected>G</option>
       <option value="dGdt">dG/dt</option>
     </select>
+    <select id="sgImageChannel" aria-label="Image channel" title="Which matrix the colourmapped image shows">
+      <option value="rss" selected>Σ</option>
+      <option value="gx">Gx</option>
+      <option value="gy">Gy</option>
+      <option value="gz">Gz</option>
+      <option value="rf" hidden>RF proxy</option>
+      <option value="rfThermo" hidden>RF thermo</option>
+      <option value="rfControl" hidden>RF ctrl</option>
+    </select>
+    <div class="sep"></div>
+    <button id="sgRf" type="button" aria-pressed="false" title="Add the RF acoustic proxy: a reduced-order research model (thermoacoustic d|B1|²/dt plus a hypothesised TX-switching term). Adds three spectrogram channels and mixes into playback. Uncalibrated and on its own relative scale — not comparable with the gradient channels.">RF proxy</button>
+    <span class="ulbl">B1×</span>
+    <input type="number" id="sgRfScale" min="0" step="0.1" value="1" disabled aria-label="RF transmit amplitude scale" title="Transmit amplitude scale, as a protocol flip-angle scale applies it. Multiplies the thermoacoustic term by B1×² and leaves the switching term alone, so 0 keeps RF-event timing but removes transmit power. This is a model input, not a display or volume control.">
+    <span class="ulbl">RF in audio</span>
+    <input type="range" id="sgRfMix" min="0" max="100" value="50" disabled aria-label="RF share of the playback mix" title="Playback only: crossfade between the gradient sound and the RF proxy, each normalised to its own peak first. 0% is gradients only, 100% is the RF proxy alone. A listening control — the true loudness ratio is unknown.">
     <div class="sep"></div>
     <span class="ulbl">f</span>
     <input type="number" id="sgFMin" min="0" step="50" value="0" aria-label="Minimum frequency in hertz" title="Lowest displayed frequency (Hz)">
@@ -2811,7 +2826,8 @@ window.SeqEyesPanelHost={
     var estimate=Pulseq.estimateSpectrogramCost({
       startSec:startSec,endSec:endSec,gradientRaster:GR,
       fMaxHz:params.fMaxHz,windowSamples:params.windowSamples||512,
-      overlap:params.overlap,oversample:params.oversample,targetColumns:params.targetColumns
+      overlap:params.overlap,oversample:params.oversample,targetColumns:params.targetColumns,
+      includeRf:params.includeRf===true
     });
     var refusal=Pulseq.spectrogramBudgetRefusal(estimate);
     if(refusal){SeqEyesPanel.deliverSpectrogramError(requestId,refusal);return;}
@@ -2841,11 +2857,15 @@ window.SeqEyesPanelHost={
       try{
         var sound=Pulseq.synthesizeGradientSound(selectPanelWindowBlocks(startSec,endSec),{
           startSec:startSec,endSec:endSec,sampleRate:sampleRate,
-          channelWeights:options.channelWeights,source:options.source
+          channelWeights:options.channelWeights,source:options.source,
+          includeRf:options.includeRf===true,rfScale:options.rfScale,
+          rfThermoWeight:options.rfThermoWeight,rfControlWeight:options.rfControlWeight,
+          rfEdgeMode:options.rfEdgeMode,rfMix:options.rfMix
         });
         SeqEyesPanel.deliverAudio(requestId,{
           sampleRate:sound.sampleRate,startSec:sound.startSec,endSec:sound.endSec,
-          silent:sound.silent,left:sound.left,right:sound.right
+          silent:sound.silent,rfIncluded:sound.rfIncluded,warnings:sound.warnings,
+          left:sound.left,right:sound.right
         });
       }catch(err){
         SeqEyesPanel.deliverAudioError(requestId,err.message||String(err));

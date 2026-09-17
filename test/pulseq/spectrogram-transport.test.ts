@@ -129,6 +129,42 @@ describe('spectrogram webview transport', () => {
     expect(restored.warnings.length).toBeGreaterThan(0);
   });
 
+  it('round-trips the RF proxy channels through the shipped decoder', () => {
+    const bytes = readFileSync(join(FIXTURES, 'writeSpiral.seq'));
+    const sequence = parseSequenceBytes(new Uint8Array(bytes), 'writeSpiral.seq');
+    const blocks = decodeAllBlocks(sequence);
+    const original = computeGradientSpectrogram(blocks, sequence.rasterTimes.gradientRaster, {
+      startSec: 0, endSec: 0.05, fMaxHz: 3000, windowSamples: 128, includeRf: true,
+    });
+    expect(original.rfIncluded).toBe(true);
+
+    const restored = transportApi().deserializeSpectrogram(overTheWire(serializeSpectrogram(original)))!;
+    expect(restored.rfIncluded).toBe(true);
+    expect(restored.rfMaxValue).toBe(original.rfMaxValue);
+
+    const cells = original.nTime * original.nFreq;
+    for (const key of ['rfThermo', 'rfControl', 'rf'] as const) {
+      expect(restored.data[key]!.length).toBe(cells);
+      for (let i = 0; i < cells; i += Math.max(1, Math.floor(cells / 500))) {
+        expect(restored.data[key]![i]).toBe(original.data[key]![i]);
+      }
+    }
+  });
+
+  it('ships no RF keys at all when the RF proxy is off', () => {
+    // The default path must not pay for a feature it did not ask for: three
+    // extra base64 matrices would be roughly 75% more payload.
+    const original = loadSpectrogram();
+    const payload = serializeSpectrogram(original);
+    expect(payload.rfB64).toBeUndefined();
+    expect(payload.rfThermoB64).toBeUndefined();
+    expect(payload.rfControlB64).toBeUndefined();
+
+    const restored = transportApi().deserializeSpectrogram(overTheWire(payload))!;
+    expect(restored.rfIncluded).toBe(false);
+    expect(restored.data.rf).toBeUndefined();
+  });
+
   it('round-trips a stereo gradient sound buffer', () => {
     const bytes = readFileSync(join(FIXTURES, 'writeSpiral.seq'));
     const sequence = parseSequenceBytes(new Uint8Array(bytes), 'writeSpiral.seq');

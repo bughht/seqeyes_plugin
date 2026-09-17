@@ -44,6 +44,11 @@ import {
 } from './fft';
 import { decimatePadded, decimatedLength, planDecimation } from './decimator';
 import {
+    combineRfSources,
+    resampleRfAcousticSources,
+    type RfControlEdgeMode,
+} from './rfAcoustic';
+import {
     estimateSpectrogramCost,
     spectrogramBudgetRefusal,
     type SpectrogramCostEstimate,
@@ -75,6 +80,15 @@ export interface SpectrogramParams {
     targetColumns: number;
     /** Divide magnitudes by the window coherent gain. */
     normalize: boolean;
+    /** Also compute the RF acoustic proxy channels. Off by default. */
+    includeRf: boolean;
+    /** RF amplitude scale; 0 keeps RF-event timing but removes transmit power. */
+    rfScale: number;
+    /** Weight of the thermoacoustic term in the combined RF proxy. */
+    rfThermoWeight: number;
+    /** Weight of the control-switching term in the combined RF proxy. */
+    rfControlWeight: number;
+    rfEdgeMode: RfControlEdgeMode;
 }
 
 export interface SpectrogramOptions extends Partial<SpectrogramParams> {
@@ -88,7 +102,14 @@ export interface GradientSpectrogramMatrices {
     gx: Float32Array;
     gy: Float32Array;
     gz: Float32Array;
+    /** Root-sum-of-squares across the three gradient axes. Gradient only. */
     rss: Float32Array;
+    /** RF thermoacoustic proxy, present only when `includeRf`. Relative. */
+    rfThermo?: Float32Array;
+    /** RF control-switching proxy, present only when `includeRf`. Relative. */
+    rfControl?: Float32Array;
+    /** Weighted sum of the two RF terms, combined before the transform. */
+    rf?: Float32Array;
 }
 
 export interface GradientSpectrogram {
@@ -112,6 +133,14 @@ export interface GradientSpectrogram {
     data: GradientSpectrogramMatrices;
     minValue: number;
     maxValue: number;
+    /** True when the RF proxy channels were computed. */
+    rfIncluded: boolean;
+    /**
+     * Peak of the combined RF proxy. Tracked apart from `maxValue` because the
+     * two have no common unit: scaling RF into the gradient window/level would
+     * assert a transfer function nobody has measured.
+     */
+    rfMaxValue: number;
     decimationFactor: number;
     decimatedRateHz: number;
     windowSamples: number;
@@ -135,6 +164,14 @@ export const DEFAULT_SPECTROGRAM_PARAMS: SpectrogramParams = Object.freeze({
     oversample: 3,
     targetColumns: 256,
     normalize: true,
+    // Off by default: the RF terms are research proxies with no calibrated
+    // level, so they are opt-in rather than something a user meets by accident
+    // in a panel whose other channels are in mT/m.
+    includeRf: false,
+    rfScale: 1,
+    rfThermoWeight: 1,
+    rfControlWeight: 1,
+    rfEdgeMode: 'signed',
 });
 
 export function resolveSpectrogramParams(params?: Partial<SpectrogramParams>): SpectrogramParams {
@@ -149,6 +186,11 @@ export function resolveSpectrogramParams(params?: Partial<SpectrogramParams>): S
         oversample: clamp(Math.round(finite(merged.oversample, 3)), 1, 4),
         targetColumns: clamp(Math.round(finite(merged.targetColumns, 256)), 64, 512),
         normalize: merged.normalize !== false,
+        includeRf: merged.includeRf === true,
+        rfScale: clamp(finite(merged.rfScale, 1), 0, 1e3),
+        rfThermoWeight: clamp(finite(merged.rfThermoWeight, 1), 0, 1e3),
+        rfControlWeight: clamp(finite(merged.rfControlWeight, 1), 0, 1e3),
+        rfEdgeMode: merged.rfEdgeMode === 'absolute' ? 'absolute' : 'signed',
     };
 }
 
@@ -284,6 +326,37 @@ export function computeGradientSpectrogram(
     const dy = decimatePadded(sy, plan, padSamples, nDecimated);
     const dz = decimatePadded(sz, plan, padSamples, nDecimated);
 
+    // ── RF acoustic proxies, on the same raster and decimation plan ─────────
+    // Sharing the plan matters: the anti-alias filter is what makes a gate edge
+    // — broadband by construction — a legitimate input to a transform that only
+    // resolves up to fMax. Point-decimating the impulses instead would alias
+    // switching energy into the displayed band.
+    let dRfThermo: Float32Array | null = null;
+    let dRfControl: Float32Array | null = null;
+    let dRfCombined: Float32Array | null = null;
+    if (params.includeRf) {
+        const rfSources = resampleRfAcousticSources(blocks, {
+            startSec: startSec - padSamples * raster,
+            dt: raster,
+            sampleCount: totalSamples,
+            rfScale: params.rfScale,
+            edgeMode: params.rfEdgeMode,
+        });
+        if (rfSources.silent) {
+            warnings.push('No RF events in the visible window; the RF proxy channels are empty.');
+        } else if (rfSources.subSampleEventCount > 0) {
+            warnings.push(
+                `${rfSources.subSampleEventCount} RF event(s) are shorter than the `
+                + `${formatSeconds(raster)} gradient raster and were deposited as `
+                + 'area-preserving impulses; their edge timing is raster-quantised.',
+            );
+        }
+        const combined = combineRfSources(rfSources, params.rfThermoWeight, params.rfControlWeight);
+        dRfThermo = decimatePadded(rfSources.thermo, plan, padSamples, nDecimated);
+        dRfControl = decimatePadded(rfSources.control, plan, padSamples, nDecimated);
+        dRfCombined = decimatePadded(combined, plan, padSamples, nDecimated);
+    }
+
     // ── Frequency crop ──────────────────────────────────────────────────────
     const binLow = Math.max(0, Math.floor(params.fMinHz / dfBin));
     const binHigh = Math.min(fftPoints / 2, Math.ceil(params.fMaxHz / dfBin));
@@ -294,6 +367,9 @@ export function computeGradientSpectrogram(
     const gyOut = new Float32Array(cells);
     const gzOut = new Float32Array(cells);
     const rssOut = new Float32Array(cells);
+    const rfThermoOut = dRfThermo ? new Float32Array(cells) : null;
+    const rfControlOut = dRfControl ? new Float32Array(cells) : null;
+    const rfOut = dRfCombined ? new Float32Array(cells) : null;
 
     // ── Framing + FFT ───────────────────────────────────────────────────────
     const w = hannWindow(windowSamples);
@@ -312,8 +388,30 @@ export function computeGradientSpectrogram(
     const magB = new Float64Array(fftPoints / 2 + 1);
     const magC = new Float64Array(fftPoints / 2 + 1);
 
+    // The RF channels pair only with each other. Packing one of them against gz
+    // would be marginally cheaper, but the pair transform recovers each signal
+    // through a Hermitian cancellation, so a non-zero partner leaves rounding
+    // residue where the single-signal path returns an exact zero — and enabling
+    // RF must not move the gradient numbers at all.
+    const rfActive = !!(dRfThermo && dRfControl && dRfCombined && rfThermoOut && rfControlOut && rfOut);
+    const frameD = rfActive ? new Float64Array(fftPoints) : null;
+    const frameE = rfActive ? new Float64Array(fftPoints) : null;
+    const frameF = rfActive ? new Float64Array(fftPoints) : null;
+    const magD = rfActive ? new Float64Array(fftPoints / 2 + 1) : null;
+    const magE = rfActive ? new Float64Array(fftPoints / 2 + 1) : null;
+    const magF = rfActive ? new Float64Array(fftPoints / 2 + 1) : null;
+
+    // A channel that is identically zero must read as exactly zero, not as the
+    // 1e-18 the paired transform's Hermitian cancellation leaves behind. That is
+    // the model's defining claim at `rfScale = 0` — the thermoacoustic term is
+    // gone, not merely small — so it is worth one pass over the decimated array
+    // to keep it literally true. It also saves the transform.
+    const thermoSilent = rfActive && isAllZero(dRfThermo!);
+    const controlSilent = rfActive && isAllZero(dRfControl!);
+
     let minValue = Number.POSITIVE_INFINITY;
     let maxValue = 0;
+    let rfMaxValue = 0;
 
     for (let col = 0; col < columns; col++) {
         const offset = col * hop;
@@ -323,6 +421,25 @@ export function computeGradientSpectrogram(
 
         realFFTPairMagnitude(frameA, frameB, fftPoints, scratchRe, scratchIm, magA, magB);
         realFFTMagnitude(frameC, fftPoints, scratchRe, scratchIm, magC);
+
+        if (rfActive) {
+            prepareFrame(frameF!, dRfCombined!, offset, windowSamples, w, fftPoints);
+            realFFTMagnitude(frameF!, fftPoints, scratchRe, scratchIm, magF!);
+
+            if (thermoSilent) magD!.fill(0);
+            if (controlSilent) magE!.fill(0);
+            if (!thermoSilent && !controlSilent) {
+                prepareFrame(frameD!, dRfThermo!, offset, windowSamples, w, fftPoints);
+                prepareFrame(frameE!, dRfControl!, offset, windowSamples, w, fftPoints);
+                realFFTPairMagnitude(frameD!, frameE!, fftPoints, scratchRe, scratchIm, magD!, magE!);
+            } else if (!thermoSilent) {
+                prepareFrame(frameD!, dRfThermo!, offset, windowSamples, w, fftPoints);
+                realFFTMagnitude(frameD!, fftPoints, scratchRe, scratchIm, magD!);
+            } else if (!controlSilent) {
+                prepareFrame(frameE!, dRfControl!, offset, windowSamples, w, fftPoints);
+                realFFTMagnitude(frameE!, fftPoints, scratchRe, scratchIm, magE!);
+            }
+        }
 
         for (let bin = binLow; bin <= binHigh; bin++) {
             const row = bin - binLow;
@@ -337,6 +454,15 @@ export function computeGradientSpectrogram(
             rssOut[index] = vr;
             if (vr > maxValue) maxValue = vr;
             if (vr < minValue) minValue = vr;
+            if (rfActive) {
+                // No `unitScale`: these channels carry no physical unit, and
+                // dividing them by gamma would dress a proxy up as mT/m.
+                const vRf = magF![bin] * invGain;
+                rfThermoOut![index] = magD![bin] * invGain;
+                rfControlOut![index] = magE![bin] * invGain;
+                rfOut![index] = vRf;
+                if (vRf > rfMaxValue) rfMaxValue = vRf;
+            }
         }
     }
 
@@ -358,9 +484,19 @@ export function computeGradientSpectrogram(
         dfResolutionHz: decimatedRate / windowSamples,
         unit: params.source === 'dGdt' ? 'T/m/s' : 'mT/m',
         source: params.source,
-        data: { gx: gxOut, gy: gyOut, gz: gzOut, rss: rssOut },
+        data: {
+            gx: gxOut,
+            gy: gyOut,
+            gz: gzOut,
+            rss: rssOut,
+            ...(rfActive
+                ? { rfThermo: rfThermoOut!, rfControl: rfControlOut!, rf: rfOut! }
+                : {}),
+        },
         minValue,
         maxValue,
+        rfIncluded: rfActive,
+        rfMaxValue,
         decimationFactor: plan.factor,
         decimatedRateHz: decimatedRate,
         windowSamples,
@@ -452,9 +588,18 @@ function emptySpectrogram(
             gy: new Float32Array(0),
             gz: new Float32Array(0),
             rss: new Float32Array(0),
+            ...(params.includeRf
+                ? {
+                    rfThermo: new Float32Array(0),
+                    rfControl: new Float32Array(0),
+                    rf: new Float32Array(0),
+                }
+                : {}),
         },
         minValue: 0,
         maxValue: 0,
+        rfIncluded: params.includeRf,
+        rfMaxValue: 0,
         decimationFactor,
         decimatedRateHz: decimatedRate,
         windowSamples,
@@ -661,4 +806,15 @@ function formatHz(value: number): string {
     if (value >= 1000) return `${(value / 1000).toFixed(2)} kHz`;
     if (value >= 10) return `${value.toFixed(0)} Hz`;
     return `${value.toFixed(1)} Hz`;
+}
+
+function isAllZero(values: Float32Array): boolean {
+    for (let i = 0; i < values.length; i++) if (values[i] !== 0) return false;
+    return true;
+}
+
+function formatSeconds(value: number): string {
+    if (!Number.isFinite(value)) return '—';
+    if (value >= 1e-3) return `${(value * 1e3).toFixed(2)} ms`;
+    return `${(value * 1e6).toFixed(1)} µs`;
 }

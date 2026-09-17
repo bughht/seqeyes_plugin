@@ -279,18 +279,26 @@ function decodeB64F32(b64,n){
 function deserializeSpectrogram(payload){
   if(!payload)return null;
   var cells=payload.nTime*payload.nFreq;
+  var data={
+    gx:decodeB64F32(payload.gxB64,cells),
+    gy:decodeB64F32(payload.gyB64,cells),
+    gz:decodeB64F32(payload.gzB64,cells),
+    rss:decodeB64F32(payload.rssB64,cells)
+  };
+  /* RF blobs travel only when the RF proxy was computed. */
+  if(payload.rfB64&&payload.rfThermoB64&&payload.rfControlB64){
+    data.rfThermo=decodeB64F32(payload.rfThermoB64,cells);
+    data.rfControl=decodeB64F32(payload.rfControlB64,cells);
+    data.rf=decodeB64F32(payload.rfB64,cells);
+  }
   return{
     nTime:payload.nTime,nFreq:payload.nFreq,
     tStartSec:payload.tStartSec,tStepSec:payload.tStepSec,
     fStartHz:payload.fStartHz,fStepHz:payload.fStepHz,
     dtResolutionSec:payload.dtResolutionSec,dfResolutionHz:payload.dfResolutionHz,
     unit:payload.unit,source:payload.source,
-    data:{
-      gx:decodeB64F32(payload.gxB64,cells),
-      gy:decodeB64F32(payload.gyB64,cells),
-      gz:decodeB64F32(payload.gzB64,cells),
-      rss:decodeB64F32(payload.rssB64,cells)
-    },
+    data:data,
+    rfIncluded:!!payload.rfIncluded,rfMaxValue:payload.rfMaxValue||0,
     minValue:payload.minValue,maxValue:payload.maxValue,
     decimationFactor:payload.decimationFactor,decimatedRateHz:payload.decimatedRateHz,
     windowSamples:payload.windowSamples,hopSamples:payload.hopSamples,fftPoints:payload.fftPoints,
@@ -308,6 +316,8 @@ function deserializeGradientSound(payload){
     startSec:payload.startSec,
     endSec:payload.endSec,
     silent:!!payload.silent,
+    rfIncluded:!!payload.rfIncluded,
+    warnings:payload.warnings||[],
     left:decodeB64F32(payload.leftB64,payload.n),
     right:decodeB64F32(payload.rightB64,payload.n)
   };
@@ -1976,10 +1986,18 @@ window.SeqEyesPanelHost={
   },
   requestAudio:function(requestId,startSec,endSec,options){
     if(!vscApi)return;
-    vscApi.postMessage({
-      command:'synthesizeGradientSound',requestId:requestId,startSec:startSec,endSec:endSec,
-      sampleRate:options.sampleRate,channelWeights:options.channelWeights,source:options.source
-    });
+    /* The whole options object crosses, the way requestSpectrogram already
+       ships `params`. Enumerating fields here meant every audio option added to
+       panel.js was silently dropped on this lane only: the RF proxy reached the
+       extension as `undefined`, so it synthesised no RF and fell back to its
+       default mix. There is no per-field list left to drift. */
+    var message={};
+    for(var key in options)if(Object.prototype.hasOwnProperty.call(options,key))message[key]=options[key];
+    message.command='synthesizeGradientSound';
+    message.requestId=requestId;
+    message.startSec=startSec;
+    message.endSec=endSec;
+    vscApi.postMessage(message);
   }
 };
 
@@ -3992,6 +4010,33 @@ function sgValueFloor(spec) {
   return m > 0 ? m * 1e-6 : 1e-12;
 }
 
+var SG_RF_CHANNELS = { rf: 1, rfThermo: 1, rfControl: 1 };
+
+function sgIsRfChannel(key) { return SG_RF_CHANNELS[key] === 1; }
+
+/**
+ * dB reference for one channel.
+ *
+ * Gradient channels are absolute — dB re 1 mT/m (or 1 T/m/s) — so their
+ * reference is 1 and the number means the same thing in every view. The RF
+ * proxy has no unit at all, so it is referenced to its own peak in the current
+ * view: 0 dB is "the loudest thing the RF proxy does here". Those two readings
+ * are not comparable, which is the honest situation; pretending otherwise would
+ * need a coil transfer function nobody has measured.
+ */
+function sgChannelRefDb(spec, key) {
+  if (!sgIsRfChannel(key)) return 0;
+  var peak = spec && spec.rfMaxValue > 0 ? spec.rfMaxValue : 0;
+  return peak > 0 ? 20 * Math.log10(peak) : 0;
+}
+
+/** Per-channel magnitude floor, scaled to that channel's own peak. */
+function sgValueFloorFor(spec, key) {
+  if (!sgIsRfChannel(key)) return sgValueFloor(spec);
+  var peak = spec && spec.rfMaxValue > 0 ? spec.rfMaxValue : 0;
+  return peak > 0 ? peak * 1e-6 : 1e-12;
+}
+
 function sgFmtDb(v) {
   if (!isFinite(v)) return '--';
   return (v >= 0 ? '+' : '') + v.toFixed(1);
@@ -4053,10 +4098,11 @@ function sgAutoWindowLevel(spec, key, previous) {
   var n = data.length;
   if (!n) return fallback;
 
-  var floorValue = sgValueFloor(spec);
+  var floorValue = sgValueFloorFor(spec, key);
+  var refDb = sgChannelRefDb(spec, key);
   var stride = Math.max(1, Math.floor(n / 4096));
   var samples = [];
-  for (var i = 0; i < n; i += stride) samples.push(sgToDb(data[i], floorValue));
+  for (var i = 0; i < n; i += stride) samples.push(sgToDb(data[i], floorValue) - refDb);
   if (!samples.length) return fallback;
   samples.sort(function (a, b) { return a - b; });
 
@@ -4149,8 +4195,10 @@ function sgBuildImageData(context) {
   var data = spec.data[context.channel] || spec.data.rss;
   var lut = context.lut;
   var wl = context.windowLevel;
-  var floorValue = sgValueFloor(spec);
-  var low = wl.level - wl.width / 2;
+  var floorValue = sgValueFloorFor(spec, context.channel);
+  // The channel reference folds into the window's lower edge, so a per-cell
+  // subtraction never enters the inner loop.
+  var low = wl.level - wl.width / 2 + sgChannelRefDb(spec, context.channel);
   var invWidth = wl.width > 0 ? 1 / wl.width : 1;
   var logScale = 20 / Math.LN10;
 
@@ -4538,13 +4586,19 @@ function sgDrawSpectrum(context) {
     ctx.strokeStyle = trace.color;
     ctx.lineWidth = trace.key === 'rss' ? 1.6 : 1.1;
     ctx.globalAlpha = trace.key === 'rss' ? 1 : 0.9;
+    // Dashed for the RF proxies: the same dB axis carries two different
+    // references, and a reader should not have to consult the legend to see
+    // which traces are the uncalibrated ones.
+    ctx.setLineDash(sgIsRfChannel(trace.key) ? [4, 3] : []);
+    var traceFloor = sgValueFloorFor(spec, trace.key);
+    var traceRefDb = sgChannelRefDb(spec, trace.key);
     ctx.beginPath();
     var started = false;
     for (var row = 0; row < values.length; row++) {
       var f = spec.fStartHz + row * spec.fStepHz;
       if (f < range.fMin || f > range.fMax) continue;
       var fp = freqPos(f);
-      var mp = magPos(sgToDb(values[row], floorValue));
+      var mp = magPos(sgToDb(values[row], traceFloor) - traceRefDb);
       var xx = rotated ? mp : fp;
       var yy = rotated ? fp : mp;
       if (!started) { ctx.moveTo(xx, yy); started = true; } else ctx.lineTo(xx, yy);
@@ -4552,6 +4606,7 @@ function sgDrawSpectrum(context) {
     ctx.stroke();
   }
   ctx.globalAlpha = 1;
+  ctx.setLineDash([]);
   ctx.restore();
   return rect;
 }
@@ -4562,7 +4617,6 @@ function sgSpectrumScale(spec, slice, windowLevel, freeY, traces) {
     return { min: windowLevel.level - windowLevel.width / 2, max: windowLevel.level + windowLevel.width / 2 };
   }
   if (!spec || !slice) return { min: -80, max: 0 };
-  var floorValue = sgValueFloor(spec);
   var max = -Infinity;
   var keys = [];
   for (var t = 0; t < traces.length; t++) if (traces[t].visible) keys.push(traces[t].key);
@@ -4570,8 +4624,10 @@ function sgSpectrumScale(spec, slice, windowLevel, freeY, traces) {
   for (var k = 0; k < keys.length; k++) {
     var values = slice[keys[k]];
     if (!values) continue;
+    var floorValue = sgValueFloorFor(spec, keys[k]);
+    var refDb = sgChannelRefDb(spec, keys[k]);
     for (var i = 0; i < values.length; i++) {
-      var db = sgToDb(values[i], floorValue);
+      var db = sgToDb(values[i], floorValue) - refDb;
       if (db > max) max = db;
     }
   }
@@ -4603,8 +4659,8 @@ function sgDetectHotBands(spec, bands, windowLevel, channel) {
   var flags = [];
   if (!spec || !spec.nTime || !bands || !bands.length) return flags;
   var data = spec.data[channel] || spec.data.rss;
-  var floorValue = sgValueFloor(spec);
-  var threshold = windowLevel.level + windowLevel.width / 2;
+  var floorValue = sgValueFloorFor(spec, channel);
+  var threshold = windowLevel.level + windowLevel.width / 2 + sgChannelRefDb(spec, channel);
   for (var i = 0; i < bands.length; i++) {
     var half = (bands[i].bwHz || 0) / 2;
     var rowLow = Math.max(0, Math.floor((bands[i].freqHz - half - spec.fStartHz) / spec.fStepHz));
@@ -4636,7 +4692,12 @@ function sgSampleCell(spec, channel, timeSec, freqHz) {
     gx: spec.data.gx[index],
     gy: spec.data.gy[index],
     gz: spec.data.gz[index],
-    rss: spec.data[channel] ? spec.data[channel][index] : spec.data.rss[index]
+    rss: spec.data[channel] ? spec.data[channel][index] : spec.data.rss[index],
+    /* null, not 0, when RF was not computed: the readout must be able to tell
+       "no RF proxy in this matrix" from "the RF proxy is silent here". */
+    rfThermo: spec.data.rfThermo ? spec.data.rfThermo[index] : null,
+    rfControl: spec.data.rfControl ? spec.data.rfControl[index] : null,
+    rf: spec.data.rf ? spec.data.rf[index] : null
   };
 }
 
@@ -4989,7 +5050,30 @@ var SeqEyesPanel = (function () {
     overlap: getNum('seqeyes.spectrogram.overlap', 0.75),
     oversample: getNum('seqeyes.spectrogram.oversample', 3),
     targetColumns: 256,
-    normalize: true
+    normalize: true,
+    /* RF acoustic proxy (rfAcoustic.ts). Off by default and opt-in: these
+       channels are uncalibrated research proxies with no unit, unlike every
+       other channel in this panel. The two mechanism weights stay at the
+       upstream 1:1 default — that ratio is a placeholder until it is fitted to
+       measurements, so exposing it as a dial would suggest a meaning it has
+       not earned. */
+    includeRf: getBool('seqeyes.spectrogram.rf', false),
+    rfScale: getNum('seqeyes.spectrogram.rfscale', 1),
+    rfThermoWeight: 1,
+    rfControlWeight: 1,
+    rfEdgeMode: 'signed',
+    /* Playback only: crossfade between the gradient sound and the RF proxy,
+       each normalised to its own peak first. There is no correct default —
+       the two have no common unit — so an even blend is the honest one. */
+    rfMix: getNum('seqeyes.spectrogram.rfmix', 0.5)
+  };
+  /* Which matrix the image layer paints. The spectrum pane still draws every
+     visible trace; this only picks the colourmapped one. */
+  var imageChannel = get('seqeyes.spectrogram.imagechannel') || 'rss';
+  var SG_RF_SLICE_KEYS = ['rfThermo', 'rfControl', 'rf'];
+  var SG_IMAGE_CHANNEL_LABELS = {
+    rss: 'Σ', gx: 'Gx', gy: 'Gy', gz: 'Gz',
+    rf: 'RF proxy', rfThermo: 'RF thermo', rfControl: 'RF ctrl'
   };
   var colormapName = get('seqeyes.spectrogram.colormap') || 'viridis';
   if (SG_COLORMAP_NAMES.indexOf(colormapName) < 0) colormapName = 'viridis';
@@ -4998,7 +5082,10 @@ var SeqEyesPanel = (function () {
     { key: 'gx', label: 'Gx', varName: '--gx', visible: getBool('seqeyes.spectrogram.trace.gx', true) },
     { key: 'gy', label: 'Gy', varName: '--gy', visible: getBool('seqeyes.spectrogram.trace.gy', true) },
     { key: 'gz', label: 'Gz', varName: '--gz', visible: getBool('seqeyes.spectrogram.trace.gz', true) },
-    { key: 'rss', label: 'Σ', varName: '--fg', visible: getBool('seqeyes.spectrogram.trace.rss', true) }
+    { key: 'rss', label: 'Σ', varName: '--fg', visible: getBool('seqeyes.spectrogram.trace.rss', true) },
+    /* Drawn only while the matrix carries them, i.e. while RF is enabled. */
+    { key: 'rfThermo', label: 'RF thermo', varName: '--rf', rf: true, visible: getBool('seqeyes.spectrogram.trace.rfThermo', true) },
+    { key: 'rfControl', label: 'RF ctrl', varName: '--tr', rf: true, visible: getBool('seqeyes.spectrogram.trace.rfControl', true) }
   ];
   var freeY = getBool('seqeyes.spectrogram.freeY', false);
   var bandsVisible = getBool('seqeyes.spectrogram.bands', true);
@@ -5031,6 +5118,11 @@ var SeqEyesPanel = (function () {
   var audioActivationId = 0;
   var audioActivationPending = false;
   var audioWindow = null;       // buffered range plus the first-pass offset
+  /* What the host actually put in the last audio buffer. The panel asks for
+     RF, but only the reply says whether any arrived, and the two lanes reach
+     the synthesiser by different routes — so this is reported rather than
+     assumed from `params.includeRf`. */
+  var audioRfIncluded = null;
   var playheadFrame = 0;
 
   var AUDIO_SAMPLE_RATE = 44100;
@@ -5237,7 +5329,9 @@ var SeqEyesPanel = (function () {
 
   function paramsSignature() {
     return [params.source, params.fMaxHz, params.windowSamples, params.overlap,
-      params.oversample, params.targetColumns, params.normalize ? 1 : 0].join('|');
+      params.oversample, params.targetColumns, params.normalize ? 1 : 0,
+      params.includeRf ? 1 : 0, params.rfScale, params.rfThermoWeight,
+      params.rfControlWeight, params.rfEdgeMode].join('|');
   }
 
   function cacheKey(startSec, endSec) {
@@ -5299,6 +5393,11 @@ var SeqEyesPanel = (function () {
       oversample: params.oversample,
       targetColumns: params.targetColumns,
       normalize: params.normalize,
+      includeRf: params.includeRf,
+      rfScale: params.rfScale,
+      rfThermoWeight: params.rfThermoWeight,
+      rfControlWeight: params.rfControlWeight,
+      rfEdgeMode: params.rfEdgeMode,
       trTimeSec: h.getTrTimeSec ? h.getTrTimeSec() : 0
     });
   }
@@ -5335,13 +5434,29 @@ var SeqEyesPanel = (function () {
     render();
   }
 
+  /**
+   * Image channel that is actually present in the current matrix.
+   *
+   * A remembered `rf` preference outlives the RF toggle and survives a reload
+   * into a matrix that has no RF channels, so the fallback is not defensive
+   * padding — it is the normal path the first time the panel opens with RF off.
+   */
+  function activeImageChannel() {
+    if (currentSpec && currentSpec.data && currentSpec.data[imageChannel]) return imageChannel;
+    return 'rss';
+  }
+
   function applySpectrogram(spec) {
     currentSpec = spec;
     currentView = { startSec: spec.requestedStartSec, endSec: spec.requestedEndSec };
-    if (windowLevelAuto) windowLevel = sgAutoWindowLevel(spec, 'rss', windowLevel);
+    if (windowLevelAuto) windowLevel = sgAutoWindowLevel(spec, activeImageChannel(), windowLevel);
     clampFrequencyRange();
     imageDirty = true;
-    hotBands = sgDetectHotBands(spec, acousticBands, windowLevel, 'rss');
+    hotBands = sgDetectHotBands(spec, acousticBands, windowLevel, activeImageChannel());
+    // The RF chips and the image-channel options both depend on whether this
+    // matrix carries RF, which is only known once it arrives.
+    buildLegend();
+    syncControls();
     publishNotices();
     render();
     if (requestStartedAt) {
@@ -5384,8 +5499,17 @@ var SeqEyesPanel = (function () {
     var anyHot = false;
     for (var k = 0; k < hotBands.length; k++) if (hotBands[k]) anyHot = true;
     if (anyHot) {
-      messages.push('Gradient energy falls inside a forbidden acoustic band (advisory: '
+      // The detection runs on whichever channel the image shows, so the wording
+      // has to name that channel rather than always claiming "gradient".
+      messages.push((sgIsRfChannel(activeImageChannel()) ? 'RF proxy energy' : 'Gradient energy')
+        + ' falls inside a forbidden acoustic band (advisory: '
         + 'this compares against the current display window, and is not a compliance check).');
+    }
+    if (currentSpec && currentSpec.rfIncluded) {
+      messages.push('RF acoustic channels are a reduced-order research proxy '
+        + '(thermoacoustic d|B1|²/dt plus a hypothesised TX-switching term), with no calibrated '
+        + 'level and no scanner resonance model. They are shown on their own relative scale and '
+        + 'must not be compared with, or added to, the gradient channels.');
     }
     notice('spectrogram', messages.length ? messages : null);
   }
@@ -5417,7 +5541,7 @@ var SeqEyesPanel = (function () {
       if (imageDirty || !imageCache || imageCache.width !== pixelW || imageCache.height !== pixelH) {
         imageCache = sgBuildImageData({
           spectrogram: currentSpec,
-          channel: 'rss',
+          channel: activeImageChannel(),
           lut: lut,
           windowLevel: windowLevel,
           view: currentView,
@@ -5512,7 +5636,20 @@ var SeqEyesPanel = (function () {
       out.gz[row] = spec.data.gz[index];
       out.rss[row] = spec.data.rss[index];
     }
+    addRfSliceColumns(out, spec, col);
     return out;
+  }
+
+  /** Copy the RF rows of one column into a slice, when the matrix has them. */
+  function addRfSliceColumns(out, spec, col) {
+    for (var i = 0; i < SG_RF_SLICE_KEYS.length; i++) {
+      var key = SG_RF_SLICE_KEYS[i];
+      var source = spec.data[key];
+      if (!source) continue;
+      var target = new Float32Array(spec.nFreq);
+      for (var row = 0; row < spec.nFreq; row++) target[row] = source[row * spec.nTime + col];
+      out[key] = target;
+    }
   }
 
   var averageCache = null;
@@ -5538,6 +5675,21 @@ var SeqEyesPanel = (function () {
       out.gx[row] = rx; out.gy[row] = ry; out.gz[row] = rz;
       out.rss[row] = Math.sqrt(rx * rx + ry * ry + rz * rz);
     }
+    // The RF channels average on their own. `rss` is rebuilt from the per-axis
+    // means above because it is a combination of three signals; `rf` is already
+    // the transform of one combined signal, so it is simply averaged.
+    for (var i = 0; i < SG_RF_SLICE_KEYS.length; i++) {
+      var key = SG_RF_SLICE_KEYS[i];
+      var source = spec.data[key];
+      if (!source) continue;
+      var target = new Float32Array(spec.nFreq);
+      for (var r = 0; r < spec.nFreq; r++) {
+        var b = r * spec.nTime, acc = 0;
+        for (var c = 0; c < spec.nTime; c++) { var v = source[b + c]; acc += v * v; }
+        target[r] = Math.sqrt(acc / spec.nTime);
+      }
+      out[key] = target;
+    }
     averageCache = { spec: spec, slice: out };
     return out;
   }
@@ -5553,7 +5705,9 @@ var SeqEyesPanel = (function () {
     for (var i = 0; i < traces.length; i++) {
       resolved.push({
         key: traces[i].key,
-        visible: traces[i].visible,
+        // An RF trace the matrix does not carry is not drawn, whatever the
+        // remembered legend state says.
+        visible: traces[i].visible && (!traces[i].rf || !!(slice && slice[traces[i].key])),
         color: (style.getPropertyValue(traces[i].varName) || '#888').trim()
       });
     }
@@ -5582,12 +5736,24 @@ var SeqEyesPanel = (function () {
     if (currentSpec && currentSpec.nTime) {
       parts.push('dt ' + sgFmtResolution(currentSpec.dtResolutionSec));
       parts.push('df ' + sgFmtHz(currentSpec.dfResolutionHz) + ' Hz');
-      parts.push('unit ' + currentSpec.unit);
+      var channel = activeImageChannel();
+      parts.push('img ' + (SG_IMAGE_CHANNEL_LABELS[channel] || channel));
+      // The unit belongs to the channel on screen, so an RF image must not be
+      // labelled mT/m.
+      parts.push('unit ' + (sgIsRfChannel(channel) ? 'relative (0 dB = RF peak in view)' : currentSpec.unit));
       parts.push('D ' + currentSpec.decimationFactor + '×');
       parts.push(currentSpec.nTime + '×' + currentSpec.nFreq);
       parts.push('W ' + windowLevel.width.toFixed(1) + ' dB  L ' + sgFmtDb(windowLevel.level) + ' dB');
     } else if (busy) {
       parts.push('Calculating…');
+    }
+    if (params.includeRf && audioRfIncluded !== null) {
+      // Says whether the buffer being played actually contains RF, which is not
+      // the same question as whether the RF channels were requested — and at
+      // what share, since a low mix is the other way RF goes unnoticed.
+      parts.push(audioRfIncluded
+        ? 'audio RF ✓ ' + Math.round(params.rfMix * 100) + '%'
+        : 'audio RF ✗ (none reached the buffer)');
     }
     if (isFinite(playheadTimeSec)) parts.push('▶ ' + sgFmtTime(playheadTimeSec, timeUnit()));
     else if (isFinite(markerTimeSec)) parts.push('marker ' + sgFmtTime(markerTimeSec, timeUnit()));
@@ -5596,7 +5762,11 @@ var SeqEyesPanel = (function () {
     }
     if (hoverReadout) parts.push(hoverReadout);
     out.textContent = parts.join('   ');
-    out.title = 'Simulated gradient spectral content — not calibrated sound pressure level.';
+    out.title = currentSpec && currentSpec.rfIncluded
+      ? 'Simulated gradient spectral content — not calibrated sound pressure level. '
+        + 'The RF channels are an uncalibrated research proxy on a separate relative scale; '
+        + 'they cannot be compared with the gradient channels or summed with them.'
+      : 'Simulated gradient spectral content — not calibrated sound pressure level.';
   }
 
   var hoverReadout = '';
@@ -5631,15 +5801,15 @@ var SeqEyesPanel = (function () {
     };
     windowLevelAuto = false;
     imageDirty = true;
-    if (currentSpec) hotBands = sgDetectHotBands(currentSpec, acousticBands, windowLevel, 'rss');
+    if (currentSpec) hotBands = sgDetectHotBands(currentSpec, acousticBands, windowLevel, activeImageChannel());
     render();
   }
 
   function resetWindowLevel() {
     windowLevelAuto = true;
-    if (currentSpec) windowLevel = sgAutoWindowLevel(currentSpec, 'rss', windowLevel);
+    if (currentSpec) windowLevel = sgAutoWindowLevel(currentSpec, activeImageChannel(), windowLevel);
     imageDirty = true;
-    if (currentSpec) hotBands = sgDetectHotBands(currentSpec, acousticBands, windowLevel, 'rss');
+    if (currentSpec) hotBands = sgDetectHotBands(currentSpec, acousticBands, windowLevel, activeImageChannel());
     render();
   }
 
@@ -5724,7 +5894,13 @@ var SeqEyesPanel = (function () {
     h.requestAudio(pendingAudioId, range.startSec, range.endSec, {
       sampleRate: 44100,
       source: params.source,
-      channelWeights: [1, 1, 1]
+      channelWeights: [1, 1, 1],
+      includeRf: params.includeRf,
+      rfScale: params.rfScale,
+      rfThermoWeight: params.rfThermoWeight,
+      rfControlWeight: params.rfControlWeight,
+      rfEdgeMode: params.rfEdgeMode,
+      rfMix: params.rfMix
     });
     syncTransport();
   }
@@ -5777,16 +5953,28 @@ var SeqEyesPanel = (function () {
   function deliverAudio(id, payload) {
     if (id !== pendingAudioId) return;
     pendingAudioId = 0;
+    // The host knows which sources were enabled, so it words the refusal; the
+    // panel used to say "no gradient activity" even when RF was the source the
+    // user was listening for.
+    var emptyMessage = params.includeRf
+      ? 'Nothing to play in this window — no gradient activity and no RF events.'
+      : 'No gradient activity in this window — nothing to play.';
     if (!payload || !payload.left || !payload.left.length) {
-      notice('gradientSound', 'No gradient activity in this window — nothing to play.');
+      notice('gradientSound', (payload && payload.warnings && payload.warnings.length)
+        ? payload.warnings : emptyMessage);
       syncTransport();
       return;
     }
     if (payload.silent) {
-      notice('gradientSound', 'No gradient activity in this window — nothing to play.');
+      notice('gradientSound', (payload.warnings && payload.warnings.length)
+        ? payload.warnings : emptyMessage);
       syncTransport();
       return;
     }
+    // Partial-source notes ("hearing the RF proxy only") are advisory, not a
+    // refusal, so they are published without stopping playback.
+    notice('gradientSound', (payload.warnings && payload.warnings.length) ? payload.warnings : null);
+    audioRfIncluded = !!payload.rfIncluded;
     if (!SeqEyesAudio.load(payload.sampleRate, payload.left, payload.right, payload.startSec)) {
       if (SeqEyesAudio.contextState() !== 'running') audioActivationFailure();
       else notice('gradientSound', 'This host could not create an audio buffer.');
@@ -5846,6 +6034,7 @@ var SeqEyesPanel = (function () {
     playheadTimeSec = NaN;
     pendingAudioId = 0;
     audioWindow = null;
+    audioRfIncluded = null;
     syncTransport();
     render();
   }
@@ -5901,7 +6090,7 @@ var SeqEyesPanel = (function () {
 
   function setAcousticBands(bands) {
     acousticBands = Array.isArray(bands) ? bands.slice() : [];
-    hotBands = currentSpec ? sgDetectHotBands(currentSpec, acousticBands, windowLevel, 'rss') : [];
+    hotBands = currentSpec ? sgDetectHotBands(currentSpec, acousticBands, windowLevel, activeImageChannel()) : [];
     buildLegend();
     publishNotices();
     render();
@@ -5916,10 +6105,15 @@ var SeqEyesPanel = (function () {
     var style = getComputedStyle(document.body);
 
     for (var i = 0; i < traces.length; i++) {
+      // RF chips appear only once the matrix carries RF, so the legend never
+      // offers a toggle that would do nothing.
+      if (traces[i].rf && !(currentSpec && currentSpec.data && currentSpec.data[traces[i].key])) continue;
       (function (trace) {
         var chip = document.createElement('div');
         chip.className = 'li' + (trace.visible ? '' : ' off');
-        chip.title = 'Toggle the ' + trace.label + ' spectrum trace';
+        chip.title = trace.rf
+          ? 'Toggle the ' + trace.label + ' trace (uncalibrated proxy, dB relative to its own peak in this view)'
+          : 'Toggle the ' + trace.label + ' spectrum trace';
         var swatch = document.createElement('div');
         swatch.className = 'ld';
         swatch.style.background = (style.getPropertyValue(trace.varName) || '#888').trim();
@@ -5990,6 +6184,32 @@ var SeqEyesPanel = (function () {
     setValue('sgWin', String(params.windowSamples));
     setValue('sgOverlap', String(params.overlap));
     setValue('sgOversample', String(params.oversample));
+
+    var rfToggle = el('sgRf');
+    if (rfToggle) {
+      rfToggle.setAttribute('aria-pressed', params.includeRf ? 'true' : 'false');
+      rfToggle.classList.toggle('on', params.includeRf);
+    }
+    var rfScale = el('sgRfScale');
+    if (rfScale) {
+      setValue('sgRfScale', String(params.rfScale));
+      rfScale.disabled = !params.includeRf;
+    }
+    var rfMix = el('sgRfMix');
+    if (rfMix) {
+      setValue('sgRfMix', String(Math.round(params.rfMix * 100)));
+      rfMix.disabled = !params.includeRf;
+    }
+    var image = el('sgImageChannel');
+    if (image) {
+      // RF options are removed rather than disabled: a disabled option that the
+      // select is currently showing is a state the user cannot get out of.
+      for (var o = image.options.length - 1; o >= 0; o--) {
+        if (sgIsRfChannel(image.options[o].value)) image.options[o].hidden = !params.includeRf;
+      }
+      image.value = activeImageChannel();
+    }
+
     var clear = el('sgMarkerClear');
     if (clear) clear.disabled = !isFinite(markerTimeSec);
   }
@@ -6101,6 +6321,56 @@ var SeqEyesPanel = (function () {
       stopPlayback();
       params.source = this.value === 'dGdt' ? 'dGdt' : 'G';
       onParamChanged(true);
+    };
+
+    var image = el('sgImageChannel');
+    if (image) image.onchange = function () {
+      imageChannel = this.value;
+      set('seqeyes.spectrogram.imagechannel', imageChannel);
+      // Channels live on different scales, so a channel change invalidates the
+      // contrast as thoroughly as new data would.
+      windowLevelAuto = true;
+      if (currentSpec) windowLevel = sgAutoWindowLevel(currentSpec, activeImageChannel(), windowLevel);
+      if (currentSpec) hotBands = sgDetectHotBands(currentSpec, acousticBands, windowLevel, activeImageChannel());
+      imageDirty = true;
+      publishNotices();
+      render();
+    };
+
+    // Each RF control changes what is being synthesised, so a buffer already
+    // playing is stale the moment one moves.
+    var rfToggle = el('sgRf');
+    if (rfToggle) rfToggle.onclick = function () {
+      stopPlayback();
+      params.includeRf = !params.includeRf;
+      set('seqeyes.spectrogram.rf', params.includeRf ? '1' : '0');
+      if (!params.includeRf && sgIsRfChannel(imageChannel)) {
+        imageChannel = 'rss';
+        set('seqeyes.spectrogram.imagechannel', imageChannel);
+      }
+      onParamChanged(true);
+      buildLegend();
+    };
+
+    var rfScale = el('sgRfScale');
+    if (rfScale) rfScale.onchange = function () {
+      stopPlayback();
+      var value = parseFloat(this.value);
+      params.rfScale = isFinite(value) && value >= 0 ? value : 1;
+      set('seqeyes.spectrogram.rfscale', String(params.rfScale));
+      onParamChanged(true);
+    };
+
+    var rfMix = el('sgRfMix');
+    if (rfMix) rfMix.oninput = function () {
+      stopPlayback();
+      var value = parseFloat(this.value);
+      params.rfMix = isFinite(value) ? Math.max(0, Math.min(1, value / 100)) : 0.5;
+      set('seqeyes.spectrogram.rfmix', String(params.rfMix));
+      // Playback only: the spectrogram keeps the mechanisms on separate
+      // channels, so this must not trigger a recompute.
+      syncControls();
+      syncTransport();
     };
 
     var win = el('sgWin');
@@ -6351,6 +6621,15 @@ var SeqEyesPanel = (function () {
       + '  Gy ' + sgFmtDb(sgToDb(cell.gy, floorValue))
       + '  Gz ' + sgFmtDb(sgToDb(cell.gz, floorValue))
       + '  Σ ' + sgFmtDb(sgToDb(cell.rss, floorValue)) + ' dB';
+    if (cell.rf !== null) {
+      // Reported against the RF peak, matching the axis the RF traces are drawn
+      // on, and flagged `rel` so it is never read as dB re 1 mT/m.
+      var rfFloor = sgValueFloorFor(currentSpec, 'rf');
+      var rfRef = sgChannelRefDb(currentSpec, 'rf');
+      text += '   RF ' + sgFmtDb(sgToDb(cell.rf, rfFloor) - rfRef)
+        + ' (th ' + sgFmtDb(sgToDb(cell.rfThermo, rfFloor) - rfRef)
+        + ', ct ' + sgFmtDb(sgToDb(cell.rfControl, rfFloor) - rfRef) + ') dB rel';
+    }
     var bandIndex = sgBandAtFrequency(acousticBands, cell.freqHz);
     if (bandIndex >= 0) {
       var band = acousticBands[bandIndex];
@@ -6591,6 +6870,13 @@ var SeqEyesPanel = (function () {
         dtResolutionSec: currentSpec ? currentSpec.dtResolutionSec : null,
         dfResolutionHz: currentSpec ? currentSpec.dfResolutionHz : null,
         decimationFactor: currentSpec ? currentSpec.decimationFactor : null,
+        includeRf: params.includeRf,
+        rfScale: params.rfScale,
+        rfMix: params.rfMix,
+        audioRfIncluded: audioRfIncluded,
+        imageChannel: activeImageChannel(),
+        rfIncluded: !!(currentSpec && currentSpec.rfIncluded),
+        rfMaxValue: currentSpec ? (currentSpec.rfMaxValue || 0) : 0,
         warnings: currentSpec ? currentSpec.warnings.slice() : [],
         error: lastError
       };

@@ -41,6 +41,33 @@ function sgValueFloor(spec) {
   return m > 0 ? m * 1e-6 : 1e-12;
 }
 
+var SG_RF_CHANNELS = { rf: 1, rfThermo: 1, rfControl: 1 };
+
+function sgIsRfChannel(key) { return SG_RF_CHANNELS[key] === 1; }
+
+/**
+ * dB reference for one channel.
+ *
+ * Gradient channels are absolute — dB re 1 mT/m (or 1 T/m/s) — so their
+ * reference is 1 and the number means the same thing in every view. The RF
+ * proxy has no unit at all, so it is referenced to its own peak in the current
+ * view: 0 dB is "the loudest thing the RF proxy does here". Those two readings
+ * are not comparable, which is the honest situation; pretending otherwise would
+ * need a coil transfer function nobody has measured.
+ */
+function sgChannelRefDb(spec, key) {
+  if (!sgIsRfChannel(key)) return 0;
+  var peak = spec && spec.rfMaxValue > 0 ? spec.rfMaxValue : 0;
+  return peak > 0 ? 20 * Math.log10(peak) : 0;
+}
+
+/** Per-channel magnitude floor, scaled to that channel's own peak. */
+function sgValueFloorFor(spec, key) {
+  if (!sgIsRfChannel(key)) return sgValueFloor(spec);
+  var peak = spec && spec.rfMaxValue > 0 ? spec.rfMaxValue : 0;
+  return peak > 0 ? peak * 1e-6 : 1e-12;
+}
+
 function sgFmtDb(v) {
   if (!isFinite(v)) return '--';
   return (v >= 0 ? '+' : '') + v.toFixed(1);
@@ -102,10 +129,11 @@ function sgAutoWindowLevel(spec, key, previous) {
   var n = data.length;
   if (!n) return fallback;
 
-  var floorValue = sgValueFloor(spec);
+  var floorValue = sgValueFloorFor(spec, key);
+  var refDb = sgChannelRefDb(spec, key);
   var stride = Math.max(1, Math.floor(n / 4096));
   var samples = [];
-  for (var i = 0; i < n; i += stride) samples.push(sgToDb(data[i], floorValue));
+  for (var i = 0; i < n; i += stride) samples.push(sgToDb(data[i], floorValue) - refDb);
   if (!samples.length) return fallback;
   samples.sort(function (a, b) { return a - b; });
 
@@ -198,8 +226,10 @@ function sgBuildImageData(context) {
   var data = spec.data[context.channel] || spec.data.rss;
   var lut = context.lut;
   var wl = context.windowLevel;
-  var floorValue = sgValueFloor(spec);
-  var low = wl.level - wl.width / 2;
+  var floorValue = sgValueFloorFor(spec, context.channel);
+  // The channel reference folds into the window's lower edge, so a per-cell
+  // subtraction never enters the inner loop.
+  var low = wl.level - wl.width / 2 + sgChannelRefDb(spec, context.channel);
   var invWidth = wl.width > 0 ? 1 / wl.width : 1;
   var logScale = 20 / Math.LN10;
 
@@ -587,13 +617,19 @@ function sgDrawSpectrum(context) {
     ctx.strokeStyle = trace.color;
     ctx.lineWidth = trace.key === 'rss' ? 1.6 : 1.1;
     ctx.globalAlpha = trace.key === 'rss' ? 1 : 0.9;
+    // Dashed for the RF proxies: the same dB axis carries two different
+    // references, and a reader should not have to consult the legend to see
+    // which traces are the uncalibrated ones.
+    ctx.setLineDash(sgIsRfChannel(trace.key) ? [4, 3] : []);
+    var traceFloor = sgValueFloorFor(spec, trace.key);
+    var traceRefDb = sgChannelRefDb(spec, trace.key);
     ctx.beginPath();
     var started = false;
     for (var row = 0; row < values.length; row++) {
       var f = spec.fStartHz + row * spec.fStepHz;
       if (f < range.fMin || f > range.fMax) continue;
       var fp = freqPos(f);
-      var mp = magPos(sgToDb(values[row], floorValue));
+      var mp = magPos(sgToDb(values[row], traceFloor) - traceRefDb);
       var xx = rotated ? mp : fp;
       var yy = rotated ? fp : mp;
       if (!started) { ctx.moveTo(xx, yy); started = true; } else ctx.lineTo(xx, yy);
@@ -601,6 +637,7 @@ function sgDrawSpectrum(context) {
     ctx.stroke();
   }
   ctx.globalAlpha = 1;
+  ctx.setLineDash([]);
   ctx.restore();
   return rect;
 }
@@ -611,7 +648,6 @@ function sgSpectrumScale(spec, slice, windowLevel, freeY, traces) {
     return { min: windowLevel.level - windowLevel.width / 2, max: windowLevel.level + windowLevel.width / 2 };
   }
   if (!spec || !slice) return { min: -80, max: 0 };
-  var floorValue = sgValueFloor(spec);
   var max = -Infinity;
   var keys = [];
   for (var t = 0; t < traces.length; t++) if (traces[t].visible) keys.push(traces[t].key);
@@ -619,8 +655,10 @@ function sgSpectrumScale(spec, slice, windowLevel, freeY, traces) {
   for (var k = 0; k < keys.length; k++) {
     var values = slice[keys[k]];
     if (!values) continue;
+    var floorValue = sgValueFloorFor(spec, keys[k]);
+    var refDb = sgChannelRefDb(spec, keys[k]);
     for (var i = 0; i < values.length; i++) {
-      var db = sgToDb(values[i], floorValue);
+      var db = sgToDb(values[i], floorValue) - refDb;
       if (db > max) max = db;
     }
   }
@@ -652,8 +690,8 @@ function sgDetectHotBands(spec, bands, windowLevel, channel) {
   var flags = [];
   if (!spec || !spec.nTime || !bands || !bands.length) return flags;
   var data = spec.data[channel] || spec.data.rss;
-  var floorValue = sgValueFloor(spec);
-  var threshold = windowLevel.level + windowLevel.width / 2;
+  var floorValue = sgValueFloorFor(spec, channel);
+  var threshold = windowLevel.level + windowLevel.width / 2 + sgChannelRefDb(spec, channel);
   for (var i = 0; i < bands.length; i++) {
     var half = (bands[i].bwHz || 0) / 2;
     var rowLow = Math.max(0, Math.floor((bands[i].freqHz - half - spec.fStartHz) / spec.fStepHz));
@@ -685,6 +723,11 @@ function sgSampleCell(spec, channel, timeSec, freqHz) {
     gx: spec.data.gx[index],
     gy: spec.data.gy[index],
     gz: spec.data.gz[index],
-    rss: spec.data[channel] ? spec.data[channel][index] : spec.data.rss[index]
+    rss: spec.data[channel] ? spec.data[channel][index] : spec.data.rss[index],
+    /* null, not 0, when RF was not computed: the readout must be able to tell
+       "no RF proxy in this matrix" from "the RF proxy is silent here". */
+    rfThermo: spec.data.rfThermo ? spec.data.rfThermo[index] : null,
+    rfControl: spec.data.rfControl ? spec.data.rfControl[index] : null,
+    rf: spec.data.rf ? spec.data.rf[index] : null
   };
 }

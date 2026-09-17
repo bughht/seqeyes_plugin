@@ -32,6 +32,17 @@ export function serializeSpectrogram(spec: GradientSpectrogram): Record<string, 
         gyB64: encodeF32B64(spec.data.gy),
         gzB64: encodeF32B64(spec.data.gz),
         rssB64: encodeF32B64(spec.data.rss),
+        // Omitted entirely when RF is off, so the common path pays nothing for
+        // a feature it did not ask for; `rfIncluded` is what the webview tests.
+        ...(spec.rfIncluded && spec.data.rf && spec.data.rfThermo && spec.data.rfControl
+            ? {
+                rfThermoB64: encodeF32B64(spec.data.rfThermo),
+                rfControlB64: encodeF32B64(spec.data.rfControl),
+                rfB64: encodeF32B64(spec.data.rf),
+            }
+            : {}),
+        rfIncluded: spec.rfIncluded,
+        rfMaxValue: spec.rfMaxValue,
         minValue: spec.minValue,
         maxValue: spec.maxValue,
         decimationFactor: spec.decimationFactor,
@@ -52,6 +63,8 @@ export function serializeGradientSound(sound: GradientSound): Record<string, unk
         startSec: sound.startSec,
         endSec: sound.endSec,
         silent: sound.silent,
+        rfIncluded: sound.rfIncluded,
+        warnings: sound.warnings,
         leftB64: encodeF32B64(sound.left),
         rightB64: encodeF32B64(sound.right),
     };

@@ -36,6 +36,12 @@ interface PanelState {
   dtResolutionSec: number | null;
   dfResolutionHz: number | null;
   decimationFactor: number | null;
+  includeRf: boolean;
+  rfScale: number;
+  rfMix: number;
+  imageChannel: string;
+  rfIncluded: boolean;
+  rfMaxValue: number;
   warnings: string[];
   error: string | null;
 }
@@ -1023,6 +1029,121 @@ async function captureNextAudioRequest(page: Page): Promise<{
     (document.getElementById('sgPlay') as HTMLButtonElement).click();
   }));
 }
+
+test('adds the RF acoustic proxy channels on request and keeps them opt-in', async ({ page }) => {
+  await loadViewer(page, fixtures.spiral);
+  await openSpectrogram(page);
+
+  // Off by default, and the RF image options stay out of reach until enabled.
+  let state = await panelState(page);
+  expect(state.includeRf).toBe(false);
+  expect(state.rfIncluded).toBe(false);
+  expect(state.imageChannel).toBe('rss');
+  await expect(page.locator('#sgRf')).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#sgRfScale')).toBeDisabled();
+  // Asserted on the attribute, not on visibility: an <option> inside a closed
+  // <select> never reports as visible either way.
+  await expect(page.locator('#sgImageChannel option[value="rf"]')).toHaveAttribute('hidden', '');
+  await expect(page.locator('#sgLegend')).not.toContainText('RF thermo');
+
+  await page.locator('#sgRf').click();
+  await expect.poll(async () => (await panelState(page)).rfIncluded, { timeout: 20_000 }).toBe(true);
+  await settlePanel(page);
+
+  state = await panelState(page);
+  expect(state.rfMaxValue).toBeGreaterThan(0);
+  await expect(page.locator('#sgRf')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#sgRfScale')).toBeEnabled();
+  await expect(page.locator('#sgImageChannel option[value="rf"]')).not.toHaveAttribute('hidden');
+  await expect(page.locator('#sgLegend')).toContainText('RF thermo');
+  await expect(page.locator('#sgLegend')).toContainText('RF ctrl');
+  // The panel must say what the numbers are worth, unprompted.
+  await expect(page.locator('#viewerNotice')).toContainText('research proxy');
+});
+
+test('gates the RF playback mix on the RF toggle and keeps it out of recompute', async ({ page }) => {
+  await loadViewer(page, fixtures.spiral);
+  await openSpectrogram(page);
+
+  await expect(page.locator('#sgRfMix')).toBeDisabled();
+  expect((await panelState(page)).rfMix).toBe(0.5);
+
+  await page.locator('#sgRf').click();
+  await expect.poll(async () => (await panelState(page)).rfIncluded, { timeout: 20_000 }).toBe(true);
+  await settlePanel(page);
+  await expect(page.locator('#sgRfMix')).toBeEnabled();
+
+  const before = (await panelState(page)).computeCount;
+  await page.locator('#sgRfMix').fill('100');
+  await page.locator('#sgRfMix').dispatchEvent('input');
+  await expect.poll(async () => (await panelState(page)).rfMix, { timeout: 10_000 }).toBe(1);
+
+  // The mix is a playback control; the spectrogram keeps the mechanisms on
+  // separate channels, so moving it must not trigger a recompute.
+  expect((await panelState(page)).computeCount).toBe(before);
+});
+
+test('switches the image to the RF proxy and recalibrates its contrast', async ({ page }) => {
+  await loadViewer(page, fixtures.spiral);
+  await openSpectrogram(page);
+  await page.locator('#sgRf').click();
+  await expect.poll(async () => (await panelState(page)).rfIncluded, { timeout: 20_000 }).toBe(true);
+  await settlePanel(page);
+
+  const gradientLevel = (await panelState(page)).windowLevel.level;
+
+  await page.locator('#sgImageChannel').selectOption('rf');
+  const state = await panelState(page);
+  expect(state.imageChannel).toBe('rf');
+  // The RF channel is referenced to its own peak, so auto contrast must land
+  // near 0 dB rather than reusing the gradient window it inherited.
+  expect(state.windowLevelAuto).toBe(true);
+  expect(state.windowLevel.level).not.toBeCloseTo(gradientLevel, 3);
+  expect(state.windowLevel.level).toBeLessThan(0);
+  expect(state.windowLevel.level).toBeGreaterThan(-120);
+  await expect(page.locator('#sgReadout')).toContainText('RF proxy');
+  await expect(page.locator('#sgReadout')).toContainText('relative');
+});
+
+test('keeps the RF event timing but drops the thermo term at RF scale 0', async ({ page }) => {
+  await loadViewer(page, fixtures.spiral);
+  await openSpectrogram(page);
+  await page.locator('#sgRf').click();
+  await expect.poll(async () => (await panelState(page)).rfIncluded, { timeout: 20_000 }).toBe(true);
+  await settlePanel(page);
+
+  await page.locator('#sgRfScale').fill('0');
+  await page.locator('#sgRfScale').dispatchEvent('change');
+  await expect.poll(async () => (await panelState(page)).rfScale, { timeout: 20_000 }).toBe(0);
+  await settlePanel(page);
+
+  // The switching term survives a zero flip-angle scale, which is the whole
+  // point of the separation, so the RF matrix must still carry energy.
+  const state = await panelState(page);
+  expect(state.rfIncluded).toBe(true);
+  expect(state.rfMaxValue).toBeGreaterThan(0);
+});
+
+test('falls back to the gradient image when the RF proxy is switched off', async ({ page }) => {
+  await loadViewer(page, fixtures.spiral);
+  await openSpectrogram(page);
+  await page.locator('#sgRf').click();
+  await expect.poll(async () => (await panelState(page)).rfIncluded, { timeout: 20_000 }).toBe(true);
+  await settlePanel(page);
+  await page.locator('#sgImageChannel').selectOption('rfControl');
+  expect((await panelState(page)).imageChannel).toBe('rfControl');
+
+  await page.locator('#sgRf').click();
+  await expect.poll(async () => (await panelState(page)).rfIncluded, { timeout: 20_000 }).toBe(false);
+  await settlePanel(page);
+
+  // A remembered RF image channel must not leave the panel painting a matrix
+  // that no longer exists.
+  const state = await panelState(page);
+  expect(state.imageChannel).toBe('rss');
+  expect(state.error).toBeNull();
+  await expect(page.locator('#sgImageChannel')).toHaveValue('rss');
+});
 
 async function loadViewer(page: Page, fixturePath: string): Promise<void> {
   await page.goto('/?debug=1');
