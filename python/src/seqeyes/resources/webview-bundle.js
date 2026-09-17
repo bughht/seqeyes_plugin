@@ -5749,8 +5749,11 @@ var SeqEyesPanel = (function () {
     }
     if (params.includeRf && audioRfIncluded !== null) {
       // Says whether the buffer being played actually contains RF, which is not
-      // the same question as whether the RF channels were requested.
-      parts.push(audioRfIncluded ? 'audio RF ✓' : 'audio RF ✗ (none reached the buffer)');
+      // the same question as whether the RF channels were requested — and at
+      // what share, since a low mix is the other way RF goes unnoticed.
+      parts.push(audioRfIncluded
+        ? 'audio RF ✓ ' + Math.round(params.rfMix * 100) + '%'
+        : 'audio RF ✗ (none reached the buffer)');
     }
     if (isFinite(playheadTimeSec)) parts.push('▶ ' + sgFmtTime(playheadTimeSec, timeUnit()));
     else if (isFinite(markerTimeSec)) parts.push('marker ' + sgFmtTime(markerTimeSec, timeUnit()));

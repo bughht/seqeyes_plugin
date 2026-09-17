@@ -528,7 +528,7 @@ test('plays the RF proxy end to end over the extension round trip', async ({ pag
   expect(await page.evaluate(() =>
     (window as unknown as { SeqEyesDev: { spectrogramState(): { audioRfIncluded: boolean | null } } })
       .SeqEyesDev.spectrogramState().audioRfIncluded)).toBe(true);
-  await expect(page.locator('#sgReadout')).toContainText('audio RF ✓');
+  await expect(page.locator('#sgReadout')).toContainText('audio RF ✓ 100%');
 
   expect(failures).toEqual([]);
 });
