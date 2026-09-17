@@ -522,5 +522,13 @@ test('plays the RF proxy end to end over the extension round trip', async ({ pag
     (window as unknown as { SeqEyesDev: { audioState(): { hasBuffer: boolean } } })
       .SeqEyesDev.audioState().hasBuffer), { timeout: 15_000 }).toBe(true);
 
+  // The panel must report what the reply actually carried, not what it asked
+  // for: that readout is the only thing distinguishing "RF was requested" from
+  // "RF reached the buffer" when a user reports silence.
+  expect(await page.evaluate(() =>
+    (window as unknown as { SeqEyesDev: { spectrogramState(): { audioRfIncluded: boolean | null } } })
+      .SeqEyesDev.spectrogramState().audioRfIncluded)).toBe(true);
+  await expect(page.locator('#sgReadout')).toContainText('audio RF ✓');
+
   expect(failures).toEqual([]);
 });

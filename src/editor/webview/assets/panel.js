@@ -104,6 +104,11 @@ var SeqEyesPanel = (function () {
   var audioActivationId = 0;
   var audioActivationPending = false;
   var audioWindow = null;       // buffered range plus the first-pass offset
+  /* What the host actually put in the last audio buffer. The panel asks for
+     RF, but only the reply says whether any arrived, and the two lanes reach
+     the synthesiser by different routes — so this is reported rather than
+     assumed from `params.includeRf`. */
+  var audioRfIncluded = null;
   var playheadFrame = 0;
 
   var AUDIO_SAMPLE_RATE = 44100;
@@ -728,6 +733,11 @@ var SeqEyesPanel = (function () {
     } else if (busy) {
       parts.push('Calculating…');
     }
+    if (params.includeRf && audioRfIncluded !== null) {
+      // Says whether the buffer being played actually contains RF, which is not
+      // the same question as whether the RF channels were requested.
+      parts.push(audioRfIncluded ? 'audio RF ✓' : 'audio RF ✗ (none reached the buffer)');
+    }
     if (isFinite(playheadTimeSec)) parts.push('▶ ' + sgFmtTime(playheadTimeSec, timeUnit()));
     else if (isFinite(markerTimeSec)) parts.push('marker ' + sgFmtTime(markerTimeSec, timeUnit()));
     else if (currentSpec && currentSpec.nTime) {
@@ -947,6 +957,7 @@ var SeqEyesPanel = (function () {
     // Partial-source notes ("hearing the RF proxy only") are advisory, not a
     // refusal, so they are published without stopping playback.
     notice('gradientSound', (payload.warnings && payload.warnings.length) ? payload.warnings : null);
+    audioRfIncluded = !!payload.rfIncluded;
     if (!SeqEyesAudio.load(payload.sampleRate, payload.left, payload.right, payload.startSec)) {
       if (SeqEyesAudio.contextState() !== 'running') audioActivationFailure();
       else notice('gradientSound', 'This host could not create an audio buffer.');
@@ -1006,6 +1017,7 @@ var SeqEyesPanel = (function () {
     playheadTimeSec = NaN;
     pendingAudioId = 0;
     audioWindow = null;
+    audioRfIncluded = null;
     syncTransport();
     render();
   }
@@ -1844,6 +1856,7 @@ var SeqEyesPanel = (function () {
         includeRf: params.includeRf,
         rfScale: params.rfScale,
         rfMix: params.rfMix,
+        audioRfIncluded: audioRfIncluded,
         imageChannel: activeImageChannel(),
         rfIncluded: !!(currentSpec && currentSpec.rfIncluded),
         rfMaxValue: currentSpec ? (currentSpec.rfMaxValue || 0) : 0,
