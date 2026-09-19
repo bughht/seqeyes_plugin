@@ -532,3 +532,95 @@ test('plays the RF proxy end to end over the extension round trip', async ({ pag
 
   expect(failures).toEqual([]);
 });
+
+/**
+ * The minimap must place blocks where they actually are in time.
+ *
+ * The block cache is built at device resolution while `mmCtx` carries a
+ * `scale(dpr)` transform, so a `drawImage(cache, 0, 0)` with no destination
+ * size draws it `dpr` times too wide: at dpr 2 only the first half of the
+ * sequence survives, stretched across the whole strip, and the viewport band —
+ * which is computed correctly in CSS units — no longer agrees with it.
+ *
+ * This only reproduces above dpr 1, which is why it went unnoticed: the
+ * default Playwright context and an unzoomed browser both run at 1.
+ */
+test.describe('minimap block cache', () => {
+  test.use({ deviceScaleFactor: 2 });
+
+  test('places RF blocks at their true times on a high-DPI display', async ({ page }) => {
+    const failures: string[] = [];
+    page.on('pageerror', e => failures.push(e.message));
+
+    const seq = parseSequenceBytes(
+      new Uint8Array(readFileSync(resolve('test/seqeyes_demo_seq_files/writeEpi.seq'))),
+      'writeEpi.seq',
+    );
+    const packed = packSequenceBlocks(seq);
+    const totalDuration = getTotalDuration(seq);
+
+    // Ground truth from the decoded sequence, not from a golden image.
+    const expected = (packed.blocks as unknown as { s: number; d: number; rf?: unknown }[])
+      .filter(b => b.rf)
+      .map(b => ({ from: b.s / totalDuration, to: (b.s + b.d) / totalDuration }));
+    expect(expected.length, 'writeEpi should carry three RF blocks').toBe(3);
+
+    await openWebview(page);
+    await post(page, {
+      type: 'sequenceData',
+      sequenceGeneration: 1,
+      blocks: packed.blocks,
+      sampleCount: packed.sampleCount,
+      totalDuration,
+      gradRaster: seq.rasterTimes.gradientRaster,
+      rfRaster: seq.rasterTimes.rfRaster,
+      adcRaster: seq.rasterTimes.adcRaster,
+      blockRaster: seq.rasterTimes.blockDurationRaster,
+      timing: detectSequenceTiming(seq),
+      notices: [],
+    }, { sampleTimes: b64(packed.sampleTimes), sampleValues: b64(packed.sampleValues) });
+
+    // Where the strip actually tints its RF band, as a fraction of its width.
+    const marks = async () => page.evaluate(() => {
+      const canvas = document.getElementById('mmc') as HTMLCanvasElement;
+      if (!canvas || !canvas.width) return [];
+      const dpr = window.devicePixelRatio || 1;
+      // Strictly inside the RF band: the Gx band begins at exactly 5*dpr, and
+      // rounding up bleeds into it.
+      const band = Math.max(1, Math.min(canvas.height, Math.floor(5 * dpr)));
+      const data = canvas.getContext('2d')?.getImageData(0, 0, canvas.width, band).data;
+      if (!data) return [];
+      const hit: boolean[] = [];
+      for (let x = 0; x < canvas.width; x++) {
+        let tinted = false;
+        for (let y = 0; y < band; y++) {
+          const i = (y * canvas.width + x) * 4;
+          if (data[i] - data[i + 1] > 8 && data[i] - data[i + 2] > 4) tinted = true;
+        }
+        hit.push(tinted);
+      }
+      const runs: { from: number; to: number }[] = [];
+      let start: number | null = null;
+      hit.forEach((v, i) => {
+        if (v && start === null) start = i;
+        else if (!v && start !== null) { runs.push({ from: start / hit.length, to: (i - 1) / hit.length }); start = null; }
+      });
+      if (start !== null) runs.push({ from: start / hit.length, to: (hit.length - 1) / hit.length });
+      return runs.filter(r => r.to - r.from > 0.002);
+    });
+
+    await expect.poll(async () => (await marks()).length, { timeout: 10_000 }).toBeGreaterThan(0);
+    const found = await marks();
+
+    // Every RF block is represented, and nothing is pushed off the strip.
+    expect(found.length, `RF marks at ${JSON.stringify(found)} for blocks at ${JSON.stringify(expected)}`)
+      .toBe(expected.length);
+    expected.forEach((want, index) => {
+      // One pixel column of the strip is worth a few thousandths of the width.
+      expect(found[index].from).toBeCloseTo(want.from, 2);
+      expect(found[index].to).toBeCloseTo(want.to, 2);
+    });
+
+    expect(failures).toEqual([]);
+  });
+});

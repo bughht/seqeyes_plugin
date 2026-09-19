@@ -502,8 +502,8 @@ function rs(){
   moc.style.width=r.width+'px';moc.style.height=r.height+'px';
   moctx.setTransform(dpr,0,0,dpr,0,0);
   if(typeof layoutMode!=='undefined'&&(layoutMode==='vertical'||r.width<600)){
-    M.l=60;M.r=5;M.t=5;M.b=18;
-  }else{M.l=92;M.r=6;M.t=8;M.b=22;}
+    M.l=60;M.r=3;M.t=5;M.b=18;
+  }else{M.l=92;M.r=4;M.t=8;M.b=22;}
   var mr=document.getElementById('mmap').getBoundingClientRect();
   mmCanvas.width=mr.width*dpr;mmCanvas.height=mr.height*dpr;
   mmCanvas.style.width=mr.width+'px';mmCanvas.style.height=mr.height+'px';
@@ -584,7 +584,9 @@ function drawMinimap(){
   mmCtx.globalAlpha=1;mmCtx.clearRect(0,0,W,H);if(!TD||TD<=0)return;
   var s=getComputedStyle(document.body);
   if(!mmCache||mmCacheW!==mmCanvas.width||mmCacheDpr!==dpr)buildMinimapCache();
-  if(mmCache){mmCtx.drawImage(mmCache,0,0);}else{mmCtx.fillStyle=s.getPropertyValue('--trbg').trim();mmCtx.fillRect(0,0,W,H);}
+  // Destination size in CSS pixels: the cache is device-resolution and this
+  // context is scaled by dpr, so omitting it draws the cache dpr times too wide.
+  if(mmCache){mmCtx.drawImage(mmCache,0,0,W,H);}else{mmCtx.fillStyle=s.getPropertyValue('--trbg').trim();mmCtx.fillRect(0,0,W,H);}
   if(!BL.length)return;var scM=W/TD;
   if(seqTiming&&seqTiming.trTimeSec>0&&seqTiming.trCount>1){
     mmCtx.strokeStyle=s.getPropertyValue('--fg').trim();mmCtx.globalAlpha=0.10;mmCtx.lineWidth=0.4;mmCtx.beginPath();
