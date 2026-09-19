@@ -584,7 +584,9 @@ function drawMinimap(){
   mmCtx.globalAlpha=1;mmCtx.clearRect(0,0,W,H);if(!TD||TD<=0)return;
   var s=getComputedStyle(document.body);
   if(!mmCache||mmCacheW!==mmCanvas.width||mmCacheDpr!==dpr)buildMinimapCache();
-  if(mmCache){mmCtx.drawImage(mmCache,0,0);}else{mmCtx.fillStyle=s.getPropertyValue('--trbg').trim();mmCtx.fillRect(0,0,W,H);}
+  // Destination size in CSS pixels: the cache is device-resolution and this
+  // context is scaled by dpr, so omitting it draws the cache dpr times too wide.
+  if(mmCache){mmCtx.drawImage(mmCache,0,0,W,H);}else{mmCtx.fillStyle=s.getPropertyValue('--trbg').trim();mmCtx.fillRect(0,0,W,H);}
   if(!BL.length)return;var scM=W/TD;
   if(seqTiming&&seqTiming.trTimeSec>0&&seqTiming.trCount>1){
     mmCtx.strokeStyle=s.getPropertyValue('--fg').trim();mmCtx.globalAlpha=0.10;mmCtx.lineWidth=0.4;mmCtx.beginPath();

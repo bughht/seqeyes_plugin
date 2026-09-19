@@ -63,6 +63,7 @@ const fixtures = {
   rotExt: resolve('test/seqeyes_demo_seq_files/writeRadialGradientEcho_rotExt.seq'),
   binaryGre: resolve('test/pulseq/binary/gre.bseq'),
   greLabel: resolve('test/seqeyes_demo_seq_files/writeGradientEcho_label.seq'),
+  epi: resolve('test/seqeyes_demo_seq_files/writeEpi.seq'),
 };
 
 const consoleFailures = new WeakMap<Page, string[]>();
@@ -1002,6 +1003,58 @@ test('replaces coarse M1 with budgeted viewport detail when TR metadata is unava
   await expect.poll(async () => (await debugState(page)).notices.join(' '), {
     timeout: 20_000,
   }).toContain('current view is detailed');
+});
+
+/**
+ * This lane keeps its own copy of the minimap renderer, and it carried the same
+ * defect: the block cache is built at device resolution but was blitted without
+ * a destination size into a context already scaled by dpr, so above dpr 1 it
+ * drew the cache dpr times too wide and the tail of the sequence fell off the
+ * strip.  Only the viewport band stayed correct, which is what made the two
+ * disagree.
+ */
+test.describe('minimap block cache at high DPI', () => {
+  test.use({ deviceScaleFactor: 2 });
+
+  test('places RF blocks at their true times', async ({ page }) => {
+    await loadViewer(page, fixtures.epi);
+
+    const total = (await debugState(page)).totalDuration;
+    expect(total).toBeGreaterThan(0);
+
+    const found = await page.evaluate(() => {
+      const canvas = document.getElementById('mmc') as HTMLCanvasElement;
+      const dpr = window.devicePixelRatio || 1;
+      // Strictly inside the RF band; the Gx band starts at exactly 5*dpr.
+      const band = Math.max(1, Math.min(canvas.height, Math.floor(5 * dpr)));
+      const data = canvas.getContext('2d')?.getImageData(0, 0, canvas.width, band).data;
+      if (!data) return [];
+      const hit: boolean[] = [];
+      for (let x = 0; x < canvas.width; x++) {
+        let tinted = false;
+        for (let y = 0; y < band; y++) {
+          const i = (y * canvas.width + x) * 4;
+          if (data[i] - data[i + 1] > 8 && data[i] - data[i + 2] > 4) tinted = true;
+        }
+        hit.push(tinted);
+      }
+      const runs: { from: number; to: number }[] = [];
+      let start: number | null = null;
+      hit.forEach((v, i) => {
+        if (v && start === null) start = i;
+        else if (!v && start !== null) { runs.push({ from: start / hit.length, to: (i - 1) / hit.length }); start = null; }
+      });
+      if (start !== null) runs.push({ from: start / hit.length, to: (hit.length - 1) / hit.length });
+      return runs.filter(r => r.to - r.from > 0.002);
+    });
+
+    // writeEpi excites once per TR over three TRs; the third is the one that
+    // used to be pushed past the right edge.
+    expect(found.length, `RF marks at ${JSON.stringify(found)}`).toBe(3);
+    [0, 1 / 3, 2 / 3].forEach((want, index) => {
+      expect(found[index].from).toBeCloseTo(want, 2);
+    });
+  });
 });
 
 async function loadViewer(page: Page, sequencePath: string): Promise<void> {

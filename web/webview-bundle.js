@@ -1804,7 +1804,11 @@ function drawMinimap(){
 
   // ── Blit cached block bands ──
   if(mmCache){
-    mmCtx.drawImage(mmCache,0,0);
+    // The cache is built at device resolution while this context carries a
+    // scale(dpr) transform, so it must be given the CSS-pixel destination
+    // size.  Without it the cache draws dpr times too wide and only the
+    // leading 1/dpr of the sequence stays on the strip.
+    mmCtx.drawImage(mmCache,0,0,W,H);
   }else{
     mmCtx.fillStyle=s.getPropertyValue('--trbg').trim();mmCtx.fillRect(0,0,W,H);
   }
