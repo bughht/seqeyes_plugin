@@ -236,7 +236,7 @@ var decodedBlocks=null,decodeContext=null,waveformOverview=null,m1Data=null,m1Wi
 var labelInfo={names:[],kinds:[]},labelTable=null,labelBusy=false,labelMarkerCount=0;
 var viewerNotices={},viewerNoticesCollapsed=readViewerNoticesCollapsed();
 var kspaceSafetyWarning=null,kspaceSafetyBusy=false,kspaceSafetyPopupTimer=0;
-var kDrawnPointCount=0,derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,waveformOverviewActive=false,rfRenderPointCount=0,rfRawCurveCount=0,rfReducedCurveCount=0,rfOverviewBucketCount=0,gradViewPointCount=0,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
+var kDrawnPointCount=0,kDrawnSpan=0,derivedRenderPointCount=0,derivedEnvelopeCurveCount=0,derivedRawCurveCount=0,waveformOverviewActive=false,rfRenderPointCount=0,rfRawCurveCount=0,rfReducedCurveCount=0,rfOverviewBucketCount=0,gradViewPointCount=0,lastDrawDurationMs=0,viewerDrawCount=0,viewerCursorDrawCount=0;
 var viewerDrawFrame=0,viewerDrawMinimap=false;
 function isMobileSafetyLayout(){return !!(window.matchMedia&&window.matchMedia('(max-width: 768px), (pointer: coarse)').matches);}
 function viewerNoticeMessages(value){
@@ -2193,7 +2193,13 @@ function placeTooltip(cx,cy){
   var r=tt.getBoundingClientRect(),vw=window.innerWidth,vh=window.innerHeight;
   var left=Math.min(Math.max(pad,cx+15),Math.max(pad,vw-r.width-pad));
   var top=cy+12;if(top+r.height+pad>vh)top=cy-r.height-12;if(top<pad)top=pad;
-  tt.style.left=left+'px';tt.style.top=top+'px';
+  /* `left`/`top` are client coordinates, but #tt is absolutely positioned
+     inside #cc, so its style offsets are measured from #cc's box.  Writing
+     client coordinates straight out put the tooltip #cc's own offset too low
+     and made the bottom flip fire that far past the real bottom of the
+     window. */
+  var host=tt.offsetParent?tt.offsetParent.getBoundingClientRect():{left:0,top:0};
+  tt.style.left=(left-host.left)+'px';tt.style.top=(top-host.top)+'px';
 }
 function fmtFlipAngle(value){
   if(!isFinite(value))return null;
@@ -2403,6 +2409,23 @@ if(systemThemeQuery){
 
 /* ── WebGL ────────────────────────────────────────────────────────────── */
 var gl=null, glProgram=null, glBuf=null, glN=0;
+/* This file keeps its own WebGL state, so it needs its own decimation index
+   buffer too: the bundle's kSpaceStrideIndices closes over the bundle's
+   context, not this one. */
+var glIdxBuf=null, glUint32Indices=false;
+var _idxFirst=-1, _idxCount=-1, _idxStride=-1, _idxN=0;
+function kSpaceStrideIndices(first,count,stride){
+  if(_idxFirst===first&&_idxCount===count&&_idxStride===stride)return _idxN;
+  var n=Math.floor(count/stride);
+  _idxFirst=first;_idxCount=count;_idxStride=stride;_idxN=n;
+  if(n<=0)return 0;
+  var idx=new Uint32Array(n);
+  for(var i=0;i<n;i++)idx[i]=first+i*stride;
+  if(!glIdxBuf)glIdxBuf=gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,glIdxBuf);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,idx,gl.DYNAMIC_DRAW);
+  return n;
+}
 var glAttribPos=-1, glAttribTime=-1;
 var glU_cy=-1,glU_sy=-1,glU_cx=-1,glU_sx=-1,glU_pan=-1,glU_scale=-1;
 var glU_halfRes=-1,glU_tMin=-1,glU_tMax=-1,glU_dot=-1,glU_color=-1;
@@ -2413,6 +2436,8 @@ function initWebGL(){
   gl=c.getContext("webgl2",{antialias:true,alpha:true,premultipliedAlpha:false})
      ||c.getContext("webgl",{antialias:true,alpha:true,premultipliedAlpha:false});
   if(!gl){console.warn("[SeqEyes] WebGL unavailable");return false;}
+  glUint32Indices=(typeof WebGL2RenderingContext!=='undefined'&&gl instanceof WebGL2RenderingContext)
+    ||!!gl.getExtension('OES_element_index_uint');
   gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
   var vs=gl.createShader(gl.VERTEX_SHADER), fs=gl.createShader(gl.FRAGMENT_SHADER);
   gl.shaderSource(vs,'attribute vec3 aPos;attribute float aTime;uniform float uCy,uSy,uCx,uSx,uScale;uniform vec2 uPan;uniform vec2 uHalfRes;uniform float uTMin,uTMax,uDot;varying float vVis;void main(){float dx=aPos.x,dy=aPos.y,dz=aPos.z;float rx=dx*uCy-dz*uSy;float rz=dx*uSy+dz*uCy;float ry=dy*uCx-rz*uSx;float sx=(rx*uScale+uPan.x)/uHalfRes.x;float sy=(ry*uScale-uPan.y)/uHalfRes.y;vVis=(aTime>=uTMin&&aTime<=uTMax)?1.0:-1.0;gl_Position=vec4(sx,sy,0.0,1.0);gl_PointSize=vVis>0.0?uDot:0.0;}');
@@ -2440,7 +2465,7 @@ function uploadKSpaceGPU(){
   for(var i=0;i<n;i++){var j=i*4;data[j]=ax[i];data[j+1]=ay[i];data[j+2]=az[i];data[j+3]=at[i];}
   if(glBuf)gl.deleteBuffer(glBuf);
   glBuf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,glBuf);gl.bufferData(gl.ARRAY_BUFFER,data,gl.STATIC_DRAW);
-  glN=n;
+  glN=n;_idxStride=-1;  // cached indices point into the buffer just replaced
   var xmin=Infinity,xmax=-Infinity,ymin=Infinity,ymax=-Infinity,zmin=Infinity,zmax=-Infinity;
   for(var a=0;a<n;a++){var xi=ax[a],yi=ay[a],zi=az[a];if(isFinite(xi)){if(xi<xmin)xmin=xi;if(xi>xmax)xmax=xi;}if(isFinite(yi)){if(yi<ymin)ymin=yi;if(yi>ymax)ymax=yi;}if(isFinite(zi)){if(zi<zmin)zmin=zi;if(zi>zmax)zmax=zi;}}
   _kBxmin=xmin;_kBxmax=xmax;_kBymin=ymin;_kBymax=ymax;_kBzmin=zmin;_kBzmax=zmax;
@@ -2737,12 +2762,30 @@ function drawKs_core(W,H,dpr){
     gl.bindBuffer(gl.ARRAY_BUFFER,glBuf);
     var win=kSpaceWindowRange(kAdcTime,glN,vs,ve);
     var stride=(kDragging||_kTouchActive||_kAnimId)?kSpaceMovingStride(win.count):1;
-    gl.enableVertexAttribArray(glAttribPos);gl.vertexAttribPointer(glAttribPos,3,gl.FLOAT,false,16*stride,0);
-    gl.enableVertexAttribArray(glAttribTime);gl.vertexAttribPointer(glAttribTime,1,gl.FLOAT,false,16*stride,12);
+    if(stride>1&&!glUint32Indices)stride=1;  // draw it all rather than wrongly
+    gl.enableVertexAttribArray(glAttribPos);gl.vertexAttribPointer(glAttribPos,3,gl.FLOAT,false,16,0);
+    gl.enableVertexAttribArray(glAttribTime);gl.vertexAttribPointer(glAttribTime,1,gl.FLOAT,false,16,12);
     kSpaceTrajectoryDrawCount++;
-    // Stride reindexes the buffer, so the window offset and count scale with it.
-    kDrawnPointCount=Math.floor(win.count/stride);
-    if(kDrawnPointCount>0)gl.drawArrays(gl.POINTS,Math.floor(win.first/stride),kDrawnPointCount);
+    /* Decimate through an index buffer.  A 16-byte vertex puts `16*stride`
+       past WebGL's 255-byte attribute stride limit for any stride above 15,
+       where vertexAttribPointer fails silently and the draw range — still
+       scaled down — walks one contiguous run of the acquisition instead. */
+    if(stride>1){
+      kDrawnPointCount=kSpaceStrideIndices(win.first,win.count,stride);
+      // How far across the window the selection reaches.  A decimated cloud
+      // spans the whole window; a selection that has collapsed to a contiguous
+      // run spans only count/stride of it, which is otherwise invisible from
+      // outside because the point count is the same either way.
+      kDrawnSpan=kDrawnPointCount>0?(kDrawnPointCount-1)*stride+1:0;
+      if(kDrawnPointCount>0){
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,glIdxBuf);
+        gl.drawElements(gl.POINTS,kDrawnPointCount,gl.UNSIGNED_INT,0);
+      }
+    }else{
+      kDrawnPointCount=win.count;
+      kDrawnSpan=win.count;
+      if(kDrawnPointCount>0)gl.drawArrays(gl.POINTS,win.first,kDrawnPointCount);
+    }
   }
   drawKsOverlay(W,H,dpr,cs);
 }
@@ -2917,7 +2960,7 @@ if(location.search.indexOf("debug=1")>=0){
   window.__seqeyesDebug={
     state:function(){
       var adcCount=(kAdc&&kAdc[0])?kAdc[0].length:0;
-      return{blocks:BL.length,totalDuration:TD,offset:ox,scale:sc,visibleDuration:visibleDuration(),minRasterTime:minRasterTime(),kOpen:kOpen,kView:kView,kRotX:kRotX,kRotY:kRotY,kScale:kScl,adcCount:adcCount,exportEnabled:!!(exportBtn&&!exportBtn.disabled),derivedRenderPoints:derivedRenderPointCount,derivedEnvelopeCurves:derivedEnvelopeCurveCount,derivedRawCurves:derivedRawCurveCount,waveformOverviewActive:waveformOverviewActive,rfRenderPoints:rfRenderPointCount,rfRawCurves:rfRawCurveCount,rfReducedCurves:rfReducedCurveCount,rfOverviewBuckets:rfOverviewBucketCount,notices:Object.keys(viewerNotices).reduce(function(all,k){return all.concat(viewerNoticeMessages(viewerNotices[k]));},[]),lastDrawDurationMs:lastDrawDurationMs,drawCount:viewerDrawCount,cursorDrawCount:viewerCursorDrawCount,kTrajectoryDrawCount:kSpaceTrajectoryDrawCount,kOverlayDrawCount:kSpaceOverlayDrawCount,m1ReferenceMode:m1ReferenceMode,m1DetailActive:!!m1WindowData,derivedDetailMaxViewSec:derivedDetailMaxViewSec,gradViewPoints:gradViewPointCount,kDrawnPoints:kDrawnPointCount,kPanX:kPanX,kPanY:kPanY,kUploadedPoints:(typeof glN==='number'?glN:0),waveformDetailActive:!!activeWaveformDetail,waveformDetailWindowSec:activeWaveformDetail?activeWaveformDetail.endSec-activeWaveformDetail.startSec:0,waveformBandActive:!!activeWaveformBand,waveformBandColumns:activeWaveformBand?activeWaveformBand.columns:0,panelMode:panelMode,panelOpen:panelOpen,labelNames:labelInfo.names.slice(),labelRowVisible:!!chVis[11],visibleChannels:visChannels().map(function(i){return CH[i];}),labelMarkersDrawn:labelMarkerCount,labelPopupOpen:SeqEyesLabels.isOpen(),title:document.title};
+      return{blocks:BL.length,totalDuration:TD,offset:ox,scale:sc,visibleDuration:visibleDuration(),minRasterTime:minRasterTime(),kOpen:kOpen,kView:kView,kRotX:kRotX,kRotY:kRotY,kScale:kScl,adcCount:adcCount,exportEnabled:!!(exportBtn&&!exportBtn.disabled),derivedRenderPoints:derivedRenderPointCount,derivedEnvelopeCurves:derivedEnvelopeCurveCount,derivedRawCurves:derivedRawCurveCount,waveformOverviewActive:waveformOverviewActive,rfRenderPoints:rfRenderPointCount,rfRawCurves:rfRawCurveCount,rfReducedCurves:rfReducedCurveCount,rfOverviewBuckets:rfOverviewBucketCount,notices:Object.keys(viewerNotices).reduce(function(all,k){return all.concat(viewerNoticeMessages(viewerNotices[k]));},[]),lastDrawDurationMs:lastDrawDurationMs,drawCount:viewerDrawCount,cursorDrawCount:viewerCursorDrawCount,kTrajectoryDrawCount:kSpaceTrajectoryDrawCount,kOverlayDrawCount:kSpaceOverlayDrawCount,m1ReferenceMode:m1ReferenceMode,m1DetailActive:!!m1WindowData,derivedDetailMaxViewSec:derivedDetailMaxViewSec,gradViewPoints:gradViewPointCount,kDrawnPoints:kDrawnPointCount,kDrawnSpan:kDrawnSpan,kPanX:kPanX,kPanY:kPanY,kUploadedPoints:(typeof glN==='number'?glN:0),waveformDetailActive:!!activeWaveformDetail,waveformDetailWindowSec:activeWaveformDetail?activeWaveformDetail.endSec-activeWaveformDetail.startSec:0,waveformBandActive:!!activeWaveformBand,waveformBandColumns:activeWaveformBand?activeWaveformBand.columns:0,panelMode:panelMode,panelOpen:panelOpen,labelNames:labelInfo.names.slice(),labelRowVisible:!!chVis[11],visibleChannels:visChannels().map(function(i){return CH[i];}),labelMarkersDrawn:labelMarkerCount,labelPopupOpen:SeqEyesLabels.isOpen(),title:document.title};
     },
     hoverPoint:function(){
       var t=(kAdcTime&&kAdcTime.length)?kAdcTime[Math.floor(kAdcTime.length/2)]:TD*0.5;

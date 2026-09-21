@@ -39,6 +39,7 @@ interface DebugState {
   waveformBandActive: boolean;
   waveformBandColumns: number;
   kDrawnPoints: number;
+  kDrawnSpan: number;
   kUploadedPoints: number;
   kPanX: number;
   kPanY: number;
@@ -436,6 +437,139 @@ test('keeps every in-window k-space point when the visible range narrows', async
   await expect.poll(drawnPixels, { timeout: 10_000 }).toBeGreaterThan(full * 0.9);
 });
 
+/**
+ * Striding every k-th sample of a sequence whose readouts are R samples long
+ * lands on only R/gcd(k,R) of the R positions inside a readout, and on the
+ * same ones in every readout. Where an axis is swept during the readout — a
+ * wave or CAIPI sequence — those positions are k-space planes, so a shared
+ * factor drops whole planes instead of thinning the cloud evenly.
+ *
+ * gre_3d_wave_FC.seq sweeps kz across its full range inside each 1000-sample
+ * readout. 33,312,000 ADC samples gave stride 56, and gcd(56, 1000) = 8 left
+ * 125 of the 1000 positions and 12% of the planes; a coprime stride restores
+ * 96%, which matches sampling at random. That sequence is far too large to
+ * ship, so what is pinned here is the property that prevents it.
+ */
+/**
+ * The hover tooltip is absolutely positioned inside #cc, so its style offsets
+ * are measured from #cc's box — but it is placed from client coordinates and
+ * clamped against the window. Writing one into the other put it #cc's own
+ * offset too low, and made the bottom flip fire that far past the real bottom
+ * of the window, which is where the tooltip disappeared off screen.
+ */
+test('anchors the hover tooltip to the cursor and keeps it on screen', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+
+  const cc = (await page.locator('#cc').boundingBox())!;
+  const tip = page.locator('#tt');
+
+  await page.mouse.move(cc.x + cc.width / 2, cc.y + cc.height / 2);
+  await expect(tip).toBeVisible();
+  const middle = (await tip.boundingBox())!;
+  // Anchored to the cursor, not to the top of the plot area.
+  expect(Math.abs(middle.y - (cc.y + cc.height / 2)),
+    `tooltip at y=${middle.y} for a cursor at y=${cc.y + cc.height / 2}`).toBeLessThan(40);
+
+  // Low in the plot — still inside the last channel row, since below it there
+  // is nothing to report — it has to flip above the cursor and stay wholly on
+  // screen; it used to run past the bottom of the window instead.
+  await page.mouse.move(cc.x + cc.width / 2, cc.y + cc.height - 40);
+  await expect(tip).toBeVisible();
+  const low = (await tip.boundingBox())!;
+  const viewport = page.viewportSize()!;
+  expect(low.y).toBeGreaterThanOrEqual(0);
+  expect(low.y + low.height,
+    `tooltip bottom ${low.y + low.height} exceeds viewport ${viewport.height}`)
+    .toBeLessThanOrEqual(viewport.height);
+});
+
+/**
+ * Decimation has to select points spread across the whole cloud, not a
+ * contiguous run of the acquisition.
+ *
+ * It used to be done by widening the vertex attribute stride to 16*k. WebGL
+ * rejects any attribute stride above 255 bytes, so every k above 15 failed —
+ * silently, because a failed vertexAttribPointer only sets an error nobody
+ * reads. The attribute kept its unstrided setup while the draw range was still
+ * divided by k, so the frame showed one continuous slice of the acquisition:
+ * for a 3D sequence, a slab at one end of the encode instead of a thinned
+ * volume.
+ */
+test('decimates across the whole cloud while dragging, not a contiguous run', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openKspace(page);
+
+  // Fit the whole sequence so the window covers the whole cloud.
+  await page.locator('#zf').click();
+  await expect.poll(async () => {
+    const s = await debugState(page);
+    return s.kDrawnPoints > 0 && s.kDrawnPoints === s.kUploadedPoints;
+  }, { timeout: 10_000 }).toBe(true);
+  const uploaded = (await debugState(page)).kUploadedPoints;
+
+  // Force a stride far above the 15 the old attribute-stride path could
+  // express; this fixture is too small to reach the shipped target.
+  await page.evaluate(() => { (window as unknown as { __kMovingPointTarget: number }).__kMovingPointTarget = 1000; });
+
+  // A held drag keeps the moving path engaged.
+  const box = (await page.locator('#kc').boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 12, box.y + box.height / 2 + 6, { steps: 4 });
+
+  await expect.poll(async () => (await debugState(page)).kDrawnPoints, { timeout: 5_000 })
+    .toBeLessThan(uploaded);
+  const moving = await debugState(page);
+  await page.mouse.up();
+
+  // Far fewer points, but still reaching across the whole window. The count
+  // alone cannot tell the two apart: a selection that has collapsed to a
+  // contiguous run draws exactly as many points as a correct one.
+  expect(moving.kDrawnPoints).toBeLessThan(uploaded / 10);
+  expect(moving.kDrawnSpan, `span ${moving.kDrawnSpan} of ${uploaded} uploaded`)
+    .toBeGreaterThan(uploaded * 0.9);
+
+  // And once the drag ends the cloud is complete again.
+  await expect.poll(async () => {
+    const s = await debugState(page);
+    return s.kDrawnPoints === s.kUploadedPoints;
+  }, { timeout: 20_000 }).toBe(true);
+});
+
+test('chooses a moving stride that cannot alias with the readout length', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+
+  const rows = await page.evaluate(() => {
+    const stride = (window as unknown as { kSpaceMovingStride: (n: number) => number }).kSpaceMovingStride;
+    const gcd = (a: number, b: number): number => (b ? gcd(b, a % b) : a);
+    // Readout lengths that real sequences actually use.
+    const readouts = [128, 256, 400, 512, 640, 1000, 1024, 2048, 4096];
+    // Counts spanning from just over the target to the reported sequence.
+    return [1_200_000, 1_800_000, 6_000_000, 12_000_000, 33_312_000].map(count => {
+      const k = stride(count);
+      return {
+        count, k,
+        drawn: Math.floor(count / k),
+        worstFactor: Math.max(...readouts.map(r => gcd(k, r))),
+      };
+    });
+  });
+
+  for (const row of rows) {
+    // No shared factor with any plausible readout length, so every position
+    // inside the readout is reachable and no plane is systematically skipped.
+    expect(row.worstFactor, `stride ${row.k} for ${row.count} samples`).toBe(1);
+    // The stride still has to do its job.
+    expect(row.drawn).toBeLessThanOrEqual(600_000);
+  }
+
+  // The reported case specifically: 33,312,000 samples against 1000-sample
+  // readouts, which used to give 56.
+  const reported = rows[rows.length - 1];
+  expect(reported.k).toBeGreaterThan(1);
+  expect(reported.k % 2).toBe(1);
+});
+
 test('reduces the k-space cloud only while the camera moves, never at rest', async ({ page }) => {
   await loadViewer(page, fixtures.largeSequence);
   await openKspace(page);
@@ -449,7 +583,8 @@ test('reduces the k-space cloud only while the camera moves, never at rest', asy
   expect(policy.small).toBe(1);
   expect(policy.atTarget).toBe(1);
   // Above it the stride bounds the drawn count rather than growing with the data.
-  expect(policy.double).toBe(2);
+  // An odd prime, never 2: see the aliasing test above for why.
+  expect(policy.double).toBe(3);
   expect(1200000 / policy.double).toBeLessThanOrEqual(600000);
   expect(6000000 / policy.tenfold).toBeLessThanOrEqual(600000);
 
@@ -485,13 +620,30 @@ test('rotates k-space about the origin regardless of panning', async ({ page }) 
   const cy = box.y + box.height / 2;
 
   // Wait for auto-fit to settle: it targets pan 0, and its easing would
-  // otherwise pull the pan back underneath the drag.
+  // otherwise pull the pan back underneath the drag. The easing moves pan and
+  // rotation as well as scale, and it can hold scale steady for a frame while
+  // still running, so every value it drives has to be quiet — watching scale
+  // alone let the drag start mid-ease under load.
+  const camera = async () => {
+    const s = await debugState(page);
+    return [s.kScale, s.kPanX, s.kPanY, s.kRotX, s.kRotY].join(',');
+  };
   await expect.poll(async () => {
-    const a = (await debugState(page)).kScale;
+    const a = await camera();
     await page.waitForTimeout(250);
-    return (await debugState(page)).kScale === a;
+    return (await camera()) === a;
   }, { timeout: 10_000 }).toBe(true);
-  expect((await debugState(page)).kPanX).toBe(0);
+
+  // Quiet is not the same as finished: if a frame is delayed the easing can
+  // look settled for a whole polling window and then resume, pulling the pan
+  // back underneath the drag. A net-zero drag retargets the easing to wherever
+  // the camera currently is, which ends the pull rather than waiting it out.
+  await page.mouse.move(cx, cy);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.move(cx + 1, cy);
+  await page.mouse.move(cx, cy);
+  await page.mouse.up({ button: 'right' });
+  expect(Math.abs((await debugState(page)).kPanX)).toBeLessThanOrEqual(1);
 
   // Panning is a screen offset: the view moves exactly as far as the cursor.
   await page.mouse.move(cx, cy);
