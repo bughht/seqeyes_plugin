@@ -620,13 +620,30 @@ test('rotates k-space about the origin regardless of panning', async ({ page }) 
   const cy = box.y + box.height / 2;
 
   // Wait for auto-fit to settle: it targets pan 0, and its easing would
-  // otherwise pull the pan back underneath the drag.
+  // otherwise pull the pan back underneath the drag. The easing moves pan and
+  // rotation as well as scale, and it can hold scale steady for a frame while
+  // still running, so every value it drives has to be quiet — watching scale
+  // alone let the drag start mid-ease under load.
+  const camera = async () => {
+    const s = await debugState(page);
+    return [s.kScale, s.kPanX, s.kPanY, s.kRotX, s.kRotY].join(',');
+  };
   await expect.poll(async () => {
-    const a = (await debugState(page)).kScale;
+    const a = await camera();
     await page.waitForTimeout(250);
-    return (await debugState(page)).kScale === a;
+    return (await camera()) === a;
   }, { timeout: 10_000 }).toBe(true);
-  expect((await debugState(page)).kPanX).toBe(0);
+
+  // Quiet is not the same as finished: if a frame is delayed the easing can
+  // look settled for a whole polling window and then resume, pulling the pan
+  // back underneath the drag. A net-zero drag retargets the easing to wherever
+  // the camera currently is, which ends the pull rather than waiting it out.
+  await page.mouse.move(cx, cy);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.move(cx + 1, cy);
+  await page.mouse.move(cx, cy);
+  await page.mouse.up({ button: 'right' });
+  expect(Math.abs((await debugState(page)).kPanX)).toBeLessThanOrEqual(1);
 
   // Panning is a screen offset: the view moves exactly as far as the cursor.
   await page.mouse.move(cx, cy);
