@@ -39,6 +39,7 @@ interface DebugState {
   waveformBandActive: boolean;
   waveformBandColumns: number;
   kDrawnPoints: number;
+  kDrawnSpan: number;
   kUploadedPoints: number;
   kPanX: number;
   kPanY: number;
@@ -480,6 +481,59 @@ test('anchors the hover tooltip to the cursor and keeps it on screen', async ({ 
   expect(low.y + low.height,
     `tooltip bottom ${low.y + low.height} exceeds viewport ${viewport.height}`)
     .toBeLessThanOrEqual(viewport.height);
+});
+
+/**
+ * Decimation has to select points spread across the whole cloud, not a
+ * contiguous run of the acquisition.
+ *
+ * It used to be done by widening the vertex attribute stride to 16*k. WebGL
+ * rejects any attribute stride above 255 bytes, so every k above 15 failed —
+ * silently, because a failed vertexAttribPointer only sets an error nobody
+ * reads. The attribute kept its unstrided setup while the draw range was still
+ * divided by k, so the frame showed one continuous slice of the acquisition:
+ * for a 3D sequence, a slab at one end of the encode instead of a thinned
+ * volume.
+ */
+test('decimates across the whole cloud while dragging, not a contiguous run', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openKspace(page);
+
+  // Fit the whole sequence so the window covers the whole cloud.
+  await page.locator('#zf').click();
+  await expect.poll(async () => {
+    const s = await debugState(page);
+    return s.kDrawnPoints > 0 && s.kDrawnPoints === s.kUploadedPoints;
+  }, { timeout: 10_000 }).toBe(true);
+  const uploaded = (await debugState(page)).kUploadedPoints;
+
+  // Force a stride far above the 15 the old attribute-stride path could
+  // express; this fixture is too small to reach the shipped target.
+  await page.evaluate(() => { (window as unknown as { __kMovingPointTarget: number }).__kMovingPointTarget = 1000; });
+
+  // A held drag keeps the moving path engaged.
+  const box = (await page.locator('#kc').boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 12, box.y + box.height / 2 + 6, { steps: 4 });
+
+  await expect.poll(async () => (await debugState(page)).kDrawnPoints, { timeout: 5_000 })
+    .toBeLessThan(uploaded);
+  const moving = await debugState(page);
+  await page.mouse.up();
+
+  // Far fewer points, but still reaching across the whole window. The count
+  // alone cannot tell the two apart: a selection that has collapsed to a
+  // contiguous run draws exactly as many points as a correct one.
+  expect(moving.kDrawnPoints).toBeLessThan(uploaded / 10);
+  expect(moving.kDrawnSpan, `span ${moving.kDrawnSpan} of ${uploaded} uploaded`)
+    .toBeGreaterThan(uploaded * 0.9);
+
+  // And once the drag ends the cloud is complete again.
+  await expect.poll(async () => {
+    const s = await debugState(page);
+    return s.kDrawnPoints === s.kUploadedPoints;
+  }, { timeout: 20_000 }).toBe(true);
 });
 
 test('chooses a moving stride that cannot alias with the readout length', async ({ page }) => {

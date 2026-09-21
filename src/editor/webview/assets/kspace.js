@@ -128,6 +128,16 @@ if(systemThemeQuery){
    WebGL state
    ═══════════════════════════════════════════════════════════════════════ */
 var gl=null, glProgram=null, glBuf=null, glN=0;
+/* Decimation index buffer.  WebGL caps a vertex attribute stride at 255 bytes
+   and this buffer is 16 bytes a point, so `16*stride` is rejected outright for
+   any stride above 15 — silently, since a failed vertexAttribPointer only sets
+   an error nobody reads.  The attribute then keeps its previous unstrided
+   setup while the draw range is still scaled down, so what reaches the screen
+   is one contiguous run of the acquisition rather than a thinned cloud: a slab
+   at one end of the encode.  Selecting the same points through an index buffer
+   has no such limit. */
+var glIdxBuf=null, glUint32Indices=false;
+var _idxFirst=-1, _idxCount=-1, _idxStride=-1, _idxN=0;
 /* Why the GPU layer has nothing to draw, or null when it is healthy.  A
    failure here used to be a console warning at most, so the panel opened
    with its axes and no points — indistinguishable from a sequence whose
@@ -157,6 +167,10 @@ function initWebGL(){
     kGpuFailure="the graphics context was lost while drawing K\u2011space";
     if(typeof drawKs==="function")drawKs();
   },false);
+  // WebGL2 always has 32-bit indices; WebGL1 needs the extension for a cloud
+  // longer than 65535 points, which every sequence reaching the stride has.
+  glUint32Indices=(typeof WebGL2RenderingContext!=='undefined'&&gl instanceof WebGL2RenderingContext)
+    ||!!gl.getExtension('OES_element_index_uint');
   gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
 
   var vs=gl.createShader(gl.VERTEX_SHADER), fs=gl.createShader(gl.FRAGMENT_SHADER);
@@ -266,6 +280,24 @@ function isSmallPrime(n){
   return true;
 }
 
+/**
+ * Upload indices selecting every `stride`-th point of [first, first+count),
+ * returning how many there are.  Cached on the range, so a drag uploads once
+ * rather than per frame.
+ */
+function kSpaceStrideIndices(first,count,stride){
+  if(_idxFirst===first&&_idxCount===count&&_idxStride===stride)return _idxN;
+  var n=Math.floor(count/stride);
+  _idxFirst=first;_idxCount=count;_idxStride=stride;_idxN=n;
+  if(n<=0)return 0;
+  var idx=new Uint32Array(n);
+  for(var i=0;i<n;i++)idx[i]=first+i*stride;
+  if(!glIdxBuf)glIdxBuf=gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,glIdxBuf);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,idx,gl.DYNAMIC_DRAW);
+  return n;
+}
+
 /** True while a drag, touch gesture, or camera easing is in progress. */
 function kSpaceCameraMoving(){
   return !!(kDragging||_kTouchActive||_kAnimId);
@@ -332,6 +364,7 @@ function uploadKSpaceGPU(){
     return;
   }
   glN=n;
+  _idxStride=-1;  // the indices point into the buffer just replaced
   // Compute bounds once
   var xmin=Infinity,xmax=-Infinity,ymin=Infinity,ymax=-Infinity,zmin=Infinity,zmax=-Infinity;
   for(var a=0;a<n;a++){var xi=ax[a],yi=ay[a],zi=az[a];if(isFinite(xi)){if(xi<xmin)xmin=xi;if(xi>xmax)xmax=xi;}if(isFinite(yi)){if(yi<ymin)ymin=yi;if(yi>ymax)ymax=yi;}if(isFinite(zi)){if(zi<zmin)zmin=zi;if(zi>zmax)zmax=zi;}}
@@ -790,17 +823,24 @@ function drawKs_core(W,H,dpr){
 
     var win=kSpaceWindowRange(kAdcTime,glN,vs,ve);
     var stride=kSpaceCameraMoving()?kSpaceMovingStride(win.count):1;
+    if(stride>1&&!glUint32Indices)stride=1;  // draw it all rather than wrongly
 
     gl.bindBuffer(gl.ARRAY_BUFFER,glBuf);
     gl.enableVertexAttribArray(glAttribPos);
-    gl.vertexAttribPointer(glAttribPos,3,gl.FLOAT,false,16*stride,0);
+    gl.vertexAttribPointer(glAttribPos,3,gl.FLOAT,false,16,0);
     gl.enableVertexAttribArray(glAttribTime);
-    gl.vertexAttribPointer(glAttribTime,1,gl.FLOAT,false,16*stride,12);
+    gl.vertexAttribPointer(glAttribTime,1,gl.FLOAT,false,16,12);
 
     kSpaceTrajectoryDrawCount++;
-    // Stride reindexes the buffer, so the window offset and count scale with it.
-    var drawFirst=Math.floor(win.first/stride),drawCount=Math.floor(win.count/stride);
-    if(drawCount>0)gl.drawArrays(gl.POINTS,drawFirst,drawCount);
+    if(stride>1){
+      var drawn=kSpaceStrideIndices(win.first,win.count,stride);
+      if(drawn>0){
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,glIdxBuf);
+        gl.drawElements(gl.POINTS,drawn,gl.UNSIGNED_INT,0);
+      }
+    }else if(win.count>0){
+      gl.drawArrays(gl.POINTS,win.first,win.count);
+    }
   }
 
   drawKsOverlay(W,H,dpr,cs);
