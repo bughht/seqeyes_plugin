@@ -2193,7 +2193,13 @@ function placeTooltip(cx,cy){
   var r=tt.getBoundingClientRect(),vw=window.innerWidth,vh=window.innerHeight;
   var left=Math.min(Math.max(pad,cx+15),Math.max(pad,vw-r.width-pad));
   var top=cy+12;if(top+r.height+pad>vh)top=cy-r.height-12;if(top<pad)top=pad;
-  tt.style.left=left+'px';tt.style.top=top+'px';
+  /* `left`/`top` are client coordinates, but #tt is absolutely positioned
+     inside #cc, so its style offsets are measured from #cc's box.  Writing
+     client coordinates straight out put the tooltip #cc's own offset too low
+     and made the bottom flip fire that far past the real bottom of the
+     window. */
+  var host=tt.offsetParent?tt.offsetParent.getBoundingClientRect():{left:0,top:0};
+  tt.style.left=(left-host.left)+'px';tt.style.top=(top-host.top)+'px';
 }
 function fmtFlipAngle(value){
   if(!isFinite(value))return null;

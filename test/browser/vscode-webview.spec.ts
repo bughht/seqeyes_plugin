@@ -534,6 +534,48 @@ test('plays the RF proxy end to end over the extension round trip', async ({ pag
 });
 
 /**
+ * The hover tooltip lives in the shared bundle, so the standalone test in
+ * standalone-viewer.spec.ts exercises web/index.html's own copy and not this
+ * one. It is absolutely positioned inside #cc, and was placed from client
+ * coordinates, which put it #cc's offset too low and made the bottom flip
+ * fire that far past the real bottom of the window.
+ */
+test('anchors the hover tooltip to the cursor', async ({ page }) => {
+  const { seq } = loadSequence();
+  const packed = packSequenceBlocks(seq);
+  await openWebview(page);
+  await post(page, {
+    type: 'sequenceData',
+    sequenceGeneration: 1,
+    blocks: packed.blocks,
+    sampleCount: packed.sampleCount,
+    totalDuration: getTotalDuration(seq),
+    gradRaster: seq.rasterTimes.gradientRaster,
+    rfRaster: seq.rasterTimes.rfRaster,
+    adcRaster: seq.rasterTimes.adcRaster,
+    blockRaster: seq.rasterTimes.blockDurationRaster,
+    timing: detectSequenceTiming(seq),
+    notices: [],
+  }, { sampleTimes: b64(packed.sampleTimes), sampleValues: b64(packed.sampleValues) });
+
+  const cc = (await page.locator('#cc').boundingBox())!;
+  expect(cc.top ?? cc.y).toBeGreaterThan(0);
+  const tip = page.locator('#tt');
+
+  await page.mouse.move(cc.x + cc.width / 2, cc.y + cc.height / 2);
+  await expect(tip).toBeVisible();
+  const box = (await tip.boundingBox())!;
+  expect(Math.abs(box.y - (cc.y + cc.height / 2)),
+    `tooltip at y=${box.y} for a cursor at y=${cc.y + cc.height / 2}`).toBeLessThan(40);
+
+  // Low in the plot it must flip above the cursor rather than run off screen.
+  await page.mouse.move(cc.x + cc.width / 2, cc.y + cc.height - 40);
+  await expect(tip).toBeVisible();
+  const low = (await tip.boundingBox())!;
+  expect(low.y + low.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+});
+
+/**
  * The minimap must place blocks where they actually are in time.
  *
  * The block cache is built at device resolution while `mmCtx` carries a
