@@ -224,6 +224,23 @@ var KSPACE_MOVING_POINT_TARGET = 600000;
  *
  * Returns 1 below the target, so narrow views and modest sequences are drawn
  * exactly even in motion.
+ *
+ * The stride is rounded up to a prime, which costs a handful of points and
+ * avoids aliasing with the readout.  Sampling every k-th sample of a sequence
+ * whose readouts are R samples long only ever lands on R/gcd(k,R) of the R
+ * positions within a readout — and on the same ones in every readout.  When an
+ * axis is swept during the readout, as in a wave or CAIPI sequence, those
+ * positions are k-space planes, so a shared factor drops whole planes rather
+ * than thinning the cloud evenly.  gre_3d_wave_FC.seq sweeps kz across its
+ * full range inside each 1000-sample readout; at stride 56, gcd 8 with 1000
+ * left 125 of the 1000 positions and 12% of the planes.  An odd prime shares
+ * no factor with a readout length it does not divide, which restores 96% —
+ * indistinguishable from sampling at random.
+ *
+ * Odd, not merely prime: readout lengths are usually even, so a stride of 2
+ * would reach only every second position and lose half the planes.  The point
+ * target is a ceiling rather than a goal, so rounding 2 up to 3 draws somewhat
+ * fewer points and stays well inside budget.
  */
 function kSpaceMovingStride(count){
   // The target is overridable so the settle-exactness guarantee can be tested
@@ -231,7 +248,22 @@ function kSpaceMovingStride(count){
   var target=(typeof window!=='undefined'&&window.__kMovingPointTarget>0)
     ?window.__kMovingPointTarget:KSPACE_MOVING_POINT_TARGET;
   if(!(count>target))return 1;
-  return Math.ceil(count/target);
+  return nextOddPrimeAtLeast(Math.ceil(count/target));
+}
+
+/** Smallest odd prime >= n, for n small enough that trial division is free. */
+function nextOddPrimeAtLeast(n){
+  var candidate=(n>3)?n:3;
+  if(candidate%2===0)candidate++;
+  while(!isSmallPrime(candidate))candidate+=2;
+  return candidate;
+}
+
+function isSmallPrime(n){
+  if(n<2)return false;
+  if(n%2===0)return n===2;
+  for(var d=3;d*d<=n;d+=2)if(n%d===0)return false;
+  return true;
 }
 
 /** True while a drag, touch gesture, or camera easing is in progress. */
