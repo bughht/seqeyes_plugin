@@ -112,7 +112,7 @@ export function calculateKspace(
     // Use a sorted-array dedup instead of Set to avoid V8's ~16.7M Set size limit.
     // Only essential points are included: selected gradient support, RF centres,
     // ADC sample times, block boundaries, and a uniform raster grid.
-    const cand: number[] = [];
+    let cand: number[] = [];
     const pushC = (t: number) => { if (isFinite(t) && t >= -tacc) cand.push(Math.max(0, tacc * Math.round(t/tacc))); };
     for (const series of gradientSeries) collectSeriesSupport(series, gradientSupport, pushC);
     for (const t of excT) { pushC(t); pushC(t - RF); pushC(t - 2 * RF); }
@@ -127,13 +127,23 @@ export function calculateKspace(
     // Sort and deduplicate in one pass — O(n log n) but safe for any sequence size
     if (cand.length === 0) return null;
     cand.sort((a, b) => a - b);
-    const grid: number[] = [];
+    const deduped: number[] = [];
     for (let i = 0; i < cand.length; i++) {
-        if (i === 0 || cand[i] - cand[i - 1] > tacc * 0.5) grid.push(cand[i]);
+        if (i === 0 || cand[i] - cand[i - 1] > tacc * 0.5) deduped.push(cand[i]);
     }
-    const N = grid.length;
+    const N = deduped.length;
     if (N < 2) return null;
     if (_options?.maxGridPoints && N > _options.maxGridPoints) return null;
+
+    // Nothing reads the candidate list again, and it is the largest thing alive
+    // here — 84M entries on a 3D wave sequence. Drop it before the trajectory
+    // allocates rather than carry it to the end of the function beside it.
+    cand = [];
+
+    // Hold the grid as a typed array: it is what `t_ktraj` returns, so it need
+    // not be copied again on the way out.
+    const grid = new Float64Array(deduped);
+    deduped.length = 0;
 
     // ---- Pass 3: evaluate the assembled piecewise-linear gradients ----
     const gx = new Float64Array(N), gy = new Float64Array(N), gz = new Float64Array(N);
@@ -166,45 +176,70 @@ export function calculateKspace(
     //   refocusing  -> negate the current state
     // Subsequent physical-gradient increments are unchanged. Kahan compensation
     // limits accumulation error within each RF epoch.
-    const kx = new Float64Array(N), ky = new Float64Array(N), kz = new Float64Array(N);
+    // The trajectory is written over the gradient arrays rather than into three
+    // more of the same length. Each step needs the gradient at i-1, which this
+    // has already overwritten, so it is carried forward in a local instead.
+    // The arithmetic is otherwise untouched, including the Kahan compensators
+    // and the -0 the refocusing branch produces at index 0.
+    const kx = gx, ky = gy, kz = gz;
     let cx = 0, cy = 0, cz = 0;
+    let px = gx[0], py = gy[0], pz = gz[0];
+    kx[0] = 0; ky[0] = 0; kz[0] = 0;
     if (refocusingAt[0] && !excitationAt[0]) {
         kx[0] = -kx[0]; ky[0] = -ky[0]; kz[0] = -kz[0];
     }
+    // The previous trajectory value is carried in a local rather than read back
+    // from the array being written, which the same-array read and write would
+    // otherwise force on every step.
+    let lx = kx[0], ly = ky[0], lz = kz[0];
     for (let i = 1; i < N; i++) {
+        const gxi = gx[i], gyi = gy[i], gzi = gz[i];
         const dt = grid[i] - grid[i-1];
-        if (dt <= 0) { kx[i] = kx[i-1]; ky[i] = ky[i-1]; kz[i] = kz[i-1]; continue; }
-        const dx = 0.5*(gx[i-1]+gx[i])*dt;
-        const dy = 0.5*(gy[i-1]+gy[i])*dt;
-        const dz = 0.5*(gz[i-1]+gz[i])*dt;
+        if (dt <= 0) {
+            kx[i] = lx; ky[i] = ly; kz[i] = lz;
+            px = gxi; py = gyi; pz = gzi;
+            continue;
+        }
+        const dx = 0.5*(px+gxi)*dt;
+        const dy = 0.5*(py+gyi)*dt;
+        const dz = 0.5*(pz+gzi)*dt;
         const yx = dx - cx, yy = dy - cy, yz = dz - cz;
-        const nx = kx[i-1] + yx, ny = ky[i-1] + yy, nz = kz[i-1] + yz;
-        cx = (nx - kx[i-1]) - yx;
-        cy = (ny - ky[i-1]) - yy;
-        cz = (nz - kz[i-1]) - yz;
-        kx[i] = nx; ky[i] = ny; kz[i] = nz;
+        const nx = lx + yx, ny = ly + yy, nz = lz + yz;
+        cx = (nx - lx) - yx;
+        cy = (ny - ly) - yy;
+        cz = (nz - lz) - yz;
+        lx = nx; ly = ny; lz = nz;
 
         // Match Pulseq's precedence when an excitation and refocusing map to
         // the same canonical trajectory time.
         if (excitationAt[i]) {
-            kx[i] = 0; ky[i] = 0; kz[i] = 0;
+            lx = 0; ly = 0; lz = 0;
             cx = 0; cy = 0; cz = 0;
         } else if (refocusingAt[i]) {
-            kx[i] = -kx[i]; ky[i] = -ky[i]; kz[i] = -kz[i];
+            lx = -lx; ly = -ly; lz = -lz;
             cx = -cx; cy = -cy; cz = -cz;
         }
+        kx[i] = lx; ky[i] = ly; kz[i] = lz;
+        px = gxi; py = gyi; pz = gzi;
     }
 
-    // ---- Pass 6: NaN before excitation for clean plot breaks ----
-    const kxP = new Float64Array(kx), kyP = new Float64Array(ky), kzP = new Float64Array(kz);
-    for (const i of eIdx) { if (i > 0) { kxP[i-1] = NaN; kyP[i-1] = NaN; kzP[i-1] = NaN; } }
-
-    // ---- Pass 7: interpolate at ADC times ----
+    // ---- Pass 6: interpolate at ADC times ----
+    // Before the plot breaks are punched in, because interpolation has to read
+    // an unbroken trajectory. In this order the breaks can be written in place;
+    // the other way round needed a full-length copy of each axis to carry a
+    // handful of NaNs.
     const nA = adcT.length;
     const kxA = new Float64Array(nA), kyA = new Float64Array(nA), kzA = new Float64Array(nA);
     for (let a = 0; a < nA; a++) { kxA[a] = interp(kx, grid, adcT[a]); kyA[a] = interp(ky, grid, adcT[a]); kzA[a] = interp(kz, grid, adcT[a]); }
 
-    return { ktraj: [kxP, kyP, kzP], t_ktraj: new Float64Array(grid), ktraj_adc: [kxA, kyA, kzA], t_adc: new Float64Array(adcT) };
+    // ---- Pass 7: NaN before excitation for clean plot breaks ----
+    for (const i of eIdx) { if (i > 0) { kx[i-1] = NaN; ky[i-1] = NaN; kz[i-1] = NaN; } }
+
+    // adcT is already a Float64Array filled to exactly totalAdcSamples, so it is
+    // returned rather than copied; the guard keeps the trim if that ever stops
+    // holding.
+    const tAdc = adcIdx === adcT.length ? adcT : adcT.slice(0, adcIdx);
+    return { ktraj: [kx, ky, kz], t_ktraj: grid, ktraj_adc: [kxA, kyA, kzA], t_adc: tAdc };
 }
 
 // ---- helpers ----
@@ -322,12 +357,12 @@ function sampleSeries(
     return v0 + (v1 - v0) * (time - t0) / (t1 - t0);
 }
 
-function timeIdx(t: number, g: number[]): number {
+function timeIdx(t: number, g: ArrayLike<number>): number {
     let lo=0,hi=g.length;
     while(lo<hi){const m=(lo+hi)>>1;if(g[m]<t-1e-12)lo=m+1;else hi=m;}
     return lo < g.length ? lo : -1;
 }
-function interp(d: Float64Array, g: number[], t: number): number {
+function interp(d: Float64Array, g: ArrayLike<number>, t: number): number {
     const n=g.length;if(n===0)return 0;
     let lo=0,hi=n;
     while(lo<hi){const m=(lo+hi)>>1;if(g[m]<t)lo=m+1;else hi=m;}

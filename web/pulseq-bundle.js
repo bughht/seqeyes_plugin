@@ -3102,7 +3102,7 @@ var Pulseq = (() => {
       }
     }
     const gradientSeries = buildGlobalGradientSeries(blocks, GR, totalDuration);
-    const cand = [];
+    let cand = [];
     const pushC = (t) => {
       if (isFinite(t) && t >= -tacc) cand.push(Math.max(0, tacc * Math.round(t / tacc)));
     };
@@ -3125,13 +3125,16 @@ var Pulseq = (() => {
     }
     if (cand.length === 0) return null;
     cand.sort((a, b) => a - b);
-    const grid = [];
+    const deduped = [];
     for (let i = 0; i < cand.length; i++) {
-      if (i === 0 || cand[i] - cand[i - 1] > tacc * 0.5) grid.push(cand[i]);
+      if (i === 0 || cand[i] - cand[i - 1] > tacc * 0.5) deduped.push(cand[i]);
     }
-    const N = grid.length;
+    const N = deduped.length;
     if (N < 2) return null;
     if (_options?.maxGridPoints && N > _options.maxGridPoints) return null;
+    cand = [];
+    const grid = new Float64Array(deduped);
+    deduped.length = 0;
     const gx = new Float64Array(N), gy = new Float64Array(N), gz = new Float64Array(N);
     const cursors = [0, 0, 0];
     for (let i = 0; i < N; i++) {
@@ -3155,55 +3158,62 @@ var Pulseq = (() => {
     const refocusingAt = new Uint8Array(N);
     for (const i of eIdx) excitationAt[i] = 1;
     for (const i of rIdx) refocusingAt[i] = 1;
-    const kx = new Float64Array(N), ky = new Float64Array(N), kz = new Float64Array(N);
+    const kx = gx, ky = gy, kz = gz;
     let cx = 0, cy = 0, cz = 0;
+    let px = gx[0], py = gy[0], pz = gz[0];
+    kx[0] = 0;
+    ky[0] = 0;
+    kz[0] = 0;
     if (refocusingAt[0] && !excitationAt[0]) {
       kx[0] = -kx[0];
       ky[0] = -ky[0];
       kz[0] = -kz[0];
     }
+    let lx = kx[0], ly = ky[0], lz = kz[0];
     for (let i = 1; i < N; i++) {
+      const gxi = gx[i], gyi = gy[i], gzi = gz[i];
       const dt = grid[i] - grid[i - 1];
       if (dt <= 0) {
-        kx[i] = kx[i - 1];
-        ky[i] = ky[i - 1];
-        kz[i] = kz[i - 1];
+        kx[i] = lx;
+        ky[i] = ly;
+        kz[i] = lz;
+        px = gxi;
+        py = gyi;
+        pz = gzi;
         continue;
       }
-      const dx = 0.5 * (gx[i - 1] + gx[i]) * dt;
-      const dy = 0.5 * (gy[i - 1] + gy[i]) * dt;
-      const dz = 0.5 * (gz[i - 1] + gz[i]) * dt;
+      const dx = 0.5 * (px + gxi) * dt;
+      const dy = 0.5 * (py + gyi) * dt;
+      const dz = 0.5 * (pz + gzi) * dt;
       const yx = dx - cx, yy = dy - cy, yz = dz - cz;
-      const nx = kx[i - 1] + yx, ny = ky[i - 1] + yy, nz = kz[i - 1] + yz;
-      cx = nx - kx[i - 1] - yx;
-      cy = ny - ky[i - 1] - yy;
-      cz = nz - kz[i - 1] - yz;
-      kx[i] = nx;
-      ky[i] = ny;
-      kz[i] = nz;
+      const nx = lx + yx, ny = ly + yy, nz = lz + yz;
+      cx = nx - lx - yx;
+      cy = ny - ly - yy;
+      cz = nz - lz - yz;
+      lx = nx;
+      ly = ny;
+      lz = nz;
       if (excitationAt[i]) {
-        kx[i] = 0;
-        ky[i] = 0;
-        kz[i] = 0;
+        lx = 0;
+        ly = 0;
+        lz = 0;
         cx = 0;
         cy = 0;
         cz = 0;
       } else if (refocusingAt[i]) {
-        kx[i] = -kx[i];
-        ky[i] = -ky[i];
-        kz[i] = -kz[i];
+        lx = -lx;
+        ly = -ly;
+        lz = -lz;
         cx = -cx;
         cy = -cy;
         cz = -cz;
       }
-    }
-    const kxP = new Float64Array(kx), kyP = new Float64Array(ky), kzP = new Float64Array(kz);
-    for (const i of eIdx) {
-      if (i > 0) {
-        kxP[i - 1] = NaN;
-        kyP[i - 1] = NaN;
-        kzP[i - 1] = NaN;
-      }
+      kx[i] = lx;
+      ky[i] = ly;
+      kz[i] = lz;
+      px = gxi;
+      py = gyi;
+      pz = gzi;
     }
     const nA = adcT.length;
     const kxA = new Float64Array(nA), kyA = new Float64Array(nA), kzA = new Float64Array(nA);
@@ -3212,7 +3222,15 @@ var Pulseq = (() => {
       kyA[a] = interp(ky, grid, adcT[a]);
       kzA[a] = interp(kz, grid, adcT[a]);
     }
-    return { ktraj: [kxP, kyP, kzP], t_ktraj: new Float64Array(grid), ktraj_adc: [kxA, kyA, kzA], t_adc: new Float64Array(adcT) };
+    for (const i of eIdx) {
+      if (i > 0) {
+        kx[i - 1] = NaN;
+        ky[i - 1] = NaN;
+        kz[i - 1] = NaN;
+      }
+    }
+    const tAdc = adcIdx === adcT.length ? adcT : adcT.slice(0, adcIdx);
+    return { ktraj: [kx, ky, kz], t_ktraj: grid, ktraj_adc: [kxA, kyA, kzA], t_adc: tAdc };
   }
   function collectSeriesSupport(series, mode, push) {
     if (series.times.length < 2) return;
