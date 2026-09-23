@@ -2327,8 +2327,8 @@ var Pulseq = (() => {
     };
   }
   function estimateKspacePeakMemoryBytes(estimate) {
-    const gridBytes = Math.max(0, estimate.gridCandidatePoints) * 17;
-    const adcAndTransferBytes = Math.max(0, estimate.adcSamples) * 44;
+    const gridBytes = Math.max(0, estimate.gridCandidatePoints) * 11;
+    const adcAndTransferBytes = Math.max(0, estimate.adcSamples) * 43;
     return Math.ceil(Math.min(Number.MAX_SAFE_INTEGER, (gridBytes + adcAndTransferBytes) * 1.25));
   }
   function kspaceExceedsInteractiveBudget(estimate) {
@@ -3103,9 +3103,20 @@ var Pulseq = (() => {
       }
     }
     const gradientSeries = buildGlobalGradientSeries(blocks, GR, totalDuration);
-    let cand = [];
+    let candBound = 2;
+    for (const series of gradientSeries) candBound += countSeriesSupport(series, gradientSupport);
+    candBound += excT.length * 3 + refT.length * 2 + adcT.length;
+    if (totalDuration > 0) candBound += Math.max(1, Math.round(totalDuration / GR)) + 1;
+    const cand = new Float64Array(candBound);
+    let candCount = 0;
+    let candOverflow = false;
     const pushC = (t) => {
-      if (isFinite(t) && t >= -tacc) cand.push(Math.max(0, tacc * Math.round(t / tacc)));
+      if (!(isFinite(t) && t >= -tacc)) return;
+      if (candCount >= cand.length) {
+        candOverflow = true;
+        return;
+      }
+      cand[candCount++] = Math.max(0, tacc * Math.round(t / tacc));
     };
     for (const series of gradientSeries) collectSeriesSupport(series, gradientSupport, pushC);
     for (const t of excT) {
@@ -3124,18 +3135,17 @@ var Pulseq = (() => {
       const nS = Math.max(1, Math.round(totalDuration / GR));
       for (let i = 0; i <= nS; i++) pushC(i * GR);
     }
-    if (cand.length === 0) return null;
-    cand.sort((a2, b) => a2 - b);
-    const deduped = [];
-    for (let i = 0; i < cand.length; i++) {
-      if (i === 0 || cand[i] - cand[i - 1] > tacc * 0.5) deduped.push(cand[i]);
+    if (candOverflow) return null;
+    if (candCount === 0) return null;
+    cand.subarray(0, candCount).sort();
+    let kept = 0;
+    for (let i = 0; i < candCount; i++) {
+      if (i === 0 || cand[i] - cand[i - 1] > tacc * 0.5) cand[kept++] = cand[i];
     }
-    const N = deduped.length;
+    const N = kept;
     if (N < 2) return null;
     if (_options?.maxGridPoints && N > _options.maxGridPoints) return null;
-    cand = [];
-    const grid = new Float64Array(deduped);
-    deduped.length = 0;
+    const grid = cand.subarray(0, N);
     const eIdx = [], rIdx = [];
     for (const t of excT) {
       const i = timeIdx(t, grid);
@@ -3267,6 +3277,10 @@ var Pulseq = (() => {
       t_adc: tAdc,
       rasterSampleCount: N
     };
+  }
+  function countSeriesSupport(series, mode) {
+    if (series.times.length < 2) return 0;
+    return mode === "all" ? series.times.length : series.requiredSupport.length;
   }
   function collectSeriesSupport(series, mode, push) {
     if (series.times.length < 2) return;

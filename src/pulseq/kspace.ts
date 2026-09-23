@@ -146,8 +146,31 @@ export function calculateKspace(
     // Use a sorted-array dedup instead of Set to avoid V8's ~16.7M Set size limit.
     // Only essential points are included: selected gradient support, RF centres,
     // ADC sample times, block boundaries, and a uniform raster grid.
-    let cand: number[] = [];
-    const pushC = (t: number) => { if (isFinite(t) && t >= -tacc) cand.push(Math.max(0, tacc * Math.round(t/tacc))); };
+    // One buffer, sized up front, sorted and deduplicated in place.
+    //
+    // This used to be a `number[]` grown by push, deduplicated into a second
+    // `number[]`, and finally copied into a typed array. Push-grown arrays
+    // overshoot: V8 doubles the backing store when it fills and never shrinks
+    // it, so 84 M candidates cost 1,894 MB rather than the 675 MB the doubles
+    // need, and the deduplicated copy was alive beside it. Those two together
+    // were the high-water mark of the whole calculation.
+    //
+    // Every push site below is counted here. Miscounting would silently drop
+    // grid points, because a write past the end of a typed array is ignored, so
+    // the refusal below is deliberate: a wrong grid is worse than no answer.
+    let candBound = 2;  // the explicit 0 and totalDuration
+    for (const series of gradientSeries) candBound += countSeriesSupport(series, gradientSupport);
+    candBound += excT.length * 3 + refT.length * 2 + adcT.length;
+    if (totalDuration > 0) candBound += Math.max(1, Math.round(totalDuration / GR)) + 1;
+
+    const cand = new Float64Array(candBound);
+    let candCount = 0;
+    let candOverflow = false;
+    const pushC = (t: number) => {
+        if (!(isFinite(t) && t >= -tacc)) return;
+        if (candCount >= cand.length) { candOverflow = true; return; }
+        cand[candCount++] = Math.max(0, tacc * Math.round(t/tacc));
+    };
     for (const series of gradientSeries) collectSeriesSupport(series, gradientSupport, pushC);
     for (const t of excT) { pushC(t); pushC(t - RF); pushC(t - 2 * RF); }
     for (const t of refT) { pushC(t); pushC(t - RF); }
@@ -157,27 +180,24 @@ export function calculateKspace(
         const nS = Math.max(1, Math.round(totalDuration / GR));
         for (let i = 0; i <= nS; i++) pushC(i * GR);
     }
+    if (candOverflow) return null;
 
     // Sort and deduplicate in one pass — O(n log n) but safe for any sequence size
-    if (cand.length === 0) return null;
-    cand.sort((a, b) => a - b);
-    const deduped: number[] = [];
-    for (let i = 0; i < cand.length; i++) {
-        if (i === 0 || cand[i] - cand[i - 1] > tacc * 0.5) deduped.push(cand[i]);
+    if (candCount === 0) return null;
+    // A typed array sorts numerically without a comparator, and in place.
+    cand.subarray(0, candCount).sort();
+    // Compacting forward only ever writes at or behind the read cursor, so the
+    // predecessor each comparison needs is still the sorted one.
+    let kept = 0;
+    for (let i = 0; i < candCount; i++) {
+        if (i === 0 || cand[i] - cand[i - 1] > tacc * 0.5) cand[kept++] = cand[i];
     }
-    const N = deduped.length;
+    const N = kept;
     if (N < 2) return null;
     if (_options?.maxGridPoints && N > _options.maxGridPoints) return null;
 
-    // Nothing reads the candidate list again, and it is the largest thing alive
-    // here — 84M entries on a 3D wave sequence. Drop it before the trajectory
-    // allocates rather than carry it to the end of the function beside it.
-    cand = [];
-
-    // Hold the grid as a typed array: it is what `t_ktraj` returns, so it need
-    // not be copied again on the way out.
-    const grid = new Float64Array(deduped);
-    deduped.length = 0;
+    // A view, not a copy: the grid is the front of the buffer just compacted.
+    const grid = cand.subarray(0, N);
 
     // ---- Pass 4: resolve RF event indices ----
     const eIdx: number[] = [], rIdx: number[] = [];
@@ -322,6 +342,12 @@ export function calculateKspace(
 }
 
 // ---- helpers ----
+/** How many times `collectSeriesSupport` will call its callback. */
+function countSeriesSupport(series: GradientSeries, mode: 'endpoints' | 'all'): number {
+    if (series.times.length < 2) return 0;
+    return mode === 'all' ? series.times.length : series.requiredSupport.length;
+}
+
 function collectSeriesSupport(
     series: GradientSeries,
     mode: 'endpoints' | 'all',

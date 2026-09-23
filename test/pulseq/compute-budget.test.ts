@@ -38,11 +38,11 @@ describe('interactive calculation budgets', () => {
       gridCandidatePoints: 104_101,
     });
     expect(estimateDerivedCost(blocks, 1e-5).rasterSamples).toBe(80_001);
-    // 104 K candidates and 4 K ADC samples at the measured 17 and 44 bytes.
+    // 104 K candidates and 4 K ADC samples at the measured 11 and 43 bytes.
     // This was above 10 MB when the trajectory was materialised at full raster.
     const smallEstimate = estimateKspacePeakMemoryBytes(estimateKspaceCost(blocks, 1e-5, 1));
-    expect(smallEstimate).toBeGreaterThan(2 * 1024 * 1024);
-    expect(smallEstimate).toBeLessThan(3 * 1024 * 1024);
+    expect(smallEstimate).toBeGreaterThan(1 * 1024 * 1024);
+    expect(smallEstimate).toBeLessThan(2 * 1024 * 1024);
     expect(kspaceExceedsInteractiveBudget(estimateKspaceCost(blocks, 1e-5, 1))).toBe(false);
   });
 
