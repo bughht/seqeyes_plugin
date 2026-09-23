@@ -2327,9 +2327,13 @@ var Pulseq = (() => {
     };
   }
   function estimateKspacePeakMemoryBytes(estimate) {
-    const gridBytes = Math.max(0, estimate.gridCandidatePoints) * 11;
+    const gridBytes = Math.max(0, estimate.gridCandidatePoints) * 1;
     const adcAndTransferBytes = Math.max(0, estimate.adcSamples) * 43;
-    return Math.ceil(Math.min(Number.MAX_SAFE_INTEGER, (gridBytes + adcAndTransferBytes) * 1.25));
+    const fixedOverheadBytes = 2 * 1024 * 1024;
+    return Math.ceil(Math.min(
+      Number.MAX_SAFE_INTEGER,
+      (gridBytes + adcAndTransferBytes) * 1.25 + fixedOverheadBytes
+    ));
   }
   function kspaceExceedsInteractiveBudget(estimate) {
     return estimate.rasterSamples > INTERACTIVE_COMPUTE_LIMITS.kspaceRasterSamples || estimate.adcSamples > INTERACTIVE_COMPUTE_LIMITS.kspaceAdcSamples || estimate.gridCandidatePoints > INTERACTIVE_COMPUTE_LIMITS.kspaceGridCandidates || estimateKspacePeakMemoryBytes(estimate) >= KSPACE_CONFIRMATION_MEMORY_BYTES;
@@ -3106,7 +3110,6 @@ var Pulseq = (() => {
     let candBound = 2;
     for (const series of gradientSeries) candBound += countSeriesSupport(series, gradientSupport);
     candBound += excT.length * 3 + refT.length * 2 + adcT.length;
-    if (totalDuration > 0) candBound += Math.max(1, Math.round(totalDuration / GR)) + 1;
     const cand = new Float64Array(candBound);
     let candCount = 0;
     let candOverflow = false;
@@ -3131,10 +3134,6 @@ var Pulseq = (() => {
     for (const t of adcT) pushC(t);
     pushC(0);
     pushC(totalDuration);
-    if (totalDuration > 0) {
-      const nS = Math.max(1, Math.round(totalDuration / GR));
-      for (let i = 0; i <= nS; i++) pushC(i * GR);
-    }
     if (candOverflow) return null;
     if (candCount === 0) return null;
     cand.subarray(0, candCount).sort();
@@ -3142,21 +3141,69 @@ var Pulseq = (() => {
     for (let i = 0; i < candCount; i++) {
       if (i === 0 || cand[i] - cand[i - 1] > tacc * 0.5) cand[kept++] = cand[i];
     }
-    const N = kept;
+    const storedCount = kept;
+    const rasterSteps = totalDuration > 0 ? Math.max(1, Math.round(totalDuration / GR)) : -1;
+    const rasterAt = (i) => Math.max(0, tacc * Math.round(i * GR / tacc));
+    const makeGridWalk = () => {
+      let storedIndex = 0;
+      let rasterIndex = 0;
+      let previous = 0;
+      let started = false;
+      return () => {
+        for (; ; ) {
+          const haveStored = storedIndex < storedCount;
+          const haveRaster = rasterIndex <= rasterSteps;
+          if (!haveStored && !haveRaster) return NaN;
+          let value;
+          if (!haveRaster) {
+            value = cand[storedIndex++];
+          } else if (!haveStored) {
+            value = rasterAt(rasterIndex++);
+          } else {
+            const stored = cand[storedIndex];
+            const raster = rasterAt(rasterIndex);
+            if (stored <= raster) {
+              value = stored;
+              storedIndex++;
+              if (stored === raster) rasterIndex++;
+            } else {
+              value = raster;
+              rasterIndex++;
+            }
+          }
+          if (!started || value !== previous) {
+            previous = value;
+            started = true;
+            return value;
+          }
+        }
+      };
+    };
+    const excSorted = Float64Array.from(excT);
+    excSorted.sort();
+    const refSorted = Float64Array.from(refT);
+    refSorted.sort();
+    const eIdx = [], rIdx = [];
+    let excSeen = 0, refSeen = 0;
+    let N = 0;
+    {
+      const nextGridTime2 = makeGridWalk();
+      for (; ; ) {
+        const t = nextGridTime2();
+        if (Number.isNaN(t)) break;
+        while (excSeen < excSorted.length && t >= excSorted[excSeen] - 1e-12) {
+          eIdx.push(N);
+          excSeen++;
+        }
+        while (refSeen < refSorted.length && t >= refSorted[refSeen] - 1e-12) {
+          rIdx.push(N);
+          refSeen++;
+        }
+        N++;
+      }
+    }
     if (N < 2) return null;
     if (_options?.maxGridPoints && N > _options.maxGridPoints) return null;
-    const grid = cand.subarray(0, N);
-    const eIdx = [], rIdx = [];
-    for (const t of excT) {
-      const i = timeIdx(t, grid);
-      if (i >= 0) eIdx.push(i);
-    }
-    for (const t of refT) {
-      const i = timeIdx(t, grid);
-      if (i >= 0) rIdx.push(i);
-    }
-    eIdx.sort((a2, b) => a2 - b);
-    rIdx.sort((a2, b) => a2 - b);
     let excCursor = 0, refCursor = 0;
     const excitationAtIndex = (i) => {
       while (excCursor < eIdx.length && eIdx[excCursor] < i) excCursor++;
@@ -3182,9 +3229,11 @@ var Pulseq = (() => {
     let out = 0;
     let nextKeep = 0;
     let ec = 0;
-    let gxPrev = sampleSeries(gradientSeries[0], grid[0], cursors, 0);
-    let gyPrev = sampleSeries(gradientSeries[1], grid[0], cursors, 1);
-    let gzPrev = sampleSeries(gradientSeries[2], grid[0], cursors, 2);
+    const nextGridTime = makeGridWalk();
+    let tPrev = nextGridTime();
+    let gxPrev = sampleSeries(gradientSeries[0], tPrev, cursors, 0);
+    let gyPrev = sampleSeries(gradientSeries[1], tPrev, cursors, 1);
+    let gzPrev = sampleSeries(gradientSeries[2], tPrev, cursors, 2);
     if (refocusingAtIndex(0) && !excitationAtIndex(0)) {
       lx = -lx;
       ly = -ly;
@@ -3193,24 +3242,24 @@ var Pulseq = (() => {
     if (nextKeep === 0) {
       while (ec < eIdx.length && eIdx[ec] < 1) ec++;
       const brk = ec < eIdx.length && eIdx[ec] === 1;
-      outT[0] = grid[0];
+      outT[0] = tPrev;
       outX[0] = brk ? NaN : lx;
       outY[0] = brk ? NaN : ly;
       outZ[0] = brk ? NaN : lz;
       out = 1;
       nextKeep = out < outCount ? Math.floor(out * outStep) : -1;
     }
-    while (a < nA && adcT[a] <= grid[0]) {
+    while (a < nA && adcT[a] <= tPrev) {
       kxA[a] = lx;
       kyA[a] = ly;
       kzA[a] = lz;
       a++;
     }
     for (let i = 1; i < N; i++) {
-      const gxi = sampleSeries(gradientSeries[0], grid[i], cursors, 0);
-      const gyi = sampleSeries(gradientSeries[1], grid[i], cursors, 1);
-      const gzi = sampleSeries(gradientSeries[2], grid[i], cursors, 2);
-      const tPrev = grid[i - 1], tCur = grid[i];
+      const tCur = nextGridTime();
+      const gxi = sampleSeries(gradientSeries[0], tCur, cursors, 0);
+      const gyi = sampleSeries(gradientSeries[1], tCur, cursors, 1);
+      const gzi = sampleSeries(gradientSeries[2], tCur, cursors, 2);
       const dt = tCur - tPrev;
       const px = lx, py = ly, pz = lz;
       if (dt > 0) {
@@ -3267,6 +3316,7 @@ var Pulseq = (() => {
       gxPrev = gxi;
       gyPrev = gyi;
       gzPrev = gzi;
+      tPrev = tCur;
     }
     while (a < nA) {
       kxA[a] = lx;
@@ -3386,15 +3436,6 @@ var Pulseq = (() => {
     if (time <= t0 || t1 <= t0) return v0;
     if (time >= t1) return v1;
     return v0 + (v1 - v0) * (time - t0) / (t1 - t0);
-  }
-  function timeIdx(t, g) {
-    let lo = 0, hi = g.length;
-    while (lo < hi) {
-      const m = lo + hi >> 1;
-      if (g[m] < t - 1e-12) lo = m + 1;
-      else hi = m;
-    }
-    return lo < g.length ? lo : -1;
   }
 
   // src/editor/kspaceTransport.ts

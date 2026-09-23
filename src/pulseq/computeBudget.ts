@@ -135,33 +135,38 @@ export function estimateSequenceKspaceCost(
  * sequences spanning 28 K to 84 M grid candidates and 12 K to 33 M ADC samples,
  * and the two-term fit reproduces every one of them:
  *
- *   writeEpi          0.8 MB predicted,   1 MB measured
- *   writeGradientEcho 2.4 MB              3 MB
- *   rotExt            9.8 MB              9 MB
- *   spiral_inout       76 MB             74 MB
- *   gre_3d_wave_FC  2,251 MB          2,219 MB
+ *   writeEpi          2.7 MB predicted,   1 MB measured
+ *   writeGradientEcho 3.0 MB              2 MB
+ *   rotExt            7.0 MB              4 MB
+ *   spiral_inout       22 MB             15 MB
+ *   gre_3d_wave_FC  1,810 MB          1,438 MB
  *
- * A candidate costs about 11 bytes: eight for its slot in the one buffer the
- * grid is built in, plus the two RF marker bytes each grid point carries. An
- * ADC sample costs about 43: its Float32 trajectory and Float64 time, plus the
- * staging each host adds. The 25% margin covers sorting temporaries and
- * runtime-dependent overhead.
+ * A candidate now costs about a byte, because the uniform raster — most of
+ * them — is generated during the walk rather than stored, and what is stored
+ * is almost entirely the ADC times the second term already counts. An ADC
+ * sample costs about 43: its Float32 trajectory and Float64 time, plus the
+ * staging each host adds. The 25% margin covers temporaries, and the fixed
+ * couple of megabytes covers the per-call overhead that dominates small
+ * sequences, where the two terms alone would fall a little short.
  *
  * These were 96 and 104 bytes when the trajectory was materialised at full
- * raster — six full-length arrays per grid point — and briefly 17 and 44 after
- * streaming removed them, while the grid was still built through two
- * push-grown arrays. An estimate left at the oldest figures overstated
- * `gre_3d_wave_FC.seq` by 5x, which would gate sequences that now calculate
- * comfortably. Recalibrate whenever the allocation shape changes; it has moved
- * twice already.
+ * raster, 17 and 44 once streaming removed it, and 11 and 43 once the grid was
+ * built in one buffer rather than two push-grown arrays. An estimate left at
+ * the oldest figures overstated `gre_3d_wave_FC.seq` by 5x, which would gate
+ * sequences that now calculate comfortably. Recalibrate whenever the
+ * allocation shape changes; it has moved three times.
  *
  * This is an estimate, not a reservation or a guarantee that the host can
  * allocate it.
  */
 export function estimateKspacePeakMemoryBytes(estimate: KspaceCostEstimate): number {
-    const gridBytes = Math.max(0, estimate.gridCandidatePoints) * 11;
+    const gridBytes = Math.max(0, estimate.gridCandidatePoints) * 1;
     const adcAndTransferBytes = Math.max(0, estimate.adcSamples) * 43;
-    return Math.ceil(Math.min(Number.MAX_SAFE_INTEGER, (gridBytes + adcAndTransferBytes) * 1.25));
+    const fixedOverheadBytes = 2 * 1024 * 1024;
+    return Math.ceil(Math.min(
+        Number.MAX_SAFE_INTEGER,
+        (gridBytes + adcAndTransferBytes) * 1.25 + fixedOverheadBytes,
+    ));
 }
 
 /** True when an interactive k-space request must not start automatically. */
