@@ -127,18 +127,36 @@ export function estimateSequenceKspaceCost(
 }
 
 /**
- * Conservative host-process peak for the current JavaScript K-space path.
+ * What calculating K-space adds to the host process, over what the loaded
+ * sequence already costs.
  *
- * Each candidate can coexist in the candidate/deduplicated number arrays,
- * gradient arrays, integrated trajectory arrays, plot-break copies, and the
- * returned time array. ADC samples additionally require calculation outputs,
- * transfer/base64 staging in VS Code, and renderer/GPU staging. The 25% margin
- * covers sorting temporaries and runtime-dependent array overhead. This is an
- * estimate, not a reservation or a guarantee that the host can allocate it.
+ * The coefficients are measured, not derived. Live memory (heap plus array
+ * buffers, after a forced collection) was sampled at each allocation stage for
+ * sequences spanning 28 K to 84 M grid candidates and 12 K to 33 M ADC samples,
+ * and the two-term fit reproduces every one of them:
+ *
+ *   writeEpi          1 MB predicted,     1 MB measured
+ *   writeGradientEcho 3.5 MB              4 MB
+ *   rotExt           13.7 MB             14 MB
+ *   spiral_inout      111 MB             111 MB
+ *   gre_3d_wave_FC  2,753 MB          2,753 MB
+ *
+ * A candidate costs about 17 bytes: it lives in the candidate and deduplicated
+ * arrays at once before becoming eight bytes of grid. An ADC sample costs about
+ * 44: its Float32 trajectory and Float64 time, plus the staging each host adds.
+ * The 25% margin covers sorting temporaries and runtime-dependent overhead.
+ *
+ * These were 96 and 104 bytes when the trajectory was materialised at full
+ * raster — six full-length arrays per grid point. Streaming removed those, and
+ * an estimate left at the old figures overstated `gre_3d_wave_FC.seq` by 5x,
+ * which would gate sequences that now calculate comfortably.
+ *
+ * This is an estimate, not a reservation or a guarantee that the host can
+ * allocate it.
  */
 export function estimateKspacePeakMemoryBytes(estimate: KspaceCostEstimate): number {
-    const gridBytes = Math.max(0, estimate.gridCandidatePoints) * 96;
-    const adcAndTransferBytes = Math.max(0, estimate.adcSamples) * 104;
+    const gridBytes = Math.max(0, estimate.gridCandidatePoints) * 17;
+    const adcAndTransferBytes = Math.max(0, estimate.adcSamples) * 44;
     return Math.ceil(Math.min(Number.MAX_SAFE_INTEGER, (gridBytes + adcAndTransferBytes) * 1.25));
 }
 

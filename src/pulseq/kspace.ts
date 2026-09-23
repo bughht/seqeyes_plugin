@@ -18,12 +18,20 @@
 import type { DecodedBlock } from './types';
 import { physicalGradientPiece, type GradientSeries } from './physicalGradients';
 
+/** ADC trajectory storage; Float32 for display, Float64 for export. */
+export type AdcSamples = Float64Array | Float32Array;
+
 export interface KSpaceData {
     /** [kx, ky, kz]  [Hz/m] — decimated when `maxTrajectoryPoints` was given. */
     ktraj: Float64Array[];
     /** Time base aligned with `ktraj`, decimated the same way  [s] */
     t_ktraj: Float64Array;
-    ktraj_adc: Float64Array[];  // ADC samples  [Hz/m]
+    /**
+     * ADC samples  [Hz/m]. Float32 when the caller asked for it — the viewers
+     * draw from Float32 either way, so that is the same value they show today,
+     * just without a Float64 stage in front of it.
+     */
+    ktraj_adc: AdcSamples[];
     t_adc: Float64Array;        // ADC times  [s]
     /** Integration grid length, whatever `ktraj` was decimated to. */
     rasterSampleCount: number;
@@ -52,6 +60,18 @@ export interface KSpaceOptions {
      * on a 3D wave sequence. Export leaves this unset and gets every sample.
      */
     maxTrajectoryPoints?: number;
+    /**
+     * Storage for the ADC trajectory. Defaults to `f64`.
+     *
+     * `f32` halves it, and both viewers already render from Float32 — the
+     * browser converts at GPU upload, the extension at transport — so the
+     * values they display are unchanged, and the transport copy disappears
+     * because the array is already in the right format. Export leaves this
+     * alone and keeps full precision, which is what the numeric baselines
+     * compare. ADC *times* stay Float64 regardless: Float32 resolves to only
+     * ~30 us at the end of a 500 s sequence, which the window culling needs.
+     */
+    adcPrecision?: 'f32' | 'f64';
     /** Optional hard cap on ADC sample count. */
     maxAdcSamples?: number;
     /** RF raster time in seconds, used to place reset-adjacent grid points. */
@@ -198,7 +218,10 @@ export function calculateKspace(
     const outT = new Float64Array(outCount);
 
     const nA = adcT.length;
-    const kxA = new Float64Array(nA), kyA = new Float64Array(nA), kzA = new Float64Array(nA);
+    const f32Adc = _options?.adcPrecision === 'f32';
+    const kxA: AdcSamples = f32Adc ? new Float32Array(nA) : new Float64Array(nA);
+    const kyA: AdcSamples = f32Adc ? new Float32Array(nA) : new Float64Array(nA);
+    const kzA: AdcSamples = f32Adc ? new Float32Array(nA) : new Float64Array(nA);
 
     const cursors = [0, 0, 0];
     let cx = 0, cy = 0, cz = 0;

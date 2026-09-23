@@ -743,7 +743,8 @@ function requestDangerousKspaceCalculation(){
       // The viewer draws the trajectory as an overview, so only that many
       // samples are kept; holding the full raster costs gigabytes for nothing.
       var ks=Pulseq.calculateKspace(ensureDecodedBlocks(),GR,TD,0,{
-        rfRaster:RR,maxTrajectoryPoints:Pulseq.MAX_KSPACE_OVERVIEW_POINTS
+        rfRaster:RR,maxTrajectoryPoints:Pulseq.MAX_KSPACE_OVERVIEW_POINTS,
+        adcPrecision:'f32'
       });
       if(!ks)throw new Error('The calculation did not produce a trajectory.');
       applyKspaceResult(ks);finishDangerousKspaceCalculation(null);showProgress('done',100,'K-space ready');
@@ -762,7 +763,7 @@ function requestKspaceCalculation(){
       if(Pulseq.kspaceExceedsInteractiveBudget(estimate))throw new Error('K-space exceeds the interactive safety budget and requires explicit confirmation.');
       var ks=Pulseq.calculateKspace(ensureDecodedBlocks(),GR,TD,0,{
         rfRaster:RR,maxGridPoints:limits.kspaceGridCandidates,maxAdcSamples:limits.kspaceAdcSamples,
-        maxTrajectoryPoints:Pulseq.MAX_KSPACE_OVERVIEW_POINTS
+        maxTrajectoryPoints:Pulseq.MAX_KSPACE_OVERVIEW_POINTS,adcPrecision:'f32'
       });
       if(!ks)throw new Error('The calculation did not produce a trajectory.');
       applyKspaceResult(ks);finishDangerousKspaceCalculation(null);showProgress('done',100,'K-space ready');
@@ -817,7 +818,7 @@ function loadSequenceSource(sourceBytes,fileName,parseSource){
     if(kspaceOverBudget){
       setKspaceSafetyWarning('K-space was not calculated because this sequence exceeds the interactive safety budget ('+
         Pulseq.formatSampleCount(kspaceEstimate.rasterSamples)+' raster samples, '+
-        Pulseq.formatSampleCount(kspaceEstimate.adcSamples)+' ADC samples). Estimated peak memory: approximately '+
+        Pulseq.formatSampleCount(kspaceEstimate.adcSamples)+' ADC samples). Estimated additional memory: approximately '+
         kspaceMemoryEstimate+' (host-dependent).');
     }
 

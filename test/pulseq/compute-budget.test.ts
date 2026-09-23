@@ -38,7 +38,11 @@ describe('interactive calculation budgets', () => {
       gridCandidatePoints: 104_101,
     });
     expect(estimateDerivedCost(blocks, 1e-5).rasterSamples).toBe(80_001);
-    expect(estimateKspacePeakMemoryBytes(estimateKspaceCost(blocks, 1e-5, 1))).toBeGreaterThan(10 * 1024 * 1024);
+    // 104 K candidates and 4 K ADC samples at the measured 17 and 44 bytes.
+    // This was above 10 MB when the trajectory was materialised at full raster.
+    const smallEstimate = estimateKspacePeakMemoryBytes(estimateKspaceCost(blocks, 1e-5, 1));
+    expect(smallEstimate).toBeGreaterThan(2 * 1024 * 1024);
+    expect(smallEstimate).toBeLessThan(3 * 1024 * 1024);
     expect(kspaceExceedsInteractiveBudget(estimateKspaceCost(blocks, 1e-5, 1))).toBe(false);
   });
 
@@ -81,11 +85,21 @@ describe('interactive calculation budgets', () => {
       adcSamples: 0,
       gridCandidatePoints: 8_000_000,
     })).toBe(false);
+    // The raster rule, not the memory rule, is what stops this one.
     expect(kspaceExceedsInteractiveBudget({
-      rasterSamples: 9_000_000,
+      rasterSamples: 13_000_000,
       adcSamples: 0,
-      gridCandidatePoints: 9_000_000,
+      gridCandidatePoints: 13_000_000,
     })).toBe(true);
+    // Since the estimate was recalibrated the memory rule no longer fires on
+    // its own: the largest sequence that passes all three sample limits still
+    // estimates well under the confirmation threshold. It stays as a guard for
+    // if those limits are ever raised.
+    expect(estimateKspacePeakMemoryBytes({
+      rasterSamples: INTERACTIVE_COMPUTE_LIMITS.kspaceRasterSamples,
+      adcSamples: INTERACTIVE_COMPUTE_LIMITS.kspaceAdcSamples,
+      gridCandidatePoints: INTERACTIVE_COMPUTE_LIMITS.kspaceGridCandidates,
+    })).toBeLessThan(KSPACE_CONFIRMATION_MEMORY_BYTES);
   });
 
   it('allows sample-bounded detail without TR metadata and caps long-TR viewports', () => {

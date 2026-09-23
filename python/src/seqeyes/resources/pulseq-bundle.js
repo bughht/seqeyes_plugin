@@ -2327,8 +2327,8 @@ var Pulseq = (() => {
     };
   }
   function estimateKspacePeakMemoryBytes(estimate) {
-    const gridBytes = Math.max(0, estimate.gridCandidatePoints) * 96;
-    const adcAndTransferBytes = Math.max(0, estimate.adcSamples) * 104;
+    const gridBytes = Math.max(0, estimate.gridCandidatePoints) * 17;
+    const adcAndTransferBytes = Math.max(0, estimate.adcSamples) * 44;
     return Math.ceil(Math.min(Number.MAX_SAFE_INTEGER, (gridBytes + adcAndTransferBytes) * 1.25));
   }
   function kspaceExceedsInteractiveBudget(estimate) {
@@ -3156,7 +3156,10 @@ var Pulseq = (() => {
     const outX = new Float64Array(outCount), outY = new Float64Array(outCount), outZ = new Float64Array(outCount);
     const outT = new Float64Array(outCount);
     const nA = adcT.length;
-    const kxA = new Float64Array(nA), kyA = new Float64Array(nA), kzA = new Float64Array(nA);
+    const f32Adc = _options?.adcPrecision === "f32";
+    const kxA = f32Adc ? new Float32Array(nA) : new Float64Array(nA);
+    const kyA = f32Adc ? new Float32Array(nA) : new Float64Array(nA);
+    const kzA = f32Adc ? new Float32Array(nA) : new Float64Array(nA);
     const cursors = [0, 0, 0];
     let cx = 0, cy = 0, cz = 0;
     let lx = 0, ly = 0, lz = 0;

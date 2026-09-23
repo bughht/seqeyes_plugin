@@ -49,6 +49,13 @@ export function serializeKSpace(ks: KSpaceData): SerializedKSpace {
 
 /** Copy a sample series into a standalone Float32 buffer for transfer. */
 export function toF32Buffer(data: Float64Array | Float32Array | number[]): ArrayBuffer {
+    // Already the right format and tightly packed: hand over the buffer rather
+    // than copying it. On a 33 M-sample trajectory each copy is 133 MB, and
+    // the originals stay alive while they are made.
+    if (data instanceof Float32Array && data.byteOffset === 0
+        && data.buffer.byteLength === data.byteLength) {
+        return data.buffer as ArrayBuffer;
+    }
     return new Float32Array(data).buffer;
 }
 

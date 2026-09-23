@@ -505,7 +505,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                         'K-space was not calculated because this sequence exceeds the interactive safety budget '
                         + `(${formatSampleCount(kspaceEstimate.rasterSamples)} raster samples, `
                         + `${formatSampleCount(kspaceEstimate.adcSamples)} ADC samples). `
-                        + `Estimated peak memory: approximately ${kspaceMemoryEstimate} (host-dependent).`
+                        + `Estimated additional memory: approximately ${kspaceMemoryEstimate} (host-dependent).`
                     );
                 }
 
@@ -708,6 +708,10 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                             // discards the rest, so the full raster need not be
                             // kept; serializeKSpace reduces to the same count.
                             maxTrajectoryPoints: MAX_KSPACE_OVERVIEW_POINTS,
+                            // Transport converts the ADC samples to Float32
+                            // anyway, so producing them that way saves both the
+                            // Float64 originals and the conversion copies.
+                            adcPrecision: 'f32',
                         },
                     );
                     if (!kspace) throw new Error('The calculation did not produce a trajectory.');
@@ -746,6 +750,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                             maxGridPoints: INTERACTIVE_COMPUTE_LIMITS.kspaceGridCandidates,
                             maxAdcSamples: INTERACTIVE_COMPUTE_LIMITS.kspaceAdcSamples,
                             maxTrajectoryPoints: MAX_KSPACE_OVERVIEW_POINTS,
+                            adcPrecision: 'f32',
                         },
                     );
                     if (!kspace) throw new Error('The calculation did not produce a trajectory.');
