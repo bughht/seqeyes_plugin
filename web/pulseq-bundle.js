@@ -24,6 +24,7 @@ var Pulseq = (() => {
   var pulseq_browser_exports = {};
   __export(pulseq_browser_exports, {
     INTERACTIVE_COMPUTE_LIMITS: () => INTERACTIVE_COMPUTE_LIMITS,
+    MAX_KSPACE_OVERVIEW_POINTS: () => MAX_KSPACE_OVERVIEW_POINTS,
     MAX_RF_RESPONSE_BANDS: () => MAX_RF_RESPONSE_BANDS,
     MAX_RF_RESPONSE_FFT_POINTS: () => MAX_RF_RESPONSE_FFT_POINTS,
     MAX_RF_RESPONSE_SAMPLES: () => MAX_RF_RESPONSE_SAMPLES,
@@ -89,7 +90,7 @@ var Pulseq = (() => {
   });
 
   // package.json
-  var version = "0.3.13";
+  var version = "0.3.14";
 
   // src/pulseq/decompressor.ts
   function decompressShape(compressed, numSamples) {
@@ -2326,8 +2327,8 @@ var Pulseq = (() => {
     };
   }
   function estimateKspacePeakMemoryBytes(estimate) {
-    const gridBytes = Math.max(0, estimate.gridCandidatePoints) * 96;
-    const adcAndTransferBytes = Math.max(0, estimate.adcSamples) * 104;
+    const gridBytes = Math.max(0, estimate.gridCandidatePoints) * 11;
+    const adcAndTransferBytes = Math.max(0, estimate.adcSamples) * 43;
     return Math.ceil(Math.min(Number.MAX_SAFE_INTEGER, (gridBytes + adcAndTransferBytes) * 1.25));
   }
   function kspaceExceedsInteractiveBudget(estimate) {
@@ -3102,9 +3103,20 @@ var Pulseq = (() => {
       }
     }
     const gradientSeries = buildGlobalGradientSeries(blocks, GR, totalDuration);
-    const cand = [];
+    let candBound = 2;
+    for (const series of gradientSeries) candBound += countSeriesSupport(series, gradientSupport);
+    candBound += excT.length * 3 + refT.length * 2 + adcT.length;
+    if (totalDuration > 0) candBound += Math.max(1, Math.round(totalDuration / GR)) + 1;
+    const cand = new Float64Array(candBound);
+    let candCount = 0;
+    let candOverflow = false;
     const pushC = (t) => {
-      if (isFinite(t) && t >= -tacc) cand.push(Math.max(0, tacc * Math.round(t / tacc)));
+      if (!(isFinite(t) && t >= -tacc)) return;
+      if (candCount >= cand.length) {
+        candOverflow = true;
+        return;
+      }
+      cand[candCount++] = Math.max(0, tacc * Math.round(t / tacc));
     };
     for (const series of gradientSeries) collectSeriesSupport(series, gradientSupport, pushC);
     for (const t of excT) {
@@ -3123,23 +3135,17 @@ var Pulseq = (() => {
       const nS = Math.max(1, Math.round(totalDuration / GR));
       for (let i = 0; i <= nS; i++) pushC(i * GR);
     }
-    if (cand.length === 0) return null;
-    cand.sort((a, b) => a - b);
-    const grid = [];
-    for (let i = 0; i < cand.length; i++) {
-      if (i === 0 || cand[i] - cand[i - 1] > tacc * 0.5) grid.push(cand[i]);
+    if (candOverflow) return null;
+    if (candCount === 0) return null;
+    cand.subarray(0, candCount).sort();
+    let kept = 0;
+    for (let i = 0; i < candCount; i++) {
+      if (i === 0 || cand[i] - cand[i - 1] > tacc * 0.5) cand[kept++] = cand[i];
     }
-    const N = grid.length;
+    const N = kept;
     if (N < 2) return null;
     if (_options?.maxGridPoints && N > _options.maxGridPoints) return null;
-    const gx = new Float64Array(N), gy = new Float64Array(N), gz = new Float64Array(N);
-    const cursors = [0, 0, 0];
-    for (let i = 0; i < N; i++) {
-      const t = grid[i];
-      gx[i] = sampleSeries(gradientSeries[0], t, cursors, 0);
-      gy[i] = sampleSeries(gradientSeries[1], t, cursors, 1);
-      gz[i] = sampleSeries(gradientSeries[2], t, cursors, 2);
-    }
+    const grid = cand.subarray(0, N);
     const eIdx = [], rIdx = [];
     for (const t of excT) {
       const i = timeIdx(t, grid);
@@ -3149,70 +3155,132 @@ var Pulseq = (() => {
       const i = timeIdx(t, grid);
       if (i >= 0) rIdx.push(i);
     }
-    eIdx.sort((a, b) => a - b);
-    rIdx.sort((a, b) => a - b);
+    eIdx.sort((a2, b) => a2 - b);
+    rIdx.sort((a2, b) => a2 - b);
     const excitationAt = new Uint8Array(N);
     const refocusingAt = new Uint8Array(N);
     for (const i of eIdx) excitationAt[i] = 1;
     for (const i of rIdx) refocusingAt[i] = 1;
-    const kx = new Float64Array(N), ky = new Float64Array(N), kz = new Float64Array(N);
+    const outCount = _options?.maxTrajectoryPoints && _options.maxTrajectoryPoints > 0 ? Math.min(_options.maxTrajectoryPoints, N) : N;
+    const outStep = N / outCount;
+    const outX = new Float64Array(outCount), outY = new Float64Array(outCount), outZ = new Float64Array(outCount);
+    const outT = new Float64Array(outCount);
+    const nA = adcT.length;
+    const f32Adc = _options?.adcPrecision === "f32";
+    const kxA = f32Adc ? new Float32Array(nA) : new Float64Array(nA);
+    const kyA = f32Adc ? new Float32Array(nA) : new Float64Array(nA);
+    const kzA = f32Adc ? new Float32Array(nA) : new Float64Array(nA);
+    const cursors = [0, 0, 0];
     let cx = 0, cy = 0, cz = 0;
+    let lx = 0, ly = 0, lz = 0;
+    let a = 0;
+    let out = 0;
+    let nextKeep = 0;
+    let ec = 0;
+    let gxPrev = sampleSeries(gradientSeries[0], grid[0], cursors, 0);
+    let gyPrev = sampleSeries(gradientSeries[1], grid[0], cursors, 1);
+    let gzPrev = sampleSeries(gradientSeries[2], grid[0], cursors, 2);
     if (refocusingAt[0] && !excitationAt[0]) {
-      kx[0] = -kx[0];
-      ky[0] = -ky[0];
-      kz[0] = -kz[0];
+      lx = -lx;
+      ly = -ly;
+      lz = -lz;
+    }
+    if (nextKeep === 0) {
+      while (ec < eIdx.length && eIdx[ec] < 1) ec++;
+      const brk = ec < eIdx.length && eIdx[ec] === 1;
+      outT[0] = grid[0];
+      outX[0] = brk ? NaN : lx;
+      outY[0] = brk ? NaN : ly;
+      outZ[0] = brk ? NaN : lz;
+      out = 1;
+      nextKeep = out < outCount ? Math.floor(out * outStep) : -1;
+    }
+    while (a < nA && adcT[a] <= grid[0]) {
+      kxA[a] = lx;
+      kyA[a] = ly;
+      kzA[a] = lz;
+      a++;
     }
     for (let i = 1; i < N; i++) {
-      const dt = grid[i] - grid[i - 1];
-      if (dt <= 0) {
-        kx[i] = kx[i - 1];
-        ky[i] = ky[i - 1];
-        kz[i] = kz[i - 1];
-        continue;
+      const gxi = sampleSeries(gradientSeries[0], grid[i], cursors, 0);
+      const gyi = sampleSeries(gradientSeries[1], grid[i], cursors, 1);
+      const gzi = sampleSeries(gradientSeries[2], grid[i], cursors, 2);
+      const tPrev = grid[i - 1], tCur = grid[i];
+      const dt = tCur - tPrev;
+      const px = lx, py = ly, pz = lz;
+      if (dt > 0) {
+        const dx = 0.5 * (gxPrev + gxi) * dt;
+        const dy = 0.5 * (gyPrev + gyi) * dt;
+        const dz = 0.5 * (gzPrev + gzi) * dt;
+        const yx = dx - cx, yy = dy - cy, yz = dz - cz;
+        const nx = lx + yx, ny = ly + yy, nz = lz + yz;
+        cx = nx - lx - yx;
+        cy = ny - ly - yy;
+        cz = nz - lz - yz;
+        lx = nx;
+        ly = ny;
+        lz = nz;
+        if (excitationAt[i]) {
+          lx = 0;
+          ly = 0;
+          lz = 0;
+          cx = 0;
+          cy = 0;
+          cz = 0;
+        } else if (refocusingAt[i]) {
+          lx = -lx;
+          ly = -ly;
+          lz = -lz;
+          cx = -cx;
+          cy = -cy;
+          cz = -cz;
+        }
       }
-      const dx = 0.5 * (gx[i - 1] + gx[i]) * dt;
-      const dy = 0.5 * (gy[i - 1] + gy[i]) * dt;
-      const dz = 0.5 * (gz[i - 1] + gz[i]) * dt;
-      const yx = dx - cx, yy = dy - cy, yz = dz - cz;
-      const nx = kx[i - 1] + yx, ny = ky[i - 1] + yy, nz = kz[i - 1] + yz;
-      cx = nx - kx[i - 1] - yx;
-      cy = ny - ky[i - 1] - yy;
-      cz = nz - kz[i - 1] - yz;
-      kx[i] = nx;
-      ky[i] = ny;
-      kz[i] = nz;
-      if (excitationAt[i]) {
-        kx[i] = 0;
-        ky[i] = 0;
-        kz[i] = 0;
-        cx = 0;
-        cy = 0;
-        cz = 0;
-      } else if (refocusingAt[i]) {
-        kx[i] = -kx[i];
-        ky[i] = -ky[i];
-        kz[i] = -kz[i];
-        cx = -cx;
-        cy = -cy;
-        cz = -cz;
+      if (i === nextKeep) {
+        while (ec < eIdx.length && eIdx[ec] < i + 1) ec++;
+        const brk = ec < eIdx.length && eIdx[ec] === i + 1;
+        outT[out] = tCur;
+        outX[out] = brk ? NaN : lx;
+        outY[out] = brk ? NaN : ly;
+        outZ[out] = brk ? NaN : lz;
+        out++;
+        nextKeep = out < outCount ? Math.floor(out * outStep) : -1;
       }
-    }
-    const kxP = new Float64Array(kx), kyP = new Float64Array(ky), kzP = new Float64Array(kz);
-    for (const i of eIdx) {
-      if (i > 0) {
-        kxP[i - 1] = NaN;
-        kyP[i - 1] = NaN;
-        kzP[i - 1] = NaN;
+      while (a < nA && adcT[a] <= tCur) {
+        const t = adcT[a];
+        if (Math.abs(tCur - t) < 1e-12 || dt <= 0) {
+          kxA[a] = lx;
+          kyA[a] = ly;
+          kzA[a] = lz;
+        } else {
+          kxA[a] = px + (lx - px) * (t - tPrev) / dt;
+          kyA[a] = py + (ly - py) * (t - tPrev) / dt;
+          kzA[a] = pz + (lz - pz) * (t - tPrev) / dt;
+        }
+        a++;
       }
+      gxPrev = gxi;
+      gyPrev = gyi;
+      gzPrev = gzi;
     }
-    const nA = adcT.length;
-    const kxA = new Float64Array(nA), kyA = new Float64Array(nA), kzA = new Float64Array(nA);
-    for (let a = 0; a < nA; a++) {
-      kxA[a] = interp(kx, grid, adcT[a]);
-      kyA[a] = interp(ky, grid, adcT[a]);
-      kzA[a] = interp(kz, grid, adcT[a]);
+    while (a < nA) {
+      kxA[a] = lx;
+      kyA[a] = ly;
+      kzA[a] = lz;
+      a++;
     }
-    return { ktraj: [kxP, kyP, kzP], t_ktraj: new Float64Array(grid), ktraj_adc: [kxA, kyA, kzA], t_adc: new Float64Array(adcT) };
+    const tAdc = adcIdx === adcT.length ? adcT : adcT.slice(0, adcIdx);
+    return {
+      ktraj: [outX, outY, outZ],
+      t_ktraj: outT,
+      ktraj_adc: [kxA, kyA, kzA],
+      t_adc: tAdc,
+      rasterSampleCount: N
+    };
+  }
+  function countSeriesSupport(series, mode) {
+    if (series.times.length < 2) return 0;
+    return mode === "all" ? series.times.length : series.requiredSupport.length;
   }
   function collectSeriesSupport(series, mode, push) {
     if (series.times.length < 2) return;
@@ -3312,22 +3380,9 @@ var Pulseq = (() => {
     }
     return lo < g.length ? lo : -1;
   }
-  function interp(d, g, t) {
-    const n = g.length;
-    if (n === 0) return 0;
-    let lo = 0, hi = n;
-    while (lo < hi) {
-      const m = lo + hi >> 1;
-      if (g[m] < t) lo = m + 1;
-      else hi = m;
-    }
-    if (lo === 0) return d[0];
-    if (lo >= n) return d[n - 1];
-    if (Math.abs(g[lo] - t) < 1e-12) return d[lo];
-    const i0 = lo - 1, i1 = lo, dt = g[i1] - g[i0];
-    if (dt <= 0) return d[i1];
-    return d[i0] + (d[i1] - d[i0]) * (t - g[i0]) / dt;
-  }
+
+  // src/editor/kspaceTransport.ts
+  var MAX_KSPACE_OVERVIEW_POINTS = 3e4;
 
   // src/pulseq/labels.ts
   var COUNTER_ORDER = ["SLC", "SEG", "REP", "AVG", "SET", "ECO", "PHS", "LIN", "PAR", "ACQ", "TRID", "ONCE"];
@@ -5670,7 +5725,7 @@ var Pulseq = (() => {
       },
       totalDurationSec,
       adcSampleCount: kspace.t_adc.length,
-      trajectorySampleCount: kspace.t_ktraj.length,
+      trajectorySampleCount: kspace.rasterSampleCount,
       units: {
         trajectory: "1/m",
         time: "s",

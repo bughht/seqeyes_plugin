@@ -18,11 +18,23 @@
 import type { DecodedBlock } from './types';
 import { physicalGradientPiece, type GradientSeries } from './physicalGradients';
 
+/** ADC trajectory storage; Float32 for display, Float64 for export. */
+export type AdcSamples = Float64Array | Float32Array;
+
 export interface KSpaceData {
-    ktraj: Float64Array[];      // [kx, ky, kz]  [Hz/m]
-    t_ktraj: Float64Array;      // time grid  [s]
-    ktraj_adc: Float64Array[];  // ADC samples  [Hz/m]
+    /** [kx, ky, kz]  [Hz/m] — decimated when `maxTrajectoryPoints` was given. */
+    ktraj: Float64Array[];
+    /** Time base aligned with `ktraj`, decimated the same way  [s] */
+    t_ktraj: Float64Array;
+    /**
+     * ADC samples  [Hz/m]. Float32 when the caller asked for it — the viewers
+     * draw from Float32 either way, so that is the same value they show today,
+     * just without a Float64 stage in front of it.
+     */
+    ktraj_adc: AdcSamples[];
     t_adc: Float64Array;        // ADC times  [s]
+    /** Integration grid length, whatever `ktraj` was decimated to. */
+    rasterSampleCount: number;
 }
 
 /**
@@ -38,6 +50,28 @@ export interface KSpaceData {
 export interface KSpaceOptions {
     /** Optional hard cap on integration grid size. */
     maxGridPoints?: number;
+    /**
+     * Keep only this many trajectory samples instead of the whole grid.
+     *
+     * The integration still visits every grid point; this only decides how many
+     * are retained, picking the same indices `downsample` would have. The viewer
+     * shows the trajectory as an overview of a few thousand points and discards
+     * the rest, so retaining the full raster costs gigabytes to no end — 2.7 GB
+     * on a 3D wave sequence. Export leaves this unset and gets every sample.
+     */
+    maxTrajectoryPoints?: number;
+    /**
+     * Storage for the ADC trajectory. Defaults to `f64`.
+     *
+     * `f32` halves it, and both viewers already render from Float32 — the
+     * browser converts at GPU upload, the extension at transport — so the
+     * values they display are unchanged, and the transport copy disappears
+     * because the array is already in the right format. Export leaves this
+     * alone and keeps full precision, which is what the numeric baselines
+     * compare. ADC *times* stay Float64 regardless: Float32 resolves to only
+     * ~30 us at the end of a 500 s sequence, which the window culling needs.
+     */
+    adcPrecision?: 'f32' | 'f64';
     /** Optional hard cap on ADC sample count. */
     maxAdcSamples?: number;
     /** RF raster time in seconds, used to place reset-adjacent grid points. */
@@ -112,8 +146,31 @@ export function calculateKspace(
     // Use a sorted-array dedup instead of Set to avoid V8's ~16.7M Set size limit.
     // Only essential points are included: selected gradient support, RF centres,
     // ADC sample times, block boundaries, and a uniform raster grid.
-    const cand: number[] = [];
-    const pushC = (t: number) => { if (isFinite(t) && t >= -tacc) cand.push(Math.max(0, tacc * Math.round(t/tacc))); };
+    // One buffer, sized up front, sorted and deduplicated in place.
+    //
+    // This used to be a `number[]` grown by push, deduplicated into a second
+    // `number[]`, and finally copied into a typed array. Push-grown arrays
+    // overshoot: V8 doubles the backing store when it fills and never shrinks
+    // it, so 84 M candidates cost 1,894 MB rather than the 675 MB the doubles
+    // need, and the deduplicated copy was alive beside it. Those two together
+    // were the high-water mark of the whole calculation.
+    //
+    // Every push site below is counted here. Miscounting would silently drop
+    // grid points, because a write past the end of a typed array is ignored, so
+    // the refusal below is deliberate: a wrong grid is worse than no answer.
+    let candBound = 2;  // the explicit 0 and totalDuration
+    for (const series of gradientSeries) candBound += countSeriesSupport(series, gradientSupport);
+    candBound += excT.length * 3 + refT.length * 2 + adcT.length;
+    if (totalDuration > 0) candBound += Math.max(1, Math.round(totalDuration / GR)) + 1;
+
+    const cand = new Float64Array(candBound);
+    let candCount = 0;
+    let candOverflow = false;
+    const pushC = (t: number) => {
+        if (!(isFinite(t) && t >= -tacc)) return;
+        if (candCount >= cand.length) { candOverflow = true; return; }
+        cand[candCount++] = Math.max(0, tacc * Math.round(t/tacc));
+    };
     for (const series of gradientSeries) collectSeriesSupport(series, gradientSupport, pushC);
     for (const t of excT) { pushC(t); pushC(t - RF); pushC(t - 2 * RF); }
     for (const t of refT) { pushC(t); pushC(t - RF); }
@@ -123,27 +180,24 @@ export function calculateKspace(
         const nS = Math.max(1, Math.round(totalDuration / GR));
         for (let i = 0; i <= nS; i++) pushC(i * GR);
     }
+    if (candOverflow) return null;
 
     // Sort and deduplicate in one pass — O(n log n) but safe for any sequence size
-    if (cand.length === 0) return null;
-    cand.sort((a, b) => a - b);
-    const grid: number[] = [];
-    for (let i = 0; i < cand.length; i++) {
-        if (i === 0 || cand[i] - cand[i - 1] > tacc * 0.5) grid.push(cand[i]);
+    if (candCount === 0) return null;
+    // A typed array sorts numerically without a comparator, and in place.
+    cand.subarray(0, candCount).sort();
+    // Compacting forward only ever writes at or behind the read cursor, so the
+    // predecessor each comparison needs is still the sorted one.
+    let kept = 0;
+    for (let i = 0; i < candCount; i++) {
+        if (i === 0 || cand[i] - cand[i - 1] > tacc * 0.5) cand[kept++] = cand[i];
     }
-    const N = grid.length;
+    const N = kept;
     if (N < 2) return null;
     if (_options?.maxGridPoints && N > _options.maxGridPoints) return null;
 
-    // ---- Pass 3: evaluate the assembled piecewise-linear gradients ----
-    const gx = new Float64Array(N), gy = new Float64Array(N), gz = new Float64Array(N);
-    const cursors = [0, 0, 0];
-    for (let i = 0; i < N; i++) {
-        const t = grid[i];
-        gx[i] = sampleSeries(gradientSeries[0], t, cursors, 0);
-        gy[i] = sampleSeries(gradientSeries[1], t, cursors, 1);
-        gz[i] = sampleSeries(gradientSeries[2], t, cursors, 2);
-    }
+    // A view, not a copy: the grid is the front of the buffer just compacted.
+    const grid = cand.subarray(0, N);
 
     // ---- Pass 4: resolve RF event indices ----
     const eIdx: number[] = [], rIdx: number[] = [];
@@ -155,7 +209,7 @@ export function calculateKspace(
     for (const i of eIdx) excitationAt[i] = 1;
     for (const i of rIdx) refocusingAt[i] = 1;
 
-    // ---- Pass 5: integrate the RF-local effective trajectory ----
+    // ---- Pass 5: integrate, and consume the trajectory as it is produced ----
     //
     // The former implementation first accumulated a raw trajectory over the
     // entire sequence and then applied a large `dk` offset at every RF event.
@@ -166,48 +220,134 @@ export function calculateKspace(
     //   refocusing  -> negate the current state
     // Subsequent physical-gradient increments are unchanged. Kahan compensation
     // limits accumulation error within each RF epoch.
-    const kx = new Float64Array(N), ky = new Float64Array(N), kz = new Float64Array(N);
-    let cx = 0, cy = 0, cz = 0;
-    if (refocusingAt[0] && !excitationAt[0]) {
-        kx[0] = -kx[0]; ky[0] = -ky[0]; kz[0] = -kz[0];
-    }
-    for (let i = 1; i < N; i++) {
-        const dt = grid[i] - grid[i-1];
-        if (dt <= 0) { kx[i] = kx[i-1]; ky[i] = ky[i-1]; kz[i] = kz[i-1]; continue; }
-        const dx = 0.5*(gx[i-1]+gx[i])*dt;
-        const dy = 0.5*(gy[i-1]+gy[i])*dt;
-        const dz = 0.5*(gz[i-1]+gz[i])*dt;
-        const yx = dx - cx, yy = dy - cy, yz = dz - cz;
-        const nx = kx[i-1] + yx, ny = ky[i-1] + yy, nz = kz[i-1] + yz;
-        cx = (nx - kx[i-1]) - yx;
-        cy = (ny - ky[i-1]) - yy;
-        cz = (nz - kz[i-1]) - yz;
-        kx[i] = nx; ky[i] = ny; kz[i] = nz;
+    //
+    // Every grid point is still visited, in order, with the same arithmetic.
+    // What changed is that nothing full-length is stored: the gradients are
+    // evaluated a point at a time, the recurrence needs only the previous
+    // sample, ADC samples are emitted through a cursor over their own sorted
+    // times as each interval closes, and the trajectory output keeps only the
+    // samples asked for. Three full-raster arrays for the gradients and three
+    // more for the trajectory — 4 GB together on a 3D wave sequence — become a
+    // handful of locals.
+    const outCount = (_options?.maxTrajectoryPoints && _options.maxTrajectoryPoints > 0)
+        ? Math.min(_options.maxTrajectoryPoints, N)
+        : N;
+    // The same selection `downsample` makes, so the overview is unchanged.
+    const outStep = N / outCount;
+    const outX = new Float64Array(outCount), outY = new Float64Array(outCount), outZ = new Float64Array(outCount);
+    const outT = new Float64Array(outCount);
 
-        // Match Pulseq's precedence when an excitation and refocusing map to
-        // the same canonical trajectory time.
-        if (excitationAt[i]) {
-            kx[i] = 0; ky[i] = 0; kz[i] = 0;
-            cx = 0; cy = 0; cz = 0;
-        } else if (refocusingAt[i]) {
-            kx[i] = -kx[i]; ky[i] = -ky[i]; kz[i] = -kz[i];
-            cx = -cx; cy = -cy; cz = -cz;
-        }
-    }
-
-    // ---- Pass 6: NaN before excitation for clean plot breaks ----
-    const kxP = new Float64Array(kx), kyP = new Float64Array(ky), kzP = new Float64Array(kz);
-    for (const i of eIdx) { if (i > 0) { kxP[i-1] = NaN; kyP[i-1] = NaN; kzP[i-1] = NaN; } }
-
-    // ---- Pass 7: interpolate at ADC times ----
     const nA = adcT.length;
-    const kxA = new Float64Array(nA), kyA = new Float64Array(nA), kzA = new Float64Array(nA);
-    for (let a = 0; a < nA; a++) { kxA[a] = interp(kx, grid, adcT[a]); kyA[a] = interp(ky, grid, adcT[a]); kzA[a] = interp(kz, grid, adcT[a]); }
+    const f32Adc = _options?.adcPrecision === 'f32';
+    const kxA: AdcSamples = f32Adc ? new Float32Array(nA) : new Float64Array(nA);
+    const kyA: AdcSamples = f32Adc ? new Float32Array(nA) : new Float64Array(nA);
+    const kzA: AdcSamples = f32Adc ? new Float32Array(nA) : new Float64Array(nA);
 
-    return { ktraj: [kxP, kyP, kzP], t_ktraj: new Float64Array(grid), ktraj_adc: [kxA, kyA, kzA], t_adc: new Float64Array(adcT) };
+    const cursors = [0, 0, 0];
+    let cx = 0, cy = 0, cz = 0;
+    let lx = 0, ly = 0, lz = 0;
+    let a = 0;        // next ADC sample to emit
+    let out = 0;      // next trajectory sample to keep
+    let nextKeep = 0; // grid index it sits at
+    let ec = 0;       // next excitation index, for the plot breaks
+
+    // `interp` returns d[0] for any time at or before the first grid point, and
+    // d[n-1] for any time past the last; those two are handled outside the loop.
+    let gxPrev = sampleSeries(gradientSeries[0], grid[0], cursors, 0);
+    let gyPrev = sampleSeries(gradientSeries[1], grid[0], cursors, 1);
+    let gzPrev = sampleSeries(gradientSeries[2], grid[0], cursors, 2);
+    if (refocusingAt[0] && !excitationAt[0]) { lx = -lx; ly = -ly; lz = -lz; }
+
+    if (nextKeep === 0) {
+        while (ec < eIdx.length && eIdx[ec] < 1) ec++;
+        const brk = ec < eIdx.length && eIdx[ec] === 1;
+        outT[0] = grid[0];
+        outX[0] = brk ? NaN : lx; outY[0] = brk ? NaN : ly; outZ[0] = brk ? NaN : lz;
+        out = 1;
+        nextKeep = out < outCount ? Math.floor(out * outStep) : -1;
+    }
+    while (a < nA && adcT[a] <= grid[0]) { kxA[a] = lx; kyA[a] = ly; kzA[a] = lz; a++; }
+
+    for (let i = 1; i < N; i++) {
+        const gxi = sampleSeries(gradientSeries[0], grid[i], cursors, 0);
+        const gyi = sampleSeries(gradientSeries[1], grid[i], cursors, 1);
+        const gzi = sampleSeries(gradientSeries[2], grid[i], cursors, 2);
+        const tPrev = grid[i-1], tCur = grid[i];
+        const dt = tCur - tPrev;
+        const px = lx, py = ly, pz = lz;   // the settled k[i-1]
+
+        if (dt > 0) {
+            const dx = 0.5*(gxPrev+gxi)*dt;
+            const dy = 0.5*(gyPrev+gyi)*dt;
+            const dz = 0.5*(gzPrev+gzi)*dt;
+            const yx = dx - cx, yy = dy - cy, yz = dz - cz;
+            const nx = lx + yx, ny = ly + yy, nz = lz + yz;
+            cx = (nx - lx) - yx;
+            cy = (ny - ly) - yy;
+            cz = (nz - lz) - yz;
+            lx = nx; ly = ny; lz = nz;
+
+            // Match Pulseq's precedence when an excitation and refocusing map to
+            // the same canonical trajectory time.
+            if (excitationAt[i]) {
+                lx = 0; ly = 0; lz = 0;
+                cx = 0; cy = 0; cz = 0;
+            } else if (refocusingAt[i]) {
+                lx = -lx; ly = -ly; lz = -lz;
+                cx = -cx; cy = -cy; cz = -cz;
+            }
+        }
+
+        if (i === nextKeep) {
+            // NaN before an excitation, so the overview breaks cleanly there.
+            while (ec < eIdx.length && eIdx[ec] < i + 1) ec++;
+            const brk = ec < eIdx.length && eIdx[ec] === i + 1;
+            outT[out] = tCur;
+            outX[out] = brk ? NaN : lx; outY[out] = brk ? NaN : ly; outZ[out] = brk ? NaN : lz;
+            out++;
+            nextKeep = out < outCount ? Math.floor(out * outStep) : -1;
+        }
+
+        // Every ADC time in (grid[i-1], grid[i]], in the order `interp` would
+        // have resolved them, and with its branches in the same order.
+        while (a < nA && adcT[a] <= tCur) {
+            const t = adcT[a];
+            if (Math.abs(tCur - t) < 1e-12 || dt <= 0) {
+                kxA[a] = lx; kyA[a] = ly; kzA[a] = lz;
+            } else {
+                kxA[a] = px + (lx - px) * (t - tPrev) / dt;
+                kyA[a] = py + (ly - py) * (t - tPrev) / dt;
+                kzA[a] = pz + (lz - pz) * (t - tPrev) / dt;
+            }
+            a++;
+        }
+
+        gxPrev = gxi; gyPrev = gyi; gzPrev = gzi;
+    }
+
+    // Times past the end of the grid take the last sample, as `interp` does.
+    while (a < nA) { kxA[a] = lx; kyA[a] = ly; kzA[a] = lz; a++; }
+
+    // adcT is already a Float64Array filled to exactly totalAdcSamples, so it is
+    // returned rather than copied; the guard keeps the trim if that ever stops
+    // holding.
+    const tAdc = adcIdx === adcT.length ? adcT : adcT.slice(0, adcIdx);
+    return {
+        ktraj: [outX, outY, outZ],
+        t_ktraj: outT,
+        ktraj_adc: [kxA, kyA, kzA],
+        t_adc: tAdc,
+        rasterSampleCount: N,
+    };
 }
 
 // ---- helpers ----
+/** How many times `collectSeriesSupport` will call its callback. */
+function countSeriesSupport(series: GradientSeries, mode: 'endpoints' | 'all'): number {
+    if (series.times.length < 2) return 0;
+    return mode === 'all' ? series.times.length : series.requiredSupport.length;
+}
+
 function collectSeriesSupport(
     series: GradientSeries,
     mode: 'endpoints' | 'all',
@@ -322,18 +462,8 @@ function sampleSeries(
     return v0 + (v1 - v0) * (time - t0) / (t1 - t0);
 }
 
-function timeIdx(t: number, g: number[]): number {
+function timeIdx(t: number, g: ArrayLike<number>): number {
     let lo=0,hi=g.length;
     while(lo<hi){const m=(lo+hi)>>1;if(g[m]<t-1e-12)lo=m+1;else hi=m;}
     return lo < g.length ? lo : -1;
-}
-function interp(d: Float64Array, g: number[], t: number): number {
-    const n=g.length;if(n===0)return 0;
-    let lo=0,hi=n;
-    while(lo<hi){const m=(lo+hi)>>1;if(g[m]<t)lo=m+1;else hi=m;}
-    if(lo===0)return d[0];if(lo>=n)return d[n-1];
-    if(Math.abs(g[lo]-t)<1e-12)return d[lo];
-    const i0=lo-1,i1=lo,dt=g[i1]-g[i0];
-    if(dt<=0)return d[i1];
-    return d[i0]+(d[i1]-d[i0])*(t-g[i0])/dt;
 }

@@ -16,6 +16,9 @@ export { packSequenceBlocks } from '../src/editor/blockTransport';
 // no longer need to cross into the bundle.
 export { buildWaveformDetailReply } from '../src/editor/waveformDetailReply';
 export { calculateKspace } from '../src/pulseq/kspace';
+// The overview budget, so the standalone viewer asks for the same trajectory
+// size the extension lane does rather than repeating the number.
+export { MAX_KSPACE_OVERVIEW_POINTS } from '../src/editor/kspaceTransport';
 export { evaluateAdcLabels, listSequenceLabels } from '../src/pulseq/labels';
 export { calculateM1, calculateM1Coarse } from '../src/pulseq/m1';
 export { calculatePns, calculatePnsCoarse, parsePnsHardwareAsc, safePnsModel } from '../src/pulseq/pns';

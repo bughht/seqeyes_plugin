@@ -115,7 +115,7 @@ export function exportKspaceArtifactsFromSequence(
     };
 }
 
-export function formatTrajectoryText(series: Float64Array[]): string {
+export function formatTrajectoryText(series: (Float64Array | Float32Array)[]): string {
     assertThreeEqualLengthSeries(series);
     const n = series[0].length;
     if (n === 0) return '';
@@ -166,7 +166,7 @@ function createMetadata(
         },
         totalDurationSec,
         adcSampleCount: kspace.t_adc.length,
-        trajectorySampleCount: kspace.t_ktraj.length,
+        trajectorySampleCount: kspace.rasterSampleCount,
         units: {
             trajectory: '1/m',
             time: 's',
@@ -182,7 +182,7 @@ function createMetadata(
     };
 }
 
-function assertThreeEqualLengthSeries(series: Float64Array[]): void {
+function assertThreeEqualLengthSeries(series: (Float64Array | Float32Array)[]): void {
     if (series.length !== 3) {
         throw new Error(`Expected three trajectory axes, received ${series.length}`);
     }
