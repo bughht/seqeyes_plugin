@@ -3157,10 +3157,15 @@ var Pulseq = (() => {
     }
     eIdx.sort((a2, b) => a2 - b);
     rIdx.sort((a2, b) => a2 - b);
-    const excitationAt = new Uint8Array(N);
-    const refocusingAt = new Uint8Array(N);
-    for (const i of eIdx) excitationAt[i] = 1;
-    for (const i of rIdx) refocusingAt[i] = 1;
+    let excCursor = 0, refCursor = 0;
+    const excitationAtIndex = (i) => {
+      while (excCursor < eIdx.length && eIdx[excCursor] < i) excCursor++;
+      return excCursor < eIdx.length && eIdx[excCursor] === i;
+    };
+    const refocusingAtIndex = (i) => {
+      while (refCursor < rIdx.length && rIdx[refCursor] < i) refCursor++;
+      return refCursor < rIdx.length && rIdx[refCursor] === i;
+    };
     const outCount = _options?.maxTrajectoryPoints && _options.maxTrajectoryPoints > 0 ? Math.min(_options.maxTrajectoryPoints, N) : N;
     const outStep = N / outCount;
     const outX = new Float64Array(outCount), outY = new Float64Array(outCount), outZ = new Float64Array(outCount);
@@ -3180,7 +3185,7 @@ var Pulseq = (() => {
     let gxPrev = sampleSeries(gradientSeries[0], grid[0], cursors, 0);
     let gyPrev = sampleSeries(gradientSeries[1], grid[0], cursors, 1);
     let gzPrev = sampleSeries(gradientSeries[2], grid[0], cursors, 2);
-    if (refocusingAt[0] && !excitationAt[0]) {
+    if (refocusingAtIndex(0) && !excitationAtIndex(0)) {
       lx = -lx;
       ly = -ly;
       lz = -lz;
@@ -3220,14 +3225,14 @@ var Pulseq = (() => {
         lx = nx;
         ly = ny;
         lz = nz;
-        if (excitationAt[i]) {
+        if (excitationAtIndex(i)) {
           lx = 0;
           ly = 0;
           lz = 0;
           cx = 0;
           cy = 0;
           cz = 0;
-        } else if (refocusingAt[i]) {
+        } else if (refocusingAtIndex(i)) {
           lx = -lx;
           ly = -ly;
           lz = -lz;
@@ -3290,6 +3295,17 @@ var Pulseq = (() => {
     }
     for (const time of series.requiredSupport) push(time);
   }
+  function freezeSeries(series) {
+    const frozen = {
+      times: Float64Array.from(series.times),
+      values: Float64Array.from(series.values),
+      requiredSupport: Float64Array.from(series.requiredSupport)
+    };
+    series.times.length = 0;
+    series.values.length = 0;
+    series.requiredSupport.length = 0;
+    return frozen;
+  }
   function buildGlobalGradientSeries(blocks, gradientRaster, totalDuration) {
     const output = [
       { times: [], values: [], requiredSupport: [] },
@@ -3317,7 +3333,7 @@ var Pulseq = (() => {
         series.requiredSupport.push(last + POLYNOMIAL_SUPPORT_EPSILON_SEC, totalDuration + POLYNOMIAL_SUPPORT_EPSILON_SEC);
       }
     }
-    return output;
+    return [freezeSeries(output[0]), freezeSeries(output[1]), freezeSeries(output[2])];
   }
   function appendGradientPiece(target, piece, gradientRaster) {
     if (!piece.times.length) return;

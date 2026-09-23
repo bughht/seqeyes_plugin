@@ -204,10 +204,19 @@ export function calculateKspace(
     for (const t of excT) { const i = timeIdx(t, grid); if (i >= 0) eIdx.push(i); }
     for (const t of refT) { const i = timeIdx(t, grid); if (i >= 0) rIdx.push(i); }
     eIdx.sort((a,b)=>a-b); rIdx.sort((a,b)=>a-b);
-    const excitationAt = new Uint8Array(N);
-    const refocusingAt = new Uint8Array(N);
-    for (const i of eIdx) excitationAt[i] = 1;
-    for (const i of rIdx) refocusingAt[i] = 1;
+    // Read through cursors rather than expanding into two Uint8Array(N). The
+    // integration walks the grid forward, so a cursor answers the same question
+    // a lookup table would, and the tables cost 168 MB on an 83.9 M-point grid
+    // to record a few hundred set entries.
+    let excCursor = 0, refCursor = 0;
+    const excitationAtIndex = (i: number): boolean => {
+        while (excCursor < eIdx.length && eIdx[excCursor] < i) excCursor++;
+        return excCursor < eIdx.length && eIdx[excCursor] === i;
+    };
+    const refocusingAtIndex = (i: number): boolean => {
+        while (refCursor < rIdx.length && rIdx[refCursor] < i) refCursor++;
+        return refCursor < rIdx.length && rIdx[refCursor] === i;
+    };
 
     // ---- Pass 5: integrate, and consume the trajectory as it is produced ----
     //
@@ -256,7 +265,7 @@ export function calculateKspace(
     let gxPrev = sampleSeries(gradientSeries[0], grid[0], cursors, 0);
     let gyPrev = sampleSeries(gradientSeries[1], grid[0], cursors, 1);
     let gzPrev = sampleSeries(gradientSeries[2], grid[0], cursors, 2);
-    if (refocusingAt[0] && !excitationAt[0]) { lx = -lx; ly = -ly; lz = -lz; }
+    if (refocusingAtIndex(0) && !excitationAtIndex(0)) { lx = -lx; ly = -ly; lz = -lz; }
 
     if (nextKeep === 0) {
         while (ec < eIdx.length && eIdx[ec] < 1) ec++;
@@ -289,10 +298,10 @@ export function calculateKspace(
 
             // Match Pulseq's precedence when an excitation and refocusing map to
             // the same canonical trajectory time.
-            if (excitationAt[i]) {
+            if (excitationAtIndex(i)) {
                 lx = 0; ly = 0; lz = 0;
                 cx = 0; cy = 0; cz = 0;
-            } else if (refocusingAt[i]) {
+            } else if (refocusingAtIndex(i)) {
                 lx = -lx; ly = -ly; lz = -lz;
                 cx = -cx; cy = -cy; cz = -cz;
             }
@@ -343,13 +352,13 @@ export function calculateKspace(
 
 // ---- helpers ----
 /** How many times `collectSeriesSupport` will call its callback. */
-function countSeriesSupport(series: GradientSeries, mode: 'endpoints' | 'all'): number {
+function countSeriesSupport(series: FrozenGradientSeries, mode: 'endpoints' | 'all'): number {
     if (series.times.length < 2) return 0;
     return mode === 'all' ? series.times.length : series.requiredSupport.length;
 }
 
 function collectSeriesSupport(
-    series: GradientSeries,
+    series: FrozenGradientSeries,
     mode: 'endpoints' | 'all',
     push: (time: number) => void,
 ): void {
@@ -361,11 +370,38 @@ function collectSeriesSupport(
     for (const time of series.requiredSupport) push(time);
 }
 
+/**
+ * The assembled global series, in exact-size typed arrays.
+ *
+ * It is built through `number[]` because the pieces arrive one block at a time
+ * and their total is not known until the end, but a push-grown array keeps
+ * whatever capacity it doubled into: 72.3 M elements cost 789 MB where the
+ * doubles need 552 MB. Freezing at the end returns that, and the transient
+ * copy is one axis at a time.
+ */
+export interface FrozenGradientSeries {
+    times: Float64Array;
+    values: Float64Array;
+    requiredSupport: Float64Array;
+}
+
+function freezeSeries(series: GradientSeries): FrozenGradientSeries {
+    const frozen = {
+        times: Float64Array.from(series.times),
+        values: Float64Array.from(series.values),
+        requiredSupport: Float64Array.from(series.requiredSupport),
+    };
+    series.times.length = 0;
+    series.values.length = 0;
+    series.requiredSupport.length = 0;
+    return frozen;
+}
+
 function buildGlobalGradientSeries(
     blocks: DecodedBlock[],
     gradientRaster: number,
     totalDuration: number,
-): [GradientSeries, GradientSeries, GradientSeries] {
+): [FrozenGradientSeries, FrozenGradientSeries, FrozenGradientSeries] {
     const output: [GradientSeries, GradientSeries, GradientSeries] = [
         { times: [], values: [], requiredSupport: [] },
         { times: [], values: [], requiredSupport: [] },
@@ -394,7 +430,8 @@ function buildGlobalGradientSeries(
             series.requiredSupport.push(last + POLYNOMIAL_SUPPORT_EPSILON_SEC, totalDuration + POLYNOMIAL_SUPPORT_EPSILON_SEC);
         }
     }
-    return output;
+    // One axis at a time, so only one oversized array is duplicated at a time.
+    return [freezeSeries(output[0]), freezeSeries(output[1]), freezeSeries(output[2])];
 }
 
 function appendGradientPiece(
@@ -444,7 +481,7 @@ function appendGradientPiece(
 }
 
 function sampleSeries(
-    series: GradientSeries,
+    series: FrozenGradientSeries,
     time: number,
     cursors: number[],
     axis: number,
