@@ -161,7 +161,9 @@ export function calculateKspace(
     let candBound = 2;  // the explicit 0 and totalDuration
     for (const series of gradientSeries) candBound += countSeriesSupport(series, gradientSupport);
     candBound += excT.length * 3 + refT.length * 2 + adcT.length;
-    if (totalDuration > 0) candBound += Math.max(1, Math.round(totalDuration / GR)) + 1;
+    // The uniform raster is not among these: it is arithmetic, so it is
+    // generated during the walk rather than stored. It is also the larger
+    // half — 50.4 M of 84.3 M candidates on a 3D wave sequence.
 
     const cand = new Float64Array(candBound);
     let candCount = 0;
@@ -176,10 +178,6 @@ export function calculateKspace(
     for (const t of refT) { pushC(t); pushC(t - RF); }
     for (const t of adcT) pushC(t);
     pushC(0); pushC(totalDuration);
-    if (totalDuration > 0) {
-        const nS = Math.max(1, Math.round(totalDuration / GR));
-        for (let i = 0; i <= nS; i++) pushC(i * GR);
-    }
     if (candOverflow) return null;
 
     // Sort and deduplicate in one pass — O(n log n) but safe for any sequence size
@@ -192,22 +190,89 @@ export function calculateKspace(
     for (let i = 0; i < candCount; i++) {
         if (i === 0 || cand[i] - cand[i - 1] > tacc * 0.5) cand[kept++] = cand[i];
     }
-    const N = kept;
+    const storedCount = kept;
+
+    /*
+     * The grid is the stored candidates merged with the generated raster.
+     *
+     * Every candidate has been quantised to a multiple of `tacc`, so two of
+     * them are either the same double or at least `tacc` apart — and the
+     * deduplication threshold is `tacc / 2`. That makes deduplication exact
+     * duplicate removal, which is why merging the two sorted sources gives the
+     * same grid the single sorted array gave: same multiset, same rule.
+     *
+     * Quantisation is monotonic, so the raster stays ascending through it.
+     */
+    const rasterSteps = totalDuration > 0 ? Math.max(1, Math.round(totalDuration / GR)) : -1;
+    const rasterAt = (i: number): number => Math.max(0, tacc * Math.round((i * GR) / tacc));
+    const makeGridWalk = () => {
+        let storedIndex = 0;
+        let rasterIndex = 0;
+        let previous = 0;
+        let started = false;
+        return (): number => {
+            for (;;) {
+                const haveStored = storedIndex < storedCount;
+                const haveRaster = rasterIndex <= rasterSteps;
+                if (!haveStored && !haveRaster) return NaN;
+                let value: number;
+                if (!haveRaster) {
+                    value = cand[storedIndex++];
+                } else if (!haveStored) {
+                    value = rasterAt(rasterIndex++);
+                } else {
+                    const stored = cand[storedIndex];
+                    const raster = rasterAt(rasterIndex);
+                    if (stored <= raster) {
+                        value = stored;
+                        storedIndex++;
+                        if (stored === raster) rasterIndex++;
+                    } else {
+                        value = raster;
+                        rasterIndex++;
+                    }
+                }
+                if (!started || value !== previous) { previous = value; started = true; return value; }
+            }
+        };
+    };
+
+    // ---- Pass 4: size the grid, and resolve RF event indices against it ----
+    //
+    // Walking rather than searching: `timeIdx` wants the first grid point at or
+    // after an event, and a forward cursor over the events in time order finds
+    // exactly that. Events with no grid point after them are dropped, as the
+    // search's -1 was.
+    const excSorted = Float64Array.from(excT); excSorted.sort();
+    const refSorted = Float64Array.from(refT); refSorted.sort();
+    const eIdx: number[] = [], rIdx: number[] = [];
+    let excSeen = 0, refSeen = 0;
+    let N = 0;
+    {
+        const nextGridTime = makeGridWalk();
+        for (;;) {
+            const t = nextGridTime();
+            if (Number.isNaN(t)) break;
+            while (excSeen < excSorted.length && t >= excSorted[excSeen] - 1e-12) { eIdx.push(N); excSeen++; }
+            while (refSeen < refSorted.length && t >= refSorted[refSeen] - 1e-12) { rIdx.push(N); refSeen++; }
+            N++;
+        }
+    }
     if (N < 2) return null;
     if (_options?.maxGridPoints && N > _options.maxGridPoints) return null;
-
-    // A view, not a copy: the grid is the front of the buffer just compacted.
-    const grid = cand.subarray(0, N);
-
-    // ---- Pass 4: resolve RF event indices ----
-    const eIdx: number[] = [], rIdx: number[] = [];
-    for (const t of excT) { const i = timeIdx(t, grid); if (i >= 0) eIdx.push(i); }
-    for (const t of refT) { const i = timeIdx(t, grid); if (i >= 0) rIdx.push(i); }
-    eIdx.sort((a,b)=>a-b); rIdx.sort((a,b)=>a-b);
-    const excitationAt = new Uint8Array(N);
-    const refocusingAt = new Uint8Array(N);
-    for (const i of eIdx) excitationAt[i] = 1;
-    for (const i of rIdx) refocusingAt[i] = 1;
+    // Read through cursors rather than expanding into two Uint8Array(N). The
+    // integration walks the grid forward, so a cursor answers the same question
+    // a lookup table would, and the tables cost 168 MB on an 83.9 M-point grid
+    // to record a few hundred set entries.
+    let excCursor = 0, refCursor = 0;
+    const excitationAtIndex = (i: number): boolean => {
+        while (excCursor < eIdx.length && eIdx[excCursor] < i) excCursor++;
+        return excCursor < eIdx.length && eIdx[excCursor] === i;
+    };
+    const refocusingAtIndex = (i: number): boolean => {
+        while (refCursor < rIdx.length && rIdx[refCursor] < i) refCursor++;
+        return refCursor < rIdx.length && rIdx[refCursor] === i;
+    };
 
     // ---- Pass 5: integrate, and consume the trajectory as it is produced ----
     //
@@ -253,26 +318,28 @@ export function calculateKspace(
 
     // `interp` returns d[0] for any time at or before the first grid point, and
     // d[n-1] for any time past the last; those two are handled outside the loop.
-    let gxPrev = sampleSeries(gradientSeries[0], grid[0], cursors, 0);
-    let gyPrev = sampleSeries(gradientSeries[1], grid[0], cursors, 1);
-    let gzPrev = sampleSeries(gradientSeries[2], grid[0], cursors, 2);
-    if (refocusingAt[0] && !excitationAt[0]) { lx = -lx; ly = -ly; lz = -lz; }
+    const nextGridTime = makeGridWalk();
+    let tPrev = nextGridTime();
+    let gxPrev = sampleSeries(gradientSeries[0], tPrev, cursors, 0);
+    let gyPrev = sampleSeries(gradientSeries[1], tPrev, cursors, 1);
+    let gzPrev = sampleSeries(gradientSeries[2], tPrev, cursors, 2);
+    if (refocusingAtIndex(0) && !excitationAtIndex(0)) { lx = -lx; ly = -ly; lz = -lz; }
 
     if (nextKeep === 0) {
         while (ec < eIdx.length && eIdx[ec] < 1) ec++;
         const brk = ec < eIdx.length && eIdx[ec] === 1;
-        outT[0] = grid[0];
+        outT[0] = tPrev;
         outX[0] = brk ? NaN : lx; outY[0] = brk ? NaN : ly; outZ[0] = brk ? NaN : lz;
         out = 1;
         nextKeep = out < outCount ? Math.floor(out * outStep) : -1;
     }
-    while (a < nA && adcT[a] <= grid[0]) { kxA[a] = lx; kyA[a] = ly; kzA[a] = lz; a++; }
+    while (a < nA && adcT[a] <= tPrev) { kxA[a] = lx; kyA[a] = ly; kzA[a] = lz; a++; }
 
     for (let i = 1; i < N; i++) {
-        const gxi = sampleSeries(gradientSeries[0], grid[i], cursors, 0);
-        const gyi = sampleSeries(gradientSeries[1], grid[i], cursors, 1);
-        const gzi = sampleSeries(gradientSeries[2], grid[i], cursors, 2);
-        const tPrev = grid[i-1], tCur = grid[i];
+        const tCur = nextGridTime();
+        const gxi = sampleSeries(gradientSeries[0], tCur, cursors, 0);
+        const gyi = sampleSeries(gradientSeries[1], tCur, cursors, 1);
+        const gzi = sampleSeries(gradientSeries[2], tCur, cursors, 2);
         const dt = tCur - tPrev;
         const px = lx, py = ly, pz = lz;   // the settled k[i-1]
 
@@ -289,10 +356,10 @@ export function calculateKspace(
 
             // Match Pulseq's precedence when an excitation and refocusing map to
             // the same canonical trajectory time.
-            if (excitationAt[i]) {
+            if (excitationAtIndex(i)) {
                 lx = 0; ly = 0; lz = 0;
                 cx = 0; cy = 0; cz = 0;
-            } else if (refocusingAt[i]) {
+            } else if (refocusingAtIndex(i)) {
                 lx = -lx; ly = -ly; lz = -lz;
                 cx = -cx; cy = -cy; cz = -cz;
             }
@@ -323,6 +390,7 @@ export function calculateKspace(
         }
 
         gxPrev = gxi; gyPrev = gyi; gzPrev = gzi;
+        tPrev = tCur;
     }
 
     // Times past the end of the grid take the last sample, as `interp` does.
@@ -343,13 +411,13 @@ export function calculateKspace(
 
 // ---- helpers ----
 /** How many times `collectSeriesSupport` will call its callback. */
-function countSeriesSupport(series: GradientSeries, mode: 'endpoints' | 'all'): number {
+function countSeriesSupport(series: FrozenGradientSeries, mode: 'endpoints' | 'all'): number {
     if (series.times.length < 2) return 0;
     return mode === 'all' ? series.times.length : series.requiredSupport.length;
 }
 
 function collectSeriesSupport(
-    series: GradientSeries,
+    series: FrozenGradientSeries,
     mode: 'endpoints' | 'all',
     push: (time: number) => void,
 ): void {
@@ -361,11 +429,38 @@ function collectSeriesSupport(
     for (const time of series.requiredSupport) push(time);
 }
 
+/**
+ * The assembled global series, in exact-size typed arrays.
+ *
+ * It is built through `number[]` because the pieces arrive one block at a time
+ * and their total is not known until the end, but a push-grown array keeps
+ * whatever capacity it doubled into: 72.3 M elements cost 789 MB where the
+ * doubles need 552 MB. Freezing at the end returns that, and the transient
+ * copy is one axis at a time.
+ */
+export interface FrozenGradientSeries {
+    times: Float64Array;
+    values: Float64Array;
+    requiredSupport: Float64Array;
+}
+
+function freezeSeries(series: GradientSeries): FrozenGradientSeries {
+    const frozen = {
+        times: Float64Array.from(series.times),
+        values: Float64Array.from(series.values),
+        requiredSupport: Float64Array.from(series.requiredSupport),
+    };
+    series.times.length = 0;
+    series.values.length = 0;
+    series.requiredSupport.length = 0;
+    return frozen;
+}
+
 function buildGlobalGradientSeries(
     blocks: DecodedBlock[],
     gradientRaster: number,
     totalDuration: number,
-): [GradientSeries, GradientSeries, GradientSeries] {
+): [FrozenGradientSeries, FrozenGradientSeries, FrozenGradientSeries] {
     const output: [GradientSeries, GradientSeries, GradientSeries] = [
         { times: [], values: [], requiredSupport: [] },
         { times: [], values: [], requiredSupport: [] },
@@ -394,7 +489,8 @@ function buildGlobalGradientSeries(
             series.requiredSupport.push(last + POLYNOMIAL_SUPPORT_EPSILON_SEC, totalDuration + POLYNOMIAL_SUPPORT_EPSILON_SEC);
         }
     }
-    return output;
+    // One axis at a time, so only one oversized array is duplicated at a time.
+    return [freezeSeries(output[0]), freezeSeries(output[1]), freezeSeries(output[2])];
 }
 
 function appendGradientPiece(
@@ -444,7 +540,7 @@ function appendGradientPiece(
 }
 
 function sampleSeries(
-    series: GradientSeries,
+    series: FrozenGradientSeries,
     time: number,
     cursors: number[],
     axis: number,
@@ -462,8 +558,3 @@ function sampleSeries(
     return v0 + (v1 - v0) * (time - t0) / (t1 - t0);
 }
 
-function timeIdx(t: number, g: ArrayLike<number>): number {
-    let lo=0,hi=g.length;
-    while(lo<hi){const m=(lo+hi)>>1;if(g[m]<t-1e-12)lo=m+1;else hi=m;}
-    return lo < g.length ? lo : -1;
-}
