@@ -25,7 +25,7 @@ import {
     type SequenceDecodeContext,
 } from '../pulseq/decoder';
 import { calculateKspace, type KSpaceData } from '../pulseq/kspace';
-import { downsample, serializeKSpace } from './kspaceTransport';
+import { downsample, MAX_KSPACE_OVERVIEW_POINTS, serializeKSpace } from './kspaceTransport';
 import { evaluateAdcLabels, listSequenceLabels } from '../pulseq/labels';
 import { serializeLabelTable } from './labelTransport';
 import { calculateM1, calculateM1Coarse, type CoarseM1Data, type M1Data } from '../pulseq/m1';
@@ -702,7 +702,13 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                         activeGradientRaster,
                         activeTotalDuration,
                         0,
-                        { rfRaster: activeRfRaster },
+                        {
+                            rfRaster: activeRfRaster,
+                            // The viewer draws the trajectory as an overview and
+                            // discards the rest, so the full raster need not be
+                            // kept; serializeKSpace reduces to the same count.
+                            maxTrajectoryPoints: MAX_KSPACE_OVERVIEW_POINTS,
+                        },
                     );
                     if (!kspace) throw new Error('The calculation did not produce a trajectory.');
                     postKspaceData(panel, kspace);
@@ -739,6 +745,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                             rfRaster: activeRfRaster,
                             maxGridPoints: INTERACTIVE_COMPUTE_LIMITS.kspaceGridCandidates,
                             maxAdcSamples: INTERACTIVE_COMPUTE_LIMITS.kspaceAdcSamples,
+                            maxTrajectoryPoints: MAX_KSPACE_OVERVIEW_POINTS,
                         },
                     );
                     if (!kspace) throw new Error('The calculation did not produce a trajectory.');
@@ -746,7 +753,7 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                     panel.webview.postMessage({ type: 'progress', phase: 'done', percent: 100, text: 'K-space ready' });
                     if (diagnosticState.lastLoad?.activeUri === activeUri.toString()) {
                         diagnosticState.lastLoad.adcCount = kspace.t_adc.length;
-                        diagnosticState.lastLoad.kspaceSampleCount = kspace.t_ktraj.length;
+                        diagnosticState.lastLoad.kspaceSampleCount = kspace.rasterSampleCount;
                         diagnosticState.lastLoad.hasKspace = true;
                     }
                 } catch (err) {

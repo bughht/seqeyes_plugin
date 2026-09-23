@@ -166,7 +166,7 @@ function createMetadata(
         },
         totalDurationSec,
         adcSampleCount: kspace.t_adc.length,
-        trajectorySampleCount: kspace.t_ktraj.length,
+        trajectorySampleCount: kspace.rasterSampleCount,
         units: {
             trajectory: '1/m',
             time: 's',
