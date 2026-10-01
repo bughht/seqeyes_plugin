@@ -2275,7 +2275,7 @@ function showTooltipAt(cx,cy,ct){
     }
     appendDerivedTooltipLines(lines,ct);
     if(lines.length>1||found){
-      tt.textContent=lines.join('\n');tt.style.display='block';
+      renderTooltipLines(tt,lines);tt.style.display='block';
       placeTooltip(cx,cy);
       if(_touchTooltipTimer)clearTimeout(_touchTooltipTimer);
       if(isTouchDevice())_touchTooltipTimer=setTimeout(function(){tt.style.display='none';},3000);
