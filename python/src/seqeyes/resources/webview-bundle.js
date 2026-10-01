@@ -1313,6 +1313,33 @@ buildLegend();
 tuSel.value=timeUnit;guSel.value=gradUnit;
 tuSel.onchange=function(){timeUnit=tuSel.value;SeqEyesPrefs.set(SeqEyesPrefs.KEYS.timeUnit,timeUnit);draw();};
 guSel.onchange=function(){gradUnit=guSel.value;SeqEyesPrefs.set(SeqEyesPrefs.KEYS.gradUnit,gradUnit);draw();};
+/**
+ * Fill a hover readout, one row per line, hanging each wrapped row under the
+ * content rather than the margin.
+ *
+ * A row like "Labels: SLC=30  SEG=5  ..." that does not fit continues under the
+ * "SLC=30", not under the "Labels:", so a continuation cannot be mistaken for a
+ * new field. The indent is that line's own label width — four columns for
+ * "RF: ", eight for "Labels: " — which `ch` gives exactly, the readout being
+ * monospace.
+ *
+ * It takes the element rather than reaching for one, because the standalone
+ * viewer calls this with its own `tt` from inside its own scope.
+ */
+function renderTooltipLines(target,lines){
+  target.textContent='';
+  for(var i=0;i<lines.length;i++){
+    var row=document.createElement('div');
+    row.textContent=lines[i];
+    var marker=lines[i].indexOf(': ');
+    if(marker>0){
+      var indent=(marker+2)+'ch';
+      row.style.paddingLeft=indent;
+      row.style.textIndent='-'+indent;
+    }
+    target.appendChild(row);
+  }
+}
 function setExportButtonEnabled(enabled){if(exportBtn)exportBtn.disabled=!enabled;}
 /* Throws rather than drawing an empty panel when a trajectory arrives without
    its ADC samples.  A reply that lost its arrays in transit used to clear the
@@ -7421,7 +7448,7 @@ function showTooltipAt(cx,cy,ct){
     }
     appendDerivedTooltipLines(lines,ct);
     if(lines.length>1||found){
-      tt.textContent=lines.join('\n');tt.style.display='block';
+      renderTooltipLines(tt,lines);tt.style.display='block';
       placeTooltip(cx,cy);
       // Auto-dismiss on touch devices
       if(_touchTooltipTimer)clearTimeout(_touchTooltipTimer);

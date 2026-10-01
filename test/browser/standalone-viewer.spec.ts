@@ -458,51 +458,66 @@ test('keeps every in-window k-space point when the visible range narrows', async
  * of the window, which is where the tooltip disappeared off screen.
  */
 /**
- * A readout line longer than the tooltip is wide has to wrap, not overhang.
+ * A readout line longer than the tooltip is wide has to wrap, and the
+ * continuation has to hang under the content rather than the margin.
  *
  * The box is capped at a max-width while the text was `white-space: pre`, so a
  * line that did not fit ran out of the box and over the plot behind it: an RF
  * line carrying multiband, offsets and phase, or a block carrying ten labels,
- * both overflowed by about 190px.
+ * both overflowed by about 190px. Wrapping alone then left continuations at
+ * column zero, where "PHS=0 LIN=102 ..." reads as a field name.
  *
- * The content is set directly because what is pinned here is the styling
- * contract rather than any one sequence's readout — whatever a block produces,
- * it has to stay inside the box.
+ * This drives the shipped renderer rather than setting text, but with content
+ * of its own: what is pinned is that any readout stays inside the box and hangs
+ * correctly, and no shipped fixture produces a line this long.
  */
-test('wraps hover readout lines instead of overhanging the tooltip', async ({ page }) => {
+test('wraps hover readout lines and hangs them under the field', async ({ page }) => {
   await loadViewer(page, fixtures.gre);
 
   const measured = await page.evaluate(() => {
     const tip = document.getElementById('tt') as HTMLElement;
     const lines = [
       'Block #5569',
-      'Time: 35934.832 ms (\u0394 1.832 / dur: 10.700 ms)',
       'RF: 677.6 Hz  MB2 \u03b8z\u2248149\u00b0  \u0394f=\u00b16.95 kHz  fo=-1111 Hz  \u03c6\u2080=4.19 rad',
-      'ADC: 832pts @6.1\u00b5s  fo=0 Hz  \u03c6\u2080=0.00 rad',
       'Labels: SLC=30  SEG=5  REP=0  SET=0  ECO=0  PHS=0  LIN=102  PAR=0  NAV=0  REV=0',
     ];
-    tip.textContent = lines.join('\n');
+    (window as unknown as { renderTooltipLines(el: HTMLElement, lines: string[]): void })
+      .renderTooltipLines(tip, lines);
     tip.style.display = 'block';
     tip.style.left = '0px';
     tip.style.top = '0px';
-    const style = getComputedStyle(tip);
+    const lineHeight = parseFloat(getComputedStyle(tip).lineHeight);
     return {
-      scrollWidth: tip.scrollWidth,
-      clientWidth: tip.clientWidth,
-      height: Math.round(tip.getBoundingClientRect().height),
-      lineHeight: parseFloat(style.lineHeight),
-      logicalLines: lines.length,
+      overflow: tip.scrollWidth - tip.clientWidth,
+      rows: [...tip.children].map((child) => {
+        const style = getComputedStyle(child as HTMLElement);
+        const text = child.textContent ?? '';
+        const marker = text.indexOf(': ');
+        return {
+          expectedColumns: marker > 0 ? marker + 2 : 0,
+          paddingLeft: parseFloat(style.paddingLeft),
+          textIndent: parseFloat(style.textIndent),
+          renderedRows: Math.round((child as HTMLElement).getBoundingClientRect().height / lineHeight),
+        };
+      }),
     };
   });
 
   // Nothing reaches past the right edge of the box.
-  expect(measured.scrollWidth,
-    `content ${measured.scrollWidth}px in a ${measured.clientWidth}px box`)
-    .toBeLessThanOrEqual(measured.clientWidth);
+  expect(measured.overflow, `content overflows by ${measured.overflow}px`).toBeLessThanOrEqual(0);
 
-  // And it wrapped rather than being clipped: the long lines take extra rows.
-  const renderedLines = Math.round(measured.height / measured.lineHeight);
-  expect(renderedLines).toBeGreaterThan(measured.logicalLines);
+  // Every labelled row hangs by its own label width, and an unlabelled one does
+  // not hang at all. The readout is monospace, so one column is one character.
+  const columns = measured.rows.find(r => r.expectedColumns > 0)!;
+  const columnWidth = columns.paddingLeft / columns.expectedColumns;
+  expect(columnWidth).toBeGreaterThan(0);
+  for (const row of measured.rows) {
+    expect(row.paddingLeft).toBeCloseTo(row.expectedColumns * columnWidth, 1);
+    expect(row.textIndent).toBeCloseTo(-row.expectedColumns * columnWidth, 1);
+  }
+
+  // And the two long rows wrapped rather than being clipped.
+  expect(measured.rows.filter(r => r.renderedRows > 1)).toHaveLength(2);
 });
 
 test('anchors the hover tooltip to the cursor and keeps it on screen', async ({ page }) => {
