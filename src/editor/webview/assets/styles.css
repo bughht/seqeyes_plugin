@@ -75,7 +75,12 @@ canvas{display:block}
 #pbar2{height:5px;background:var(--gr);border-radius:3px;overflow:hidden;margin:0 0 6px}
 #pfill2{height:100%;width:0%;background:var(--adc);border-radius:3px;transition:width .4s ease}
 #ppct{font-size:11px;color:var(--lb);font-family:monospace}
-#tt{position:absolute;pointer-events:none;background:rgba(0,0,0,.88);color:#fff;padding:5px 9px;border-radius:4px;font:11px monospace;white-space:pre;display:none;z-index:100;line-height:1.35;max-width:340px}
+/* pre-wrap, not pre: the readout is capped at max-width, so a line that does
+   not fit — an RF line with multiband and offsets, or a block carrying ten
+   labels — used to run outside the box and over the plot. Newlines and the
+   column spacing still matter, hence pre-wrap rather than normal, and
+   break-word catches a single token too long to fit on its own. */
+#tt{position:absolute;pointer-events:none;background:rgba(0,0,0,.88);color:#fff;padding:5px 9px;border-radius:4px;font:11px monospace;white-space:pre-wrap;overflow-wrap:break-word;display:none;z-index:100;line-height:1.35;max-width:340px}
 /* ── Touch & mobile ── */
 #mc,#kc,#mmc,#sgImg,#sgOvl,#spCanvas{touch-action:none}
 body{overscroll-behavior:none}
