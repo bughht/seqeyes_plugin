@@ -169,6 +169,31 @@ body.layout-vertical.sg-split-drag{cursor:col-resize}
   body.layout-vertical #spane.mobile-spectrum #spPane{display:block;flex:1 1 auto}
   #viewerNotice .viewer-notice-item{align-items:flex-start;padding:5px 7px}
 }
+/* ── Simulation pane (simulation-panel.js) ───────────────────────── */
+#simBtn[hidden]{display:none}
+#simpane{position:absolute;inset:0;display:none;flex-direction:column;overflow:hidden}
+#simpane.on{display:flex}
+#simTools{flex:0 0 auto;display:flex;align-items:center;flex-wrap:wrap;gap:3px;padding:3px 5px 3px 8px;border-bottom:1px solid var(--gr);background:var(--trbg)}
+#simTools button{background:var(--gr);border:1px solid var(--ax);color:var(--fg);padding:1px 5px;border-radius:3px;cursor:pointer;font-size:10px;line-height:1.5}
+#simTools button:hover{opacity:.75}
+#simTools button:disabled{opacity:.4;cursor:not-allowed}
+#simTools button.on{background:var(--adc);border-color:var(--adc);color:#fff}
+#simTools select{background:var(--gr);border:1px solid var(--ax);color:var(--fg);padding:1px 2px;border-radius:3px;font-size:10px;cursor:pointer;max-width:96px}
+#simTools .sep{width:1px;height:14px;background:var(--ax);margin:0 2px;flex-shrink:0}
+#simTools .ulbl{font-size:10px;color:var(--lb)}
+#simProgress{flex:0 0 3px;visibility:hidden}
+#simProgress.on{visibility:visible;background:var(--gr)}
+#simProgressFill{height:100%;width:0;background:var(--adc);transition:width .2s}
+#simBody{position:relative;flex:1 1 auto;min-height:0;min-width:0;overflow:hidden}
+#simCanvas{position:absolute;top:0;left:0;display:block;width:100%;height:100%;cursor:crosshair}
+#simEmpty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:12px;color:var(--lb);font-size:12px;text-align:center;pointer-events:none}
+#simReadout{flex:0 0 auto;font:10px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--lb);padding:2px 6px;border-top:1px solid var(--gr);line-height:1.35;max-height:84px;overflow-y:auto;white-space:normal;user-select:text}
+#simReadout .sg-warn{color:#b8860b}
+@media(max-width:768px),(pointer:coarse){
+  #simTools{gap:4px;padding:4px 5px}
+  #simTools button{min-height:24px;padding:2px 7px}
+  #simBtn{order:1}
+}
 /* ── Label row: ⚙ chip and marker controls (labels.js) ─────────────── */
 #tb .lbl-gear{font-size:12px;line-height:1;padding:1px 3px}
 #tb .lbl-gear:focus-visible{outline:1px solid var(--adc)}

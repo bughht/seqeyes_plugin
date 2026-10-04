@@ -13,7 +13,7 @@
    host at call time.
    ═══════════════════════════════════════════════════════════════════════ */
 
-var panelMode = 'off';          // 'off' | 'kspace' | 'spectrogram'
+var panelMode = 'off';          // 'off' | 'kspace' | 'spectrogram' | 'simulation'
 var panelOpen = false;          // read by applyLayoutMode() in state.js
 
 var SeqEyesPanel = (function () {
@@ -147,24 +147,40 @@ var SeqEyesPanel = (function () {
 
   /* ── Mode state machine (R1) ──────────────────────────────────────── */
 
+  /* The cycle button walks off → k-space → spectrogram → off. Simulation has
+     its own toggle (#simBtn); from there the cycle button starts over at
+     k-space, so it reads as it does when the panel is closed. */
   var MODE_LABELS = {
     off: { text: 'K-Space / Spectrum', title: 'Show the k-space trajectory' },
     kspace: { text: 'K-Space ▸ Spectrogram', title: 'Switch to the gradient spectrogram' },
-    spectrogram: { text: 'Spectrogram ✕', title: 'Close the panel' }
+    spectrogram: { text: 'Spectrogram ✕', title: 'Close the panel' },
+    simulation: { text: 'K-Space / Spectrum', title: 'Show the k-space trajectory' }
   };
+
+  function simulationAvailable() {
+    return typeof SeqEyesSimulation !== 'undefined' && SeqEyesSimulation.isAvailable();
+  }
 
   function updateButton() {
     var button = el('panelBtn');
     if (!button) return;
     var label = MODE_LABELS[panelMode] || MODE_LABELS.off;
+    var cycling = panelMode === 'kspace' || panelMode === 'spectrogram';
     button.textContent = label.text;
     button.title = label.title;
-    button.setAttribute('aria-pressed', panelMode === 'off' ? 'false' : 'true');
-    button.setAttribute('aria-label', panelMode === 'off'
-      ? 'Analysis panel closed. Show the k-space trajectory.'
+    button.setAttribute('aria-pressed', cycling ? 'true' : 'false');
+    button.setAttribute('aria-label', !cycling
+      ? 'K-space and spectrogram closed. Show the k-space trajectory.'
       : (panelMode === 'kspace'
         ? 'K-space trajectory shown. Switch to the gradient spectrogram.'
         : 'Gradient spectrogram shown. Close the analysis panel.'));
+    var simButton = el('simBtn');
+    if (simButton) {
+      var simulating = panelMode === 'simulation';
+      simButton.textContent = simulating ? 'Simulation ✕' : 'Simulation';
+      simButton.title = simulating ? 'Close the simulation panel' : 'Simulate this sequence on a phantom (Bloch, runs in your browser)';
+      simButton.setAttribute('aria-pressed', simulating ? 'true' : 'false');
+    }
   }
 
   function applyPanelGeometry() {
@@ -200,7 +216,8 @@ var SeqEyesPanel = (function () {
    * k-space is refused.
    */
   function setMode(mode, options) {
-    if (mode !== 'off' && mode !== 'kspace' && mode !== 'spectrogram') mode = 'off';
+    if (mode !== 'off' && mode !== 'kspace' && mode !== 'spectrogram' && mode !== 'simulation') mode = 'off';
+    if (mode === 'simulation' && !simulationAvailable()) mode = 'off';
     var h = activeHost();
 
     if (mode === 'kspace') {
@@ -220,8 +237,11 @@ var SeqEyesPanel = (function () {
 
     var kpane = el('kpane');
     var spane = el('spane');
+    var simpane = el('simpane');
     if (kpane) kpane.classList.toggle('on', mode === 'kspace');
     if (spane) spane.classList.toggle('on', mode === 'spectrogram');
+    if (simpane) simpane.classList.toggle('on', mode === 'simulation');
+    if (previous === 'simulation' && typeof SeqEyesSimulation !== 'undefined') SeqEyesSimulation.onHidden();
 
     applyPanelGeometry();
     updateButton();
@@ -238,11 +258,12 @@ var SeqEyesPanel = (function () {
       applySplit();
       requestAnimationFrame(function () { resize(); requestSpectrogram(true); });
     }
+    if (mode === 'simulation') SeqEyesSimulation.onShown();
     return panelMode;
   }
 
   function cycle() {
-    if (panelMode === 'off') return setMode('kspace');
+    if (panelMode === 'off' || panelMode === 'simulation') return setMode('kspace');
     if (panelMode === 'kspace') return setMode('spectrogram');
     return setMode('off');
   }
@@ -1229,6 +1250,8 @@ var SeqEyesPanel = (function () {
 
     var button = el('panelBtn');
     if (button) button.onclick = function () { cycle(); };
+    var simButton = el('simBtn');
+    if (simButton) simButton.onclick = function () { setMode(panelMode === 'simulation' ? 'off' : 'simulation'); };
 
     var safetySpectrogram = el('kspaceSafetySpectrogram');
     if (safetySpectrogram) {
@@ -1728,12 +1751,14 @@ var SeqEyesPanel = (function () {
       if (!refused && h && h.requestKspace) h.requestKspace();
     }
     if (panelMode === 'spectrogram') requestSpectrogram(true);
+    if (typeof SeqEyesSimulation !== 'undefined') SeqEyesSimulation.onSequenceLoaded();
   }
 
   function onThemeChanged() {
     imageDirty = true;
     buildLegend();
     render();
+    if (typeof SeqEyesSimulation !== 'undefined') SeqEyesSimulation.onThemeChanged();
   }
 
   function onLayoutChanged() {
@@ -1744,6 +1769,11 @@ var SeqEyesPanel = (function () {
       mobileView.textContent = 'Spectrum';
       mobileView.setAttribute('aria-pressed', 'false');
     }
+    if (panelMode === 'simulation') {
+      applyPanelGeometry();
+      requestAnimationFrame(SeqEyesSimulation.resize);
+      return;
+    }
     if (panelMode !== 'spectrogram') return;
     applySplit();
     applyPanelGeometry();
@@ -1752,6 +1782,7 @@ var SeqEyesPanel = (function () {
 
   function onPanelResized() {
     if (panelMode === 'spectrogram') resize();
+    else if (panelMode === 'simulation') SeqEyesSimulation.resize();
   }
 
   /** Restore the persisted mode once the host is ready to serve data. */
@@ -1759,6 +1790,7 @@ var SeqEyesPanel = (function () {
     var stored = get('seqeyes.panelMode');
     if (stored === 'spectrogram') setMode('spectrogram', { force: true });
     else if (stored === 'kspace') setMode('kspace', { force: true });
+    else if (stored === 'simulation' && simulationAvailable()) setMode('simulation', { force: true });
   }
 
   /**
@@ -1784,12 +1816,14 @@ var SeqEyesPanel = (function () {
     wire();
     syncControls();
     buildLegend();
+    if (typeof SeqEyesSimulation !== 'undefined') SeqEyesSimulation.install();
     updateButton();
     return api;
   }
 
   var api = {
     install: install,
+    getHost: activeHost,
     setMode: setMode,
     getMode: function () { return panelMode; },
     cycle: cycle,
@@ -1873,7 +1907,7 @@ var SeqEyesPanel = (function () {
 
 /** Called from kspace.js's outer resize handle, whichever pane is showing. */
 function panelHandleResize() {
-  if (panelMode === 'spectrogram') SeqEyesPanel.onPanelResized();
+  if (panelMode === 'spectrogram' || panelMode === 'simulation') SeqEyesPanel.onPanelResized();
   else if (typeof resizeKc === 'function') { resizeKc(); if (typeof drawKs === 'function') drawKs(); }
 }
 
@@ -1911,4 +1945,10 @@ window.SeqEyesDev.audioState = function () {
 };
 window.SeqEyesDev.setAudioClock = function (fn) { SeqEyesAudio.setClock(fn); };
 window.SeqEyesDev.setSplitRatio = function (r) { SeqEyesPanel.setSplitRatio(r); };
+window.SeqEyesDev.simulationState = function () {
+  return typeof SeqEyesSimulation !== 'undefined' ? SeqEyesSimulation.state() : null;
+};
+window.SeqEyesDev.simulationMatrix = function () {
+  return typeof SeqEyesSimulation !== 'undefined' ? SeqEyesSimulation.matrixSummary() : null;
+};
 window.SeqEyesDev.getSplitRatio = function () { return SeqEyesPanel.getSplitRatio(); };

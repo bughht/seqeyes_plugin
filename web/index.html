@@ -85,6 +85,7 @@
 </span>
 <div class="sep"></div><div class="lg" id="legend"></div>
 <button id="panelBtn" type="button" aria-pressed="false" title="Show the k-space trajectory" style="margin-left:4px">K-Space / Spectrum</button>
+<button id="simBtn" type="button" aria-pressed="false" hidden title="Simulate this sequence on a phantom (Bloch, runs in your browser)" style="margin-left:4px">Simulation</button>
 <span class="cur" id="cur">← hover for time</span>
 </div>
 <div id="viewerNotice">
@@ -187,6 +188,27 @@
     <div id="spPane"><canvas id="spCanvas" aria-label="Frequency spectrum at the marker"></canvas></div>
   </div>
   <div id="sgReadout" role="status" aria-live="off"></div>
+</div>
+<div id="simpane">
+  <div id="simTools">
+    <span class="ulbl">Phantom</span>
+    <select id="simPhantom" aria-label="Phantom" title="Built-in phantom: tissue-labelled Shepp–Logan (PD, T1, T2 at 3 T) in the sequence's FOV">
+      <option value="shepp-logan" selected>Shepp–Logan</option>
+    </select>
+    <select id="simSize" aria-label="Phantom matrix size" title="Phantom matrix; the field of view comes from the sequence's FOV definition"></select>
+    <span class="ulbl">Spins/voxel</span>
+    <select id="simSpins" aria-label="Spins per voxel" title="Spins per voxel along x × y. Auto simulates one voxel per tissue to find how many the sequence's spoiling needs."></select>
+    <button id="simRun" type="button" title="Simulate the open sequence">▶ Run</button>
+    <button id="simCancel" type="button" disabled title="Stop the simulation">■ Cancel</button>
+    <div class="sep"></div>
+    <select id="simView" aria-label="View" title="Reconstructed image, gridded k-space, or the raw ADC data (readouts × samples)"></select>
+    <select id="simFrame" aria-label="Frame" title="Frame: one per slice or repetition" hidden></select>
+    <button id="simLog" type="button" aria-pressed="false" title="Logarithmic display (60 dB range)">log</button>
+    <select id="simCmap" aria-label="Colormap" title="Colormap"></select>
+  </div>
+  <div id="simProgress" aria-hidden="true"><div id="simProgressFill"></div></div>
+  <div id="simBody"><canvas id="simCanvas" aria-label="Simulation result: wheel to zoom, drag to pan, double-click to fit"></canvas><div id="simEmpty">No simulation yet. Press Run.</div></div>
+  <div id="simReadout" role="status" aria-live="polite"></div>
 </div>
 </div>
 </div>
@@ -2642,7 +2664,7 @@ kCanvas.addEventListener("touchcancel",function(){
 /* The shared panelHandleResize() dispatches to the bundle's k-space drawing
    code; this host has its own, so it overrides the dispatcher. */
 function panelHandleResize(){
-  if(panelMode==='spectrogram')SeqEyesPanel.onPanelResized();
+  if(panelMode==='spectrogram'||panelMode==='simulation')SeqEyesPanel.onPanelResized();
   else{resizeKc();drawKs();}
 }
 function persistPanelSize(){
@@ -2852,6 +2874,11 @@ function applyAscProfile(fileName,profile){
 
 window.SeqEyesPanelHost={
   getView:function(){var d=visibleDuration();return{startSec:ox,endSec:ox+d,totalDuration:TD};},
+  /* Simulation (simulation-panel.js): the worker script sits next to this
+     page. MATLAB's uihtml copies only the files seqeyes.m lists and has not
+     been checked for workers yet, so it keeps the panel hidden for now. */
+  createSimulationWorker:window._SEQEYES_HOST==='matlab'?undefined:function(){return new Worker('sim-worker.js');},
+  getSequenceSource:function(){return currentSequenceBytes?{bytes:currentSequenceBytes,name:currentSequenceName}:null;},
   getLayoutMode:function(){return layoutMode;},
   getGradientRaster:function(){return GR;},
   getTrTimeSec:function(){return seqTiming&&seqTiming.trTimeSec>0?seqTiming.trTimeSec:0;},
