@@ -5,6 +5,6 @@
     "lib": ["ES2022"],
     "types": []
   },
-  "include": ["src/sim/**/*.ts"],
+  "include": ["src/sim/**/*.ts", "types/sim-core-globals.d.ts"],
   "exclude": ["src/sim/platform/node.ts"]
 }
