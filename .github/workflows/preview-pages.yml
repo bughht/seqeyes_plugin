@@ -1,0 +1,83 @@
+name: Preview simulation branch on GitHub Pages
+
+# GitHub Pages serves one site per repository, and a deployment replaces all
+# of it. This workflow therefore deploys the production site built from main
+# at the root, unchanged for visitors, and this branch's build under
+# /preview/simulation/, so the branch can be checked on github.io before it is
+# merged. A deployment from main (deploy-pages.yml) removes the preview again;
+# re-run this workflow from the Actions tab to restore it.
+#
+# Requires feature/simulation in the github-pages environment's deployment
+# branch policy (Settings → Environments → github-pages).
+
+on:
+  push:
+    branches: ['feature/simulation']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}preview/simulation/
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main (production root)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main
+
+      - name: Checkout this branch (preview)
+        uses: actions/checkout@v4
+        with:
+          path: branch
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Build the production site exactly as deploy-pages.yml does
+        working-directory: main
+        run: |
+          npm ci
+          npm run check
+
+      - name: Validate and build the branch site
+        working-directory: branch
+        run: |
+          npm ci
+          npm run check
+
+      - name: Assemble the site
+        run: |
+          mkdir -p _site/preview/simulation
+          cp -R main/web/. _site/
+          cp -R branch/web/. _site/preview/simulation/
+          {
+            echo "branch: ${GITHUB_REF_NAME}"
+            echo "commit: ${GITHUB_SHA}"
+            echo "built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > _site/preview/simulation/preview.txt
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: './_site'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
