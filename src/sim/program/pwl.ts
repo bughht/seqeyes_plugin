@@ -192,3 +192,23 @@ function quadProd(a1: number, b1: number, c1: number, a2: number, b2: number, c2
     const p4 = c1 * c2;
     return h * (p0 + h * (p1 / 2 + h * (p2 / 3 + h * (p3 / 4 + h * p4 / 5))));
 }
+
+/** Relative-time snapping grid [s]: far below any raster, far above rounding. */
+export const RELATIVE_TIME_QUANTUM_SEC = 1e-12;
+
+/**
+ * The same pieces with times relative to `t0`, snapped to a 1 ps grid.
+ *
+ * Absolute times carry the rounding of their magnitude (≈ 2e-15 s near 10 s),
+ * and a difference of two of them inherits it: a 1 µs RF cell computed that
+ * way is off by ~1e-9 relative, which then differs from one TR to the next.
+ * Pulseq breakpoints sit on µs rasters, so snapping relative times to 1 ps
+ * recovers them exactly and makes repeated events bit-identical.
+ */
+export function relativePieces(pieces: GradientPieces, t0: number): GradientPieces {
+    const t = new Float64Array(pieces.t.length);
+    for (let i = 0; i < t.length; i++) {
+        t[i] = Math.round((pieces.t[i] - t0) / RELATIVE_TIME_QUANTUM_SEC) * RELATIVE_TIME_QUANTUM_SEC;
+    }
+    return { t, ga: pieces.ga.slice(), gb: pieces.gb.slice() };
+}

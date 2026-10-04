@@ -29,6 +29,34 @@ export interface SpinSet {
     readonly rxIm: Float64Array;
 }
 
+/**
+ * Spins folded into classes along rewound axes.
+ *
+ * Suppose an axis carries no gradient during any RF pulse or readout, and
+ * its gradient area since the sequence start is zero at every RF pulse (a
+ * Cartesian phase encode with its rewinder). Then spins that differ only in
+ * their position along that axis meet every pulse in the same state. Between
+ * pulses they differ by the phase 2π·K(t)·r, with K the area since the start.
+ * One representative per class is simulated (the SpinSet, its folded
+ * coordinates zero). Its members are the real spins, which enter only at
+ * readout, through that phase. plan/dephasing.ts decides which axes fold.
+ */
+export interface SpinMembers {
+    readonly count: number;
+    /** Class (row of the simulated SpinSet) of each member. */
+    readonly classOf: Int32Array;
+    /** Signal weight of each member (the class rows' own weights are unused). */
+    readonly weight: Float64Array;
+    /** Fold point of each member: an index into `foldPoints`. */
+    readonly foldOf: Int32Array;
+    /** Distinct member positions along the folded axes, xyz interleaved [m]; other axes zero. */
+    readonly foldPoints: Float64Array;
+    /** Receive coils and complex B1− per member, coil-major as on SpinSet. */
+    readonly coils: number;
+    readonly rxRe: Float64Array;
+    readonly rxIm: Float64Array;
+}
+
 export interface SpinState {
     readonly mx: Float64Array;
     readonly my: Float64Array;

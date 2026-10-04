@@ -25,6 +25,7 @@ import {
     mergeAxes,
     pieceCount,
     piecesMoments,
+    relativePieces,
     type AxisPoints,
     type GradientPieces,
 } from './pwl';
@@ -437,12 +438,6 @@ function blockRotation(seq: PulseqSequence, extId: number): number[] | undefined
         return seq.rotations.find(rotation => rotation.id === ext.ref)?.values;
     }
     return undefined;
-}
-
-function relativePieces(pieces: GradientPieces, t0: number): GradientPieces {
-    const t = new Float64Array(pieces.t.length);
-    for (let i = 0; i < t.length; i++) t[i] = pieces.t[i] - t0;
-    return { t, ga: pieces.ga.slice(), gb: pieces.gb.slice() };
 }
 
 function noteIgnoredFeatures(block: DecodedBlock, ignored: Set<IgnoredFeature>): void {
