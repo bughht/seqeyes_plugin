@@ -216,6 +216,7 @@ var Pulseq = (() => {
     "LIN": { labelId: 8, flagId: 0 },
     "PAR": { labelId: 9, flagId: 0 },
     "ONCE": { labelId: 10, flagId: 0 },
+    "TRID": { labelId: 11, flagId: 0 },
     "NAV": { labelId: 0, flagId: 1 },
     "REV": { labelId: 0, flagId: 2 },
     "SMS": { labelId: 0, flagId: 4 },
@@ -504,7 +505,7 @@ var Pulseq = (() => {
       if (vc >= VER_V15) {
         requireFieldCount("RF", line, parts.length, 12);
         const use = parts[11].toLowerCase();
-        if (!/^[erisu]$/.test(use)) parseError(`RF row has invalid use flag '${parts[11]}': ${line}`);
+        if (!/^[erispou]$/.test(use)) parseError(`RF row has invalid use flag '${parts[11]}': ${line}`);
         seq.rfs.set(id, {
           id,
           amplitude: amp,
@@ -1096,7 +1097,7 @@ var Pulseq = (() => {
       const freqOffset = reader.float64("RF frequency offset");
       const phaseOffset = reader.float64("RF phase offset");
       const use = reader.char("RF use").toLowerCase();
-      if (!/^[erisu]$/.test(use)) reader.fail(`invalid RF use flag '${use}'`);
+      if (!/^[erispou]$/.test(use)) reader.fail(`invalid RF use flag '${use}'`);
       seq.rfs.set(id, {
         id,
         amplitude,
@@ -1971,7 +1972,9 @@ var Pulseq = (() => {
     const duration = n > 0 ? t[n - 1] - rfStart + raster : 0;
     const centerTime = rf.center >= 0 ? blockStart + rfDelay + rf.center * 1e-6 : estimateRfPeakTime(t, amp, rfStart, duration);
     const use = classifiedUse || "u";
+    const ptxChannels = timeShape ? detectPtxTimeShapeChannels(timeShape) : 0;
     return {
+      ...ptxChannels > 1 ? { ptxChannels } : {},
       blockIndex: rf.id,
       startTime: rfStart,
       centerTime,
@@ -2130,7 +2133,7 @@ var Pulseq = (() => {
     const b0 = getB02(seq);
     const freqFull = effFreqOff(adc.freqOffset, adc.freqPPM, b0);
     const phaseFull = effPhaseOff(adc.phaseOffset, adc.phasePPM, b0);
-    return {
+    const decoded = {
       blockIndex: adc.id,
       startTime: blockStart,
       numSamples: adc.numSamples,
@@ -2141,6 +2144,9 @@ var Pulseq = (() => {
       freqOffset: freqFull,
       phaseOffset: phaseFull
     };
+    const modulation = adc.phaseModShapeId > 0 ? seq.shapes.get(adc.phaseModShapeId) : void 0;
+    if (modulation) decoded.phaseModulation = modulation.samples;
+    return decoded;
   }
   function decodeExtensions(seq, ext, db, blockStart, context) {
     const visited = /* @__PURE__ */ new Set();
@@ -2156,6 +2162,7 @@ var Pulseq = (() => {
             cached = {
               blockIndex: trigger.id,
               startTime: 0,
+              triggerType: trigger.triggerType,
               channel: trigger.channel,
               delay: trigger.delay * 1e-6,
               duration: trigger.duration * 1e-6
@@ -2219,6 +2226,24 @@ var Pulseq = (() => {
       }
       cur = cur.nextId > 0 ? seq.extensions.get(cur.nextId) : void 0;
     }
+  }
+  function detectPtxTimeShapeChannels(timeShape) {
+    const n = timeShape.length;
+    if (n < 2) return 0;
+    const first = timeShape[0];
+    let repeats = 0;
+    for (let i = 0; i < n; i++) {
+      if (timeShape[i] === first) repeats++;
+    }
+    if (repeats < 2 || n % repeats !== 0) return 0;
+    const perChannel = n / repeats;
+    for (let channel = 1; channel < repeats; channel++) {
+      const offset = channel * perChannel;
+      for (let i = 0; i < perChannel; i++) {
+        if (timeShape[offset + i] !== timeShape[i]) return 0;
+      }
+    }
+    return repeats;
   }
   function makeConstant(n, value) {
     const a = new Float64Array(Math.max(n, 2));
@@ -3070,9 +3095,269 @@ var Pulseq = (() => {
     return out;
   }
 
+  // src/pulseq/gradientTimeline.ts
+  var SERIES_PADDING_EPSILON_SEC = 1e-12;
+  var GAP_EDGE_SNAP_HZ_PER_M = 1e-6;
+  var CHUNK_BITS = 16;
+  var CHUNK_SIZE = 1 << CHUNK_BITS;
+  var CHUNK_MASK = CHUNK_SIZE - 1;
+  var Float64Chunks = class {
+    constructor() {
+      __publicField(this, "chunks", []);
+      __publicField(this, "count", 0);
+    }
+    get length() {
+      return this.count;
+    }
+    push(value) {
+      const chunkIndex = this.count >>> CHUNK_BITS;
+      let chunk = this.chunks[chunkIndex];
+      if (!chunk) {
+        chunk = new Float64Array(CHUNK_SIZE);
+        this.chunks[chunkIndex] = chunk;
+      }
+      chunk[this.count & CHUNK_MASK] = value;
+      this.count++;
+    }
+    /** Value at an absolute index; throws if that chunk was released. */
+    get(index) {
+      if (index < 0 || index >= this.count) throw new RangeError(`index ${index} out of range [0, ${this.count})`);
+      const chunk = this.chunks[index >>> CHUNK_BITS];
+      if (!chunk) throw new RangeError(`index ${index} was released`);
+      return chunk[index & CHUNK_MASK];
+    }
+    /** Release every chunk that lies entirely before `index`. */
+    releaseBefore(index) {
+      const lastReleasable = Math.min(index, this.count) >>> CHUNK_BITS;
+      for (let i = 0; i < lastReleasable; i++) this.chunks[i] = null;
+    }
+    /** Exact-size copy of every value (none may have been released). */
+    toArray() {
+      const out = new Float64Array(this.count);
+      for (let i = 0, offset = 0; offset < this.count; i++, offset += CHUNK_SIZE) {
+        const chunk = this.chunks[i];
+        if (!chunk) throw new RangeError("cannot copy a series whose chunks were released");
+        const n = Math.min(CHUNK_SIZE, this.count - offset);
+        out.set(n === CHUNK_SIZE ? chunk : chunk.subarray(0, n), offset);
+      }
+      return out;
+    }
+    clear() {
+      this.chunks.length = 0;
+      this.count = 0;
+    }
+  };
+  var GradientAxisAssembler = class {
+    /**
+     * @param collectSupport  Record the support points the k-space `endpoints`
+     *   grid needs. Streaming consumers pass false: the list would otherwise
+     *   grow with the whole sequence.
+     */
+    constructor(gradientRaster, carry, collectSupport = true) {
+      __publicField(this, "gradientRaster", gradientRaster);
+      __publicField(this, "collectSupport", collectSupport);
+      __publicField(this, "times", new Float64Chunks());
+      __publicField(this, "values", new Float64Chunks());
+      __publicField(this, "requiredSupport", new Float64Chunks());
+      __publicField(this, "started", false);
+      __publicField(this, "pendingTime", 0);
+      __publicField(this, "pendingValue", 0);
+      __publicField(this, "finished", false);
+      if (carry?.started) {
+        this.started = true;
+        this.pendingTime = carry.pendingTime;
+        this.pendingValue = carry.pendingValue;
+      }
+    }
+    /** Whether any piece has been appended to this axis. */
+    get hasSupport() {
+      return this.started;
+    }
+    /** True while the last appended point is still held back (not yet final). */
+    get hasPending() {
+      return this.started && !this.finished;
+    }
+    get heldTime() {
+      return this.pendingTime;
+    }
+    get heldValue() {
+      return this.pendingValue;
+    }
+    /**
+     * Latest time through which the waveform of this axis can no longer change,
+     * given that no piece still to be appended can start before `nextPieceTime`
+     * (+∞ when no further piece will arrive on this axis).
+     *
+     * Emitted points are final. The held-back point is final unless it is a tiny
+     * nonzero value the gap rule may still snap to zero. Past it, a nonzero
+     * value's continuation depends on the next piece (continuation, ramp or
+     * padding), while a zero value stays zero until within one raster of the
+     * next piece.
+     */
+    finalThrough(nextPieceTime) {
+      if (this.finished) return Number.POSITIVE_INFINITY;
+      if (!this.started) return nextPieceTime - this.gradientRaster;
+      if (this.pendingValue !== 0) {
+        if (Math.abs(this.pendingValue) <= GAP_EDGE_SNAP_HZ_PER_M) {
+          return this.times.length ? this.times.get(this.times.length - 1) : Number.NEGATIVE_INFINITY;
+        }
+        return this.pendingTime;
+      }
+      return Math.max(this.pendingTime, nextPieceTime - this.gradientRaster);
+    }
+    carry() {
+      return { started: this.started, pendingTime: this.pendingTime, pendingValue: this.pendingValue };
+    }
+    /** Append one block's piece of this axis (times ascending, absolute [s]). */
+    appendPiece(times, values) {
+      if (this.finished) throw new Error("cannot append to a finished gradient series");
+      const n = times.length;
+      if (!n) return;
+      const firstTime = times[0];
+      this.support(firstTime);
+      this.support(times[n - 1]);
+      if (!this.started) {
+        if (firstTime > 0) {
+          this.pushPoint(-SERIES_PADDING_EPSILON_SEC, 0);
+          this.pushPoint(firstTime - SERIES_PADDING_EPSILON_SEC, 0);
+          this.support(-SERIES_PADDING_EPSILON_SEC);
+          this.support(firstTime - SERIES_PADDING_EPSILON_SEC);
+        }
+        for (let i = 0; i < n; i++) this.pushPoint(times[i], values[i]);
+        return;
+      }
+      const raster = this.gradientRaster;
+      const previousTime = this.pendingTime;
+      let firstValue = values[0];
+      if (previousTime + raster < firstTime) {
+        if (this.pendingValue !== 0) {
+          if (Math.abs(this.pendingValue) > GAP_EDGE_SNAP_HZ_PER_M) {
+            this.pushPoint(previousTime + raster * 0.5, 0);
+            this.support(previousTime + raster * 0.5);
+          } else {
+            this.pendingValue = 0;
+          }
+        }
+        if (firstValue !== 0) {
+          if (Math.abs(firstValue) > GAP_EDGE_SNAP_HZ_PER_M) {
+            this.pushPoint(firstTime - raster * 0.5, 0);
+            this.support(firstTime - raster * 0.5);
+          } else {
+            firstValue = 0;
+          }
+        }
+      }
+      const currentLast = this.pendingTime;
+      let start = 0;
+      while (start < n && times[start] <= currentLast) start++;
+      for (let i = start; i < n; i++) this.pushPoint(times[i], i === 0 ? firstValue : values[i]);
+    }
+    /** Emit the held-back point and the trailing zero padding. */
+    finish(totalDuration) {
+      if (this.finished) return;
+      this.finished = true;
+      if (!this.started) return;
+      const last = this.pendingTime;
+      this.emit(this.pendingTime, this.pendingValue);
+      if (last < totalDuration) {
+        this.emit(last + SERIES_PADDING_EPSILON_SEC, 0);
+        this.emit(totalDuration + SERIES_PADDING_EPSILON_SEC, 0);
+        this.support(last + SERIES_PADDING_EPSILON_SEC);
+        this.support(totalDuration + SERIES_PADDING_EPSILON_SEC);
+      }
+    }
+    /** Copy out the finished series and drop the chunked storage. */
+    freeze() {
+      if (!this.finished) throw new Error("finish() the series before freezing it");
+      const frozen = {
+        times: this.times.toArray(),
+        values: this.values.toArray(),
+        requiredSupport: this.requiredSupport.toArray()
+      };
+      this.times.clear();
+      this.values.clear();
+      this.requiredSupport.clear();
+      return frozen;
+    }
+    support(time) {
+      if (this.collectSupport) this.requiredSupport.push(time);
+    }
+    pushPoint(time, value) {
+      if (this.started) this.emit(this.pendingTime, this.pendingValue);
+      this.started = true;
+      this.pendingTime = time;
+      this.pendingValue = value;
+    }
+    emit(time, value) {
+      this.times.push(time);
+      this.values.push(value);
+    }
+  };
+  var GradientTimelineBuilder = class {
+    constructor(gradientRaster, carry, collectSupport = true) {
+      __publicField(this, "gradientRaster", gradientRaster);
+      __publicField(this, "axes");
+      if (!(gradientRaster > 0)) throw new Error("gradientRaster must be positive");
+      if (carry && carry.gradientRaster !== gradientRaster) {
+        throw new Error("carry was captured with a different gradient raster");
+      }
+      this.axes = [
+        new GradientAxisAssembler(gradientRaster, carry?.axes[0], collectSupport),
+        new GradientAxisAssembler(gradientRaster, carry?.axes[1], collectSupport),
+        new GradientAxisAssembler(gradientRaster, carry?.axes[2], collectSupport)
+      ];
+    }
+    /** Append the next block (blocks must arrive in time order). */
+    append(block) {
+      for (let axis = 0; axis < 3; axis++) {
+        const piece = physicalGradientPiece(block, axis);
+        if (piece.times.length) this.axes[axis].appendPiece(piece.times, piece.values);
+      }
+    }
+    /** State at the current block boundary; restore with the constructor. */
+    snapshotCarry() {
+      return {
+        gradientRaster: this.gradientRaster,
+        axes: [this.axes[0].carry(), this.axes[1].carry(), this.axes[2].carry()]
+      };
+    }
+    finish(totalDuration) {
+      for (const axis of this.axes) axis.finish(totalDuration);
+    }
+    /**
+     * Latest time through which all three axes are final, given per axis the
+     * earliest time a not-yet-appended piece can start (see the axis method).
+     */
+    finalThrough(nextPieceTimes) {
+      return Math.min(
+        this.axes[0].finalThrough(nextPieceTimes[0]),
+        this.axes[1].finalThrough(nextPieceTimes[1]),
+        this.axes[2].finalThrough(nextPieceTimes[2])
+      );
+    }
+  };
+  function buildFrozenGradientSeries(blocks, gradientRaster, totalDuration) {
+    const builder = new GradientTimelineBuilder(gradientRaster);
+    for (const block of blocks) builder.append(block);
+    builder.finish(totalDuration);
+    return [builder.axes[0].freeze(), builder.axes[1].freeze(), builder.axes[2].freeze()];
+  }
+  function sampleSeries(series, time, cursors, axis) {
+    const n = series.times.length;
+    if (!n || time < series.times[0] || time > series.times[n - 1]) return 0;
+    let cursor = Math.min(cursors[axis], n - 2);
+    while (cursor + 1 < n && series.times[cursor + 1] < time) cursor++;
+    cursors[axis] = cursor;
+    if (cursor + 1 >= n) return series.values[n - 1];
+    const t0 = series.times[cursor], t1 = series.times[cursor + 1];
+    const v0 = series.values[cursor], v1 = series.values[cursor + 1];
+    if (time <= t0 || t1 <= t0) return v0;
+    if (time >= t1) return v1;
+    return v0 + (v1 - v0) * (time - t0) / (t1 - t0);
+  }
+
   // src/pulseq/kspace.ts
   var TRAJECTORY_TIME_ACCURACY_SEC = 1e-10;
-  var POLYNOMIAL_SUPPORT_EPSILON_SEC = 1e-12;
   function calculateKspace(blocks, gradientRaster, totalDuration, trajectoryDelay = 0, _options) {
     if (!blocks.length || !gradientRaster || gradientRaster <= 0) return null;
     const GR = gradientRaster;
@@ -3106,7 +3391,7 @@ var Pulseq = (() => {
           adcT[adcIdx++] = t0 + (s + 0.5) * dwell + trajectoryDelay;
       }
     }
-    const gradientSeries = buildGlobalGradientSeries(blocks, GR, totalDuration);
+    const gradientSeries = buildFrozenGradientSeries(blocks, GR, totalDuration);
     let candBound = 2;
     for (const series of gradientSeries) candBound += countSeriesSupport(series, gradientSupport);
     candBound += excT.length * 3 + refT.length * 2 + adcT.length;
@@ -3344,98 +3629,6 @@ var Pulseq = (() => {
       return;
     }
     for (const time of series.requiredSupport) push(time);
-  }
-  function freezeSeries(series) {
-    const frozen = {
-      times: Float64Array.from(series.times),
-      values: Float64Array.from(series.values),
-      requiredSupport: Float64Array.from(series.requiredSupport)
-    };
-    series.times.length = 0;
-    series.values.length = 0;
-    series.requiredSupport.length = 0;
-    return frozen;
-  }
-  function buildGlobalGradientSeries(blocks, gradientRaster, totalDuration) {
-    const output = [
-      { times: [], values: [], requiredSupport: [] },
-      { times: [], values: [], requiredSupport: [] },
-      { times: [], values: [], requiredSupport: [] }
-    ];
-    for (const block of blocks) {
-      for (let axis = 0; axis < 3; axis++) {
-        const piece = physicalGradientPiece(block, axis);
-        if (piece.times.length) appendGradientPiece(output[axis], piece, gradientRaster);
-      }
-    }
-    for (const series of output) {
-      if (!series.times.length) continue;
-      const first = series.times[0];
-      const last = series.times[series.times.length - 1];
-      if (first > 0) {
-        series.times.unshift(-POLYNOMIAL_SUPPORT_EPSILON_SEC, first - POLYNOMIAL_SUPPORT_EPSILON_SEC);
-        series.values.unshift(0, 0);
-        series.requiredSupport.push(-POLYNOMIAL_SUPPORT_EPSILON_SEC, first - POLYNOMIAL_SUPPORT_EPSILON_SEC);
-      }
-      if (last < totalDuration) {
-        series.times.push(last + POLYNOMIAL_SUPPORT_EPSILON_SEC, totalDuration + POLYNOMIAL_SUPPORT_EPSILON_SEC);
-        series.values.push(0, 0);
-        series.requiredSupport.push(last + POLYNOMIAL_SUPPORT_EPSILON_SEC, totalDuration + POLYNOMIAL_SUPPORT_EPSILON_SEC);
-      }
-    }
-    return [freezeSeries(output[0]), freezeSeries(output[1]), freezeSeries(output[2])];
-  }
-  function appendGradientPiece(target, piece, gradientRaster) {
-    if (!piece.times.length) return;
-    target.requiredSupport.push(piece.times[0], piece.times[piece.times.length - 1]);
-    if (!target.times.length) {
-      target.times.push(...piece.times);
-      target.values.push(...piece.values);
-      return;
-    }
-    const lastIndex = target.times.length - 1;
-    const previousTime = target.times[lastIndex];
-    const firstTime = piece.times[0];
-    if (previousTime + gradientRaster < firstTime) {
-      if (target.values[lastIndex] !== 0) {
-        if (Math.abs(target.values[lastIndex]) > 1e-6) {
-          target.times.push(previousTime + gradientRaster * 0.5);
-          target.values.push(0);
-          target.requiredSupport.push(previousTime + gradientRaster * 0.5);
-        } else {
-          target.values[lastIndex] = 0;
-        }
-      }
-      if (piece.values[0] !== 0) {
-        if (Math.abs(piece.values[0]) > 1e-6) {
-          target.times.push(firstTime - gradientRaster * 0.5);
-          target.values.push(0);
-          target.requiredSupport.push(firstTime - gradientRaster * 0.5);
-        } else {
-          piece.values[0] = 0;
-        }
-      }
-    }
-    let start = 0;
-    const currentLast = target.times[target.times.length - 1];
-    while (start < piece.times.length && piece.times[start] <= currentLast) start++;
-    for (let i = start; i < piece.times.length; i++) {
-      target.times.push(piece.times[i]);
-      target.values.push(piece.values[i]);
-    }
-  }
-  function sampleSeries(series, time, cursors, axis) {
-    const n = series.times.length;
-    if (!n || time < series.times[0] || time > series.times[n - 1]) return 0;
-    let cursor = Math.min(cursors[axis], n - 2);
-    while (cursor + 1 < n && series.times[cursor + 1] < time) cursor++;
-    cursors[axis] = cursor;
-    if (cursor + 1 >= n) return series.values[n - 1];
-    const t0 = series.times[cursor], t1 = series.times[cursor + 1];
-    const v0 = series.values[cursor], v1 = series.values[cursor + 1];
-    if (time <= t0 || t1 <= t0) return v0;
-    if (time >= t1) return v1;
-    return v0 + (v1 - v0) * (time - t0) / (t1 - t0);
   }
 
   // src/editor/kspaceTransport.ts
@@ -3683,6 +3876,17 @@ var Pulseq = (() => {
       const alpha = (timeSec - t0) / (t1 - t0);
       return values[pointIndex] + alpha * (values[pointIndex + 1] - values[pointIndex]);
     };
+  }
+
+  // src/pulseq/segmentMoments.ts
+  function integrateLinearSegment(a, b, tRef, ga, gb) {
+    const h = b - a;
+    if (!(h > 0)) return [0, 0];
+    const slope = (gb - ga) / h;
+    const aRel = a - tRef;
+    const m0 = ga * h + 0.5 * slope * h * h;
+    const m1 = ga * (aRel * h + 0.5 * h * h) + slope * (0.5 * aRel * h * h + h * h * h / 3);
+    return [m0, m1];
   }
 
   // src/pulseq/m1.ts
@@ -4130,15 +4334,6 @@ var Pulseq = (() => {
       }
     }
     return { t: outT, m1: outM1 };
-  }
-  function integrateLinearSegment(a, b, tRef, ga, gb) {
-    const h = b - a;
-    if (!(h > 0)) return [0, 0];
-    const slope = (gb - ga) / h;
-    const aRel = a - tRef;
-    const m0 = ga * h + 0.5 * slope * h * h;
-    const m1 = ga * (aRel * h + 0.5 * h * h) + slope * (0.5 * aRel * h * h + h * h * h / 3);
-    return [m0, m1];
   }
 
   // src/pulseq/ascText.ts
