@@ -57,6 +57,7 @@ const KNOWN_LABELS: Record<string, { labelId: number; flagId: number }> = {
     'LIN':  { labelId: 8,  flagId: 0 },
     'PAR':  { labelId: 9,  flagId: 0 },
     'ONCE': { labelId: 10, flagId: 0 },
+    'TRID': { labelId: 11, flagId: 0 },
     'NAV':  { labelId: 0,  flagId: 1 },
     'REV':  { labelId: 0,  flagId: 2 },
     'SMS':  { labelId: 0,  flagId: 4 },

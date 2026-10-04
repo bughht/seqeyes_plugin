@@ -241,8 +241,10 @@ function decodeRF(
         : estimateRfPeakTime(t, amp, rfStart, duration);
 
     const use = classifiedUse || 'u';
+    const ptxChannels = timeShape ? detectPtxTimeShapeChannels(timeShape) : 0;
 
     return {
+        ...(ptxChannels > 1 ? { ptxChannels } : {}),
         blockIndex: rf.id,
         startTime: rfStart,
         centerTime,
@@ -431,7 +433,7 @@ function decodeADC(adc: ADCEntry, blockStart: number, seq: PulseqSequence): Deco
     const b0 = getB0(seq);
     const freqFull = effFreqOff(adc.freqOffset, adc.freqPPM, b0);
     const phaseFull = effPhaseOff(adc.phaseOffset, adc.phasePPM, b0);
-    return {
+    const decoded: DecodedADCEvent = {
         blockIndex: adc.id, startTime: blockStart,
         numSamples: adc.numSamples,
         dwell: adc.dwell * 1e-9,     // ns → s
@@ -439,6 +441,11 @@ function decodeADC(adc: ADCEntry, blockStart: number, seq: PulseqSequence): Deco
         freqOffset: freqFull,
         phaseOffset: phaseFull,
     };
+    // The modulation shape is shared, not copied: one ADC library entry is
+    // typically reused by thousands of blocks.
+    const modulation = adc.phaseModShapeId > 0 ? seq.shapes.get(adc.phaseModShapeId) : undefined;
+    if (modulation) decoded.phaseModulation = modulation.samples;
+    return decoded;
 }
 
 function decodeExtensions(
@@ -459,6 +466,7 @@ function decodeExtensions(
                     cached = {
                         blockIndex: trigger.id,
                         startTime: 0,
+                        triggerType: trigger.triggerType,
                         channel: trigger.channel,
                         delay: trigger.delay * 1e-6,
                         duration: trigger.duration * 1e-6,
@@ -525,6 +533,32 @@ function decodeExtensions(
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
+
+/**
+ * Channel count of an RF time shape written with the pTx-Pulseq convention
+ * (Roos et al., MRM 2025): every channel's samples sit back to back in one
+ * arbitrary RF event, each channel repeating the same time base, so the
+ * channel count equals the number of samples at the first sample time.
+ * Returns 0 for an ordinary (single-channel) time shape.
+ */
+export function detectPtxTimeShapeChannels(timeShape: ArrayLike<number>): number {
+    const n = timeShape.length;
+    if (n < 2) return 0;
+    const first = timeShape[0];
+    let repeats = 0;
+    for (let i = 0; i < n; i++) {
+        if (timeShape[i] === first) repeats++;
+    }
+    if (repeats < 2 || n % repeats !== 0) return 0;
+    const perChannel = n / repeats;
+    for (let channel = 1; channel < repeats; channel++) {
+        const offset = channel * perChannel;
+        for (let i = 0; i < perChannel; i++) {
+            if (timeShape[offset + i] !== timeShape[i]) return 0;
+        }
+    }
+    return repeats;
+}
 
 function makeConstant(n: number, value: number): Float64Array {
     const a = new Float64Array(Math.max(n, 2));
