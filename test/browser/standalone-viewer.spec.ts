@@ -1,6 +1,6 @@
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 
 import { expect, test, type Download, type Locator, type Page } from '@playwright/test';
 import sharp from 'sharp';
@@ -1293,7 +1293,7 @@ async function openSequenceText(page: Page, name: string, source: string): Promi
 
 async function dropSequence(page: Page, sequencePath: string): Promise<void> {
   const data = readFileSync(sequencePath).toString('base64');
-  const name = sequencePath.split('/').pop() || 'sequence.bseq';
+  const name = basename(sequencePath) || 'sequence.bseq';
   await page.locator('#dropZone').evaluate((dropZone, source) => {
     const binary = atob(source.data);
     const bytes = new Uint8Array(binary.length);
