@@ -12,6 +12,7 @@
  * All signs follow ../conventions.ts.
  */
 
+import { rasterCellsFromShapes } from '../../pulseq/rfWaveform';
 import type { PulseqSequence } from '../../pulseq/types';
 import { demodulationPhase } from '../conventions';
 import type { SimProgram } from '../program/compile';
@@ -104,51 +105,16 @@ export interface RfCells {
 export function rfCells(segment: RfSegment): RfCells {
     const op = segment.operator;
     if (op.ptxChannels > 1) throw new Error('Dynamic pTx RF (pTx-Pulseq layout) is not supported yet.');
-    const waveform = op.waveform;
-    const raster = waveform.raster;
-    // Cell boundaries relative to the RF event start (block start + RF delay).
-    let starts: Float64Array;
-    let widths: Float64Array;
-    let magnitude: Float64Array;
-    let phase: Float64Array;
-    let pulseStart: number;
-    if (waveform.kind === 'uniform') {
-        const n = waveform.count;
-        pulseStart = segment.t0;
-        starts = new Float64Array(n);
-        widths = new Float64Array(n).fill(raster);
-        magnitude = new Float64Array(n);
-        phase = new Float64Array(n);
-        for (let j = 0; j < n; j++) {
-            starts[j] = j * raster;
-            magnitude[j] = waveform.magnitude[j];
-            phase[j] = waveform.phaseCycles ? waveform.phaseCycles[j] : 0;
-        }
-    } else {
-        // Piecewise-linear breakpoints, resampled to raster cells evaluated at
-        // their midpoints (exact for cells inside one linear stretch).
-        const times = waveform.times;
-        const first = times[0], last = times[waveform.count - 1];
-        pulseStart = segment.t0 - first;
-        const n = Math.max(1, Math.round((last - first) / raster));
-        const width = (last - first) / n;
-        starts = new Float64Array(n);
-        widths = new Float64Array(n).fill(width);
-        magnitude = new Float64Array(n);
-        phase = new Float64Array(n);
-        let k = 0;
-        for (let j = 0; j < n; j++) {
-            starts[j] = first + j * width;
-            const mid = starts[j] + 0.5 * width;
-            while (k + 1 < waveform.count - 1 && times[k + 1] <= mid) k++;
-            const span = times[k + 1] - times[k];
-            const u = span > 0 ? (mid - times[k]) / span : 0;
-            magnitude[j] = waveform.magnitude[k] + u * (waveform.magnitude[k + 1] - waveform.magnitude[k]);
-            const p0 = waveform.phaseCycles ? waveform.phaseCycles[k] : 0;
-            const p1 = waveform.phaseCycles ? waveform.phaseCycles[k + 1] : 0;
-            phase[j] = p0 + u * (p1 - p0);
-        }
-    }
+    // Raster cells as Pulseq defines the waveform (pulseq/rfWaveform.ts):
+    // uniform samples held per raster, time shapes as linear breakpoints.
+    const cells = rasterCellsFromShapes(op.waveform);
+    if (cells.count < 1) throw new Error('RF event without samples.');
+    const starts = cells.start;
+    const widths = cells.width;
+    const magnitude = cells.magnitude;
+    const phase = cells.phaseCycles;
+    // Cell starts are relative to the RF event start; the segment opens at the first cell.
+    const pulseStart = segment.t0 - starts[0];
     const count = starts.length;
     const b1Re = new Float64Array(count);
     const b1Im = new Float64Array(count);

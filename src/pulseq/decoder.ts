@@ -19,6 +19,9 @@ import type {
 import { ExtType, VER_PRE_14 } from './types';
 import { classifyRfUses } from './rfClassification';
 import { analyzeRfResponse } from './rfResponse';
+import { detectPtxTimeShapeChannels } from './rfWaveform';
+
+export { detectPtxTimeShapeChannels };
 
 // ─── Constants ───────────────────────────────────────────────────────────
 
@@ -235,7 +238,9 @@ function decodeRF(
         phase[i] = 2 * Math.PI * ph[i] + phaseFull + 2 * Math.PI * freqFull * dt;
     }
 
-    const duration = n > 0 ? t[n - 1] - rfStart + raster : 0;
+    // Uniform samples are held for one raster each, so the pulse lasts n·raster;
+    // time-shape samples are breakpoints, so it ends at the last one.
+    const duration = n > 0 ? (timeShape ? t[n - 1] - rfStart : n * raster) : 0;
     const centerTime = rf.center >= 0
         ? blockStart + rfDelay + rf.center * 1e-6
         : estimateRfPeakTime(t, amp, rfStart, duration);
@@ -534,31 +539,6 @@ function decodeExtensions(
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
-/**
- * Channel count of an RF time shape written with the pTx-Pulseq convention
- * (Roos et al., MRM 2025): every channel's samples sit back to back in one
- * arbitrary RF event, each channel repeating the same time base, so the
- * channel count equals the number of samples at the first sample time.
- * Returns 0 for an ordinary (single-channel) time shape.
- */
-export function detectPtxTimeShapeChannels(timeShape: ArrayLike<number>): number {
-    const n = timeShape.length;
-    if (n < 2) return 0;
-    const first = timeShape[0];
-    let repeats = 0;
-    for (let i = 0; i < n; i++) {
-        if (timeShape[i] === first) repeats++;
-    }
-    if (repeats < 2 || n % repeats !== 0) return 0;
-    const perChannel = n / repeats;
-    for (let channel = 1; channel < repeats; channel++) {
-        const offset = channel * perChannel;
-        for (let i = 0; i < perChannel; i++) {
-            if (timeShape[offset + i] !== timeShape[i]) return 0;
-        }
-    }
-    return repeats;
-}
 
 function makeConstant(n: number, value: number): Float64Array {
     const a = new Float64Array(Math.max(n, 2));

@@ -12,6 +12,7 @@
  * Gradients are physical (rotation applied), in Hz/m; k is in cycles/m.
  */
 
+import type { RfShapeArrays } from '../../pulseq/rfWaveform';
 import type { RFEntry } from '../../pulseq/types';
 import type { GradientPieces, SegmentMoments } from './pwl';
 
@@ -28,32 +29,6 @@ export interface FreeSegment extends SegmentBase {
     kind: 'free';
 }
 
-/** RF waveform as Pulseq defines it: uniform raster cells, or time-shape breakpoints. */
-export type RfWaveform =
-    | {
-        /** Sample i is held over [i·raster, (i+1)·raster] from the pulse start. */
-        kind: 'uniform';
-        raster: number;
-        count: number;
-        /** Normalised magnitude per sample (shared with the shape library — read-only). */
-        magnitude: Float64Array;
-        /** Phase per sample in cycles, or null for zero phase (shared — read-only). */
-        phaseCycles: Float64Array | null;
-    }
-    | {
-        /**
-         * Breakpoints of a piecewise-linear waveform at `times` (seconds from
-         * the pulse start, the time shape × raster). The pulse ends at the last
-         * breakpoint, as Pulseq's `makeBlockPulse` defines it — no extra raster.
-         */
-        kind: 'breakpoints';
-        raster: number;
-        count: number;
-        times: Float64Array;
-        magnitude: Float64Array;
-        phaseCycles: Float64Array | null;
-    };
-
 /**
  * Everything that determines an RF pulse's action on a spin at a given
  * position, off-resonance and B1 — and nothing else. Events sharing a key share
@@ -65,7 +40,8 @@ export interface RfOperatorSpec {
     rf: RFEntry;
     /** Peak amplitude [Hz]. */
     amplitude: number;
-    waveform: RfWaveform;
+    /** The pulse shapes; their meaning in time is defined by pulseq/rfWaveform.ts. */
+    waveform: RfShapeArrays;
     /** Effective frequency offset incl. PPM [Hz]. */
     freqOffset: number;
     /** Pulse duration [s]. */

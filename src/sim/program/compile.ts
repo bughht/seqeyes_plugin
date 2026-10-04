@@ -17,6 +17,7 @@ import {
     type SequenceDecodeContext,
 } from '../../pulseq/decoder';
 import { GradientTimelineBuilder, type GradientAxisAssembler } from '../../pulseq/gradientTimeline';
+import { rfShapeArrays, rfShapeDuration, type RfShapeArrays } from '../../pulseq/rfWaveform';
 import { DEFAULT_B0_T, PULSEQ_GAMMA_HZ_PER_T } from '../conventions';
 import { ContentHasher } from './hash';
 import {
@@ -34,7 +35,6 @@ import type {
     IgnoredFeature,
     RfOperatorSpec,
     RfSegment,
-    RfWaveform,
     SimSegment,
 } from './types';
 
@@ -199,35 +199,22 @@ function buildFreeSegment(readers: Readers, t0: number, t1: number, blockIndex: 
 interface RfTiming {
     start: number;
     end: number;
-    waveform: RfWaveform;
+    waveform: RfShapeArrays;
     ptxChannels: number;
 }
 
 function rfTiming(seq: PulseqSequence, rf: RFEntry, blockStart: number): RfTiming {
     const raster = seq.rasterTimes.rfRaster;
     const pulseStart = blockStart + rf.delay * 1e-6;
-    const magnitude = seq.shapes.get(rf.magShapeId)?.samples ?? Float64Array.of(1);
-    const phase = rf.phaseShapeId > 0 ? seq.shapes.get(rf.phaseShapeId)?.samples ?? null : null;
-    const time = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples ?? null : null;
-
-    if (!time) {
-        const count = Math.min(magnitude.length, phase?.length ?? magnitude.length);
-        return {
-            start: pulseStart,
-            end: pulseStart + count * raster,
-            waveform: { kind: 'uniform', raster, count, magnitude, phaseCycles: phase },
-            ptxChannels: 0,
-        };
-    }
-    const ptxChannels = detectPtxTimeShapeChannels(time);
-    let count = Math.min(magnitude.length, phase?.length ?? magnitude.length, time.length);
-    if (ptxChannels > 1) count = Math.floor(time.length / ptxChannels);
-    const times = new Float64Array(count);
-    for (let i = 0; i < count; i++) times[i] = time[i] * raster;
+    const waveform = rfShapeArrays(rf, seq)
+        ?? { raster, magnitude: Float64Array.of(1), phaseCycles: null, timeShape: null };
+    const rawTime = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples : undefined;
+    const ptxChannels = rawTime ? detectPtxTimeShapeChannels(rawTime) : 0;
+    const first = waveform.timeShape?.length ? waveform.timeShape[0] * raster : 0;
     return {
-        start: pulseStart + (count ? times[0] : 0),
-        end: pulseStart + (count ? times[count - 1] : 0),
-        waveform: { kind: 'breakpoints', raster, count, times, magnitude, phaseCycles: phase },
+        start: pulseStart + first,
+        end: pulseStart + rfShapeDuration(waveform),
+        waveform,
         ptxChannels,
     };
 }

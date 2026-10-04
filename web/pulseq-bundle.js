@@ -1524,7 +1524,7 @@ var Pulseq = (() => {
     const raster = seq.rasterTimes.rfRaster;
     const timeShape = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples : void 0;
     if (timeShape && timeShape.length > 0) {
-      return timeShape[timeShape.length - 1] * raster + raster;
+      return timeShape[timeShape.length - 1] * raster;
     }
     return magShape.numSamples * raster;
   }
@@ -1652,6 +1652,101 @@ var Pulseq = (() => {
     return sum;
   }
 
+  // src/pulseq/rfWaveform.ts
+  function rasterCellCount(shapes) {
+    if (!shapes.timeShape) {
+      return Math.min(shapes.magnitude.length, shapes.phaseCycles?.length ?? shapes.magnitude.length);
+    }
+    const count = breakpointCount(shapes);
+    if (count < 2) return count;
+    const span = (shapes.timeShape[count - 1] - shapes.timeShape[0]) * shapes.raster;
+    return Math.max(1, Math.round(span / shapes.raster));
+  }
+  function forEachRasterCell(shapes, visit) {
+    const { raster, magnitude, phaseCycles, timeShape } = shapes;
+    if (!timeShape) {
+      const count2 = rasterCellCount(shapes);
+      for (let i = 0; i < count2; i++) visit(i * raster, raster, magnitude[i], phaseCycles ? phaseCycles[i] : 0);
+      return;
+    }
+    const points = breakpointCount(shapes);
+    if (points < 2) return;
+    const first = timeShape[0] * raster;
+    const last = timeShape[points - 1] * raster;
+    const count = Math.max(1, Math.round((last - first) / raster));
+    const width = (last - first) / count;
+    let k = 0;
+    for (let i = 0; i < count; i++) {
+      const start = first + i * width;
+      const mid = start + 0.5 * width;
+      while (k + 1 < points - 1 && timeShape[k + 1] * raster <= mid) k++;
+      const t0 = timeShape[k] * raster;
+      const t1 = timeShape[k + 1] * raster;
+      const u = t1 > t0 ? (mid - t0) / (t1 - t0) : 0;
+      const p0 = phaseCycles ? phaseCycles[k] : 0;
+      const p1 = phaseCycles ? phaseCycles[k + 1] : 0;
+      visit(start, width, magnitude[k] + u * (magnitude[k + 1] - magnitude[k]), p0 + u * (p1 - p0));
+    }
+  }
+  function rasterCellsFromShapes(shapes) {
+    const cells = allocate(rasterCellCount(shapes), !shapes.timeShape);
+    let i = 0;
+    forEachRasterCell(shapes, (start, width, magnitude, phase) => {
+      cells.start[i] = start;
+      cells.width[i] = width;
+      cells.magnitude[i] = magnitude;
+      cells.phaseCycles[i] = phase;
+      i++;
+    });
+    return cells;
+  }
+  function detectPtxTimeShapeChannels(timeShape) {
+    const n = timeShape.length;
+    if (n < 2) return 0;
+    const first = timeShape[0];
+    let repeats = 0;
+    for (let i = 0; i < n; i++) {
+      if (timeShape[i] === first) repeats++;
+    }
+    if (repeats < 2 || n % repeats !== 0) return 0;
+    const perChannel = n / repeats;
+    for (let channel = 1; channel < repeats; channel++) {
+      const offset = channel * perChannel;
+      for (let i = 0; i < perChannel; i++) {
+        if (timeShape[offset + i] !== timeShape[i]) return 0;
+      }
+    }
+    return repeats;
+  }
+  function rfShapeArrays(rf, seq) {
+    const magnitude = seq.shapes.get(rf.magShapeId)?.samples;
+    if (!magnitude || magnitude.length < 1) return null;
+    const phase = rf.phaseShapeId > 0 ? seq.shapes.get(rf.phaseShapeId)?.samples ?? null : null;
+    let time = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples ?? null : null;
+    if (time) {
+      const channels = detectPtxTimeShapeChannels(time);
+      if (channels > 1) time = time.subarray(0, time.length / channels);
+    }
+    return { raster: seq.rasterTimes.rfRaster, magnitude, phaseCycles: phase, timeShape: time };
+  }
+  function breakpointCount(shapes) {
+    return Math.min(
+      shapes.magnitude.length,
+      shapes.phaseCycles?.length ?? shapes.magnitude.length,
+      shapes.timeShape?.length ?? shapes.magnitude.length
+    );
+  }
+  function allocate(count, uniform) {
+    return {
+      count,
+      start: new Float64Array(count),
+      width: new Float64Array(count),
+      magnitude: new Float64Array(count),
+      phaseCycles: new Float64Array(count),
+      uniform
+    };
+  }
+
   // src/pulseq/rfResponse.ts
   var MAX_RF_RESPONSE_FFT_POINTS = 131072;
   var MAX_RF_RESPONSE_SAMPLES = 131072;
@@ -1700,67 +1795,46 @@ var Pulseq = (() => {
     return { carrierAreaDeg, bands, spectrumAnalyzed, limited };
   }
   function estimateRfCarrierAreaDeg(rf, seq) {
-    const magnitude = seq.shapes.get(rf.magShapeId);
-    if (!magnitude || magnitude.numSamples < 1) return 0;
-    const phase = seq.shapes.get(rf.phaseShapeId);
-    const time = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId) : void 0;
-    const count = rfSampleCount(rf, seq);
-    const raster = seq.rasterTimes.rfRaster;
+    const shapes = rfShapeArrays(rf, seq);
+    if (!shapes) return 0;
     let realArea = 0;
     let imaginaryArea = 0;
-    for (let index = 0; index < count; index++) {
-      const sampleTime = time ? time.samples[index] * raster : (index + 0.5) * raster;
-      const nextTime = time && index + 1 < count ? time.samples[index + 1] * raster : sampleTime + raster;
-      const width = nextTime - sampleTime;
-      const amplitude = rf.amplitude * magnitude.samples[index];
-      const phaseRad = TAU * (phase?.samples[index] ?? 0);
-      if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(amplitude) || !Number.isFinite(phaseRad)) continue;
+    forEachRasterCell(shapes, (_start, width, magnitude, phaseCycles) => {
+      const amplitude = rf.amplitude * magnitude;
+      const phaseRad = TAU * phaseCycles;
+      if (!Number.isFinite(amplitude) || !Number.isFinite(phaseRad)) return;
       realArea += amplitude * Math.cos(phaseRad) * width;
       imaginaryArea += amplitude * Math.sin(phaseRad) * width;
-    }
+    });
     return DEG_PER_CYCLE * Math.hypot(realArea, imaginaryArea);
   }
   function rfSampleCount(rf, seq) {
-    const magnitude = seq.shapes.get(rf.magShapeId);
-    if (!magnitude) return 0;
-    const phase = seq.shapes.get(rf.phaseShapeId);
-    const time = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId) : void 0;
-    return Math.min(
-      magnitude.numSamples,
-      phase?.numSamples ?? magnitude.numSamples,
-      time?.numSamples ?? magnitude.numSamples
-    );
+    const shapes = rfShapeArrays(rf, seq);
+    return shapes ? rasterCellCount(shapes) : 0;
   }
   function buildComplexRfSamples(rf, seq) {
-    const magnitude = seq.shapes.get(rf.magShapeId);
-    if (!magnitude || magnitude.numSamples < 1) return emptySamples(seq.rasterTimes.rfRaster);
-    const phase = seq.shapes.get(rf.phaseShapeId);
-    const time = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId) : void 0;
-    const count = Math.min(
-      magnitude.numSamples,
-      phase?.numSamples ?? magnitude.numSamples,
-      time?.numSamples ?? magnitude.numSamples
-    );
-    if (count < 1) return emptySamples(seq.rasterTimes.rfRaster);
     const raster = seq.rasterTimes.rfRaster;
-    const real = new Float64Array(count);
-    const imaginary = new Float64Array(count);
-    const times = new Float64Array(count);
-    const widths = new Float64Array(count);
-    let uniform = !time;
-    for (let index = 0; index < count; index++) {
-      const sampleTime = time ? time.samples[index] * raster : (index + 0.5) * raster;
-      const nextTime = time && index + 1 < count ? time.samples[index + 1] * raster : sampleTime + raster;
-      const width = nextTime - sampleTime;
-      const amplitude = rf.amplitude * magnitude.samples[index];
-      const phaseRad = TAU * (phase?.samples[index] ?? 0);
-      times[index] = Number.isFinite(sampleTime) ? sampleTime : 0;
+    const shapes = rfShapeArrays(rf, seq);
+    if (!shapes) return emptySamples(raster);
+    const cells = rasterCellsFromShapes(shapes);
+    if (cells.count < 1) return emptySamples(raster);
+    const real = new Float64Array(cells.count);
+    const imaginary = new Float64Array(cells.count);
+    const times = new Float64Array(cells.count);
+    const widths = new Float64Array(cells.count);
+    let uniform = true;
+    for (let index = 0; index < cells.count; index++) {
+      const amplitude = rf.amplitude * cells.magnitude[index];
+      const phaseRad = TAU * cells.phaseCycles[index];
+      const width = cells.width[index];
+      times[index] = cells.start[index] + 0.5 * width;
       widths[index] = Number.isFinite(width) && width > 0 ? width : 0;
-      real[index] = Number.isFinite(amplitude) && Number.isFinite(phaseRad) ? amplitude * Math.cos(phaseRad) : 0;
-      imaginary[index] = Number.isFinite(amplitude) && Number.isFinite(phaseRad) ? amplitude * Math.sin(phaseRad) : 0;
+      const finite2 = Number.isFinite(amplitude) && Number.isFinite(phaseRad);
+      real[index] = finite2 ? amplitude * Math.cos(phaseRad) : 0;
+      imaginary[index] = finite2 ? amplitude * Math.sin(phaseRad) : 0;
       if (Math.abs(widths[index] - raster) > Math.max(1e-12, raster * 1e-6)) uniform = false;
     }
-    return { real, imaginary, times, widths, uniform, dwell: raster };
+    return { real, imaginary, times, widths, uniform, dwell: uniform ? raster : widths[0] };
   }
   function emptySamples(raster) {
     return {
@@ -1969,7 +2043,7 @@ var Pulseq = (() => {
       const dt = t[i] - rfStart;
       phase[i] = 2 * Math.PI * ph[i] + phaseFull + 2 * Math.PI * freqFull * dt;
     }
-    const duration = n > 0 ? t[n - 1] - rfStart + raster : 0;
+    const duration = n > 0 ? timeShape ? t[n - 1] - rfStart : n * raster : 0;
     const centerTime = rf.center >= 0 ? blockStart + rfDelay + rf.center * 1e-6 : estimateRfPeakTime(t, amp, rfStart, duration);
     const use = classifiedUse || "u";
     const ptxChannels = timeShape ? detectPtxTimeShapeChannels(timeShape) : 0;
@@ -2226,24 +2300,6 @@ var Pulseq = (() => {
       }
       cur = cur.nextId > 0 ? seq.extensions.get(cur.nextId) : void 0;
     }
-  }
-  function detectPtxTimeShapeChannels(timeShape) {
-    const n = timeShape.length;
-    if (n < 2) return 0;
-    const first = timeShape[0];
-    let repeats = 0;
-    for (let i = 0; i < n; i++) {
-      if (timeShape[i] === first) repeats++;
-    }
-    if (repeats < 2 || n % repeats !== 0) return 0;
-    const perChannel = n / repeats;
-    for (let channel = 1; channel < repeats; channel++) {
-      const offset = channel * perChannel;
-      for (let i = 0; i < perChannel; i++) {
-        if (timeShape[offset + i] !== timeShape[i]) return 0;
-      }
-    }
-    return repeats;
   }
   function makeConstant(n, value) {
     const a = new Float64Array(Math.max(n, 2));
