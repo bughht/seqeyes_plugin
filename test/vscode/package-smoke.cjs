@@ -26,10 +26,13 @@ const forbiddenPrefixes = [
   'extension/performance-results/',
   'extension/matlab/',
   'extension/web/',
+  'extension/python/',
+  'extension/scripts/',
 ];
 
 const forbiddenEntries = [
   'extension/tsconfig.json',
+  'extension/tsconfig.sim-core.json',
   'extension/web/pulseq-browser.ts',
 ];
 

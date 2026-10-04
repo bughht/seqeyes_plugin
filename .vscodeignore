@@ -3,7 +3,7 @@
 .github/**
 src/**
 .gitignore
-**/tsconfig.json
+**/tsconfig*.json
 **/*.map
 **/*.ts
 **/*.asc
@@ -17,6 +17,8 @@ performance-results/**
 **/__pycache__/**
 **/.pytest_cache/**
 matlab/**
+python/**
+scripts/**
 web/**
 images/*.svg
 PLAN.md
