@@ -7,7 +7,8 @@ import { compileProgram } from '../../src/sim/program/compile';
 import { SimulationCancelledError, simulateReference } from '../../src/sim/engine/reference';
 import { spinSetFrom, type SpinSpec } from '../../src/sim/engine/spins';
 import { CounterRng } from '../../src/sim/rng';
-import { sheppLoganPhantom, spinsFromGrid2D } from '../../src/sim/phantom/builtin';
+import { sheppLoganPhantom, sheppLoganPhantom2D, spinsFromGrid2D } from '../../src/sim/phantom/builtin';
+import { occupiedVoxels, phantomSpins, syntheticCoils } from '../../src/sim/phantom/model';
 
 function load(name: string) {
     const path = join(__dirname, '..', 'seqeyes_demo_seq_files', name);
@@ -72,6 +73,30 @@ describe('reference engine', () => {
         }
         expect(peak).toBeGreaterThan(0);
         expect(worst / peak).toBeLessThan(1e-11);
+    });
+
+    it('synthesises on the readout lattice as the per-group recurrence does', () => {
+        // Continuous T2 and B0 (one group per spin), several coils and
+        // stratified sub-spins: the case lattice synthesis exists for.
+        const seq = load('writeGradientEcho.seq');
+        const base = sheppLoganPhantom2D(24, 0.096, 0.096);
+        const n = 24 * 24;
+        const t2 = new Float32Array(n), b0 = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            t2[i] = base.maps.pd[i] > 0 ? 0.04 + 0.6 * ((i * 7919) % 101) / 101 : 0;
+            b0[i] = 30 * Math.sin(i * 0.37);
+        }
+        const phantom = { ...base, maps: { ...base.maps, t2, b0 }, coils: syntheticCoils(24, 24, base.voxel, 3) };
+        const spins = phantomSpins(phantom, { subSpins: [16, 1], voxels: occupiedVoxels(phantom) });
+        const lattice = simulateReference(compileProgram(seq), spins, { readout: 'lattice' });
+        const grouped = simulateReference(compileProgram(seq), spins, { readout: 'grouped' });
+        let peak = 0, worst = 0;
+        for (let i = 0; i < grouped.signal.length; i++) {
+            peak = Math.max(peak, Math.abs(grouped.signal[i]));
+            worst = Math.max(worst, Math.abs(lattice.signal[i] - grouped.signal[i]));
+        }
+        expect(peak).toBeGreaterThan(0);
+        expect(worst / peak).toBeLessThan(1e-10);
     });
 
     it('reports monotonic progress ending at 1, and can be cancelled', () => {

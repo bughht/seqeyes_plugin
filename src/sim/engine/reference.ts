@@ -50,8 +50,13 @@ export interface SimulationOptions {
     initial?: SpinState;
     /** 'cached' (default) applies each RF operator as a cached affine map; 'stepping' steps every event. */
     rfMode?: 'cached' | 'stepping';
-    /** 'grouped' (default) sums identically-evolving spins per readout; 'direct' synthesises every spin. */
-    readout?: 'grouped' | 'direct';
+    /**
+     * Readout synthesis. 'lattice' (default) merges groups on the readout
+     * lattice where it can (see synthesizeOnLattice) and otherwise does what
+     * 'grouped' does: sum identically evolving spins, then advance each
+     * group's phasor per sample. 'direct' synthesises every spin.
+     */
+    readout?: 'lattice' | 'grouped' | 'direct';
     /** Called with the fraction of the sequence done, at most every `progressInterval` segments. */
     onProgress?: (fraction: number) => void;
     progressInterval?: number;
@@ -83,9 +88,12 @@ export function simulateReference(program: SimProgram, spins: SpinSet, options: 
     // Gradient area since the start: the folded phase at a readout (members only).
     const area = new Float64Array(3);
     const cache = (options.rfMode ?? 'cached') === 'cached' ? new RfOperatorCache(spins) : null;
-    const grouper = new ReadoutGrouper(spins, (options.readout ?? 'grouped') === 'grouped');
+    const grouper = new ReadoutGrouper(spins, (options.readout ?? 'grouped') !== 'direct');
+    // Lattice synthesis is the default for grouped readouts; 'grouped' alone is
+    // the per-group recurrence it is checked against.
+    const lattice = (options.readout ?? 'lattice') === 'lattice';
     const interval = Math.max(1, options.progressInterval ?? 64);
-    const free = new PendingFree();
+    const free = new PendingFree(new FreeKernel(spins));
     let sampleOffset = 0;
     let processed = 0;
     const until = options.until ?? Infinity;
@@ -99,7 +107,7 @@ export function simulateReference(program: SimProgram, spins: SpinSet, options: 
             else applyRf(segment, spins, state);
         } else {
             free.flush(spins, state);
-            sampleAdc(segment, spins, state, signal, sampleOffset, grouper, members, area);
+            sampleAdc(segment, spins, state, signal, sampleOffset, grouper, members, area, lattice);
             sampleOffset += segment.numSamples;
             // The window itself is free precession from the state just sampled.
             free.add(segment.moments.dk, segment.t1 - segment.t0);
@@ -137,6 +145,8 @@ class PendingFree {
     private dt = 0;
     private empty = true;
 
+    constructor(private readonly kernel: FreeKernel) { }
+
     add(dk: ArrayLike<number>, dt: number): void {
         this.dk[0] += dk[0];
         this.dk[1] += dk[1];
@@ -147,12 +157,92 @@ class PendingFree {
 
     flush(spins: SpinSet, state: SpinState): void {
         if (this.empty) return;
-        applyFreeInterval(this.dk, this.dt, spins, state);
+        this.kernel.apply(this.dk, this.dt, state);
         this.dk.fill(0);
         this.dt = 0;
         this.empty = true;
     }
 }
+
+/**
+ * applyFreeInterval with the work shared where spins allow, bit-identical to
+ * it. Relaxation factors depend only on the interval length, which repeats
+ * every TR, so they are cached per length; phases depend only on position and
+ * off-resonance, so spins sharing both (the classes of a folded column) share
+ * one cos/sin per interval. Neither changes a single operation's inputs.
+ */
+class FreeKernel {
+    /** Distinct (x, y, z, Δf) of the spins, and each spin's entry. */
+    private readonly keyOf: Int32Array;
+    private readonly kx: Float64Array;
+    private readonly ky: Float64Array;
+    private readonly kz: Float64Array;
+    private readonly kdf: Float64Array;
+    private readonly cos: Float64Array;
+    private readonly sin: Float64Array;
+    private readonly relaxation = new Map<number, { e1: Float64Array; e2: Float64Array }>();
+
+    constructor(private readonly spins: SpinSet) {
+        const index = new Map<string, number>();
+        const keyOf = new Int32Array(spins.count);
+        const x: number[] = [], y: number[] = [], z: number[] = [], df: number[] = [];
+        for (let i = 0; i < spins.count; i++) {
+            const key = `${spins.x[i]}|${spins.y[i]}|${spins.z[i]}|${spins.df[i]}`;
+            let k = index.get(key);
+            if (k === undefined) {
+                k = x.length;
+                index.set(key, k);
+                x.push(spins.x[i]); y.push(spins.y[i]); z.push(spins.z[i]); df.push(spins.df[i]);
+            }
+            keyOf[i] = k;
+        }
+        this.keyOf = keyOf;
+        this.kx = Float64Array.from(x); this.ky = Float64Array.from(y); this.kz = Float64Array.from(z);
+        this.kdf = Float64Array.from(df);
+        this.cos = new Float64Array(x.length);
+        this.sin = new Float64Array(x.length);
+    }
+
+    apply(dk: ArrayLike<number>, dt: number, state: SpinState): void {
+        const twoPi = 2 * Math.PI;
+        for (let k = 0; k < this.kx.length; k++) {
+            const cycles = dk[0] * this.kx[k] + dk[1] * this.ky[k] + dk[2] * this.kz[k] + this.kdf[k] * dt;
+            const angle = twoPi * (cycles - Math.round(cycles));
+            this.cos[k] = Math.cos(angle);
+            this.sin[k] = Math.sin(angle);
+        }
+        const { e1, e2 } = this.factors(dt);
+        const { mx, my, mz } = state;
+        const keyOf = this.keyOf, cosT = this.cos, sinT = this.sin;
+        for (let i = 0; i < this.spins.count; i++) {
+            const k = keyOf[i];
+            const c = cosT[k] * e2[i], sn = sinT[k] * e2[i];
+            const x = mx[i], y = my[i];
+            mx[i] = x * c - y * sn;
+            my[i] = x * sn + y * c;
+            mz[i] = mz[i] * e1[i] + (1 - e1[i]);
+        }
+    }
+
+    /** E1 and E2 of every spin for an interval, cached for the lengths that recur. */
+    private factors(dt: number): { e1: Float64Array; e2: Float64Array } {
+        let entry = this.relaxation.get(dt);
+        if (entry) return entry;
+        const n = this.spins.count;
+        entry = { e1: new Float64Array(n), e2: new Float64Array(n) };
+        for (let i = 0; i < n; i++) {
+            entry.e1[i] = Math.exp(-dt * this.spins.r1[i]);
+            entry.e2[i] = Math.exp(-dt * this.spins.r2[i]);
+        }
+        // A sequence repeats a handful of interval lengths; bound the cache for those that do not.
+        if (this.relaxation.size >= FREE_CACHE_LENGTHS) this.relaxation.clear();
+        this.relaxation.set(dt, entry);
+        return entry;
+    }
+}
+
+/** Interval lengths whose relaxation factors the free kernel keeps. */
+const FREE_CACHE_LENGTHS = 32;
 
 /** Exact free precession and relaxation over an interval with gradient area `dk`. */
 export function applyFreeInterval(dk: ArrayLike<number>, dt: number, spins: SpinSet, state: SpinState): void {
@@ -443,6 +533,45 @@ export interface ReadoutGroups {
     z: Float64Array;
     df: Float64Array;
     r2: Float64Array;
+    /** Lattice of group positions per axis, computed on first use (null: not a lattice). */
+    lattices?: (GroupLattice | null | undefined)[];
+}
+
+/** Group positions along one axis as origin + slot·pitch. */
+interface GroupLattice {
+    origin: number;
+    pitch: number;
+    span: number;
+    slot: Int32Array;
+}
+
+function groupLattice(groups: ReadoutGroups, axis: number): GroupLattice | null {
+    groups.lattices ??= [];
+    const cached = groups.lattices[axis];
+    if (cached !== undefined) return cached;
+    const position = axis === 0 ? groups.x : axis === 1 ? groups.y : groups.z;
+    const values = Float64Array.from(position).sort();
+    let result: GroupLattice | null = null;
+    if (values.length) {
+        const origin = values[0];
+        let pitch = Infinity;
+        for (let i = 1; i < values.length; i++) {
+            const gap = values[i] - values[i - 1];
+            if (gap > 1e-12 * Math.max(1, Math.abs(values[i])) && gap < pitch) pitch = gap;
+        }
+        if (!Number.isFinite(pitch)) pitch = 1;      // a single position
+        const span = Math.round((values[values.length - 1] - origin) / pitch) + 1;
+        const slot = new Int32Array(groups.count);
+        let onLattice = span <= 1 << 22;
+        for (let g = 0; g < groups.count && onLattice; g++) {
+            const offset = (position[g] - origin) / pitch;
+            slot[g] = Math.round(offset);
+            if (Math.abs(offset - slot[g]) > 1e-6) onLattice = false;
+        }
+        if (onLattice) result = { origin, pitch, span, slot };
+    }
+    groups.lattices[axis] = result;
+    return result;
 }
 
 /**
@@ -567,6 +696,163 @@ function sumMembers(
     return any;
 }
 
+/** Taylor terms the lattice synthesis may use before falling back. */
+const LATTICE_MAX_TERMS = 24;
+/** Truncation error the lattice synthesis accepts, relative to the signal. */
+const LATTICE_TOLERANCE = 1e-13;
+
+/**
+ * Readout synthesis on the lattice of group positions.
+ *
+ * On a gradient plateau along one axis, group g contributes
+ *   A_g · e^{i2π k(t)·x_g} · e^{z_g τ},   z_g = −R2_g + i2π·Δf_g,
+ * and the positions x_g of stratified spins sit on a lattice x₀ + jδ shared
+ * by every voxel. Expanding e^{z_g τ} = e^{z̄τ} Σ_m (δz_g τ)^m / m! around the
+ * mean z̄ turns the sum over groups into M sums over lattice points:
+ *   S(τ) = e^{z̄τ} Σ_m τ^m · Σ_j C_{m,j} e^{i2π k(t)·x_j},
+ *   C_{m,j} = Σ_{g at j} A_g (δz_g)^m / m!.
+ * Groups sharing a position (the rows of a column, for an x readout) cost
+ * one coefficient update each instead of one phasor per sample, which is
+ * what makes continuous phantoms (one group per spin) affordable. M is chosen
+ * so the truncation stays below LATTICE_TOLERANCE.
+ *
+ * Returns false, leaving the sums untouched, when the readout uses more than
+ * one axis, the positions are not on a lattice, the spread of z needs too
+ * many terms, or the lattice would not be smaller than the groups.
+ */
+function synthesizeOnLattice(
+    segment: AdcSegment,
+    groups: ReadoutGroups,
+    gRe: Float64Array,
+    gIm: Float64Array,
+    coils: number,
+    k: Float64Array,
+    times: Float64Array,
+    sumRe: Float64Array,
+    sumIm: Float64Array,
+): boolean {
+    const axes = segment.activeAxes & 7;
+    const axis = axes === 1 ? 0 : axes === 2 ? 1 : axes === 4 ? 2 : -1;
+    if (axis < 0) return false;
+    const lattice = groupLattice(groups, axis);
+    if (!lattice) return false;
+    const { origin, pitch, span } = lattice;
+    const n = segment.numSamples;
+
+    // Groups with signal, their positions and the spread of z.
+    const active: number[] = [];
+    let zRe = 0, zIm = 0;
+    for (let g = 0; g < groups.count; g++) {
+        let nonzero = false;
+        for (let c = 0; c < coils; c++) if (gRe[g * coils + c] !== 0 || gIm[g * coils + c] !== 0) nonzero = true;
+        if (!nonzero) continue;
+        active.push(g);
+        zRe -= groups.r2[g];
+        zIm += 2 * Math.PI * groups.df[g];
+    }
+    if (active.length < 64) return false;
+    zRe /= active.length;
+    zIm /= active.length;
+
+    const tauMax = times[n - 1] - segment.t0;
+    let spread = 0;
+    for (const g of active) {
+        const dRe = -groups.r2[g] - zRe, dIm = 2 * Math.PI * groups.df[g] - zIm;
+        spread = Math.max(spread, Math.sqrt(dRe * dRe + dIm * dIm));
+    }
+    spread *= tauMax;
+    let terms = 1, bound = Math.exp(spread);
+    for (; terms <= LATTICE_MAX_TERMS; terms++) {
+        bound *= spread / terms;
+        if (bound < LATTICE_TOLERANCE) break;
+    }
+    if (terms > LATTICE_MAX_TERMS) return false;
+    // Worth it only when the lattice evaluation is cheaper than per-group phasors.
+    if (span * (1 + terms * coils) > 0.5 * active.length * (1 + coils) || span * terms * coils > 4_000_000) return false;
+
+    const slot = lattice.slot;
+
+    // Coefficients C[m][j][coil], complex.
+    const stride = span * coils;
+    const cRe = new Float64Array(terms * stride), cIm = new Float64Array(terms * stride);
+    for (let i = 0; i < active.length; i++) {
+        const g = active[i];
+        const dRe = -groups.r2[g] - zRe, dIm = 2 * Math.PI * groups.df[g] - zIm;
+        let pRe = 1, pIm = 0;                       // (δz)^m / m!
+        for (let m = 0; m < terms; m++) {
+            for (let c = 0; c < coils; c++) {
+                const ar = gRe[g * coils + c], ai = gIm[g * coils + c];
+                const o = m * stride + slot[g] * coils + c;
+                cRe[o] += ar * pRe - ai * pIm;
+                cIm[o] += ar * pIm + ai * pRe;
+            }
+            const nr = (pRe * dRe - pIm * dIm) / (m + 1);
+            pIm = (pRe * dIm + pIm * dRe) / (m + 1);
+            pRe = nr;
+        }
+    }
+
+    // P[m][s][coil] = Σ_j C[m][j][coil] · e^{i2π k_s x_j}.
+    const pStride = n * coils;
+    const pRe = new Float64Array(terms * pStride), pIm = new Float64Array(terms * pStride);
+    const twoPi = 2 * Math.PI;
+    const step = k[3 + axis] - k[axis];
+    for (let j = 0; j < span; j++) {
+        let any = false;
+        for (let m = 0; m < terms && !any; m++) {
+            for (let c = 0; c < coils; c++) if (cRe[m * stride + j * coils + c] !== 0 || cIm[m * stride + j * coils + c] !== 0) any = true;
+        }
+        if (!any) continue;
+        const x = origin + j * pitch;
+        const stepCycles = step * x;
+        const stepAngle = twoPi * (stepCycles - Math.round(stepCycles));
+        const sRe = Math.cos(stepAngle), sIm = Math.sin(stepAngle);
+        let eRe = 0, eIm = 0;
+        for (let s = 0; s < n; s++) {
+            if (s % RECURRENCE_ANCHOR === 0) {
+                const cycles = k[3 * s + axis] * x;
+                const angle = twoPi * (cycles - Math.round(cycles));
+                eRe = Math.cos(angle);
+                eIm = Math.sin(angle);
+            } else {
+                const nr = eRe * sRe - eIm * sIm;
+                eIm = eRe * sIm + eIm * sRe;
+                eRe = nr;
+            }
+            for (let m = 0; m < terms; m++) {
+                for (let c = 0; c < coils; c++) {
+                    const o = m * stride + j * coils + c;
+                    const ar = cRe[o], ai = cIm[o];
+                    const q = m * pStride + s * coils + c;
+                    pRe[q] += ar * eRe - ai * eIm;
+                    pIm[q] += ar * eIm + ai * eRe;
+                }
+            }
+        }
+    }
+
+    // S(τ) = e^{z̄τ} Σ_m τ^m · P_m.
+    for (let s = 0; s < n; s++) {
+        const tau = times[s] - segment.t0;
+        const decay = Math.exp(zRe * tau);
+        const turns = zIm * tau / twoPi;
+        const angle = twoPi * (turns - Math.round(turns));
+        const wRe = decay * Math.cos(angle), wIm = decay * Math.sin(angle);
+        for (let c = 0; c < coils; c++) {
+            let accRe = 0, accIm = 0, power = 1;
+            for (let m = 0; m < terms; m++) {
+                const q = m * pStride + s * coils + c;
+                accRe += pRe[q] * power;
+                accIm += pIm[q] * power;
+                power *= tau;
+            }
+            sumRe[s * coils + c] += accRe * wRe - accIm * wIm;
+            sumIm[s * coils + c] += accRe * wIm + accIm * wRe;
+        }
+    }
+    return true;
+}
+
 /** Samples between exact re-evaluations of the phasor recurrence. */
 const RECURRENCE_ANCHOR = 64;
 
@@ -579,6 +865,7 @@ function sampleAdc(
     grouper: ReadoutGrouper,
     members: SpinMembers | null,
     area: Float64Array,
+    useLattice: boolean,
 ): void {
     const n = segment.numSamples;
     const coils = members ? members.coils : spins.coils;
@@ -609,7 +896,9 @@ function sampleAdc(
         }
         const twoPi = 2 * Math.PI;
         const dwell = segment.dwell;
-        for (let g = 0; g < groups.count; g++) {
+        const lattice = uniform && useLattice
+            && synthesizeOnLattice(segment, groups, gRe, gIm, coils, k, times, sumRe, sumIm);
+        for (let g = 0; g < groups.count && !lattice; g++) {
             let nonzero = false;
             for (let c = 0; c < coils; c++) if (gRe[g * coils + c] !== 0 || gIm[g * coils + c] !== 0) nonzero = true;
             if (!nonzero) continue;
