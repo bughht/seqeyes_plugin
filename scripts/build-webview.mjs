@@ -10,12 +10,16 @@
  * them in an IIFE when inlining into the webview; the standalone web app
  * loads them directly.
  *
+ * It also bundles the simulation worker (src/sim/worker/entry.ts) into
+ * web/sim-worker.js, with the licence notice of the code it includes.
+ *
  * Usage:  node scripts/build-webview.mjs
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import * as esbuild from 'esbuild';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -72,6 +76,24 @@ fs.writeFileSync(path.join(webDir, 'styles.css'), cssContent, 'utf-8');
 console.log('✓  web/styles.css');
 fs.writeFileSync(path.join(outDir, 'styles.css'), cssContent, 'utf-8');
 console.log('✓  out/editor/webview/assets/styles.css');
+
+// Simulation worker: one self-contained classic script (hosts start it as a
+// Worker from its URL or a Blob). fflate is MIT-licensed, and its notice must
+// travel with every copy, so it leads the bundle.
+const fflateLicence = fs.readFileSync(path.join(ROOT, 'node_modules', 'fflate', 'LICENSE'), 'utf-8').trim();
+esbuild.buildSync({
+    entryPoints: [path.join(ROOT, 'src', 'sim', 'worker', 'entry.ts')],
+    bundle: true,
+    format: 'iife',
+    target: 'es2020',
+    outfile: path.join(webDir, 'sim-worker.js'),
+    banner: {
+        js: '/*! SeqEyes simulation worker. Includes fflate (https://github.com/101arrowz/fflate):\n'
+            + fflateLicence.split('\n').map(line => ' * ' + line).join('\n').replace(/\*\//g, '* /') + '\n */',
+    },
+    logLevel: 'warning',
+});
+console.log('✓  web/sim-worker.js');
 
 // Copy template.html to out/
 const htmlContent = fs.readFileSync(path.join(ASSETS_DIR, 'template.html'), 'utf-8');
