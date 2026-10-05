@@ -18,8 +18,9 @@
 
    The viewer shows the plane of the chosen X and Y dimensions (the others
    fixed by sliders), and below it the line along X through the selected Y:
-   the waveform itself, real, imaginary and magnitude. Parts: magnitude,
-   phase, real, imaginary; magnitude optionally in dB. Pure UI.
+   the waveform itself, real, imaginary and magnitude (a real dataset: its
+   signed values). Parts: magnitude, phase, real, imaginary; magnitude
+   optionally in dB. Pure UI.
    ═══════════════════════════════════════════════════════════════════════ */
 
 var SeqEyesNdView = (function () {
@@ -471,6 +472,9 @@ var SeqEyesNdView = (function () {
       var colors = { re: cssVar(style, '--gx', '#3cb44b'), im: cssVar(style, '--gy', '#4363d8'), abs: cssVar(style, '--fg', '#222'), phase: cssVar(style, '--rf', '#e6194b') };
       if (state.part === 'phase') {
         traces.push({ key: 'phase', label: '∠', values: data.re.map(function (r, i) { return Math.atan2(data.im[i], r); }) });
+      } else if (!dataset.im && !state.fft[state.x]) {
+        // Real data keeps its sign (an inverted Mz is −1, not 1).
+        traces.push({ key: 'abs', label: 'value', values: data.re });
       } else {
         traces.push({ key: 'abs', label: '|·|', values: data.re.map(function (r, i) { return Math.hypot(r, data.im[i]); }) });
         if (dataset.im || state.fft[state.x]) {
@@ -505,7 +509,8 @@ var SeqEyesNdView = (function () {
         context.beginPath(); context.moveTo(tx, top); context.lineTo(tx, top + h); context.stroke();
         context.fillText(coordinateText(state.x, Math.round(xi)), tx + 2, size.h - 8);
       }
-      // Traces; past two points per pixel, each pixel column draws its min–max.
+      // Traces; past two points per pixel, each pixel column draws its first,
+      // lowest, highest and last value, joined to the next column.
       var perPixel = n / Math.max(1, w);
       traces.forEach(function (trace) {
         context.strokeStyle = colors[trace.key]; context.lineWidth = trace.key === 'abs' ? 1.4 : 1;
@@ -516,13 +521,18 @@ var SeqEyesNdView = (function () {
             if (i === 0) context.moveTo(px, py); else context.lineTo(px, py);
           }
         } else {
+          var started = false;
           for (var column = 0; column < w; column++) {
             var from = Math.floor(column * perPixel), to = Math.min(n, Math.floor((column + 1) * perPixel));
+            if (to <= from) continue;
             var low = Infinity, high = -Infinity;
             for (var k = from; k < to; k++) { var v = trace.values[k]; if (v < low) low = v; if (v > high) high = v; }
-            if (low > high) continue;
-            context.moveTo(left + column + 0.5, yOf(high));
-            context.lineTo(left + column + 0.5, yOf(low) + 0.5);
+            var cx = left + column + 0.5;
+            if (started) context.lineTo(cx, yOf(trace.values[from])); else context.moveTo(cx, yOf(trace.values[from]));
+            started = true;
+            context.lineTo(cx, yOf(low));
+            context.lineTo(cx, yOf(high));
+            context.lineTo(cx, yOf(trace.values[to - 1]));
           }
         }
         context.stroke();

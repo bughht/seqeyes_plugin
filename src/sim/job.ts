@@ -11,6 +11,8 @@
  *     spins per tissue per column instead of every voxel. Folding pays off
  *     for phantoms with few distinct tissues (Shepp–Logan, label maps);
  *     continuous maps (BrainWeb) have nearly one class per voxel;
+ *   - through-slice sampling: sub-slices along z where the sequence's pulses
+ *     act (plan/slices.ts), with a spacing probed like the spins per voxel;
  *   - chunks: whole columns (rows) when y (x) folds, else voxels in readout
  *     order, so classes and readout groups stay inside a chunk.
  * The split depends only on the settings, never on the worker count, and
@@ -23,16 +25,20 @@ import { parseSequenceBytes } from '../pulseq/sequenceReader';
 import { simulateReference, type SimulationOptions } from './engine/reference';
 import { sheppLoganPhantom2D } from './phantom/builtin';
 import {
+    assignPlanes,
     foldedPhantomSpins,
     occupiedVoxels,
     phantomSpins,
     physicsTable,
+    planeMaps,
     syntheticCoils,
     type Phantom2D,
     type PhysicsTable,
+    type ThroughSlice,
 } from './phantom/model';
 import { analyzeDephasing, foldableAxes, intervalCycles, resolutionCount, type DephasingAnalysis } from './plan/dephasing';
 import { POWER_OF_TWO_COUNTS, probeSubSpins, type ProbeResult, type ProbeTissue } from './plan/probe';
+import { measurePulses, planSlices, probeSliceDensity, type PulseResponse, type SlicePlan } from './plan/slices';
 import { compileProgram, type SimProgram } from './program/compile';
 import type { SimSegment } from './program/types';
 import { reconstructCartesian, type CartesianRecon } from './recon/cartesian';
@@ -57,6 +63,18 @@ export interface SpinBands {
     y: number;
 }
 
+/** The sub-slices a plan chose, for other workers to reuse without measuring (see JobPlan.resolvedSlices). */
+export interface ResolvedSlices {
+    kind: 'slices';
+    z: number[];
+    weight: number[];
+    density: number;
+    reference: number;
+    ranges: [number, number][];
+    extent: SlicePlan['extent'];
+    coarsened: boolean;
+}
+
 export interface JobSettings {
     phantom: PhantomSource;
     /** Synthetic receive coils for phantoms without coil maps (default 1: a uniform coil). */
@@ -71,6 +89,11 @@ export interface JobSettings {
      * the most spins.
      */
     tolerance?: number;
+    /**
+     * Spins along z: 'auto' places sub-slices where the sequence's pulses act
+     * (default), 'off' keeps every spin at z = 0, or a resolved plan.
+     */
+    throughSlice?: 'auto' | 'off' | ResolvedSlices;
 }
 
 /** Planning can take seconds (the probe simulates voxels); these report where it is. */
@@ -115,7 +138,11 @@ export interface JobPlan {
     bands: SpinBandPlan[] | null;
     /** What the plan resolved to, for other workers (see SpinBands). */
     resolved: [number, number] | SpinBands;
-    /** Spins in the phantom (every voxel × sub-spins). */
+    /** Through-slice sampling, or null when every spin sits at z = 0. */
+    slices: SliceSummary | null;
+    /** The sub-slices as other workers take them (JobSettings.throughSlice). */
+    resolvedSlices: ResolvedSlices | 'off';
+    /** Spins in the phantom (every voxel × sub-spins × sub-slices). */
     spins: number;
     /** Spins actually simulated (classes; equals `spins` when nothing folds). */
     simulated: number;
@@ -148,15 +175,43 @@ export interface RawLayout {
     labels: { names: string[]; kinds: string[]; values: Int32Array };
 }
 
-/** Phantom spins beyond which a job is refused. */
-export const MAX_JOB_SPINS = 32_000_000;
+export interface SliceSummary {
+    /** Sub-slices, and the ranges they cover [m]. */
+    count: number;
+    ranges: [number, number][];
+    /** Sub-slices per 1/Kz (plan/slices.ts). */
+    density: number;
+    /** Slice thickness the sub-slice weights refer to [m]. */
+    reference: number;
+    extent: SlicePlan['extent'];
+    coarsened: boolean;
+    /** Phantom planes the sub-slices take their maps from (1: a 2-D phantom, extruded). */
+    planes: number;
+    /** The density probe's verdict, when it ran. */
+    probe: { error: number; capped: boolean; tested: { density: number; slices: number; error: number }[] } | null;
+}
+
+/** Spins a job stores (members when folded) beyond which it is refused. */
+export const MAX_JOB_SPINS = 64_000_000;
 /** Simulated spins (classes) beyond which a job is refused. */
-export const MAX_JOB_SIMULATED = 4_000_000;
+export const MAX_JOB_SIMULATED = 128_000_000;
+/**
+ * Work (simulated spins × RF pulses) the sub-slices may bring a job to before
+ * the plan takes a coarser tested density. Continuous maps such as BrainWeb
+ * have about one class per spin, so every sub-slice multiplies them; about a
+ * minute on 8 workers.
+ */
+const SLICE_WORK_BUDGET = 4e9;
 /** Receive coils beyond which a job is refused. */
 export const MAX_JOB_COILS = 32;
-/** Chunks hold at least this many spins, and a job has at most MAX_CHUNKS of them. */
+/** Chunks hold MIN…MAX_CHUNK_SPINS spins, and about MAX_CHUNKS of them when that allows. */
 const MIN_CHUNK_SPINS = 16_384;
+const MAX_CHUNK_SPINS = 262_144;
 const MAX_CHUNKS = 64;
+/** Most sub-slices a plan may use. */
+const MAX_SLICES = 512;
+/** Tissues the sub-slice density probe simulates. */
+const SLICE_PROBE_TISSUES = 2;
 /** Programs up to this many blocks keep their segments in memory between chunks. */
 const REPLAY_BLOCK_LIMIT = 200_000;
 /** Tissues the probe simulates (the longest-lived first; see representativeTissues). */
@@ -185,6 +240,10 @@ export class SimulationJob {
     private readonly chunkVoxels: Int32Array[];
     /** Spins along x per voxel when banded (indexed like the maps), else null. */
     private readonly countX: Int32Array | null;
+    /** Sub-slices along z, or null for one plane at z = 0. */
+    private readonly slices: ThroughSlice | null;
+    /** The pulses as measured for this plan (empty when the sub-slices came resolved). */
+    readonly pulses: PulseResponse[];
     private readonly sequenceFov: [number, number, number] | null;
     private trajectory: AdcTrajectory | null = null;
     private readonly hooks: JobHooks;
@@ -217,24 +276,35 @@ export class SimulationJob {
         this.countX = banded ? banded.countX : null;
         // Other workers must reproduce y as this plan chose it.
         if (banded) banded.resolved.y = subSpins[1];
-        const spinsOf = (v: number) => (this.countX ? this.countX[v] : subSpins[0]) * subSpins[1];
-
-        let spins = 0;
-        for (const v of voxels) spins += spinsOf(v);
-        if (spins > MAX_JOB_SPINS) {
-            throw new Error(`${spins.toLocaleString('en-US')} spins exceed the ${MAX_JOB_SPINS.toLocaleString('en-US')} limit; `
-                + 'use a smaller phantom matrix or fewer spins per voxel.');
-        }
-        this.report('Splitting the spins into chunks', 0.95);
+        // Chunk units do not depend on the sub-slices; classes at z = 0 size their cost.
         const units = this.chunkUnits(voxels);
-        const simulated = this.countClasses(units, subSpins, spinsOf);
+        const through = this.planThroughSlice(settings, subSpins, banded?.resolved ?? null, this.countClasses(units, subSpins));
+        this.slices = through.slices;
+        this.pulses = through.pulses;
+        // Sub-slices (spins along z) and planes (member sets) present at each voxel.
+        const { slicesAt, planesAt } = this.presence(voxels);
+        const along = (v: number) => (this.countX ? this.countX[v] : subSpins[0]) * subSpins[1];
+        const spinsOf = (v: number) => along(v) * slicesAt[v];
+
+        let spins = 0, stored = 0;
+        for (const v of voxels) {
+            spins += spinsOf(v);
+            stored += along(v) * (this.fold ? planesAt[v] : slicesAt[v]);
+        }
+        if (stored > MAX_JOB_SPINS) {
+            throw new Error(`${stored.toLocaleString('en-US')} spins exceed the ${MAX_JOB_SPINS.toLocaleString('en-US')} limit; `
+                + 'use a smaller phantom matrix, fewer spins per voxel or fewer sub-slices.');
+        }
+        this.report('Splitting the spins into chunks', 0.97);
+        const simulated = this.countClasses(units, subSpins);
         if (simulated > MAX_JOB_SIMULATED) {
             throw new Error(`${simulated.toLocaleString('en-US')} simulated spins exceed the `
-                + `${MAX_JOB_SIMULATED.toLocaleString('en-US')} limit; use a smaller phantom matrix or fewer spins per voxel.`);
+                + `${MAX_JOB_SIMULATED.toLocaleString('en-US')} limit; use a smaller phantom matrix, fewer spins per voxel or fewer sub-slices.`);
         }
-        this.chunkVoxels = splitUnits(units, spinsOf, Math.max(MIN_CHUNK_SPINS, Math.ceil(spins / MAX_CHUNKS)));
+        const target = Math.max(MIN_CHUNK_SPINS, Math.min(MAX_CHUNK_SPINS, Math.ceil(spins / MAX_CHUNKS)));
+        this.chunkVoxels = splitUnits(units, spinsOf, target);
 
-        const notes = ['2D phantom: one plane at z = 0, so the slice profile and through-plane dephasing are not simulated.'];
+        const notes = through.notes.slice();
         for (const band of banded?.bands ?? []) {
             if (band.capped) {
                 notes.push(`x, T2 ${(band.t2Min * 1000).toFixed(0)}–${Number.isFinite(band.t2Max) ? (band.t2Max * 1000).toFixed(0) : '∞'} ms: `
@@ -269,6 +339,8 @@ export class SimulationJob {
             subSpins,
             bands: banded ? banded.bands : null,
             resolved: banded ? banded.resolved : subSpins,
+            slices: through.summary,
+            resolvedSlices: through.resolved,
             spins,
             simulated,
             chunks: this.chunkVoxels.length,
@@ -287,7 +359,7 @@ export class SimulationJob {
     simulateChunk(index: number, options: SimulationOptions = {}): Float64Array {
         const voxels = this.chunkVoxels[index];
         if (!voxels) throw new Error(`No chunk ${index} (the job has ${this.chunkVoxels.length}).`);
-        const spinOptions = { subSpins: this.plan.subSpins, voxels, countX: this.countX ?? undefined };
+        const spinOptions = { subSpins: this.plan.subSpins, voxels, countX: this.countX ?? undefined, slices: this.slices ?? undefined };
         if (!this.fold) return simulateReference(this.program, phantomSpins(this.phantom, spinOptions), options).signal;
         const { classes, members } = foldedPhantomSpins(this.phantom, this.physics, spinOptions, this.fold);
         return simulateReference(this.program, classes, { ...options, members }).signal;
@@ -346,8 +418,125 @@ export class SimulationJob {
         }
         const coils = Math.round(settings.coils ?? 1);
         if (!(coils >= 1 && coils <= MAX_JOB_COILS)) throw new Error(`Coils must be between 1 and ${MAX_JOB_COILS}, got ${settings.coils}.`);
+        for (const plane of phantom.planes ?? []) {
+            if (plane.maps.pd.length !== phantom.nx * phantom.ny) throw new Error('A phantom plane does not match the phantom matrix size.');
+        }
         if (!phantom.coils && coils > 1) phantom = { ...phantom, coils: syntheticCoils(phantom.nx, phantom.ny, phantom.voxel, coils) };
         return phantom;
+    }
+
+    /**
+     * Sub-slices along z (plan/slices.ts): resolved by another worker, or
+     * measured from the pulses with a density probed on one voxel of the
+     * longest-lived tissues, at the in-plane spins this plan chose.
+     */
+    private planThroughSlice(settings: JobSettings, subSpins: [number, number], bands: SpinBands | null, flatClasses: number): {
+        slices: ThroughSlice | null; summary: SliceSummary | null; resolved: ResolvedSlices | 'off'; pulses: PulseResponse[]; notes: string[];
+    } {
+        const mode = settings.throughSlice ?? 'auto';
+        const flat = 'one plane at z = 0, so slice profiles and through-slice dephasing are not simulated';
+        if (mode === 'off') {
+            return { slices: null, summary: null, resolved: 'off', pulses: [], notes: [`Through-slice sampling is off: ${flat}.`] };
+        }
+        let plan: ResolvedSlices;
+        let probe: SliceSummary['probe'] = null;
+        let pulses: PulseResponse[] = [];
+        let budgetNote = '';
+        if (mode !== 'auto') {
+            plan = mode;
+        } else {
+            this.report('Measuring the RF pulses along z', 0.9);
+            pulses = measurePulses(this.program);
+            const options = {
+                offResonance: this.largestOffResonance(),
+                planeThickness: this.phantom.voxel[2],
+                maxSlices: MAX_SLICES,
+            };
+            const selective = pulses.some(p => p.axis === 'z' && p.bands.length);
+            if (!planSlices(pulses, { ...options, density: 1 })) {
+                const why = selective
+                    ? 'An excitation is not selective along z and the phantom plane has no thickness'
+                    : 'No pulse is selective along z';
+                return { slices: null, summary: null, resolved: 'off', pulses, notes: [`${why}: ${flat}.`] };
+            }
+            this.report('Probing the sub-slice spacing', 0.93);
+            const tissues = representativeTissues(this.physics).slice(0, SLICE_PROBE_TISSUES).map(tissue => ({
+                ...tissue,
+                countX: this.fold & 1 ? 1 : bands ? bandCount(bands, tissue.t2) : subSpins[0],
+            }));
+            const result = probeSliceDensity(this.program, pulses, tissues, {
+                ...options,
+                voxel: [this.phantom.voxel[0], this.phantom.voxel[1]],
+                countY: this.fold & 2 ? 1 : subSpins[1],
+                tolerance: settings.tolerance,
+            })!;
+            probe = { error: result.error, capped: result.capped, tested: result.tested };
+            let chosen = result.plan;
+            // Each sub-slice repeats the classes: past the budget, the finest
+            // tested density that fits (the coarsest when none does).
+            const work = (slices: number) => flatClasses * slices * Math.max(1, this.analysis.rfEvents);
+            if (work(chosen.z.length) > SLICE_WORK_BUDGET) {
+                const fitting = result.tested.filter(t => work(t.slices) <= SLICE_WORK_BUDGET);
+                const pick = fitting.length ? fitting[fitting.length - 1] : result.tested[0];
+                if (pick && pick.density < chosen.density) {
+                    chosen = planSlices(pulses, { ...options, density: pick.density })!;
+                    budgetNote = `Through-slice: ${chosen.z.length} sub-slices instead of ${result.plan.z.length} to keep the run affordable `
+                        + `(about ${(100 * pick.error).toFixed(0)} % signal error from the z sampling; choose Fast or Draft accuracy to make that the default).`;
+                }
+            }
+            plan = {
+                kind: 'slices',
+                z: Array.from(chosen.z), weight: Array.from(chosen.weight),
+                density: chosen.density, reference: chosen.reference,
+                ranges: chosen.ranges, extent: chosen.extent, coarsened: chosen.coarsened,
+            };
+        }
+        const z = Float64Array.from(plan.z);
+        const slices: ThroughSlice = { z, weight: Float64Array.from(plan.weight), plane: assignPlanes(this.phantom, z) };
+        const planes = new Set(Array.from(slices.plane)).size;
+        const summary: SliceSummary = {
+            count: z.length, ranges: plan.ranges, density: plan.density, reference: plan.reference,
+            extent: plan.extent, coarsened: plan.coarsened, planes, probe,
+        };
+        const mm = (value: number) => +(value * 1000).toFixed(2);
+        const notes: string[] = [];
+        const span = plan.ranges.map(([a, b]) => `${mm(a)}…${mm(b)}`).join(', ');
+        notes.push(plan.extent === 'plane'
+            ? `An excitation is not selective along z: ${z.length} sub-slices span only the phantom plane's ${mm(this.phantom.voxel[2])} mm.`
+            : `Through-slice: ${z.length} sub-slices over z = ${span} mm (slice ${mm(plan.reference)} mm FWHM).`);
+        notes.push(this.phantom.planes?.length
+            ? `${planes} phantom planes along z, ${mm(this.phantom.voxel[2])} mm apart.`
+            : 'The 2-D phantom is extruded along z: every sub-slice sees the same plane.');
+        if (plan.coarsened) notes.push(`The sub-slice spacing was widened to stay within ${MAX_SLICES} sub-slices.`);
+        if (budgetNote) notes.push(budgetNote);
+        if (probe?.capped) {
+            notes.push(`Through-slice: the finest spacing tried did not reach the ${tolerancePercent(settings)} target `
+                + `(error ${Number.isFinite(probe.error) ? (100 * probe.error).toFixed(0) : '?'} %).`);
+        }
+        return { slices, summary, resolved: plan, pulses, notes };
+    }
+
+    /** Largest |B0 offset| among the phantom's occupied voxels [Hz]. */
+    private largestOffResonance(): number {
+        let largest = 0;
+        for (const maps of [this.phantom.maps, ...(this.phantom.planes ?? []).map(plane => plane.maps)]) {
+            if (!maps.b0) continue;
+            for (let i = 0; i < maps.b0.length; i++) if (maps.pd[i] > 0) largest = Math.max(largest, Math.abs(maps.b0[i]));
+        }
+        return largest;
+    }
+
+    /** Sub-slices and distinct planes with PD > 0 at each voxel. */
+    private presence(voxels: Int32Array): { slicesAt: Int32Array; planesAt: Int32Array } {
+        const cells = this.phantom.nx * this.phantom.ny;
+        const slicesAt = new Int32Array(cells), planesAt = new Int32Array(cells);
+        const planeOf = this.slices ? Array.from(this.slices.plane) : [-1];
+        const used = [...new Set(planeOf)];
+        for (const v of voxels) {
+            for (const plane of planeOf) if (planeMaps(this.phantom, plane).pd[v] > 0) slicesAt[v]++;
+            for (const plane of used) if (planeMaps(this.phantom, plane).pd[v] > 0) planesAt[v]++;
+        }
+        return { slicesAt, planesAt };
     }
 
     private planAxis(axis: 0 | 1, voxel: number, settings: JobSettings): AxisPlan {
@@ -393,7 +582,8 @@ export class SimulationJob {
     private planBands(voxels: Int32Array, voxel: number, settings: JobSettings):
         { axis: AxisPlan; countX: Int32Array; bands: SpinBandPlan[]; resolved: SpinBands } | null {
         const folded = (this.fold & 1) !== 0;
-        const t2 = this.phantom.maps.t2;
+        // A voxel's band is set by its longest-lived tissue over the planes.
+        const { t1, t2 } = this.longestTimes();
         const bandOf = (v: number, edges: readonly number[]) => {
             const time = Number.isFinite(t2[v]) && t2[v] > 0 ? t2[v] : Infinity;
             let b = 0;
@@ -424,7 +614,7 @@ export class SimulationJob {
                 // The band's bound: its longest T2 with its longest T1.
                 let t1Max = 0, t2Max = 0;
                 for (const v of members[b]) {
-                    const time1 = Number.isFinite(this.phantom.maps.t1[v]) ? this.phantom.maps.t1[v] : 1e9;
+                    const time1 = Number.isFinite(t1[v]) ? t1[v] : 1e9;
                     const time2 = Number.isFinite(t2[v]) ? t2[v] : 1e9;
                     t1Max = Math.max(t1Max, time1);
                     t2Max = Math.max(t2Max, time2);
@@ -460,6 +650,23 @@ export class SimulationJob {
         return { axis, countX, bands, resolved: { kind: 'bands', edges, counts, y } };
     }
 
+    /** Per voxel, the longest T1 and T2 among the planes where it has PD (the own plane's maps without planes). */
+    private longestTimes(): { t1: Float32Array; t2: Float32Array } {
+        const planes = this.phantom.planes ?? [];
+        if (!planes.length) return { t1: this.phantom.maps.t1, t2: this.phantom.maps.t2 };
+        const cells = this.phantom.nx * this.phantom.ny;
+        const t1 = new Float32Array(cells), t2 = new Float32Array(cells);
+        const life = (time: number) => (Number.isFinite(time) && time > 0 ? time : Infinity);
+        for (const maps of [this.phantom.maps, ...planes.map(plane => plane.maps)]) {
+            for (let v = 0; v < cells; v++) {
+                if (!(maps.pd[v] > 0)) continue;
+                t1[v] = Math.max(t1[v], life(maps.t1[v]));
+                t2[v] = Math.max(t2[v], life(maps.t2[v]));
+            }
+        }
+        return { t1, t2 };
+    }
+
     /** Voxels grouped into the units chunks are cut from (see the file comment). */
     private chunkUnits(voxels: Int32Array): Int32Array[] {
         const nx = this.phantom.nx;
@@ -477,20 +684,44 @@ export class SimulationJob {
     }
 
     /** Simulated spins over all chunks: classes when folded, else every spin. */
-    private countClasses(units: Int32Array[], subSpins: [number, number], spinsOf: (v: number) => number): number {
-        if (!this.fold) return units.reduce((sum, unit) => sum + unit.reduce((s, v) => s + spinsOf(v), 0), 0);
-        // Per unit: distinct physics entries × sub-positions along the unfolded
-        // axes. With both axes folded, chunks repeat the same few classes,
-        // which this count ignores.
-        if (this.fold === 3) return this.physics.t1.length;
+    private countClasses(units: Int32Array[], subSpins: [number, number]): number {
+        const planeOf = this.slices ? Array.from(this.slices.plane) : [-1];
+        const slicesOfPlane = new Map<number, number>();
+        for (const plane of planeOf) slicesOfPlane.set(plane, (slicesOfPlane.get(plane) ?? 0) + 1);
+        const along = (v: number) => (this.countX ? this.countX[v] : subSpins[0]);
+        if (!this.fold) {
+            let total = 0;
+            for (const unit of units) {
+                for (const v of unit) {
+                    for (const [plane, count] of slicesOfPlane) if (planeMaps(this.phantom, plane).pd[v] > 0) total += along(v) * subSpins[1] * count;
+                }
+            }
+            return total;
+        }
+        // Per unit: distinct (physics entry, plane) × sub-positions along the
+        // unfolded axes × the plane's sub-slices. With both axes folded,
+        // chunks repeat the same few classes, which this count ignores.
+        if (this.fold === 3) {
+            let total = 0;
+            for (const [plane, count] of slicesOfPlane) {
+                const entries = new Set<number>();
+                const of = plane < 0 ? this.physics.of : this.physics.ofPlanes[plane];
+                for (const unit of units) for (const v of unit) if (of[v] >= 0) entries.add(of[v]);
+                total += entries.size * count;
+            }
+            return total;
+        }
         let total = 0;
         for (const unit of units) {
-            // One class per physics entry and unfolded position; banded counts make positions differ.
-            const seen = new Map<number, number>();
+            // One class per physics entry, plane and unfolded position; banded counts make positions differ.
+            const seen = new Map<string, number>();
             for (const v of unit) {
-                const along = this.fold & 1 ? 1 : (this.countX ? this.countX[v] : subSpins[0]);
-                const key = this.physics.of[v] * 8192 + along;
-                seen.set(key, along * (this.fold & 2 ? 1 : subSpins[1]));
+                const positions = this.fold & 1 ? 1 : along(v);
+                for (const [plane, count] of slicesOfPlane) {
+                    const of = plane < 0 ? this.physics.of : this.physics.ofPlanes[plane];
+                    if (of[v] < 0) continue;
+                    seen.set(`${of[v]}|${positions}|${plane}`, positions * (this.fold & 2 ? 1 : subSpins[1]) * count);
+                }
             }
             for (const count of seen.values()) total += count;
         }
@@ -536,6 +767,14 @@ export class ChunkAccumulator {
 
 function tolerancePercent(settings: JobSettings): string {
     return `${+(100 * (settings.tolerance ?? 0.02)).toFixed(1)} %`;
+}
+
+/** Spins along x a band plan gives a tissue of this T2. */
+function bandCount(bands: SpinBands, t2: number): number {
+    const time = Number.isFinite(t2) && t2 > 0 ? t2 : Infinity;
+    let b = 0;
+    while (b < bands.edges.length - 1 && time > bands.edges[b]) b++;
+    return bands.counts[b] || Math.max(...bands.counts);
 }
 
 function clampCount(value: number): number {

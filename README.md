@@ -210,7 +210,7 @@ where k-space is refused, and the k-space safety dialog offers it as a way out.
 ## Simulation (preview, standalone web app)
 
 The **Simulation** toggle next to the k-space/spectrogram button runs a Bloch
-simulation of the open sequence on a 2-D phantom, entirely in your browser
+simulation of the open sequence on a phantom, entirely in your browser
 (Web Workers, no server), and shows the raw data and a reconstruction.
 
 **Phantoms**
@@ -227,6 +227,23 @@ simulation of the open sequence on a 2-D phantom, entirely in your browser
   ADC, B0, B1, or NIfTI maps (`name_T1.nii.gz`, …). 3-D phantoms get a plane
   and slice selector; B0/B1 come from the file, MRzero-style synthetic maps,
   or ideal fields; synthetic receive coils give multi-coil data.
+
+**RF pulses and the slab.** Every RF pulse goes through the same Bloch
+stepping, raster cell by raster cell, with the gradients playing at the time,
+its frequency and phase, and each spin's off-resonance and B1. Excitation,
+refocusing, adiabatic inversion, VERSE, multiband, spectral-spatial and fat
+saturation pulses need no special treatment. **Slices: auto** (the default)
+also places spins along z wherever the sequence's pulses act. Each pulse's
+response is measured first, and sub-slices go across its slab, or its bands
+for a multiband pulse, at a spacing set by the pulse's k-space extent. A
+one-voxel probe checks that spacing against a finer one. Slice profiles,
+transition bands, refocusing slabs narrower than the excitation, and missing
+slice rephasers then show in the signal as on a scanner. A 2-D phantom is
+extruded through the slab; a 3-D phantom brings the planes its slabs reach.
+**Slices: z = 0** keeps every spin in one plane, which is faster. The **RF
+pulses** tab shows each pulse's measured tip angle, |Mxy|, Mz, Mx and My
+across z, or against off-resonance for pulses without a z gradient, as soon
+as a sequence is open.
 
 **Viewing the data.** Phantom maps, raw data (by the sequence's labels — LIN,
 PAR, SLC, ECO, REP, … — by acquisition, or every sample in time order),
@@ -250,15 +267,20 @@ needs the most spins, so a looser target is faster on long scans.
 and Gadgetron), the ISMRMRD stream format, a NumPy `.npz` with data,
 trajectory, labels and times, or the current view as PNG.
 
-**What it simulates**: exact spin-domain RF on the native raster (slice-
-selective pulses), relaxation, gradients, RF/ADC phase and frequency offsets,
-B0 and B1 maps, receive coils. The number of spins per voxel along a spoiled
-axis is measured, not guessed: a one-voxel probe per tissue finds the count
-whose signal stays within 2 % of a reference that cannot alias — long-T2 CSF
-in an RF-spoiled GRE needs a few hundred. **Not yet**: the slice profile
-(the phantom is one plane at z = 0), T2′ and diffusion (maps are shown but
-not simulated), non-Cartesian gridding (the preview recon snaps samples to the
-nearest Cartesian cell), and the VS Code and MATLAB hosts.
+**What it simulates**: exact spin-domain RF on the native raster, through
+the slab (see above), with relaxation, gradients, RF/ADC phase and frequency
+offsets, B0 and B1 maps and receive coils. The number of spins per voxel
+along a spoiled axis is measured, not guessed. A one-voxel probe per tissue
+finds the count whose signal stays within 2 % of a reference that cannot
+alias; long-T2 CSF in an RF-spoiled GRE needs a few hundred. Sub-slices
+multiply the work. When a continuous map such as BrainWeb would take too
+long, the plan takes a coarser tested spacing and says so. **Not yet**:
+- T2′ and diffusion: the maps are shown but not simulated;
+- 3-D encoding;
+- dynamic pTx;
+- non-Cartesian gridding (the preview recon snaps samples to the nearest
+  Cartesian cell);
+- the VS Code and MATLAB hosts.
 
 ## Usage
 

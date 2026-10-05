@@ -4,6 +4,7 @@
  *
  * Messages (panel → worker):
  *   { type: 'phantom', id, request }                 load or re-slice a phantom
+ *   { type: 'pulses',  id, bytes, name }             measure every RF pulse (plan/slices.ts)
  *   { type: 'open',    job, bytes, name, settings, layout? }  parse, compile, plan
  *   { type: 'previewOpen', id, bytes, name }         recon context for live previews
  *   { type: 'preview', id, signal, coils }           reconstruct a partial signal
@@ -12,7 +13,8 @@
  *   { type: 'export',  job, id, format, signal }     ISMRMRD / NumPy file bytes
  *   { type: 'close',   job }                         release the job
  * Replies (worker → panel):
- *   { type: 'phantom', id, volume, phantom }   { type: 'plan', job, plan, layout? }
+ *   { type: 'phantom', id, volume, phantom }   { type: 'pulses', id, pulses }
+ *   { type: 'plan', job, plan, layout? }
  *   { type: 'planProgress', job, message, fraction }   { type: 'preview', id, recon }
  *   { type: 'progress', job, chunk, fraction } { type: 'chunk', job, chunk, signal, ms }
  *   { type: 'recon', job, recon, layout }      { type: 'export', job, id, name, mime, bytes }
@@ -27,22 +29,28 @@ import { SimulationJob, type JobSettings } from '../job';
 import { sheppLoganPhantom2D } from '../phantom/builtin';
 import { loadPhantomFiles, withFieldMode, type FieldMapMode } from '../phantom/files';
 import { sliceVolume, type Phantom2D, type PhantomVolume, type SliceOptions } from '../phantom/model';
+import { measurePulses, planSlices, type PulseResponse } from '../plan/slices';
 import { standardSelfPort } from '../platform/browser';
 import { compileProgram } from '../program/compile';
 import { reconstructCartesian } from '../recon/cartesian';
 import { adcTrajectory, type AdcTrajectory } from '../recon/trajectory';
 import { parseSequenceBytes } from '../../pulseq/sequenceReader';
 
+/**
+ * With `sequence`, a plane of a volume comes with the neighbouring planes
+ * the sequence's slabs reach, for through-slice sampling.
+ */
 type PhantomRequest =
     /** The built-in phantom in the FOV of the given sequence (0.256 m without one). */
     | { kind: 'shepp-logan'; size: number; sequence?: ArrayBuffer; name?: string }
     /** Parse files into a volume (kept for re-slicing) and return one plane. */
-    | { kind: 'files'; files: { name: string; bytes: ArrayBuffer }[]; fields: FieldMapMode; slice: SliceOptions }
+    | { kind: 'files'; files: { name: string; bytes: ArrayBuffer }[]; fields: FieldMapMode; slice: SliceOptions; sequence?: ArrayBuffer; name?: string }
     /** Another plane, or other field maps, of the volume loaded last. */
-    | { kind: 'slice'; fields: FieldMapMode; slice: SliceOptions };
+    | { kind: 'slice'; fields: FieldMapMode; slice: SliceOptions; sequence?: ArrayBuffer; name?: string };
 
 type Request =
     | { type: 'phantom'; id: number; request: PhantomRequest }
+    | { type: 'pulses'; id: number; bytes: ArrayBuffer; name: string }
     | { type: 'open'; job: number; bytes: ArrayBuffer; name: string; settings: JobSettings; layout?: boolean }
     | { type: 'previewOpen'; id: number; bytes: ArrayBuffer; name: string }
     | { type: 'preview'; id: number; signal: Float64Array; coils: number }
@@ -77,7 +85,9 @@ function jobFor(id: number): SimulationJob {
 /** Every buffer a phantom holds, so it can be transferred rather than copied. */
 function phantomBuffers(phantom: Phantom2D): ArrayBuffer[] {
     const buffers = new Set<ArrayBuffer>();
-    for (const map of Object.values(phantom.maps)) if (map) buffers.add(map.buffer as ArrayBuffer);
+    for (const maps of [phantom.maps, ...(phantom.planes ?? []).map(plane => plane.maps)]) {
+        for (const map of Object.values(maps)) if (map) buffers.add(map.buffer as ArrayBuffer);
+    }
     if (phantom.coils) {
         buffers.add(phantom.coils.re.buffer as ArrayBuffer);
         buffers.add(phantom.coils.im.buffer as ArrayBuffer);
@@ -109,8 +119,40 @@ function loadPhantom(request: PhantomRequest): { volume: ReturnType<typeof volum
     } else if (!volume) {
         throw new Error('Load a phantom file first.');
     }
-    const phantom = sliceVolume(withFieldMode(volume, request.fields), request.slice);
+    const fielded = withFieldMode(volume, request.fields);
+    const slice: SliceOptions = { ...request.slice };
+    if (request.sequence) {
+        const neighbours = neighbourRange(fielded, slice, new Uint8Array(request.sequence), request.name ?? '');
+        if (neighbours) slice.neighbours = neighbours;
+    }
+    const phantom = sliceVolume(fielded, slice);
     return { volume: volumeSummary(volume), phantom };
+}
+
+/**
+ * Plane offsets along the slice's normal that the sequence's sub-slices can
+ * reach (plan/slices.ts), or undefined when one plane is enough: a single
+ * plane, or no slab selective along z.
+ */
+function neighbourRange(v: PhantomVolume, slice: SliceOptions, sequence: Uint8Array, name: string): [number, number] | undefined {
+    const plane = slice.plane ?? 'xy';
+    const normal = plane === 'xy' ? 2 : plane === 'xz' ? 1 : 0;
+    if (v.shape[normal] < 2) return undefined;
+    const spacing = v.voxel[normal];
+    let offResonance = 0;
+    if (v.maps.b0) for (let i = 0; i < v.maps.b0.length; i++) if (v.maps.pd[i] > 0) offResonance = Math.max(offResonance, Math.abs(v.maps.b0[i]));
+    const plan = planSlices(measurePulses(compileProgram(parseSequenceBytes(sequence, name))), {
+        density: 1, planeThickness: spacing, offResonance,
+    });
+    if (!plan || plan.extent === 'plane' || !(spacing > 0)) return undefined;
+    const lo = Math.min(...plan.ranges.map(r => Math.round(r[0] / spacing)));
+    const hi = Math.max(...plan.ranges.map(r => Math.round(r[1] / spacing)));
+    return lo === 0 && hi === 0 ? undefined : [lo, hi];
+}
+
+/** Every buffer of the measured pulses, for transfer. */
+function pulseBuffers(pulses: PulseResponse[]): ArrayBuffer[] {
+    return pulses.flatMap(p => [p.offsets, p.mx, p.my, p.mz].map(a => a.buffer as ArrayBuffer));
 }
 
 function handle(request: Request): void {
@@ -118,6 +160,11 @@ function handle(request: Request): void {
         case 'phantom': {
             const result = loadPhantom(request.request);
             port.post({ type: 'phantom', id: request.id, ...result }, phantomBuffers(result.phantom));
+            return;
+        }
+        case 'pulses': {
+            const pulses = measurePulses(compileProgram(parseSequenceBytes(new Uint8Array(request.bytes), request.name)));
+            port.post({ type: 'pulses', id: request.id, pulses }, pulseBuffers(pulses));
             return;
         }
         case 'open': {

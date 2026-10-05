@@ -93,7 +93,10 @@ describe('simulate and reconstruct a Pulseq demo GRE', () => {
         // 2 mm in the centre of the 128² FOV keeps this quick.
         const program = compileProgram(seq);
         const m = 32, voxel = fov[0] / n;
-        const job = new SimulationJob(bytes, path, { phantom: { kind: 'shepp-logan', size: m, fov: [m * voxel, m * voxel] }, subSpins: 'auto' });
+        // At z = 0: the prediction is for the nominal flip (slice profiles are tested in slices.test.ts).
+        const job = new SimulationJob(bytes, path, {
+            phantom: { kind: 'shepp-logan', size: m, fov: [m * voxel, m * voxel] }, subSpins: 'auto', throughSlice: 'off',
+        });
         expect(job.plan.axes.map(axis => axis.reason)).toEqual(['spoiling', 'none']);
         const grid = sheppLoganPhantom(m, m * voxel, m * voxel);
         let total: ChunkAccumulator | null = null;

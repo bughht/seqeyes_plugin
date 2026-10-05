@@ -205,6 +205,7 @@
     <span class="ulbl">Spins/voxel</span>
     <select id="simSpins" aria-label="Spins per voxel" title="Spins per voxel along x × y. Auto simulates one voxel per tissue to find how many the sequence's spoiling needs."></select>
     <select id="simAccuracy" aria-label="Accuracy target" title="What Auto aims for: the signal error it accepts from simulating each voxel with a finite number of spins. Long-T2 tissue (CSF) needs the most spins; a looser target is faster."></select>
+    <select id="simSlices" aria-label="Through-slice sampling" title="Spins along z. Auto places sub-slices wherever the sequence's pulses act along z (slice profiles, refocusing and inversion slabs, multiband), with a spacing it checks by simulation; z = 0 keeps every spin in one plane."></select>
     <button id="simRun" type="button" title="Simulate the open sequence">▶ Run</button>
     <button id="simCancel" type="button" disabled title="Stop the simulation">■</button>
     <select id="simExport" aria-label="Export" title="Export the simulated raw data (ISMRMRD, NumPy) or the current view"></select>
@@ -212,6 +213,7 @@
   <div id="simViewBar">
     <span id="simData" role="tablist" aria-label="Data"></span>
     <select id="simRawOrder" aria-label="Raw data order" title="Index raw data by the sequence's labels (LIN, PAR, SLC, ECO, …) or by acquisition order" hidden></select>
+    <select id="simRfAxis" aria-label="RF response axis" title="Pulses that select along z: their response across z. Every pulse: its response against off-resonance at the isocentre." hidden></select>
     <span class="ulbl">X</span><select id="simAxisX" aria-label="Horizontal axis" title="Dimension shown across the image, and along the line plot"></select>
     <span class="ulbl">Y</span><select id="simAxisY" aria-label="Vertical axis" title="Dimension shown down the image; none shows the line plot only"></select>
     <span id="simParts" role="group" aria-label="Complex part"><button type="button" data-part="abs" title="Magnitude">|·|</button><button type="button" data-part="phase" title="Phase">∠</button><button type="button" data-part="re" title="Real part">Re</button><button type="button" data-part="im" title="Imaginary part">Im</button></span>

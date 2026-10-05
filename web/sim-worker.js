@@ -789,12 +789,12 @@
     const datatype = new ByteList();
     encodeDatatype(dataset.type, datatype);
     const fill = Uint8Array.of(3, dataset.vlen ? 2 : 10);
-    const layout = new ByteList().u8(3).u8(1).u64(dataset.dataAddress).u64(dataset.count * dataset.elementSize);
+    const layout2 = new ByteList().u8(3).u8(1).u64(dataset.dataAddress).u64(dataset.count * dataset.elementSize);
     return [
       { type: MSG_DATASPACE, flags: 0, body: space.result() },
       { type: MSG_DATATYPE, flags: MSG_FLAG_CONSTANT, body: datatype.result() },
       { type: MSG_FILL_VALUE, flags: MSG_FLAG_CONSTANT, body: fill },
-      { type: MSG_LAYOUT, flags: 0, body: layout.result() }
+      { type: MSG_LAYOUT, flags: 0, body: layout2.result() }
     ];
   }
   var messagesOf = (node) => node.kind === "group" ? groupMessages(node) : datasetMessages(node);
@@ -1467,21 +1467,21 @@
     set: "SET",
     segment: "SEG"
   };
-  function planExport(layout, grid) {
-    const names = layout.labels.names;
+  function planExport(layout2, grid) {
+    const names = layout2.labels.names;
     const width = names.length;
     const column = (name) => names.indexOf(name);
     const label = (a, name) => {
       const c = column(name);
-      return c >= 0 ? layout.labels.values[a * width + c] : 0;
+      return c >= 0 ? layout2.labels.values[a * width + c] : 0;
     };
     const has = (name) => column(name) >= 0;
     const raw = [];
     const labelled = COUNTERS.filter((counter) => has(LABEL_OF[counter]));
-    for (let a = 0; a < layout.acquisitions; a++) {
+    for (let a = 0; a < layout2.acquisitions; a++) {
       const values = {};
       for (const counter of COUNTERS) values[counter] = label(a, LABEL_OF[counter]);
-      if (!has("LIN") && grid.delta) values.kspace_encode_step_1 = gridLine(layout, a, grid);
+      if (!has("LIN") && grid.delta) values.kspace_encode_step_1 = gridLine(layout2, a, grid);
       raw.push(values);
     }
     const counterOffsets = {};
@@ -1506,8 +1506,8 @@
       if (label(a, "NAV")) flags.push(ACQ_FLAG_BITS.IS_NAVIGATION_DATA);
       if (label(a, "NOISE")) flags.push(ACQ_FLAG_BITS.IS_NOISE_MEASUREMENT);
       if (label(a, "REF")) flags.push(label(a, "IMA") ? ACQ_FLAG_BITS.IS_PARALLEL_CALIBRATION_AND_IMAGING : ACQ_FLAG_BITS.IS_PARALLEL_CALIBRATION);
-      if (label(a, "REV") || grid.delta && reversedReadout(layout, a)) flags.push(ACQ_FLAG_BITS.IS_REVERSE);
-      return { idx, flags, centerSample: centerSample(layout, a) };
+      if (label(a, "REV") || grid.delta && reversedReadout(layout2, a)) flags.push(ACQ_FLAG_BITS.IS_REVERSE);
+      return { idx, flags, centerSample: centerSample(layout2, a) };
     });
     markBoundaries(acquisitions);
     if (acquisitions.length) acquisitions[acquisitions.length - 1].flags.push(ACQ_FLAG_BITS.LAST_IN_MEASUREMENT);
@@ -1550,42 +1550,42 @@
       if (g.last.length) acquisitions[g.last[g.last.length - 1]].flags.push(ACQ_FLAG_BITS.LAST_IN_ENCODE_STEP1);
     }
   }
-  function centerSample(layout, a) {
-    const offset = layout.offsets[a], n = layout.samples[a];
+  function centerSample(layout2, a) {
+    const offset = layout2.offsets[a], n = layout2.samples[a];
     let best = Math.floor(n / 2), bestNorm = Infinity;
     for (let s = 0; s < n; s++) {
       const i2 = 3 * (offset + s);
-      const norm2 = layout.k[i2] ** 2 + layout.k[i2 + 1] ** 2 + layout.k[i2 + 2] ** 2;
-      if (norm2 < bestNorm - 1e-12) {
-        bestNorm = norm2;
+      const norm3 = layout2.k[i2] ** 2 + layout2.k[i2 + 1] ** 2 + layout2.k[i2 + 2] ** 2;
+      if (norm3 < bestNorm - 1e-12) {
+        bestNorm = norm3;
         best = s;
       }
     }
     return best;
   }
-  function reversedReadout(layout, a) {
-    const n = layout.samples[a];
+  function reversedReadout(layout2, a) {
+    const n = layout2.samples[a];
     if (n < 2) return false;
-    const first = 3 * layout.offsets[a], last = 3 * (layout.offsets[a] + n - 1);
+    const first = 3 * layout2.offsets[a], last = 3 * (layout2.offsets[a] + n - 1);
     let span = 0;
     for (let d = 0; d < 3; d++) {
-      const delta = layout.k[last + d] - layout.k[first + d];
+      const delta = layout2.k[last + d] - layout2.k[first + d];
       if (Math.abs(delta) > Math.abs(span)) span = delta;
     }
     return span < 0;
   }
-  function gridLine(layout, a, grid) {
-    const centre = 3 * (layout.offsets[a] + (layout.samples[a] >> 1));
-    const kv = layout.k[centre + grid.axes[1]];
+  function gridLine(layout2, a, grid) {
+    const centre = 3 * (layout2.offsets[a] + (layout2.samples[a] >> 1));
+    const kv = layout2.k[centre + grid.axes[1]];
     return Math.round(kv / grid.delta[1] - grid.offset[1]) + (grid.nv >> 1);
   }
-  function normalisedTrajectory(layout, a, kmax, axes) {
-    const n = layout.samples[a];
+  function normalisedTrajectory(layout2, a, kmax, axes) {
+    const n = layout2.samples[a];
     const out = new Float32Array(n * axes.length);
     for (let s = 0; s < n; s++) {
       for (let d = 0; d < axes.length; d++) {
         const axis = axes[d];
-        const k = layout.k[3 * (layout.offsets[a] + s) + axis];
+        const k = layout2.k[3 * (layout2.offsets[a] + s) + axis];
         out[s * axes.length + d] = kmax[axis] > 0 ? 0.5 * k / kmax[axis] : 0;
       }
     }
@@ -3170,19 +3170,19 @@
     };
   }
   function ismrmrdAcquisitions(job, signal, plan, cartesian) {
-    const layout = job.rawLayout();
-    const coils = layout.coils;
+    const layout2 = job.rawLayout();
+    const coils = layout2.coils;
     const kmax = [0, 0, 0];
-    for (let i2 = 0; i2 < layout.k.length; i2++) kmax[i2 % 3] = Math.max(kmax[i2 % 3], Math.abs(layout.k[i2]));
+    for (let i2 = 0; i2 < layout2.k.length; i2++) kmax[i2 % 3] = Math.max(kmax[i2 % 3], Math.abs(layout2.k[i2]));
     const peak = Math.max(...kmax);
     const trajectoryAxes = cartesian ? [] : [0, 1, 2].filter((axis) => kmax[axis] > 1e-9 * peak);
     const out = [];
-    for (let a = 0; a < layout.acquisitions; a++) {
-      const n = layout.samples[a];
+    for (let a = 0; a < layout2.acquisitions; a++) {
+      const n = layout2.samples[a];
       const data = new Float32Array(coils * n * 2);
       for (let s = 0; s < n; s++) {
         for (let c = 0; c < coils; c++) {
-          const src = ((layout.offsets[a] + s) * coils + c) * 2;
+          const src = ((layout2.offsets[a] + s) * coils + c) * 2;
           const dst = (c * n + s) * 2;
           data[dst] = signal[src];
           data[dst + 1] = signal[src + 1];
@@ -3194,37 +3194,37 @@
           flags: acquisitionFlags(...acquisition.flags),
           scan_counter: a,
           // ISMRMRD time stamps count 2.5 ms ticks, as the scanners' do.
-          acquisition_time_stamp: Math.round(layout.t0[a] / 25e-4),
+          acquisition_time_stamp: Math.round(layout2.t0[a] / 25e-4),
           number_of_samples: n,
           active_channels: coils,
           center_sample: acquisition.centerSample,
           trajectory_dimensions: trajectoryAxes.length,
-          sample_time_us: layout.dwell[a] * 1e6,
+          sample_time_us: layout2.dwell[a] * 1e6,
           read_dir: [1, 0, 0],
           phase_dir: [0, 1, 0],
           slice_dir: [0, 0, 1],
           idx: acquisition.idx
         }),
-        traj: trajectoryAxes.length ? normalisedTrajectory(layout, a, kmax, trajectoryAxes) : new Float32Array(0),
+        traj: trajectoryAxes.length ? normalisedTrajectory(layout2, a, kmax, trajectoryAxes) : new Float32Array(0),
         data
       });
     }
     return out;
   }
   function numpyExport(job, signal) {
-    const layout = job.rawLayout();
-    const coils = layout.coils;
+    const layout2 = job.rawLayout();
+    const coils = layout2.coils;
     const total = signal.length / (2 * coils);
-    const uniform = layout.samples.every((n) => n === layout.samples[0]);
+    const uniform = layout2.samples.every((n) => n === layout2.samples[0]);
     const re = new Float32Array(total * coils), im = new Float32Array(total * coils);
     let shape;
     if (uniform) {
-      const n = layout.samples[0];
-      shape = [layout.acquisitions, coils, n];
-      for (let a = 0; a < layout.acquisitions; a++) {
+      const n = layout2.samples[0];
+      shape = [layout2.acquisitions, coils, n];
+      for (let a = 0; a < layout2.acquisitions; a++) {
         for (let c = 0; c < coils; c++) {
           for (let s = 0; s < n; s++) {
-            const src = ((layout.offsets[a] + s) * coils + c) * 2;
+            const src = ((layout2.offsets[a] + s) * coils + c) * 2;
             const dst = (a * coils + c) * n + s;
             re[dst] = signal[src];
             im[dst] = signal[src + 1];
@@ -3240,15 +3240,15 @@
     }
     const entries = /* @__PURE__ */ new Map();
     entries.set("data", { shape, data: re, imag: im });
-    entries.set("traj", { shape: [total, 3], data: layout.k });
-    entries.set("offsets", { shape: [layout.acquisitions], data: layout.offsets });
-    entries.set("t0", { shape: [layout.acquisitions], data: layout.t0 });
-    entries.set("dwell", { shape: [layout.acquisitions], data: layout.dwell });
-    const width = layout.labels.names.length;
-    layout.labels.names.forEach((name, l) => {
-      const column = new Int32Array(layout.acquisitions);
-      for (let a = 0; a < layout.acquisitions; a++) column[a] = layout.labels.values[a * width + l];
-      entries.set(`label_${name}`, { shape: [layout.acquisitions], data: column });
+    entries.set("traj", { shape: [total, 3], data: layout2.k });
+    entries.set("offsets", { shape: [layout2.acquisitions], data: layout2.offsets });
+    entries.set("t0", { shape: [layout2.acquisitions], data: layout2.t0 });
+    entries.set("dwell", { shape: [layout2.acquisitions], data: layout2.dwell });
+    const width = layout2.labels.names.length;
+    layout2.labels.names.forEach((name, l) => {
+      const column = new Int32Array(layout2.acquisitions);
+      for (let a = 0; a < layout2.acquisitions; a++) column[a] = layout2.labels.values[a * width + l];
+      entries.set(`label_${name}`, { shape: [layout2.acquisitions], data: column });
     });
     const description = {
       format: "SeqEyes simulated raw data",
@@ -3256,7 +3256,7 @@
       data: uniform ? "data[acquisition, coil, sample]" : "data[sample, coil]; readout a is data[offsets[a]:offsets[a] + n_a]",
       traj: "k [1/m] per sample (x, y, z), reset at each excitation",
       times: "sample s of readout a is at t0[a] + (s + 0.5) * dwell[a] seconds",
-      labels: layout.labels.names,
+      labels: layout2.labels.names,
       phantom: job.plan.phantom.source,
       spinsPerVoxel: job.plan.subSpins,
       coils,
@@ -3607,14 +3607,14 @@
     for (let index = 0; index < samples.real.length; index++) {
       const bx = samples.real[index];
       const by = samples.imaginary[index];
-      const norm2 = Math.hypot(bx, by, frequencyOffsetHz);
+      const norm3 = Math.hypot(bx, by, frequencyOffsetHz);
       const width = samples.widths[index];
-      if (!(norm2 > 0) || !(width > 0)) continue;
-      const sine = Math.sin(Math.PI * norm2 * width);
-      const localAReal = Math.cos(Math.PI * norm2 * width);
-      const localAImaginary = -frequencyOffsetHz / norm2 * sine;
-      const localBReal = by / norm2 * sine;
-      const localBImaginary = -bx / norm2 * sine;
+      if (!(norm3 > 0) || !(width > 0)) continue;
+      const sine = Math.sin(Math.PI * norm3 * width);
+      const localAReal = Math.cos(Math.PI * norm3 * width);
+      const localAImaginary = -frequencyOffsetHz / norm3 * sine;
+      const localBReal = by / norm3 * sine;
+      const localBImaginary = -bx / norm3 * sine;
       const nextAReal = localAReal * stateAReal - localAImaginary * stateAImaginary - localBReal * stateBReal - localBImaginary * stateBImaginary;
       const nextAImaginary = localAReal * stateAImaginary + localAImaginary * stateAReal - localBReal * stateBImaginary + localBImaginary * stateBReal;
       const nextBReal = localBReal * stateAReal - localBImaginary * stateAImaginary + localAReal * stateBReal + localAImaginary * stateBImaginary;
@@ -4735,9 +4735,9 @@
         reader.float64("ROTATIONS qy"),
         reader.float64("ROTATIONS qz")
       ];
-      const norm2 = Math.hypot(...values);
-      if (!Number.isFinite(norm2) || norm2 <= 0) reader.fail("invalid zero or non-finite rotation quaternion");
-      seq.rotations.push({ id, values: values.map((value) => value / norm2) });
+      const norm3 = Math.hypot(...values);
+      if (!Number.isFinite(norm3) || norm3 <= 0) reader.fail("invalid zero or non-finite rotation quaternion");
+      seq.rotations.push({ id, values: values.map((value) => value / norm3) });
     }
   }
   function readSignature(reader, seq, sectionOffset) {
@@ -5305,13 +5305,13 @@
           toNumber(p[3], "ROTATIONS", line),
           toNumber(p[4], "ROTATIONS", line)
         ];
-        const norm2 = Math.sqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
-        if (Math.abs(norm2 - 1) > 1e-3 || norm2 === 0) {
+        const norm3 = Math.sqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
+        if (Math.abs(norm3 - 1) > 1e-3 || norm3 === 0) {
           parseError(`ROTATIONS row has a non-normalized quaternion: ${line}`);
         }
         seq.rotations.push({
           id: toInt(p[0], "ROTATIONS", line),
-          values: [q0 / norm2, q1 / norm2, q2 / norm2, q3 / norm2]
+          values: [q0 / norm3, q1 / norm3, q2 / norm3, q3 / norm3]
         });
       } else {
         requireFieldCount("ROTATIONS", line, p.length, 10);
@@ -6464,9 +6464,18 @@
   }
   function checkMembers(members, classes) {
     const points = members.foldPoints.length / 3;
+    let owners = classes;
+    if (members.profileOf) {
+      owners = members.profiles ?? 0;
+      if (members.profileOf.length !== classes) throw new Error(`${members.profileOf.length} class profiles for ${classes} classes.`);
+      for (let c = 0; c < classes; c++) {
+        const q = members.profileOf[c];
+        if (!(q >= 0 && q < owners)) throw new Error(`Class ${c} names profile ${q} of ${owners}.`);
+      }
+    }
     for (let m = 0; m < members.count; m++) {
       const c = members.classOf[m], p = members.foldOf[m];
-      if (!(c >= 0 && c < classes)) throw new Error(`Member ${m} names class ${c} of ${classes}.`);
+      if (!(c >= 0 && c < owners)) throw new Error(`Member ${m} names ${members.profileOf ? "profile" : "class"} ${c} of ${owners}.`);
       if (!(p >= 0 && p < points)) throw new Error(`Member ${m} names fold point ${p} of ${points}.`);
     }
   }
@@ -6503,6 +6512,8 @@
       __publicField(this, "kdf");
       __publicField(this, "cos");
       __publicField(this, "sin");
+      /** Per coordinate (x, y, z, Δf): its distinct values, each key's index into them, phasor scratch. */
+      __publicField(this, "tables");
       __publicField(this, "relaxation", /* @__PURE__ */ new Map());
       const index = /* @__PURE__ */ new Map();
       const keyOf = new Int32Array(spins.count);
@@ -6527,14 +6538,32 @@
       this.kdf = Float64Array.from(df);
       this.cos = new Float64Array(x2.length);
       this.sin = new Float64Array(x2.length);
+      const tables = [this.kx, this.ky, this.kz, this.kdf].map((coordinate) => {
+        const distinct = /* @__PURE__ */ new Map();
+        const at = new Int32Array(coordinate.length);
+        for (let k = 0; k < coordinate.length; k++) {
+          let j = distinct.get(coordinate[k]);
+          if (j === void 0) distinct.set(coordinate[k], j = distinct.size);
+          at[k] = j;
+        }
+        const values = new Float64Array(distinct.size);
+        for (const [value, j] of distinct) values[j] = value;
+        return { values, index: at, cos: new Float64Array(values.length), sin: new Float64Array(values.length) };
+      });
+      const tableSize = tables.reduce((sum, table) => sum + table.values.length, 0);
+      this.tables = tableSize * 4 < x2.length ? tables : null;
     }
     apply(dk, dt, state) {
       const twoPi = 2 * Math.PI;
-      for (let k = 0; k < this.kx.length; k++) {
-        const cycles = dk[0] * this.kx[k] + dk[1] * this.ky[k] + dk[2] * this.kz[k] + this.kdf[k] * dt;
-        const angle = twoPi * (cycles - Math.round(cycles));
-        this.cos[k] = Math.cos(angle);
-        this.sin[k] = Math.sin(angle);
+      if (this.tables) {
+        this.factorisedPhasors(dk, dt);
+      } else {
+        for (let k = 0; k < this.kx.length; k++) {
+          const cycles = dk[0] * this.kx[k] + dk[1] * this.ky[k] + dk[2] * this.kz[k] + this.kdf[k] * dt;
+          const angle = twoPi * (cycles - Math.round(cycles));
+          this.cos[k] = Math.cos(angle);
+          this.sin[k] = Math.sin(angle);
+        }
       }
       const { e1, e2 } = this.factors(dt);
       const { mx, my, mz } = state;
@@ -6546,6 +6575,47 @@
         mx[i2] = x2 * c - y * sn;
         my[i2] = x2 * sn + y * c;
         mz[i2] = mz[i2] * e1[i2] + (1 - e1[i2]);
+      }
+    }
+    /** Each key's phasor as the product of its coordinates' factors (only those that turn). */
+    factorisedPhasors(dk, dt) {
+      const tables = this.tables;
+      const scales = [dk[0], dk[1], dk[2], dt];
+      const active = [];
+      for (let a = 0; a < 4; a++) {
+        if (scales[a] === 0) continue;
+        const table = tables[a];
+        let turns = false;
+        for (let j = 0; j < table.values.length; j++) {
+          const cycles = scales[a] * table.values[j];
+          const angle = 2 * Math.PI * (cycles - Math.round(cycles));
+          table.cos[j] = Math.cos(angle);
+          table.sin[j] = Math.sin(angle);
+          if (angle !== 0) turns = true;
+        }
+        if (turns) active.push(a);
+      }
+      const keys = this.cos.length;
+      if (!active.length) {
+        this.cos.fill(1);
+        this.sin.fill(0);
+        return;
+      }
+      const first = tables[active[0]];
+      for (let k = 0; k < keys; k++) {
+        const j = first.index[k];
+        this.cos[k] = first.cos[j];
+        this.sin[k] = first.sin[j];
+      }
+      for (let n = 1; n < active.length; n++) {
+        const table = tables[active[n]];
+        for (let k = 0; k < keys; k++) {
+          const j = table.index[k];
+          const fc = table.cos[j], fs = table.sin[j];
+          const c = this.cos[k], s = this.sin[k];
+          this.cos[k] = c * fc - s * fs;
+          this.sin[k] = c * fs + s * fc;
+        }
       }
     }
     /** E1 and E2 of every spin for an interval, cached for the lengths that recur. */
@@ -6835,7 +6905,7 @@
     }
     return any;
   }
-  function sumMembers(members, groups, state, area, gRe, gIm) {
+  function sumMembers(members, spins, groups, state, area, gRe, gIm) {
     const coils = members.coils;
     const points = members.foldPoints;
     const pointCount = points.length / 3;
@@ -6846,22 +6916,75 @@
       pRe[p] = Math.cos(angle);
       pIm[p] = Math.sin(angle);
     }
+    const profiles = members.profileOf ? profileSums(members, spins, groups, state) : null;
+    if (profiles && !profiles.shared) return sumMembersByClass(members, spins, groups, state, pRe, pIm, gRe, gIm);
+    const sx = profiles ? profiles.mx : state.mx, sy = profiles ? profiles.my : state.my;
+    const groupOf = profiles ? profiles.groupOf : groups.groupOf;
     let any = false;
     for (let m = 0; m < members.count; m++) {
       const k = members.classOf[m];
-      const cx = state.mx[k], cy = state.my[k];
+      const cx = sx[k], cy = sy[k];
       if (cx === 0 && cy === 0) continue;
       any = true;
       const p = members.foldOf[m];
       const mx = cx * pRe[p] - cy * pIm[p];
       const my = cx * pIm[p] + cy * pRe[p];
       const w = members.weight[m];
-      const g = groups.groupOf[k];
+      const g = groupOf[k];
       for (let c = 0; c < coils; c++) {
         const rr = members.rxRe[c * members.count + m];
         const ri = -members.rxIm[c * members.count + m];
         gRe[g * coils + c] += w * (rr * mx - ri * my);
         gIm[g * coils + c] += w * (rr * my + ri * mx);
+      }
+    }
+    return any;
+  }
+  function profileSums(members, spins, groups, state) {
+    const count = members.profiles ?? 0;
+    const profileOf = members.profileOf;
+    const mx = new Float64Array(count), my = new Float64Array(count);
+    const groupOf = new Int32Array(count).fill(-1);
+    let shared = true;
+    for (let c = 0; c < spins.count; c++) {
+      const q = profileOf[c];
+      const g = groups.groupOf[c];
+      if (groupOf[q] < 0) groupOf[q] = g;
+      else if (groupOf[q] !== g) shared = false;
+      mx[q] += spins.weight[c] * state.mx[c];
+      my[q] += spins.weight[c] * state.my[c];
+    }
+    return { mx, my, groupOf, shared };
+  }
+  function sumMembersByClass(members, spins, groups, state, pRe, pIm, gRe, gIm) {
+    const coils = members.coils;
+    const count = members.profiles ?? 0;
+    const profileOf = members.profileOf;
+    const start = new Int32Array(count + 1);
+    for (let c = 0; c < spins.count; c++) start[profileOf[c] + 1]++;
+    for (let q = 0; q < count; q++) start[q + 1] += start[q];
+    const fill = start.slice(0, count);
+    const classes = new Int32Array(spins.count);
+    for (let c = 0; c < spins.count; c++) classes[fill[profileOf[c]]++] = c;
+    let any = false;
+    for (let m = 0; m < members.count; m++) {
+      const q = members.classOf[m];
+      const p = members.foldOf[m];
+      for (let i2 = start[q]; i2 < start[q + 1]; i2++) {
+        const k = classes[i2];
+        const cx = state.mx[k] * spins.weight[k], cy = state.my[k] * spins.weight[k];
+        if (cx === 0 && cy === 0) continue;
+        any = true;
+        const mx = cx * pRe[p] - cy * pIm[p];
+        const my = cx * pIm[p] + cy * pRe[p];
+        const w = members.weight[m];
+        const g = groups.groupOf[k];
+        for (let c = 0; c < coils; c++) {
+          const rr = members.rxRe[c * members.count + m];
+          const ri = -members.rxIm[c * members.count + m];
+          gRe[g * coils + c] += w * (rr * mx - ri * my);
+          gIm[g * coils + c] += w * (rr * my + ri * mx);
+        }
       }
     }
     return any;
@@ -6989,7 +7112,7 @@
     const groups = grouper.groups(segment.activeAxes);
     const gRe = new Float64Array(groups.count * coils);
     const gIm = new Float64Array(groups.count * coils);
-    const any = members ? sumMembers(members, groups, state, area, gRe, gIm) : sumSpins(spins, groups, state, gRe, gIm);
+    const any = members ? sumMembers(members, spins, groups, state, area, gRe, gIm) : sumSpins(spins, groups, state, gRe, gIm);
     const sumRe = new Float64Array(n * coils);
     const sumIm = new Float64Array(n * coils);
     if (any) {
@@ -7121,6 +7244,27 @@
   }
 
   // src/sim/phantom/model.ts
+  function planeMaps(phantom, plane) {
+    return plane < 0 ? phantom.maps : phantom.planes[plane].maps;
+  }
+  function assignPlanes(phantom, z) {
+    const plane = new Int32Array(z.length).fill(-1);
+    const planes = phantom.planes;
+    if (!planes?.length || !(phantom.voxel[2] > 0)) return plane;
+    for (let k = 0; k < z.length; k++) {
+      const wanted = Math.round(z[k] / phantom.voxel[2]);
+      let best = -1, distance3 = Math.abs(wanted);
+      for (let i2 = 0; i2 < planes.length; i2++) {
+        const d = Math.abs(planes[i2].offset - wanted);
+        if (d < distance3) {
+          distance3 = d;
+          best = i2;
+        }
+      }
+      plane[k] = best;
+    }
+    return plane;
+  }
   function sliceVolume(volume2, options = {}) {
     const plane = options.plane ?? "xy";
     const [sx, sy, sz] = volume2.shape;
@@ -7145,15 +7289,35 @@
         source[row * nx + col] = u * strides[axes[0]] + v * strides[axes[1]] + index * strides[axes[2]];
       }
     }
-    const pick = (map) => {
-      const out = new Float32Array(nx * ny);
-      for (let i2 = 0; i2 < out.length; i2++) out[i2] = map[source[i2]];
-      return out;
+    const mapsAt = (offset) => {
+      const shift = offset * strides[axes[2]];
+      const pickAt = (map) => {
+        const out = new Float32Array(nx * ny);
+        for (let i2 = 0; i2 < out.length; i2++) out[i2] = map[source[i2] + shift];
+        return out;
+      };
+      const maps2 = { pd: pickAt(volume2.maps.pd), t1: pickAt(volume2.maps.t1), t2: pickAt(volume2.maps.t2) };
+      for (const name of ["t2prime", "adc", "b0", "b1"]) {
+        const map = volume2.maps[name];
+        if (map) maps2[name] = pickAt(map);
+      }
+      return maps2;
     };
-    const maps = { pd: pick(volume2.maps.pd), t1: pick(volume2.maps.t1), t2: pick(volume2.maps.t2) };
-    for (const name of ["t2prime", "adc", "b0", "b1"]) {
-      const map = volume2.maps[name];
-      if (map) maps[name] = pick(map);
+    const maps = mapsAt(0);
+    const planes = [];
+    if (options.neighbours) {
+      const [lo, hi] = options.neighbours;
+      let empty = null;
+      for (let offset = Math.min(0, Math.round(lo)); offset <= Math.max(0, Math.round(hi)); offset++) {
+        if (offset === 0) continue;
+        const inside = index + offset >= 0 && index + offset < nw;
+        if (inside) {
+          planes.push({ offset, maps: mapsAt(offset) });
+        } else {
+          empty ?? (empty = { pd: new Float32Array(nx * ny), t1: new Float32Array(nx * ny), t2: new Float32Array(nx * ny) });
+          planes.push({ offset, maps: empty });
+        }
+      }
     }
     const label = "xyz";
     return {
@@ -7161,6 +7325,7 @@
       ny,
       voxel: [fovU / nx, fovV / ny, volume2.voxel[axes[2]]],
       maps,
+      planes: planes.length ? planes : void 0,
       source: `${volume2.source} \xB7 ${label[axes[0]]}${label[axes[1]]} plane, ${label[axes[2]]} = ${index}`,
       notes: volume2.notes.slice()
     };
@@ -7214,7 +7379,7 @@
       const [cx, cy] = centre(c);
       centrePower += Math.exp(-(cx * cx + cy * cy) / (width * width));
     }
-    const norm2 = count === 1 ? 1 : 1 / Math.sqrt(centrePower);
+    const norm3 = count === 1 ? 1 : 1 / Math.sqrt(centrePower);
     for (let c = 0; c < count; c++) {
       const [cx, cy] = centre(c);
       for (let row = 0; row < ny; row++) {
@@ -7227,7 +7392,7 @@
             continue;
           }
           const dx = x2 - cx, dy = y - cy;
-          const magnitude = norm2 * Math.exp(-(dx * dx + dy * dy) / (2 * width * width));
+          const magnitude = norm3 * Math.exp(-(dx * dx + dy * dy) / (2 * width * width));
           const phase = Math.atan2(dy, dx);
           re[i2] = magnitude * Math.cos(phase);
           im[i2] = magnitude * Math.sin(phase);
@@ -7237,51 +7402,75 @@
     return { count, re, im };
   }
   function occupiedVoxels(phantom) {
-    const pd = phantom.maps.pd;
+    const cells = phantom.nx * phantom.ny;
+    const any = new Uint8Array(cells);
+    for (const maps of [phantom.maps, ...(phantom.planes ?? []).map((plane) => plane.maps)]) {
+      for (let i2 = 0; i2 < cells; i2++) if (maps.pd[i2] > 0) any[i2] = 1;
+    }
     let count = 0;
-    for (let i2 = 0; i2 < pd.length; i2++) if (pd[i2] > 0) count++;
+    for (let i2 = 0; i2 < cells; i2++) count += any[i2];
     const voxels = new Int32Array(count);
     let k = 0;
-    for (let i2 = 0; i2 < pd.length; i2++) if (pd[i2] > 0) voxels[k++] = i2;
+    for (let i2 = 0; i2 < cells; i2++) if (any[i2]) voxels[k++] = i2;
     return voxels;
   }
   function rate(time) {
     return Number.isFinite(time) && time > 0 ? 1 / time : 0;
   }
   function physicsTable(phantom) {
-    const { pd, t1, t2, b0, b1 } = phantom.maps;
-    const of = new Int32Array(pd.length).fill(-1);
-    const table = { of, t1: [], t2: [], df: [], b1: [] };
+    const table = { of: new Int32Array(0), ofPlanes: [], t1: [], t2: [], df: [], b1: [] };
     const index = /* @__PURE__ */ new Map();
-    for (let i2 = 0; i2 < pd.length; i2++) {
-      if (!(pd[i2] > 0)) continue;
-      const df = b0 ? b0[i2] : 0, gain = b1 ? b1[i2] : 1;
-      const key = `${t1[i2]}|${t2[i2]}|${df}|${gain}`;
-      let k = index.get(key);
-      if (k === void 0) {
-        k = table.t1.length;
-        index.set(key, k);
-        table.t1.push(t1[i2]);
-        table.t2.push(t2[i2]);
-        table.df.push(df);
-        table.b1.push(gain);
+    const entries = (maps) => {
+      const { pd, t1, t2, b0, b1 } = maps;
+      const of = new Int32Array(pd.length).fill(-1);
+      for (let i2 = 0; i2 < pd.length; i2++) {
+        if (!(pd[i2] > 0)) continue;
+        const df = b0 ? b0[i2] : 0, gain = b1 ? b1[i2] : 1;
+        const key = `${t1[i2]}|${t2[i2]}|${df}|${gain}`;
+        let k = index.get(key);
+        if (k === void 0) {
+          k = table.t1.length;
+          index.set(key, k);
+          table.t1.push(t1[i2]);
+          table.t2.push(t2[i2]);
+          table.df.push(df);
+          table.b1.push(gain);
+        }
+        of[i2] = k;
       }
-      of[i2] = k;
-    }
+      return of;
+    };
+    table.of = entries(phantom.maps);
+    table.ofPlanes = (phantom.planes ?? []).map((plane) => entries(plane.maps));
     return table;
+  }
+  function entriesOf(physics, plane) {
+    return plane < 0 ? physics.of : physics.ofPlanes[plane];
+  }
+  function slicesOf(options) {
+    return options.slices ?? { z: Float64Array.of(0), weight: Float64Array.of(1), plane: Int32Array.of(-1) };
   }
   function xCount(options, index) {
     return options.countX ? options.countX[index] : options.subSpins[0];
   }
-  function spinCount(options) {
+  function spinCount(options, phantom) {
+    const slices = slicesOf(options);
     let total = 0;
-    for (let v = 0; v < options.voxels.length; v++) total += xCount(options, options.voxels[v]);
+    for (let v = 0; v < options.voxels.length; v++) {
+      const index = options.voxels[v];
+      let present = 0;
+      for (let k = 0; k < slices.z.length; k++) {
+        if (!phantom || planeMaps(phantom, slices.plane[k]).pd[index] > 0) present++;
+      }
+      total += xCount(options, index) * present;
+    }
     return total * options.subSpins[1];
   }
   function phantomSpins(phantom, options) {
     const my = options.subSpins[1];
     const voxels = options.voxels;
-    const count = spinCount(options);
+    const slices = slicesOf(options);
+    const count = spinCount(options, phantom);
     const coils = phantom.coils?.count ?? 1;
     const set = {
       count,
@@ -7298,7 +7487,7 @@
       rxRe: new Float64Array(coils * count),
       rxIm: new Float64Array(coils * count)
     };
-    const { pd, t1, t2, b0, b1 } = phantom.maps;
+    const cells = phantom.nx * phantom.ny;
     const [dx, dy] = phantom.voxel;
     const offsetsY = stratified(my);
     let k = 0;
@@ -7309,24 +7498,29 @@
       const col = index % phantom.nx, row = Math.floor(index / phantom.nx);
       const x0 = (col - phantom.nx / 2) * dx;
       const y0 = (phantom.ny / 2 - 1 - row) * dy;
-      const r1 = rate(t1[index]), r2 = rate(t2[index]);
-      const df = b0 ? b0[index] : 0;
-      const gain = b1 ? b1[index] : 1;
-      const weight = pd[index] / (mx * my);
-      for (const oy of offsetsY) {
-        for (const ox of offsetsX) {
-          set.x[k] = x0 + ox * dx;
-          set.y[k] = y0 + oy * dy;
-          set.df[k] = df;
-          set.r1[k] = r1;
-          set.r2[k] = r2;
-          set.weight[k] = weight;
-          set.b1Re[k] = gain;
-          for (let c = 0; c < coils; c++) {
-            set.rxRe[c * count + k] = phantom.coils ? phantom.coils.re[c * pd.length + index] : 1;
-            set.rxIm[c * count + k] = phantom.coils ? phantom.coils.im[c * pd.length + index] : 0;
+      for (let slice = 0; slice < slices.z.length; slice++) {
+        const { pd, t1, t2, b0, b1 } = planeMaps(phantom, slices.plane[slice]);
+        if (!(pd[index] > 0)) continue;
+        const r1 = rate(t1[index]), r2 = rate(t2[index]);
+        const df = b0 ? b0[index] : 0;
+        const gain = b1 ? b1[index] : 1;
+        const weight = pd[index] / (mx * my) * slices.weight[slice];
+        for (const oy of offsetsY) {
+          for (const ox of offsetsX) {
+            set.x[k] = x0 + ox * dx;
+            set.y[k] = y0 + oy * dy;
+            set.z[k] = slices.z[slice];
+            set.df[k] = df;
+            set.r1[k] = r1;
+            set.r2[k] = r2;
+            set.weight[k] = weight;
+            set.b1Re[k] = gain;
+            for (let c = 0; c < coils; c++) {
+              set.rxRe[c * count + k] = phantom.coils ? phantom.coils.re[c * cells + index] : 1;
+              set.rxIm[c * count + k] = phantom.coils ? phantom.coils.im[c * cells + index] : 0;
+            }
+            k++;
           }
-          k++;
         }
       }
     }
@@ -7342,75 +7536,128 @@
     const entries = physics.t1.length;
     const coils = phantom.coils?.count ?? 1;
     const cells = phantom.nx * phantom.ny;
-    const memberCount = spinCount(options);
+    const slices = slicesOf(options);
+    const through = options.slices !== void 0;
+    const usedPlanes = [...new Set(Array.from(slices.plane))];
+    const slicesOfPlane = new Map(usedPlanes.map((plane) => [plane, []]));
+    for (let k = 0; k < slices.z.length; k++) slicesOfPlane.get(slices.plane[k]).push(k);
+    const planeSlot = new Map(usedPlanes.map((plane, i2) => [plane, i2]));
+    let memberCount = 0;
+    for (let v = 0; v < voxels.length; v++) {
+      for (const plane of usedPlanes) if (planeMaps(phantom, plane).pd[voxels[v]] > 0) memberCount += xCount(options, voxels[v]) * my;
+    }
     const classOf = new Int32Array(memberCount);
     const weight = new Float64Array(memberCount);
     const foldOf = new Int32Array(memberCount);
     const rxRe = new Float64Array(coils * memberCount), rxIm = new Float64Array(coils * memberCount);
     const classIndex = /* @__PURE__ */ new Map();
     const pointIndex = /* @__PURE__ */ new Map();
-    const classX = [], classY = [], classEntry = [];
+    const classX = [], classY = [], classEntry = [], classPlane = [];
     const points = [];
     let m = 0;
     for (let v = 0; v < voxels.length; v++) {
       const index = voxels[v];
-      const mx = xCount(options, index);
-      const offsetsX = stratified(mx);
-      const stepX = finest / mx;
-      const col = index % phantom.nx, row = Math.floor(index / phantom.nx);
-      const entry = physics.of[index];
-      const w = phantom.maps.pd[index] / (mx * my);
-      const x0 = (col - phantom.nx / 2) * dx;
-      const y0 = (phantom.ny / 2 - 1 - row) * dy;
-      for (let ay = 0; ay < my; ay++) {
-        const y = y0 + offsetsY[ay] * dy;
-        const jy = row * my + ay;
-        for (let ax = 0; ax < mx; ax++) {
-          const x2 = x0 + offsetsX[ax] * dx;
-          const jx = col * 2 * finest + (2 * ax + 1) * stepX;
-          const classKey = ((foldX ? 0 : jx) * lineY + (foldY ? 0 : jy)) * entries + entry;
-          let c = classIndex.get(classKey);
-          if (c === void 0) {
-            c = classX.length;
-            classIndex.set(classKey, c);
-            classX.push(foldX ? 0 : x2);
-            classY.push(foldY ? 0 : y);
-            classEntry.push(entry);
+      for (const plane of usedPlanes) {
+        const maps = planeMaps(phantom, plane);
+        if (!(maps.pd[index] > 0)) continue;
+        const mx = xCount(options, index);
+        const offsetsX = stratified(mx);
+        const stepX = finest / mx;
+        const col = index % phantom.nx, row = Math.floor(index / phantom.nx);
+        const entry = entriesOf(physics, plane)[index];
+        const w = maps.pd[index] / (mx * my);
+        const x0 = (col - phantom.nx / 2) * dx;
+        const y0 = (phantom.ny / 2 - 1 - row) * dy;
+        const slot = planeSlot.get(plane);
+        for (let ay = 0; ay < my; ay++) {
+          const y = y0 + offsetsY[ay] * dy;
+          const jy = row * my + ay;
+          for (let ax = 0; ax < mx; ax++) {
+            const x2 = x0 + offsetsX[ax] * dx;
+            const jx = col * 2 * finest + (2 * ax + 1) * stepX;
+            const classKey = (((foldX ? 0 : jx) * lineY + (foldY ? 0 : jy)) * entries + entry) * usedPlanes.length + slot;
+            let c2 = classIndex.get(classKey);
+            if (c2 === void 0) {
+              c2 = classX.length;
+              classIndex.set(classKey, c2);
+              classX.push(foldX ? 0 : x2);
+              classY.push(foldY ? 0 : y);
+              classEntry.push(entry);
+              classPlane.push(plane);
+            }
+            const pointKey = (foldX ? jx : 0) * (lineY + 1) + (foldY ? jy : 0);
+            let p = pointIndex.get(pointKey);
+            if (p === void 0) {
+              p = points.length / 3;
+              pointIndex.set(pointKey, p);
+              points.push(foldX ? x2 : 0, foldY ? y : 0, 0);
+            }
+            classOf[m] = c2;
+            weight[m] = w;
+            foldOf[m] = p;
+            for (let coil = 0; coil < coils; coil++) {
+              rxRe[coil * memberCount + m] = phantom.coils ? phantom.coils.re[coil * cells + index] : 1;
+              rxIm[coil * memberCount + m] = phantom.coils ? phantom.coils.im[coil * cells + index] : 0;
+            }
+            m++;
           }
-          const pointKey = (foldX ? jx : 0) * (lineY + 1) + (foldY ? jy : 0);
-          let p = pointIndex.get(pointKey);
-          if (p === void 0) {
-            p = points.length / 3;
-            pointIndex.set(pointKey, p);
-            points.push(foldX ? x2 : 0, foldY ? y : 0, 0);
-          }
-          classOf[m] = c;
-          weight[m] = w;
-          foldOf[m] = p;
-          for (let coil = 0; coil < coils; coil++) {
-            rxRe[coil * memberCount + m] = phantom.coils ? phantom.coils.re[coil * cells + index] : 1;
-            rxIm[coil * memberCount + m] = phantom.coils ? phantom.coils.im[coil * cells + index] : 0;
-          }
-          m++;
         }
       }
     }
-    const count = classX.length;
+    const profiles = classX.length;
+    if (!through) {
+      const classes2 = {
+        count: profiles,
+        x: Float64Array.from(classX),
+        y: Float64Array.from(classY),
+        z: new Float64Array(profiles),
+        df: Float64Array.from(classEntry, (e) => physics.df[e]),
+        r1: Float64Array.from(classEntry, (e) => rate(physics.t1[e])),
+        r2: Float64Array.from(classEntry, (e) => rate(physics.t2[e])),
+        weight: new Float64Array(profiles),
+        b1Re: Float64Array.from(classEntry, (e) => physics.b1[e]),
+        b1Im: new Float64Array(profiles),
+        coils: 1,
+        rxRe: new Float64Array(profiles).fill(1),
+        rxIm: new Float64Array(profiles)
+      };
+      const members2 = { count: memberCount, classOf, weight, foldOf, foldPoints: Float64Array.from(points), coils, rxRe, rxIm };
+      return { classes: classes2, members: members2 };
+    }
+    let count = 0;
+    for (let q = 0; q < profiles; q++) count += slicesOfPlane.get(classPlane[q]).length;
+    const profileOf = new Int32Array(count);
     const classes = {
       count,
-      x: Float64Array.from(classX),
-      y: Float64Array.from(classY),
+      x: new Float64Array(count),
+      y: new Float64Array(count),
       z: new Float64Array(count),
-      df: Float64Array.from(classEntry, (e) => physics.df[e]),
-      r1: Float64Array.from(classEntry, (e) => rate(physics.t1[e])),
-      r2: Float64Array.from(classEntry, (e) => rate(physics.t2[e])),
+      df: new Float64Array(count),
+      r1: new Float64Array(count),
+      r2: new Float64Array(count),
       weight: new Float64Array(count),
-      b1Re: Float64Array.from(classEntry, (e) => physics.b1[e]),
+      b1Re: new Float64Array(count),
       b1Im: new Float64Array(count),
       coils: 1,
       rxRe: new Float64Array(count).fill(1),
       rxIm: new Float64Array(count)
     };
+    let c = 0;
+    for (let q = 0; q < profiles; q++) {
+      const e = classEntry[q];
+      for (const k of slicesOfPlane.get(classPlane[q])) {
+        classes.x[c] = classX[q];
+        classes.y[c] = classY[q];
+        classes.z[c] = slices.z[k];
+        classes.df[c] = physics.df[e];
+        classes.r1[c] = rate(physics.t1[e]);
+        classes.r2[c] = rate(physics.t2[e]);
+        classes.b1Re[c] = physics.b1[e];
+        classes.weight[c] = slices.weight[k];
+        profileOf[c] = q;
+        c++;
+      }
+    }
     const members = {
       count: memberCount,
       classOf,
@@ -7419,7 +7666,9 @@
       foldPoints: Float64Array.from(points),
       coils,
       rxRe,
-      rxIm
+      rxIm,
+      profileOf,
+      profiles
     };
     return { classes, members };
   }
@@ -7583,6 +7832,529 @@
     let sum = 0;
     for (let i2 = 0; i2 < a.length; i2++) sum += (a[i2] - b[i2]) ** 2;
     return Math.sqrt(sum);
+  }
+
+  // src/sim/plan/slices.ts
+  var Z_LIMIT = 0.25;
+  var MIN_EXTENT = 2;
+  var CANDIDATE_LEVEL = 1e-4;
+  var SUPPORT_LEVEL = 2e-3;
+  var EDGE_LEVEL = 1e-3;
+  var COARSE_POINTS = 16384;
+  var FINE_POINTS = 4096;
+  var FINE_PER_CELL = 4;
+  var FINE_MIN_POINTS = 64;
+  var SPECTRAL_POINTS = 1024;
+  var SPECTRAL_ENERGY = 0.995;
+  var TIERS = [0.1, 0.02, 4e-3];
+  var FREQUENCY_LIMIT = 5e4;
+  function measurePulses(program, options = {}) {
+    const found = /* @__PURE__ */ new Map();
+    for (const segment of program.segments()) {
+      if (segment.kind !== "rf") continue;
+      const use = segment.use || "u";
+      const entry = found.get(segment.key);
+      if (entry) {
+        entry.events++;
+        entry.uses.add(use);
+      } else {
+        found.set(segment.key, { segment, events: 1, uses: /* @__PURE__ */ new Set([use]) });
+      }
+    }
+    const alike = /* @__PURE__ */ new Map();
+    for (const [key, entry] of found) {
+      const cells = rfCells(entry.segment, 0);
+      const signature = zSignature(cells);
+      const twin = alike.get(signature);
+      if (twin) {
+        twin.keys.push(key);
+        twin.events += entry.events;
+        for (const use of entry.uses) twin.uses.add(use);
+      } else {
+        alike.set(signature, { segment: entry.segment, cells, keys: [key], events: entry.events, uses: entry.uses });
+      }
+    }
+    return [...alike.values()].map((entry) => measurePulse(entry.segment, entry.cells, entry.keys, roleOf(entry.uses), entry.events, options));
+  }
+  function zSignature(cells) {
+    const n = cells.count;
+    const values = new Float64Array(4 * n + 1);
+    values[0] = cells.freq;
+    for (let j = 0; j < n; j++) {
+      values[1 + 4 * j] = cells.width[j];
+      values[2 + 4 * j] = cells.b1Re[j];
+      values[3 + 4 * j] = cells.b1Im[j];
+      values[4 + 4 * j] = cells.grad[3 * j + 2];
+    }
+    const words = new Uint32Array(values.buffer);
+    let h1 = 2166136261, h2 = 2654435769;
+    for (let i2 = 0; i2 < words.length; i2++) {
+      h1 = Math.imul(h1 ^ words[i2], 16777619);
+      h2 = Math.imul(h2 ^ words[i2], 1540483477) ^ h2 >>> 15;
+    }
+    return `${n}:${(h1 >>> 0).toString(16)}:${(h2 >>> 0).toString(16)}`;
+  }
+  function roleOf(uses) {
+    if (uses.has("e") || uses.has("u")) return "excitation";
+    if (uses.has("r")) return "refocusing";
+    if (uses.has("p") || uses.has("o")) return "other";
+    if (uses.has("i")) return "inversion";
+    if (uses.has("s")) return "saturation";
+    return "other";
+  }
+  function geometry(cells) {
+    const n = cells.count;
+    let duration = 0;
+    for (let j = 0; j < n; j++) duration += cells.width[j];
+    const kappa = new Float64Array(n), tau = new Float64Array(n);
+    let tail = 0, lo = 0, hi = 0, end = duration;
+    for (let j = n - 1; j >= 0; j--) {
+      const w = cells.width[j], g = cells.grad[3 * j + 2];
+      kappa[j] = tail + 0.5 * g * w;
+      tau[j] = end - 0.5 * w;
+      tail += g * w;
+      end -= w;
+      lo = Math.min(lo, tail);
+      hi = Math.max(hi, tail);
+    }
+    return { cells, duration, kappa, tau, extentZ: hi - lo };
+  }
+  function measurePulse(segment, cells, keys, role, events, options) {
+    const shape = geometry(cells);
+    const { duration, extentZ } = shape;
+    const selective = extentZ >= MIN_EXTENT;
+    const resolution = selective ? 1 / extentZ : 1 / Math.max(duration, 1e-6);
+    let limit;
+    if (selective) {
+      limit = options.zLimit ?? Z_LIMIT;
+    } else {
+      let narrowest = Infinity;
+      for (let j = 0; j < cells.count; j++) narrowest = Math.min(narrowest, cells.width[j]);
+      limit = Math.min(FREQUENCY_LIMIT, 0.5 / narrowest);
+    }
+    const slope = selective ? shape.kappa : shape.tau;
+    const small = smallTip(cells, slope, shape.tau, -limit, limit, resolution);
+    let regions;
+    let scan;
+    if (selective) {
+      regions = candidateRegions(small, resolution, -limit, limit);
+      scan = fineScan(cells, true, regions, resolution, limit);
+    } else {
+      const [from, to] = energyWindow(small);
+      const pad = Math.max(0.25 * (to - from), 4 * resolution);
+      regions = [[Math.max(-limit, Math.min(0, from) - pad), Math.min(limit, Math.max(0, to) + pad)]];
+      const points = Math.max(128, Math.min(SPECTRAL_POINTS, Math.ceil((regions[0][1] - regions[0][0]) / (resolution / FINE_PER_CELL)) + 1));
+      scan = uniformScan(cells, false, regions[0][0], regions[0][1], points);
+    }
+    let peak = 0;
+    for (let i2 = 0; i2 < scan.mz.length; i2++) peak = Math.max(peak, activity(scan.mz[i2]));
+    return {
+      keys,
+      role,
+      events,
+      firstTime: segment.t0,
+      duration,
+      freq: cells.freq,
+      peakFlipDeg: 2 * Math.asin(Math.min(1, peak)) * 180 / Math.PI,
+      extentZ: selective ? extentZ : 0,
+      axis: selective ? "z" : "frequency",
+      offsets: scan.offsets,
+      mx: scan.mx,
+      my: scan.my,
+      mz: scan.mz,
+      regions,
+      bands: selective ? findBands(scan, role, resolution) : []
+    };
+  }
+  function activity(mz) {
+    return Math.sqrt(Math.max(0, 0.5 * (1 - mz)));
+  }
+  function smallTip(cells, slope, tau, from, to, resolution) {
+    const points = Math.max(256, Math.min(COARSE_POINTS, Math.ceil((to - from) / (0.25 * resolution)) + 1));
+    const step = (to - from) / (points - 1);
+    const sumRe = new Float64Array(points), sumIm = new Float64Array(points);
+    const twoPi = 2 * Math.PI;
+    for (let j = 0; j < cells.count; j++) {
+      const cr = cells.b1Re[j] * cells.width[j], ci = cells.b1Im[j] * cells.width[j];
+      if (cr === 0 && ci === 0) continue;
+      const stepCycles = slope[j] * step;
+      const sr = Math.cos(twoPi * (stepCycles - Math.round(stepCycles)));
+      const si = Math.sin(twoPi * (stepCycles - Math.round(stepCycles)));
+      let er = 0, ei = 0;
+      for (let i2 = 0; i2 < points; i2++) {
+        if (i2 % 256 === 0) {
+          const cycles = slope[j] * (from + i2 * step) - cells.freq * tau[j];
+          const angle = twoPi * (cycles - Math.round(cycles));
+          er = Math.cos(angle);
+          ei = Math.sin(angle);
+        } else {
+          const nr = er * sr - ei * si;
+          ei = er * si + ei * sr;
+          er = nr;
+        }
+        sumRe[i2] += cr * er - ci * ei;
+        sumIm[i2] += cr * ei + ci * er;
+      }
+    }
+    const magnitude = new Float64Array(points);
+    for (let i2 = 0; i2 < points; i2++) magnitude[i2] = Math.hypot(sumRe[i2], sumIm[i2]);
+    return { from, step, magnitude };
+  }
+  function candidateRegions(small, resolution, lo, hi) {
+    const { from, step, magnitude } = small;
+    let peak = 0;
+    for (let i2 = 0; i2 < magnitude.length; i2++) peak = Math.max(peak, magnitude[i2]);
+    if (!(peak > 0)) return [];
+    const runs = [];
+    for (let i2 = 0; i2 < magnitude.length; i2++) {
+      if (magnitude[i2] < CANDIDATE_LEVEL * peak) continue;
+      const u = from + i2 * step;
+      const last = runs[runs.length - 1];
+      if (last && u - last[1] <= 2 * resolution + step) last[1] = u;
+      else runs.push([u, u]);
+    }
+    return mergeIntervals(runs.map(([a, b]) => [Math.max(lo, a - 4 * resolution), Math.min(hi, b + 4 * resolution)]));
+  }
+  function energyWindow(small) {
+    const { from, step, magnitude } = small;
+    let total = 0;
+    for (let i2 = 0; i2 < magnitude.length; i2++) total += magnitude[i2] * magnitude[i2];
+    if (!(total > 0)) return [0, 0];
+    const cut = 0.5 * (1 - SPECTRAL_ENERGY) * total;
+    let lo = 0, hi = magnitude.length - 1, sum = 0;
+    while (lo < hi && sum + magnitude[lo] ** 2 <= cut) sum += magnitude[lo++] ** 2;
+    sum = 0;
+    while (hi > lo && sum + magnitude[hi] ** 2 <= cut) sum += magnitude[hi--] ** 2;
+    return [from + lo * step, from + hi * step];
+  }
+  function uniformScan(cells, selective, from, to, points) {
+    const offsets = new Float64Array(points);
+    for (let i2 = 0; i2 < points; i2++) offsets[i2] = points > 1 ? from + (to - from) * i2 / (points - 1) : 0.5 * (from + to);
+    const [mx, my, mz] = respond(cells, selective, offsets);
+    return { offsets, mx, my, mz, spacing: new Float64Array(points).fill(points > 1 ? (to - from) / (points - 1) : 0) };
+  }
+  function fineScan(cells, selective, regions, resolution, limit) {
+    const total = regions.reduce((sum, [a, b]) => sum + (b - a), 0);
+    const spacingFor = (width) => {
+      const wanted = resolution / FINE_PER_CELL;
+      const budget = total > 0 ? total / FINE_POINTS : wanted;
+      return Math.min(Math.max(wanted, budget), width / (FINE_MIN_POINTS - 1));
+    };
+    const parts = [];
+    let peak = 0;
+    const scanRegion = (a, b) => {
+      const h = spacingFor(Math.max(b - a, resolution));
+      const count = Math.max(FINE_MIN_POINTS, Math.round((b - a) / h) + 1);
+      const offsets2 = new Float64Array(count);
+      for (let i2 = 0; i2 < count; i2++) offsets2[i2] = count > 1 ? a + (b - a) * i2 / (count - 1) : 0.5 * (a + b);
+      const m = respond(cells, selective, offsets2);
+      for (let i2 = 0; i2 < count; i2++) peak = Math.max(peak, activity(m[2][i2]));
+      return { offsets: offsets2, m, spacing: count > 1 ? (b - a) / (count - 1) : resolution };
+    };
+    for (const region of regions) {
+      let [a, b] = region;
+      let part = scanRegion(a, b);
+      for (let grow = 0; grow < 4; grow++) {
+        const n = part.offsets.length;
+        const left = activity(part.m[2][0]), right = activity(part.m[2][n - 1]);
+        const widen = Math.max(b - a, 8 * resolution);
+        const growLeft = left > EDGE_LEVEL * peak && a > -limit;
+        const growRight = right > EDGE_LEVEL * peak && b < limit;
+        if (!growLeft && !growRight) break;
+        if (growLeft) a = Math.max(-limit, a - widen);
+        if (growRight) b = Math.min(limit, b + widen);
+        part = scanRegion(a, b);
+      }
+      region[0] = a;
+      region[1] = b;
+      parts.push(part);
+    }
+    regions.splice(0, regions.length, ...mergeIntervals(regions));
+    parts.sort((p, q) => p.offsets[0] - q.offsets[0]);
+    const offsets = [], mx = [], my = [], mz = [], spacing = [];
+    for (const part of parts) {
+      for (let i2 = 0; i2 < part.offsets.length; i2++) {
+        if (offsets.length && part.offsets[i2] <= offsets[offsets.length - 1]) continue;
+        offsets.push(part.offsets[i2]);
+        mx.push(part.m[0][i2]);
+        my.push(part.m[1][i2]);
+        mz.push(part.m[2][i2]);
+        spacing.push(part.spacing);
+      }
+    }
+    return {
+      offsets: Float64Array.from(offsets),
+      mx: Float64Array.from(mx),
+      my: Float64Array.from(my),
+      mz: Float64Array.from(mz),
+      spacing: Float64Array.from(spacing)
+    };
+  }
+  function respond(cells, selective, offsets) {
+    const n = offsets.length;
+    const zeros = new Float64Array(n);
+    const spins = {
+      count: n,
+      x: zeros,
+      y: zeros,
+      z: selective ? offsets : zeros,
+      df: selective ? zeros : offsets,
+      r1: zeros,
+      r2: zeros,
+      weight: new Float64Array(n).fill(1),
+      b1Re: new Float64Array(n).fill(1),
+      b1Im: zeros,
+      coils: 1,
+      rxRe: new Float64Array(n).fill(1),
+      rxIm: zeros
+    };
+    const mx = new Float64Array(n), my = new Float64Array(n), mz = new Float64Array(n);
+    for (let i2 = 0; i2 < n; i2++) [mx[i2], my[i2], mz[i2]] = stepRfVector(cells, spins, i2, 0, 0, 1);
+    return [mx, my, mz];
+  }
+  function findBands(scan, role, resolution) {
+    const n = scan.offsets.length;
+    const level = new Float64Array(n);
+    let peak = 0;
+    for (let i2 = 0; i2 < n; i2++) {
+      level[i2] = activity(scan.mz[i2]);
+      peak = Math.max(peak, level[i2]);
+    }
+    if (!(peak > 1e-9)) return [];
+    const runs = [];
+    for (let i2 = 0; i2 < n; i2++) {
+      if (level[i2] < SUPPORT_LEVEL * peak) continue;
+      const last = runs[runs.length - 1];
+      if (last && scan.offsets[i2] - scan.offsets[last[1]] <= 2 * resolution + scan.spacing[i2]) last[1] = i2;
+      else runs.push([i2, i2]);
+    }
+    const excites = role === "excitation" || role === "other";
+    const action = (i2) => excites ? Math.hypot(scan.mx[i2], scan.my[i2]) : 0.5 * (1 - scan.mz[i2]);
+    return runs.map(([first, last]) => {
+      let top = first, topValue = -1, sum = 0, moment = 0;
+      for (let i2 = first; i2 <= last; i2++) {
+        const value = action(i2);
+        sum += value;
+        moment += value * scan.offsets[i2];
+        if (value > topValue) {
+          topValue = value;
+          top = i2;
+        }
+      }
+      const half = topValue / 2;
+      const crossing = (step) => {
+        let i2 = top;
+        while (i2 + step >= first && i2 + step <= last && action(i2 + step) >= half) i2 += step;
+        const j = i2 + step;
+        if (j < first || j > last) return scan.offsets[i2];
+        const t = (action(i2) - half) / (action(i2) - action(j));
+        return scan.offsets[i2] + t * (scan.offsets[j] - scan.offsets[i2]);
+      };
+      return {
+        from: scan.offsets[first] - scan.spacing[first],
+        to: scan.offsets[last] + scan.spacing[last],
+        centre: sum > 0 ? moment / sum : scan.offsets[top],
+        thickness: Math.abs(crossing(1) - crossing(-1))
+      };
+    });
+  }
+  function planSlices(pulses, options = {}) {
+    const density = Math.max(0.25, options.density ?? 2);
+    const maxSlices = Math.max(4, Math.floor(options.maxSlices ?? 512));
+    const selective = pulses.filter((p) => p.axis === "z" && p.bands.length);
+    if (!selective.length) return null;
+    const excites = (p) => p.role === "excitation" || p.role === "other";
+    const offResonance = Math.abs(options.offResonance ?? 0);
+    const widened = selective.map((p) => {
+      const margin = offResonance > 0 ? offResonance * p.duration / p.extentZ : 0;
+      let peak = 0;
+      for (let i2 = 0; i2 < p.mz.length; i2++) peak = Math.max(peak, activity(p.mz[i2]));
+      return { pulse: p, margin, peak, bands: p.bands.map((b) => [b.from - margin, b.to + margin]) };
+    });
+    let ranges;
+    let reference;
+    let extent;
+    if (pulses.some((p) => p.role === "excitation" && p.axis !== "z")) {
+      const thickness = options.planeThickness ?? 0;
+      if (!(thickness > 0)) return null;
+      ranges = [[-thickness / 2, thickness / 2]];
+      reference = thickness;
+      extent = "plane";
+    } else {
+      ranges = mergeIntervals(widened.filter((w) => excites(w.pulse)).flatMap((w) => w.bands));
+      if (!ranges.length) return null;
+      const thicknesses = selective.filter(excites).flatMap((p) => p.bands.map((b) => b.thickness)).filter((t) => t > 0);
+      reference = thicknesses.length ? Math.max(...thicknesses) : ranges.reduce((sum, [a, b]) => sum + (b - a), 0);
+      extent = "pulses";
+    }
+    const finest = Math.min(...selective.map((p) => 1 / p.extentZ));
+    const stepAt = (z, scale2) => {
+      let best = Infinity;
+      for (const w of widened) {
+        if (!w.bands.some(([a, b]) => z >= a && z <= b)) continue;
+        const level = Math.max(activityAt(w.pulse, z), activityAt(w.pulse, z - w.margin), activityAt(w.pulse, z + w.margin));
+        let tier = 1;
+        for (const threshold of TIERS) if (level < threshold * w.peak) tier *= 2;
+        best = Math.min(best, tier / w.pulse.extentZ);
+      }
+      return (Number.isFinite(best) ? best : finest) * scale2 / density;
+    };
+    for (let scale2 = 1, attempt = 0; attempt < 40; attempt++, scale2 *= 1.25) {
+      const cells = layout(ranges, (z) => stepAt(z, scale2), maxSlices + 1);
+      if (cells.length <= maxSlices) {
+        const centres = cells.map(([a, b]) => 0.5 * (a + b)), widths = cells.map(([a, b]) => b - a);
+        return {
+          z: Float64Array.from(centres),
+          width: Float64Array.from(widths),
+          weight: Float64Array.from(widths, (w) => w / reference),
+          density,
+          reference,
+          ranges,
+          extent,
+          coarsened: scale2 > 1
+        };
+      }
+    }
+    throw new Error("Could not fit the slab into the sub-slice budget.");
+  }
+  function layout(ranges, stepAt, limit) {
+    const cells = [];
+    for (const [a, b] of ranges) {
+      const middle = 0.5 * (a + b);
+      for (const direction of [1, -1]) {
+        const end = direction > 0 ? b : a;
+        let z = middle;
+        while (direction * (end - z) > 1e-12 && cells.length < limit) {
+          let step = stepAt(z);
+          step = Math.min(step, stepAt(z + 0.5 * direction * step), stepAt(z + direction * step));
+          const remaining = direction * (end - z);
+          if (remaining < 1.5 * step) step = remaining;
+          const next = z + direction * step;
+          cells.push(direction > 0 ? [z, next] : [next, z]);
+          z = next;
+        }
+      }
+    }
+    return cells.sort((p, q) => p[0] - q[0]);
+  }
+  function activityAt(pulse, z) {
+    if (!pulse.regions.some(([a, b]) => z >= a && z <= b)) return 0;
+    const offsets = pulse.offsets;
+    let lo = 0, hi = offsets.length - 1;
+    if (!(z >= offsets[lo] && z <= offsets[hi])) return 0;
+    while (hi - lo > 1) {
+      const mid = lo + hi >> 1;
+      if (offsets[mid] <= z) lo = mid;
+      else hi = mid;
+    }
+    const span = offsets[hi] - offsets[lo];
+    const t = span > 0 ? (z - offsets[lo]) / span : 0;
+    return (1 - t) * activity(pulse.mz[lo]) + t * activity(pulse.mz[hi]);
+  }
+  function probeSliceDensity(program, pulses, tissues, options) {
+    const densities = options.densities ?? [1, 2, 4, 8, 16];
+    const tolerance = options.tolerance ?? 0.02;
+    const horizon = Math.min(program.totalDuration, options.horizon ?? 4);
+    const countY = Math.max(1, Math.floor(options.countY ?? 1));
+    const spinLimit = options.spinLimit ?? 4e5;
+    const plans = /* @__PURE__ */ new Map();
+    const planAt = (density) => {
+      if (!plans.has(density)) plans.set(density, planSlices(pulses, { ...options, density }));
+      return plans.get(density);
+    };
+    const first = planAt(densities[0]);
+    if (!first) return null;
+    const order = tissues.slice().sort((a, b) => lifetime2(b) - lifetime2(a));
+    const signals = /* @__PURE__ */ new Map();
+    const signalOf = (plan, t) => {
+      const key = `${plan.density}|${t}`;
+      let signal = signals.get(key);
+      if (!signal) {
+        signal = simulateReference(program, probeColumn(plan, order[t], options.voxel, countY), { until: horizon }).signal;
+        signals.set(key, signal);
+      }
+      return signal;
+    };
+    const tested = [];
+    let chosen = first;
+    for (const density of densities) {
+      const plan = planAt(density), finer = planAt(2 * density);
+      const spins = (p) => Math.max(...order.map((t) => t.countX)) * countY * p.z.length;
+      if (finer.coarsened || spins(finer) > spinLimit) {
+        return { plan: chosen, error: tested.length ? tested[tested.length - 1].error : NaN, capped: true, tested };
+      }
+      let error = 0;
+      for (let t = 0; t < order.length && error <= tolerance; t++) {
+        const reference = signalOf(finer, t);
+        const scale2 = norm2(reference);
+        if (!(scale2 > 0)) continue;
+        error = Math.max(error, distance2(signalOf(plan, t), reference) / scale2);
+      }
+      tested.push({ density, slices: plan.z.length, error });
+      if (error <= tolerance) return { plan, error, capped: false, tested };
+      chosen = finer;
+    }
+    return { plan: chosen, error: tested[tested.length - 1].error, capped: true, tested };
+  }
+  function probeColumn(plan, tissue, voxel, countY) {
+    const countX = Math.max(1, tissue.countX);
+    const perSlice = countX * countY;
+    const count = perSlice * plan.z.length;
+    const x2 = new Float64Array(count), y = new Float64Array(count), z = new Float64Array(count);
+    const weight = new Float64Array(count);
+    let i2 = 0;
+    for (let k = 0; k < plan.z.length; k++) {
+      for (let ay = 0; ay < countY; ay++) {
+        for (let ax = 0; ax < countX; ax++) {
+          x2[i2] = ((ax + 0.5) / countX - 0.5) * voxel[0];
+          y[i2] = countY > 1 ? ((ay + 0.5) / countY - 0.5) * voxel[1] : 0;
+          z[i2] = plan.z[k];
+          weight[i2] = plan.weight[k] / perSlice;
+          i2++;
+        }
+      }
+    }
+    const rate2 = (time) => Number.isFinite(time) && time > 0 ? 1 / time : 0;
+    return {
+      count,
+      x: x2,
+      y,
+      z,
+      df: new Float64Array(count),
+      r1: new Float64Array(count).fill(rate2(tissue.t1)),
+      r2: new Float64Array(count).fill(rate2(tissue.t2)),
+      weight,
+      b1Re: new Float64Array(count).fill(1),
+      b1Im: new Float64Array(count),
+      coils: 1,
+      rxRe: new Float64Array(count).fill(1),
+      rxIm: new Float64Array(count)
+    };
+  }
+  function lifetime2(tissue) {
+    const t2 = Number.isFinite(tissue.t2) ? tissue.t2 : 1e9;
+    const t1 = Number.isFinite(tissue.t1) ? tissue.t1 : 1e9;
+    return t2 + 1e-6 * t1;
+  }
+  function norm2(signal) {
+    let sum = 0;
+    for (let i2 = 0; i2 < signal.length; i2++) sum += signal[i2] * signal[i2];
+    return Math.sqrt(sum);
+  }
+  function distance2(a, b) {
+    let sum = 0;
+    for (let i2 = 0; i2 < a.length; i2++) sum += (a[i2] - b[i2]) ** 2;
+    return Math.sqrt(sum);
+  }
+  function mergeIntervals(intervals) {
+    const sorted = intervals.slice().sort((a, b) => a[0] - b[0]);
+    const merged = [];
+    for (const [a, b] of sorted) {
+      const last = merged[merged.length - 1];
+      if (last && a <= last[1]) last[1] = Math.max(last[1], b);
+      else merged.push([a, b]);
+    }
+    return merged;
   }
 
   // src/sim/recon/cartesian.ts
@@ -7879,11 +8651,15 @@
   }
 
   // src/sim/job.ts
-  var MAX_JOB_SPINS = 32e6;
-  var MAX_JOB_SIMULATED = 4e6;
+  var MAX_JOB_SPINS = 64e6;
+  var MAX_JOB_SIMULATED = 128e6;
+  var SLICE_WORK_BUDGET = 4e9;
   var MAX_JOB_COILS = 32;
   var MIN_CHUNK_SPINS = 16384;
+  var MAX_CHUNK_SPINS = 262144;
   var MAX_CHUNKS = 64;
+  var MAX_SLICES = 512;
+  var SLICE_PROBE_TISSUES = 2;
   var REPLAY_BLOCK_LIMIT = 2e5;
   var PROBE_TISSUES = 4;
   var T2_BAND_EDGES = [0.03, 0.06, 0.12, 0.25, 0.5, 1, Infinity];
@@ -7899,6 +8675,10 @@
       __publicField(this, "chunkVoxels");
       /** Spins along x per voxel when banded (indexed like the maps), else null. */
       __publicField(this, "countX");
+      /** Sub-slices along z, or null for one plane at z = 0. */
+      __publicField(this, "slices");
+      /** The pulses as measured for this plan (empty when the sub-slices came resolved). */
+      __publicField(this, "pulses");
       __publicField(this, "sequenceFov");
       __publicField(this, "trajectory", null);
       __publicField(this, "hooks");
@@ -7924,20 +8704,29 @@
       const subSpins = [axes[0].count, axes[1].count];
       this.countX = banded ? banded.countX : null;
       if (banded) banded.resolved.y = subSpins[1];
-      const spinsOf = (v) => (this.countX ? this.countX[v] : subSpins[0]) * subSpins[1];
-      let spins = 0;
-      for (const v of voxels) spins += spinsOf(v);
-      if (spins > MAX_JOB_SPINS) {
-        throw new Error(`${spins.toLocaleString("en-US")} spins exceed the ${MAX_JOB_SPINS.toLocaleString("en-US")} limit; use a smaller phantom matrix or fewer spins per voxel.`);
-      }
-      this.report("Splitting the spins into chunks", 0.95);
       const units = this.chunkUnits(voxels);
-      const simulated = this.countClasses(units, subSpins, spinsOf);
-      if (simulated > MAX_JOB_SIMULATED) {
-        throw new Error(`${simulated.toLocaleString("en-US")} simulated spins exceed the ${MAX_JOB_SIMULATED.toLocaleString("en-US")} limit; use a smaller phantom matrix or fewer spins per voxel.`);
+      const through = this.planThroughSlice(settings, subSpins, banded?.resolved ?? null, this.countClasses(units, subSpins));
+      this.slices = through.slices;
+      this.pulses = through.pulses;
+      const { slicesAt, planesAt } = this.presence(voxels);
+      const along = (v) => (this.countX ? this.countX[v] : subSpins[0]) * subSpins[1];
+      const spinsOf = (v) => along(v) * slicesAt[v];
+      let spins = 0, stored = 0;
+      for (const v of voxels) {
+        spins += spinsOf(v);
+        stored += along(v) * (this.fold ? planesAt[v] : slicesAt[v]);
       }
-      this.chunkVoxels = splitUnits(units, spinsOf, Math.max(MIN_CHUNK_SPINS, Math.ceil(spins / MAX_CHUNKS)));
-      const notes = ["2D phantom: one plane at z = 0, so the slice profile and through-plane dephasing are not simulated."];
+      if (stored > MAX_JOB_SPINS) {
+        throw new Error(`${stored.toLocaleString("en-US")} spins exceed the ${MAX_JOB_SPINS.toLocaleString("en-US")} limit; use a smaller phantom matrix, fewer spins per voxel or fewer sub-slices.`);
+      }
+      this.report("Splitting the spins into chunks", 0.97);
+      const simulated = this.countClasses(units, subSpins);
+      if (simulated > MAX_JOB_SIMULATED) {
+        throw new Error(`${simulated.toLocaleString("en-US")} simulated spins exceed the ${MAX_JOB_SIMULATED.toLocaleString("en-US")} limit; use a smaller phantom matrix, fewer spins per voxel or fewer sub-slices.`);
+      }
+      const target = Math.max(MIN_CHUNK_SPINS, Math.min(MAX_CHUNK_SPINS, Math.ceil(spins / MAX_CHUNKS)));
+      this.chunkVoxels = splitUnits(units, spinsOf, target);
+      const notes = through.notes.slice();
       for (const band of banded?.bands ?? []) {
         if (band.capped) {
           notes.push(`x, T2 ${(band.t2Min * 1e3).toFixed(0)}\u2013${Number.isFinite(band.t2Max) ? (band.t2Max * 1e3).toFixed(0) : "\u221E"} ms: ${band.count} spins per voxel did not reach the ${tolerancePercent(settings)} target (error ${(100 * band.error).toFixed(0)} %).`);
@@ -7971,6 +8760,8 @@
         subSpins,
         bands: banded ? banded.bands : null,
         resolved: banded ? banded.resolved : subSpins,
+        slices: through.summary,
+        resolvedSlices: through.resolved,
         spins,
         simulated,
         chunks: this.chunkVoxels.length,
@@ -7987,7 +8778,7 @@
     simulateChunk(index, options = {}) {
       const voxels = this.chunkVoxels[index];
       if (!voxels) throw new Error(`No chunk ${index} (the job has ${this.chunkVoxels.length}).`);
-      const spinOptions = { subSpins: this.plan.subSpins, voxels, countX: this.countX ?? void 0 };
+      const spinOptions = { subSpins: this.plan.subSpins, voxels, countX: this.countX ?? void 0, slices: this.slices ?? void 0 };
       if (!this.fold) return simulateReference(this.program, phantomSpins(this.phantom, spinOptions), options).signal;
       const { classes, members } = foldedPhantomSpins(this.phantom, this.physics, spinOptions, this.fold);
       return simulateReference(this.program, classes, { ...options, members }).signal;
@@ -8038,8 +8829,120 @@
       }
       const coils = Math.round(settings.coils ?? 1);
       if (!(coils >= 1 && coils <= MAX_JOB_COILS)) throw new Error(`Coils must be between 1 and ${MAX_JOB_COILS}, got ${settings.coils}.`);
+      for (const plane of phantom.planes ?? []) {
+        if (plane.maps.pd.length !== phantom.nx * phantom.ny) throw new Error("A phantom plane does not match the phantom matrix size.");
+      }
       if (!phantom.coils && coils > 1) phantom = { ...phantom, coils: syntheticCoils(phantom.nx, phantom.ny, phantom.voxel, coils) };
       return phantom;
+    }
+    /**
+     * Sub-slices along z (plan/slices.ts): resolved by another worker, or
+     * measured from the pulses with a density probed on one voxel of the
+     * longest-lived tissues, at the in-plane spins this plan chose.
+     */
+    planThroughSlice(settings, subSpins, bands, flatClasses) {
+      const mode = settings.throughSlice ?? "auto";
+      const flat = "one plane at z = 0, so slice profiles and through-slice dephasing are not simulated";
+      if (mode === "off") {
+        return { slices: null, summary: null, resolved: "off", pulses: [], notes: [`Through-slice sampling is off: ${flat}.`] };
+      }
+      let plan;
+      let probe = null;
+      let pulses = [];
+      let budgetNote = "";
+      if (mode !== "auto") {
+        plan = mode;
+      } else {
+        this.report("Measuring the RF pulses along z", 0.9);
+        pulses = measurePulses(this.program);
+        const options = {
+          offResonance: this.largestOffResonance(),
+          planeThickness: this.phantom.voxel[2],
+          maxSlices: MAX_SLICES
+        };
+        const selective = pulses.some((p) => p.axis === "z" && p.bands.length);
+        if (!planSlices(pulses, { ...options, density: 1 })) {
+          const why = selective ? "An excitation is not selective along z and the phantom plane has no thickness" : "No pulse is selective along z";
+          return { slices: null, summary: null, resolved: "off", pulses, notes: [`${why}: ${flat}.`] };
+        }
+        this.report("Probing the sub-slice spacing", 0.93);
+        const tissues = representativeTissues(this.physics).slice(0, SLICE_PROBE_TISSUES).map((tissue) => ({
+          ...tissue,
+          countX: this.fold & 1 ? 1 : bands ? bandCount(bands, tissue.t2) : subSpins[0]
+        }));
+        const result = probeSliceDensity(this.program, pulses, tissues, {
+          ...options,
+          voxel: [this.phantom.voxel[0], this.phantom.voxel[1]],
+          countY: this.fold & 2 ? 1 : subSpins[1],
+          tolerance: settings.tolerance
+        });
+        probe = { error: result.error, capped: result.capped, tested: result.tested };
+        let chosen = result.plan;
+        const work = (slices2) => flatClasses * slices2 * Math.max(1, this.analysis.rfEvents);
+        if (work(chosen.z.length) > SLICE_WORK_BUDGET) {
+          const fitting = result.tested.filter((t) => work(t.slices) <= SLICE_WORK_BUDGET);
+          const pick = fitting.length ? fitting[fitting.length - 1] : result.tested[0];
+          if (pick && pick.density < chosen.density) {
+            chosen = planSlices(pulses, { ...options, density: pick.density });
+            budgetNote = `Through-slice: ${chosen.z.length} sub-slices instead of ${result.plan.z.length} to keep the run affordable (about ${(100 * pick.error).toFixed(0)} % signal error from the z sampling; choose Fast or Draft accuracy to make that the default).`;
+          }
+        }
+        plan = {
+          kind: "slices",
+          z: Array.from(chosen.z),
+          weight: Array.from(chosen.weight),
+          density: chosen.density,
+          reference: chosen.reference,
+          ranges: chosen.ranges,
+          extent: chosen.extent,
+          coarsened: chosen.coarsened
+        };
+      }
+      const z = Float64Array.from(plan.z);
+      const slices = { z, weight: Float64Array.from(plan.weight), plane: assignPlanes(this.phantom, z) };
+      const planes = new Set(Array.from(slices.plane)).size;
+      const summary = {
+        count: z.length,
+        ranges: plan.ranges,
+        density: plan.density,
+        reference: plan.reference,
+        extent: plan.extent,
+        coarsened: plan.coarsened,
+        planes,
+        probe
+      };
+      const mm = (value) => +(value * 1e3).toFixed(2);
+      const notes = [];
+      const span = plan.ranges.map(([a, b]) => `${mm(a)}\u2026${mm(b)}`).join(", ");
+      notes.push(plan.extent === "plane" ? `An excitation is not selective along z: ${z.length} sub-slices span only the phantom plane's ${mm(this.phantom.voxel[2])} mm.` : `Through-slice: ${z.length} sub-slices over z = ${span} mm (slice ${mm(plan.reference)} mm FWHM).`);
+      notes.push(this.phantom.planes?.length ? `${planes} phantom planes along z, ${mm(this.phantom.voxel[2])} mm apart.` : "The 2-D phantom is extruded along z: every sub-slice sees the same plane.");
+      if (plan.coarsened) notes.push(`The sub-slice spacing was widened to stay within ${MAX_SLICES} sub-slices.`);
+      if (budgetNote) notes.push(budgetNote);
+      if (probe?.capped) {
+        notes.push(`Through-slice: the finest spacing tried did not reach the ${tolerancePercent(settings)} target (error ${Number.isFinite(probe.error) ? (100 * probe.error).toFixed(0) : "?"} %).`);
+      }
+      return { slices, summary, resolved: plan, pulses, notes };
+    }
+    /** Largest |B0 offset| among the phantom's occupied voxels [Hz]. */
+    largestOffResonance() {
+      let largest = 0;
+      for (const maps of [this.phantom.maps, ...(this.phantom.planes ?? []).map((plane) => plane.maps)]) {
+        if (!maps.b0) continue;
+        for (let i2 = 0; i2 < maps.b0.length; i2++) if (maps.pd[i2] > 0) largest = Math.max(largest, Math.abs(maps.b0[i2]));
+      }
+      return largest;
+    }
+    /** Sub-slices and distinct planes with PD > 0 at each voxel. */
+    presence(voxels) {
+      const cells = this.phantom.nx * this.phantom.ny;
+      const slicesAt = new Int32Array(cells), planesAt = new Int32Array(cells);
+      const planeOf = this.slices ? Array.from(this.slices.plane) : [-1];
+      const used = [...new Set(planeOf)];
+      for (const v of voxels) {
+        for (const plane of planeOf) if (planeMaps(this.phantom, plane).pd[v] > 0) slicesAt[v]++;
+        for (const plane of used) if (planeMaps(this.phantom, plane).pd[v] > 0) planesAt[v]++;
+      }
+      return { slicesAt, planesAt };
     }
     planAxis(axis, voxel, settings) {
       const folded = (this.fold & 1 << axis) !== 0;
@@ -8080,7 +8983,7 @@
      */
     planBands(voxels, voxel, settings) {
       const folded = (this.fold & 1) !== 0;
-      const t2 = this.phantom.maps.t2;
+      const { t1, t2 } = this.longestTimes();
       const bandOf = (v, edges2) => {
         const time = Number.isFinite(t2[v]) && t2[v] > 0 ? t2[v] : Infinity;
         let b = 0;
@@ -8110,7 +9013,7 @@
           this.report(`Probing spins per voxel: T2 ${range} (band ${++probed} of ${occupied})`, 0.2 + 0.7 * (probed - 1) / occupied);
           let t1Max = 0, t2Max = 0;
           for (const v of members[b]) {
-            const time1 = Number.isFinite(this.phantom.maps.t1[v]) ? this.phantom.maps.t1[v] : 1e9;
+            const time1 = Number.isFinite(t1[v]) ? t1[v] : 1e9;
             const time2 = Number.isFinite(t2[v]) ? t2[v] : 1e9;
             t1Max = Math.max(t1Max, time1);
             t2Max = Math.max(t2Max, time2);
@@ -8149,6 +9052,22 @@
       };
       return { axis, countX, bands, resolved: { kind: "bands", edges, counts, y } };
     }
+    /** Per voxel, the longest T1 and T2 among the planes where it has PD (the own plane's maps without planes). */
+    longestTimes() {
+      const planes = this.phantom.planes ?? [];
+      if (!planes.length) return { t1: this.phantom.maps.t1, t2: this.phantom.maps.t2 };
+      const cells = this.phantom.nx * this.phantom.ny;
+      const t1 = new Float32Array(cells), t2 = new Float32Array(cells);
+      const life = (time) => Number.isFinite(time) && time > 0 ? time : Infinity;
+      for (const maps of [this.phantom.maps, ...planes.map((plane) => plane.maps)]) {
+        for (let v = 0; v < cells; v++) {
+          if (!(maps.pd[v] > 0)) continue;
+          t1[v] = Math.max(t1[v], life(maps.t1[v]));
+          t2[v] = Math.max(t2[v], life(maps.t2[v]));
+        }
+      }
+      return { t1, t2 };
+    }
     /** Voxels grouped into the units chunks are cut from (see the file comment). */
     chunkUnits(voxels) {
       const nx = this.phantom.nx;
@@ -8165,16 +9084,40 @@
       return [...lines.keys()].sort((a, b) => a - b).map((line) => Int32Array.from(lines.get(line)));
     }
     /** Simulated spins over all chunks: classes when folded, else every spin. */
-    countClasses(units, subSpins, spinsOf) {
-      if (!this.fold) return units.reduce((sum, unit) => sum + unit.reduce((s, v) => s + spinsOf(v), 0), 0);
-      if (this.fold === 3) return this.physics.t1.length;
+    countClasses(units, subSpins) {
+      const planeOf = this.slices ? Array.from(this.slices.plane) : [-1];
+      const slicesOfPlane = /* @__PURE__ */ new Map();
+      for (const plane of planeOf) slicesOfPlane.set(plane, (slicesOfPlane.get(plane) ?? 0) + 1);
+      const along = (v) => this.countX ? this.countX[v] : subSpins[0];
+      if (!this.fold) {
+        let total2 = 0;
+        for (const unit of units) {
+          for (const v of unit) {
+            for (const [plane, count] of slicesOfPlane) if (planeMaps(this.phantom, plane).pd[v] > 0) total2 += along(v) * subSpins[1] * count;
+          }
+        }
+        return total2;
+      }
+      if (this.fold === 3) {
+        let total2 = 0;
+        for (const [plane, count] of slicesOfPlane) {
+          const entries = /* @__PURE__ */ new Set();
+          const of = plane < 0 ? this.physics.of : this.physics.ofPlanes[plane];
+          for (const unit of units) for (const v of unit) if (of[v] >= 0) entries.add(of[v]);
+          total2 += entries.size * count;
+        }
+        return total2;
+      }
       let total = 0;
       for (const unit of units) {
         const seen = /* @__PURE__ */ new Map();
         for (const v of unit) {
-          const along = this.fold & 1 ? 1 : this.countX ? this.countX[v] : subSpins[0];
-          const key = this.physics.of[v] * 8192 + along;
-          seen.set(key, along * (this.fold & 2 ? 1 : subSpins[1]));
+          const positions = this.fold & 1 ? 1 : along(v);
+          for (const [plane, count] of slicesOfPlane) {
+            const of = plane < 0 ? this.physics.of : this.physics.ofPlanes[plane];
+            if (of[v] < 0) continue;
+            seen.set(`${of[v]}|${positions}|${plane}`, positions * (this.fold & 2 ? 1 : subSpins[1]) * count);
+          }
         }
         for (const count of seen.values()) total += count;
       }
@@ -8183,6 +9126,12 @@
   };
   function tolerancePercent(settings) {
     return `${+(100 * (settings.tolerance ?? 0.02)).toFixed(1)} %`;
+  }
+  function bandCount(bands, t2) {
+    const time = Number.isFinite(t2) && t2 > 0 ? t2 : Infinity;
+    let b = 0;
+    while (b < bands.edges.length - 1 && time > bands.edges[b]) b++;
+    return bands.counts[b] || Math.max(...bands.counts);
   }
   function clampCount(value) {
     const n = Math.floor(value);
@@ -8606,10 +9555,10 @@
     let [b, c, d] = header.quatern;
     let a = 1 - (b * b + c * c + d * d);
     if (a < 1e-7) {
-      const norm2 = 1 / Math.sqrt(b * b + c * c + d * d);
-      b *= norm2;
-      c *= norm2;
-      d *= norm2;
+      const norm3 = 1 / Math.sqrt(b * b + c * c + d * d);
+      b *= norm3;
+      c *= norm3;
+      d *= norm3;
       a = 0;
     } else {
       a = Math.sqrt(a);
@@ -8974,7 +9923,9 @@
   }
   function phantomBuffers(phantom) {
     const buffers = /* @__PURE__ */ new Set();
-    for (const map of Object.values(phantom.maps)) if (map) buffers.add(map.buffer);
+    for (const maps of [phantom.maps, ...(phantom.planes ?? []).map((plane) => plane.maps)]) {
+      for (const map of Object.values(maps)) if (map) buffers.add(map.buffer);
+    }
     if (phantom.coils) {
       buffers.add(phantom.coils.re.buffer);
       buffers.add(phantom.coils.im.buffer);
@@ -9004,14 +9955,47 @@
     } else if (!volume) {
       throw new Error("Load a phantom file first.");
     }
-    const phantom = sliceVolume(withFieldMode(volume, request.fields), request.slice);
+    const fielded = withFieldMode(volume, request.fields);
+    const slice = { ...request.slice };
+    if (request.sequence) {
+      const neighbours = neighbourRange(fielded, slice, new Uint8Array(request.sequence), request.name ?? "");
+      if (neighbours) slice.neighbours = neighbours;
+    }
+    const phantom = sliceVolume(fielded, slice);
     return { volume: volumeSummary(volume), phantom };
+  }
+  function neighbourRange(v, slice, sequence, name) {
+    const plane = slice.plane ?? "xy";
+    const normal = plane === "xy" ? 2 : plane === "xz" ? 1 : 0;
+    if (v.shape[normal] < 2) return void 0;
+    const spacing = v.voxel[normal];
+    let offResonance = 0;
+    if (v.maps.b0) {
+      for (let i2 = 0; i2 < v.maps.b0.length; i2++) if (v.maps.pd[i2] > 0) offResonance = Math.max(offResonance, Math.abs(v.maps.b0[i2]));
+    }
+    const plan = planSlices(measurePulses(compileProgram(parseSequenceBytes(sequence, name))), {
+      density: 1,
+      planeThickness: spacing,
+      offResonance
+    });
+    if (!plan || plan.extent === "plane" || !(spacing > 0)) return void 0;
+    const lo = Math.min(...plan.ranges.map((r) => Math.round(r[0] / spacing)));
+    const hi = Math.max(...plan.ranges.map((r) => Math.round(r[1] / spacing)));
+    return lo === 0 && hi === 0 ? void 0 : [lo, hi];
+  }
+  function pulseBuffers(pulses) {
+    return pulses.flatMap((p) => [p.offsets, p.mx, p.my, p.mz].map((a) => a.buffer));
   }
   function handle(request) {
     switch (request.type) {
       case "phantom": {
         const result = loadPhantom(request.request);
         port.post({ type: "phantom", id: request.id, ...result }, phantomBuffers(result.phantom));
+        return;
+      }
+      case "pulses": {
+        const pulses = measurePulses(compileProgram(parseSequenceBytes(new Uint8Array(request.bytes), request.name)));
+        port.post({ type: "pulses", id: request.id, pulses }, pulseBuffers(pulses));
         return;
       }
       case "open": {
@@ -9026,8 +10010,8 @@
           }
         });
         jobs.set(request.job, job);
-        const layout = request.layout ? job.rawLayout() : void 0;
-        port.post({ type: "plan", job: request.job, plan: job.plan, layout }, layout ? [layout.k.buffer] : []);
+        const layout2 = request.layout ? job.rawLayout() : void 0;
+        port.post({ type: "plan", job: request.job, plan: job.plan, layout: layout2 }, layout2 ? [layout2.k.buffer] : []);
         return;
       }
       case "previewOpen": {
@@ -9077,12 +10061,12 @@
       case "recon": {
         const job = jobFor(request.job);
         const recon = job.reconstruct(request.signal);
-        const layout = job.rawLayout();
+        const layout2 = job.rawLayout();
         const transfer = [recon.images.buffer, recon.kspace.buffer];
         for (const stack of [recon.coilImages, recon.coilKspace]) {
           if (stack) transfer.push(stack.re.buffer, stack.im.buffer);
         }
-        transfer.push(layout.k.buffer);
+        transfer.push(layout2.k.buffer);
         port.post({
           type: "recon",
           job: request.job,
@@ -9102,7 +10086,7 @@
           },
           // The phantom the job simulated (resolved coils included), for the Phantom view.
           phantom: job.phantom,
-          layout
+          layout: layout2
         }, transfer);
         return;
       }

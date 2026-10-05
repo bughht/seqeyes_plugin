@@ -28,6 +28,14 @@
    phantom worker reconstructs it about twice a second, so the image fills in
    strip by strip.
 
+   Spins along z: the plan places sub-slices wherever the sequence's pulses
+   act along z (src/sim/plan/slices.ts), so slice profiles, refocusing and
+   inversion slabs and multiband pulses act on a 2-D phantom as on a slab.
+   The RF pulses tab shows every pulse's measured response (across z, or
+   against off-resonance), before any run; the phantom worker measures it
+   when a sequence opens. A 3-D phantom brings the neighbouring planes the
+   slabs reach.
+
    Results are shown with SeqEyesNdView (ndview.js): any two dimensions of
    the raw data, k-space, images or phantom maps as an image, the waveform
    along one of them as a line plot, hover marking the sample's time on the
@@ -70,7 +78,15 @@ var SeqEyesSimulation = (function () {
     ['mrzero', 'B0/B1: file, else MRzero-style'],
     ['none', 'B0/B1: ideal']
   ];
-  var DATA_TABS = [['phantom', 'Phantom'], ['raw', 'Raw'], ['kspace', 'k-space'], ['image', 'Image']];
+  var SLICE_CHOICES = [['auto', 'Slices: auto'], ['off', 'Slices: z = 0']];
+  var DATA_TABS = [['phantom', 'Phantom'], ['rf', 'RF pulses'], ['raw', 'Raw'], ['kspace', 'k-space'], ['image', 'Image']];
+  var RF_AXES = [['z', 'across z'], ['frequency', 'against Δf']];
+  /** Points of the RF views, and what they show of each pulse (from equilibrium, no relaxation). */
+  var RF_POINTS = 1024;
+  var RF_QUANTITIES = ['tip', '|Mxy|', 'Mz', 'Mx', 'My'];
+  var RF_UNITS = ['°', '', '', '', ''];
+  /** Pulse-measurement requests to the phantom worker use their own id range. */
+  var PULSE_ID_BASE = 1e9;
   var EXPORTS = [
     ['ismrmrd-h5', 'ISMRMRD raw data (.h5)'],
     ['ismrmrd-stream', 'ISMRMRD stream (.bin)'],
@@ -88,6 +104,8 @@ var SeqEyesSimulation = (function () {
   var coils = choice(+get('seqeyes.simulation.coils'), COIL_CHOICES, 1);
   var spins = choice(get('seqeyes.simulation.spins'), SPIN_CHOICES, 'auto');
   var accuracy = choice(get('seqeyes.simulation.accuracy'), ACCURACY_CHOICES.map(function (a) { return a[0]; }), '0.02');
+  var sliceMode = choice(get('seqeyes.simulation.slices'), SLICE_CHOICES.map(function (c) { return c[0]; }), 'auto');
+  var rfAxis = choice(get('seqeyes.simulation.rfAxis'), RF_AXES.map(function (a) { return a[0]; }), 'z');
   var dataTab = choice(get('seqeyes.simulation.data'), DATA_TABS.map(function (t) { return t[0]; }), 'image');
   var rawOrder = choice(get('seqeyes.simulation.rawOrder'), ['labels', 'acquisition', 'time'], 'labels');
   var slicePlane = choice(get('seqeyes.simulation.plane'), ['xy', 'xz', 'yz'], 'xy');
@@ -103,6 +121,10 @@ var SeqEyesSimulation = (function () {
   var phantom = { status: 'idle', id: 0, data: null, volume: null, label: '', error: null };
   var uploaded = null;            // { label, files } of the user's last upload
   var presetBytes = {};           // preset id → ArrayBuffer (fetched once per session)
+
+  /* The open sequence's RF pulses, measured by the phantom worker. */
+  var pulseRequest = PULSE_ID_BASE;
+  var pulses = { status: 'idle', id: 0, list: null, error: null };
 
   /* Run state. */
   var runCounter = 0;
@@ -161,6 +183,7 @@ var SeqEyesSimulation = (function () {
     });
     return plan.phantom.source + ' · ' + plan.phantom.nx + '×' + plan.phantom.ny
       + ' · spins/voxel ' + axes.join(', ')
+      + (plan.slices ? ' · ' + plan.slices.count + ' sub-slices' + (plan.slices.planes > 1 ? ' over ' + plan.slices.planes + ' planes' : '') : ' · z = 0')
       + ' · ' + formatCount(plan.spins) + ' spins, ' + formatCount(plan.simulated) + ' simulated'
       + (plan.coils > 1 ? ' · ' + plan.coils + ' coils' : '')
       + ' · ' + plan.rfEvents + ' RF, ' + plan.adcEvents + ' ADC';
@@ -230,7 +253,8 @@ var SeqEyesSimulation = (function () {
       return;
     }
     if (reason === 'slice' && phantom.volume) {
-      postPhantom(id, { kind: 'slice', fields: fields, slice: sliceOptions() }, []);
+      var sliceRequest = { kind: 'slice', fields: fields, slice: sliceOptions() };
+      postPhantom(id, sliceRequest, withSequence(sliceRequest));
       return;
     }
     if (phantomChoice === 'file') {
@@ -250,8 +274,52 @@ var SeqEyesSimulation = (function () {
 
   function postFiles(id, files) {
     var copies = files.map(function (file) { return { name: file.name, bytes: file.bytes.slice(0) }; });
-    postPhantom(id, { kind: 'files', files: copies, fields: fields, slice: sliceOptions() },
-      copies.map(function (file) { return file.bytes; }));
+    var request = { kind: 'files', files: copies, fields: fields, slice: sliceOptions() };
+    postPhantom(id, request, copies.map(function (file) { return file.bytes; }).concat(withSequence(request)));
+  }
+
+  /**
+   * Attach a copy of the open sequence to a phantom request, so a 3-D
+   * phantom comes with the neighbouring planes its slabs reach. Returns the
+   * buffers to transfer.
+   */
+  function withSequence(request) {
+    var source = sliceMode === 'auto' && host() && host().getSequenceSource();
+    if (!source || !source.bytes || !source.bytes.length) return [];
+    var copy = source.bytes.slice();
+    request.sequence = copy.buffer;
+    request.name = source.name || '';
+    phantom.sequenceBytes = source.bytes;
+    return [copy.buffer];
+  }
+
+  /** Measure the open sequence's RF pulses (for the RF pulses tab). */
+  function requestPulses() {
+    if (!isAvailable()) return;
+    datasets.rf = null;
+    datasets.rfSpectral = null;
+    var source = host().getSequenceSource();
+    if (!source || !source.bytes || !source.bytes.length) { pulses = { status: 'idle', id: 0, list: null, error: null }; return; }
+    var id = ++pulseRequest;
+    pulses = { status: 'loading', id: id, list: null, error: null };
+    var copy = source.bytes.slice();
+    try {
+      ensurePhantomWorker().postMessage({ type: 'pulses', id: id, bytes: copy.buffer, name: source.name || '' }, [copy.buffer]);
+    } catch (error) {
+      pulses.status = 'error';
+      pulses.error = String(error && error.message || error);
+    }
+  }
+
+  function onPulses(message) {
+    if (message.id !== pulses.id) return;
+    pulses.status = 'ready';
+    pulses.list = message.pulses;
+    datasets.rf = rfDataset(message.pulses, 'z');
+    datasets.rfSpectral = rfDataset(message.pulses, 'frequency');
+    if (!datasets.rf && rfAxis === 'z') rfAxis = 'frequency';
+    syncControls();
+    if (dataTab === 'rf') refreshView();
   }
 
   function postPhantom(id, request, transfer) {
@@ -313,6 +381,11 @@ var SeqEyesSimulation = (function () {
   function onPhantomMessage(message) {
     if (!message) return;
     if (message.type === 'preview') { onPreview(message); return; }
+    if (message.type === 'pulses') { onPulses(message); return; }
+    if (message.type === 'error' && message.id > PULSE_ID_BASE) {
+      if (message.id === pulses.id) { pulses.status = 'error'; pulses.error = message.message; syncControls(); }
+      return;
+    }
     if (message.type === 'error' && run && message.id === run.id && run.previewPending) {
       // A failed preview is not worth stopping the run for.
       run.previewPending = false;
@@ -323,6 +396,10 @@ var SeqEyesSimulation = (function () {
     phantom.status = 'ready';
     phantom.data = message.phantom;
     phantom.volume = message.volume;
+    if (phantom.runWhenReady) {
+      phantom.runWhenReady = false;
+      setTimeout(startRun, 0);
+    }
     if (message.volume && sliceIndex === null) sliceIndex = Math.floor(sliceAxisSize() / 2);
     datasets.phantom = phantomDataset(message.phantom);
     syncControls();
@@ -343,7 +420,11 @@ var SeqEyesSimulation = (function () {
     var p = phantom.data;
     var lines = [p.source + ' · ' + p.nx + '×' + p.ny + ' at ' + (p.voxel[0] * 1000).toFixed(2) + '×' + (p.voxel[1] * 1000).toFixed(2) + ' mm'
       + (phantom.volume ? ' · volume ' + phantom.volume.shape.join('×') : '')];
-    if (!result) lines.push('Press Run to simulate the open sequence on this phantom (2D, z = 0).');
+    if (!result) {
+      lines.push('Press Run to simulate the open sequence on this phantom' + (sliceMode === 'auto'
+        ? ', with spins through the slab wherever the pulses act along z.'
+        : ' (2-D, every spin at z = 0).'));
+    }
     setStatus(lines.concat(result ? statusForResultLines() : []), (p.notes || []).concat(result ? resultWarnings() : []));
   }
 
@@ -381,7 +462,7 @@ var SeqEyesSimulation = (function () {
   }
 
   function jobSettings() {
-    var settings = { phantom: { kind: 'phantom', phantom: phantom.data }, coils: coils, subSpins: 'auto', tolerance: +accuracy };
+    var settings = { phantom: { kind: 'phantom', phantom: phantom.data }, coils: coils, subSpins: 'auto', tolerance: +accuracy, throughSlice: sliceMode };
     if (spins !== 'auto') settings.subSpins = spins.split('x').map(Number);
     return settings;
   }
@@ -391,6 +472,12 @@ var SeqEyesSimulation = (function () {
     var source = host().getSequenceSource();
     if (!source || !source.bytes || !source.bytes.length) { setStatus(['Open a Pulseq sequence first.']); return; }
     if (phantom.status !== 'ready' || !phantom.data) { setStatus(['The phantom is not ready yet.']); return; }
+    if (phantom.volume && sliceMode === 'auto' && phantom.sequenceBytes !== source.bytes) {
+      // The neighbouring planes depend on the sequence's slabs: cut them first.
+      phantom.runWhenReady = true;
+      loadPhantom('slice');
+      return;
+    }
     stopRun(run);
     var settings = jobSettings();
     run = {
@@ -457,9 +544,12 @@ var SeqEyesSimulation = (function () {
           r.simulateStarted = now();
           r.phase = 'simulating';
           openPreview(r);
-          // Followers take the leader's spins per voxel: same chunks, no probe.
+          // Followers take the leader's spins per voxel and sub-slices: same chunks, no probe.
           var followers = Math.min(r.budget, r.plan.chunks) - 1;
-          var settings = { phantom: r.settings.phantom, coils: r.settings.coils, subSpins: r.plan.resolved };
+          var settings = {
+            phantom: r.settings.phantom, coils: r.settings.coils, tolerance: r.settings.tolerance,
+            subSpins: r.plan.resolved, throughSlice: r.plan.resolvedSlices
+          };
           for (var i = 0; i < followers; i++) {
             var follower = spawnWorker(r);
             if (!follower) return;
@@ -749,7 +839,7 @@ var SeqEyesSimulation = (function () {
     renderRunCard(run);
     // Live previews belonged to the cancelled run; the last finished result is shown again.
     if (result) buildResultDatasets();
-    else datasets = { phantom: datasets.phantom };
+    else datasets = { phantom: datasets.phantom, rf: datasets.rf, rfSpectral: datasets.rfSpectral };
     refreshView();
     setProgress(null);
     setStatus(['Cancelled.'].concat(result ? ['Showing the previous result.'] : []));
@@ -793,6 +883,82 @@ var SeqEyesSimulation = (function () {
         { name: 'map', size: count, labels: labels, units: units }
       ],
       re: re, im: im, defaultX: 0, defaultY: 1, defaultColormap: 'viridis'
+    };
+  }
+
+  /** Label of one measured pulse: what it is, how long, how far it tips, where it acts. */
+  function pulseLabel(p) {
+    var parts = [p.role, (p.duration * 1000).toFixed(2) + ' ms', Math.round(p.peakFlipDeg) + '°'];
+    if (p.freq) parts.push((p.freq > 0 ? '+' : '') + Math.round(p.freq) + ' Hz');
+    if (p.bands && p.bands.length) {
+      parts.push(p.bands.map(function (b) {
+        return (b.thickness * 1000).toFixed(2) + ' mm @ ' + (b.centre * 1000).toFixed(1);
+      }).join(', ') + ' mm');
+    }
+    parts.push('×' + p.events);
+    return parts.join(' · ');
+  }
+
+  /** The response at u: linear between scan points, equilibrium outside the scanned regions. */
+  function sampleResponse(p, u) {
+    var inside = p.regions.some(function (r) { return u >= r[0] && u <= r[1]; });
+    var offsets = p.offsets, n = offsets.length;
+    if (!inside || !n || u < offsets[0] || u > offsets[n - 1]) return [0, 0, 1];
+    var lo = 0, hi = n - 1;
+    while (hi - lo > 1) {
+      var mid = (lo + hi) >> 1;
+      if (offsets[mid] <= u) lo = mid; else hi = mid;
+    }
+    var span = offsets[hi] - offsets[lo], t = span > 0 ? (u - offsets[lo]) / span : 0;
+    return [p.mx[lo] + t * (p.mx[hi] - p.mx[lo]), p.my[lo] + t * (p.my[hi] - p.my[lo]), p.mz[lo] + t * (p.mz[hi] - p.mz[lo])];
+  }
+
+  /**
+   * Every pulse that acts along z, across a common z window (or every other
+   * pulse against off-resonance): the tip angle, |Mxy|, Mz, Mx and My after
+   * the pulse from equilibrium, × pulse. The z window spans each band ±3
+   * FWHM. Null when there is no such pulse.
+   */
+  function rfDataset(list, axis) {
+    var chosen = (list || []).filter(function (p) { return p.axis === axis && p.offsets.length; });
+    if (!chosen.length) return null;
+    var lo = Infinity, hi = -Infinity;
+    chosen.forEach(function (p) {
+      if (axis === 'z' && p.bands.length) {
+        p.bands.forEach(function (b) {
+          var reach = 3 * Math.max(b.thickness, 1 / p.extentZ);
+          lo = Math.min(lo, b.centre - reach);
+          hi = Math.max(hi, b.centre + reach);
+        });
+      } else {
+        p.regions.forEach(function (r) { lo = Math.min(lo, r[0]); hi = Math.max(hi, r[1]); });
+      }
+    });
+    if (!(hi > lo)) return null;
+    var n = RF_POINTS, step = (hi - lo) / (n - 1), q = RF_QUANTITIES.length;
+    var re = new Float32Array(n * q * chosen.length);
+    chosen.forEach(function (p, k) {
+      var base = n * q * k;
+      for (var i = 0; i < n; i++) {
+        var m = sampleResponse(p, lo + i * step);
+        re[base + i] = Math.acos(Math.max(-1, Math.min(1, m[2]))) * 180 / Math.PI;
+        re[base + n + i] = Math.sqrt(m[0] * m[0] + m[1] * m[1]);
+        re[base + 2 * n + i] = m[2];
+        re[base + 3 * n + i] = m[0];
+        re[base + 4 * n + i] = m[1];
+      }
+    });
+    var alongZ = axis === 'z';
+    return {
+      id: 'rf-' + axis,
+      title: alongZ ? 'RF pulses across z (from equilibrium, no relaxation)' : 'RF pulses against off-resonance at the isocentre',
+      square: false,
+      dims: [
+        { name: alongZ ? 'z' : 'Δf', size: n, scale: alongZ ? { start: lo * 1000, step: step * 1000, unit: 'mm' } : { start: lo, step: step, unit: 'Hz' } },
+        { name: 'quantity', size: q, labels: RF_QUANTITIES, units: RF_UNITS },
+        { name: 'pulse', size: chosen.length, labels: chosen.map(pulseLabel) }
+      ],
+      re: re, im: null, defaultX: 0, defaultY: chosen.length > 1 ? 2 : -1, defaultPart: 're', defaultColormap: 'viridis'
     };
   }
 
@@ -1005,6 +1171,7 @@ var SeqEyesSimulation = (function () {
   }
 
   function currentDataset(tab) {
+    if (tab === 'rf') return (rfAxis === 'z' ? datasets.rf : datasets.rfSpectral) || datasets.rf || datasets.rfSpectral || null;
     if (tab === 'raw') {
       if (rawOrder === 'time' && datasets.rawTime) return datasets.rawTime;
       if (rawOrder === 'labels' && datasets.rawLabels) return datasets.rawLabels;
@@ -1025,7 +1192,9 @@ var SeqEyesSimulation = (function () {
       empty.style.display = dataset ? 'none' : 'flex';
       empty.textContent = tab === 'phantom'
         ? (phantom.status === 'loading' ? 'Loading phantom…' : phantom.status === 'error' ? 'The phantom could not be loaded.' : 'No phantom loaded.')
-        : (run && !run.finished ? 'Simulating…' : 'No simulation yet. Press Run.');
+        : tab === 'rf'
+          ? (pulses.status === 'loading' ? 'Measuring the RF pulses…' : pulses.status === 'error' ? 'The pulses could not be measured: ' + pulses.error : 'Open a sequence to see its RF pulses.')
+          : (run && !run.finished ? 'Simulating…' : 'No simulation yet. Press Run.');
     }
   }
 
@@ -1142,6 +1311,7 @@ var SeqEyesSimulation = (function () {
     var accuracySelect = el('simAccuracy');
     fillSelect(accuracySelect, ACCURACY_CHOICES, accuracy);
     if (accuracySelect) accuracySelect.hidden = spins !== 'auto';
+    fillSelect(el('simSlices'), SLICE_CHOICES, sliceMode);
 
     var volume3d = !isShepp && phantom.volume && Math.max(phantom.volume.shape[0], phantom.volume.shape[1], phantom.volume.shape[2]) > 1
       && Math.min(phantom.volume.shape[0], phantom.volume.shape[1], phantom.volume.shape[2]) > 1;
@@ -1176,7 +1346,7 @@ var SeqEyesSimulation = (function () {
         var tab = button.getAttribute('data-tab');
         button.classList.toggle('on', tab === dataTab);
         button.setAttribute('aria-selected', tab === dataTab ? 'true' : 'false');
-        button.disabled = tab !== 'phantom' && !currentDataset(tab);
+        button.disabled = tab !== 'phantom' && tab !== 'rf' && !currentDataset(tab);
       });
     }
     var order = el('simRawOrder');
@@ -1185,6 +1355,12 @@ var SeqEyesSimulation = (function () {
       var orders = [['acquisition', 'samples × acquisitions'], ['time', 'all samples in time order']];
       if (datasets.rawLabels) orders.unshift(['labels', 'samples × labels']);
       fillSelect(order, orders, rawOrder === 'labels' && !datasets.rawLabels ? 'acquisition' : rawOrder);
+    }
+    var axisSelect = el('simRfAxis');
+    if (axisSelect) {
+      var axes = RF_AXES.filter(function (entry) { return entry[0] === 'z' ? datasets.rf : datasets.rfSpectral; });
+      axisSelect.hidden = !(dataTab === 'rf' && axes.length > 1);
+      if (axes.length) fillSelect(axisSelect, axes, axes.some(function (entry) { return entry[0] === rfAxis; }) ? rfAxis : axes[0][0]);
     }
     var reveal = el('simReveal');
     if (reveal) reveal.disabled = !(dataTab === 'raw' && result && host() && host().revealTimeRange);
@@ -1251,6 +1427,14 @@ var SeqEyesSimulation = (function () {
     if (spinSelect) spinSelect.onchange = function () { spins = this.value; set('seqeyes.simulation.spins', spins); syncControls(); };
     var accuracySelect = el('simAccuracy');
     if (accuracySelect) accuracySelect.onchange = function () { accuracy = this.value; set('seqeyes.simulation.accuracy', accuracy); };
+    var sliceSelect = el('simSlices');
+    if (sliceSelect) sliceSelect.onchange = function () {
+      sliceMode = this.value;
+      set('seqeyes.simulation.slices', sliceMode);
+      if (phantom.volume) loadPhantom('slice');      // neighbouring planes come and go with it
+    };
+    var axisSelect = el('simRfAxis');
+    if (axisSelect) axisSelect.onchange = function () { rfAxis = this.value; set('seqeyes.simulation.rfAxis', rfAxis); showData('rf'); };
     var runButton = el('simRun');
     if (runButton) runButton.onclick = startRun;
     var cancel = el('simCancel');
@@ -1319,7 +1503,8 @@ var SeqEyesSimulation = (function () {
     install();
     wire();
     if (phantom.status === 'idle' || (phantom.status === 'error' && phantomChoice === 'shepp-logan')) loadPhantom('choice');
-    showData(result || dataTab === 'phantom' ? dataTab : 'phantom');
+    if (pulses.status === 'idle') requestPulses();
+    showData(result || dataTab === 'phantom' || dataTab === 'rf' ? dataTab : 'phantom');
     describePhantom();
   }
 
@@ -1335,8 +1520,13 @@ var SeqEyesSimulation = (function () {
     result = null;
     datasets = { phantom: datasets.phantom };
     setProgress(null);
-    // The built-in phantom follows the sequence's FOV.
+    // The built-in phantom follows the sequence's FOV; a volume's neighbouring planes follow its slabs.
     if (phantomChoice === 'shepp-logan' && phantom.status !== 'idle') loadPhantom('choice');
+    else if (phantom.volume && sliceMode === 'auto') loadPhantom('slice');
+    pulses = { status: 'idle', id: 0, list: null, error: null };
+    datasets.rf = null;
+    datasets.rfSpectral = null;
+    if (shown) requestPulses();
     if (shown) {
       showData(dataTab === 'phantom' ? 'phantom' : dataTab);
       describePhantom();
@@ -1358,6 +1548,9 @@ var SeqEyesSimulation = (function () {
         source: phantom.data ? phantom.data.source : '' },
       coils: coils,
       spins: spins,
+      slices: sliceMode,
+      pulses: { status: pulses.status, count: pulses.list ? pulses.list.length : 0,
+        alongZ: datasets.rf ? datasets.rf.dims[2].size : 0, spectral: datasets.rfSpectral ? datasets.rfSpectral.dims[2].size : 0 },
       tab: dataTab,
       view: snap,
       plan: result ? result.plan : (run ? run.plan : null),

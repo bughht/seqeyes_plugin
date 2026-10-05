@@ -70,7 +70,10 @@ describe('simulation jobs', () => {
     const { path, bytes } = demo('writeGradientEcho.seq');
 
     it('folded classes give the signal of every spin simulated on its own', () => {
-        const settings = { phantom: { kind: 'shepp-logan' as const, size: 16, fov: [0.032, 0.032] as [number, number] }, subSpins: [8, 3] as [number, number] };
+        const settings = {
+            phantom: { kind: 'shepp-logan' as const, size: 16, fov: [0.032, 0.032] as [number, number] },
+            subSpins: [8, 3] as [number, number], throughSlice: 'off' as const,
+        };
         const job = new SimulationJob(bytes, path, settings);
         expect(job.plan.axes.map(axis => axis.folded)).toEqual([false, true]);
         expect(job.plan.simulated).toBeLessThan(job.plan.spins);
@@ -83,7 +86,7 @@ describe('simulation jobs', () => {
     });
 
     it('sums to the same bits whatever order chunks finish in', () => {
-        const job = new SimulationJob(bytes, path, { phantom: { kind: 'shepp-logan', size: 48 }, subSpins: [16, 4] });
+        const job = new SimulationJob(bytes, path, { phantom: { kind: 'shepp-logan', size: 48 }, subSpins: [16, 4], throughSlice: 'off' });
         expect(job.plan.chunks).toBeGreaterThan(1);
         const ascending = Array.from({ length: job.plan.chunks }, (_, i) => i);
         const forward = runAll(job, ascending);
@@ -97,8 +100,13 @@ describe('simulation jobs', () => {
         const leader = new SimulationJob(bytes, path, { phantom: { kind: 'shepp-logan', size: 32 }, subSpins: 'auto' });
         expect(leader.plan.bands?.length).toBeGreaterThan(0);
         expect(leader.plan.subSpins[1]).toBeGreaterThan(1);
-        const follower = new SimulationJob(bytes, path, { phantom: { kind: 'shepp-logan', size: 32 }, subSpins: leader.plan.resolved });
+        expect(leader.plan.slices?.count).toBeGreaterThan(4);
+        const follower = new SimulationJob(bytes, path, {
+            phantom: { kind: 'shepp-logan', size: 32 }, subSpins: leader.plan.resolved, throughSlice: leader.plan.resolvedSlices,
+        });
+        expect(follower.pulses).toEqual([]);              // took the sub-slices as resolved
         expect(follower.plan.subSpins).toEqual(leader.plan.subSpins);
+        expect(follower.plan.slices).toEqual({ ...leader.plan.slices, probe: null });
         expect([follower.plan.spins, follower.plan.simulated, follower.plan.chunks])
             .toEqual([leader.plan.spins, leader.plan.simulated, leader.plan.chunks]);
         const chunk = Math.floor(leader.plan.chunks / 2);
@@ -119,5 +127,12 @@ describe('simulation jobs', () => {
         expect(y.reason).toBe('resolution');
         expect(y.count).toBe(4);
         expect(job.plan.simulated).toBeLessThan(job.plan.spins / 20);
+        // The 3 mm slab, sampled through: a few spins per 1/Kz, and the probe agreed.
+        const slices = job.plan.slices!;
+        expect(slices.extent).toBe('pulses');
+        expect(slices.reference * 1000).toBeCloseTo(3, 1);
+        expect(slices.count).toBeGreaterThanOrEqual(8);
+        expect(slices.probe?.capped).toBe(false);
+        expect(job.plan.notes.some(note => note.startsWith('Through-slice:'))).toBe(true);
     });
 });

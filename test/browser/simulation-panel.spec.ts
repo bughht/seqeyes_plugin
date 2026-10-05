@@ -23,6 +23,8 @@ interface SimulationState {
   workers: number;
   phantom: { choice: string; status: string; error: string | null; nx: number; ny: number; volume: number[] | null; plane: string; index: number | null; source: string };
   coils: number;
+  slices: string;
+  pulses: { status: string; count: number; alongZ: number; spectral: number };
   tab: string;
   view: ViewState | null;
   plan: null | {
@@ -32,6 +34,7 @@ interface SimulationState {
     chunks: number;
     coils: number;
     axes: { count: number; reason: string; folded: boolean }[];
+    slices: null | { count: number; reference: number; extent: string; planes: number };
   };
   done: boolean;
   nu: number;
@@ -57,6 +60,7 @@ interface DevWindow {
 const gre = resolve('test/kspace_baselines/v151_gre/seq/writeGradientEcho.seq');
 const greLabel = resolve('test/seqeyes_demo_seq_files/writeGradientEcho_label.seq');
 const epi = resolve('test/seqeyes_demo_seq_files/writeEpi.seq');
+const epiFatSat = resolve('test/seqeyes_demo_seq_files/writeEpiRS.seq');
 const mrzeroLike = resolve('test/fixtures/sim/mrzero_like_small.npz');
 
 const consoleFailures = new WeakMap<Page, string[]>();
@@ -98,6 +102,10 @@ test('simulates a labelled GRE and browses its raw data, k-space and image', asy
   expect(state.plan?.subSpins).toEqual([8, 1]);
   expect(state.plan?.coils).toBe(4);
   expect(state.plan?.axes[1].folded).toBe(true);
+  // The 5 mm slab is sampled through (Slices: auto is the default).
+  expect(state.slices).toBe('auto');
+  expect(state.plan?.slices?.count).toBeGreaterThan(4);
+  expect(state.plan?.slices?.reference).toBeCloseTo(0.005, 3);
   expect(state.tab).toBe('image');
   // Image: x, y, a coil dimension led by the root-sum-of-squares, and frames.
   expect(state.view?.dims.map(d => d.name)).toEqual(['x', 'y', 'coil', 'frame']);
@@ -182,6 +190,47 @@ test('loads an MRzero-format 3-D phantom, slices it and simulates it', async ({ 
   expect(state.status).toContain('MRzero');
   expect(state.status).toContain('T2′ map is loaded but not simulated');
   await expectCanvasVaried(page.locator('#simCanvas'));
+});
+
+test('shows every RF pulse before a run, and samples the slab through or not', async ({ page }) => {
+  await loadViewer(page, epiFatSat);
+  await openSimulation(page);
+  // Measured when the sequence opens: the slice-selective excitation along z,
+  // the fat saturation (no gradient) against off-resonance.
+  await expect.poll(async () => (await simulationState(page)).pulses.status, { timeout: 30_000 }).toBe('ready');
+  let state = await simulationState(page);
+  expect([state.pulses.alongZ, state.pulses.spectral]).toEqual([1, 1]);
+  await page.locator('#simData button[data-tab="rf"]').click();
+  state = await simulationState(page);
+  expect(state.view?.dataset).toBe('rf-z');
+  expect(state.view?.dims.map(d => d.name)).toEqual(['z', 'quantity', 'pulse']);
+  expect(state.view?.part).toBe('re');
+  await expectCanvasVaried(page.locator('#simPlot'));
+  await expect(page.locator('#simRfAxis')).toBeVisible();
+  await page.locator('#simRfAxis').selectOption('frequency');
+  state = await simulationState(page);
+  expect(state.view?.dataset).toBe('rf-frequency');
+  expect(state.view?.dims[0].name).toBe('Δf');
+  await expectCanvasVaried(page.locator('#simPlot'));
+
+  await expect.poll(async () => (await simulationState(page)).phantom.status).toBe('ready');
+  await page.locator('#simMatrix').selectOption('32');
+  await expect.poll(async () => (await simulationState(page)).phantom.nx).toBe(32);
+  await page.locator('#simSpins').selectOption('1x1');
+  await page.locator('#simRun').click();
+  await expect.poll(async () => (await simulationState(page)).done, { timeout: 120_000 }).toBe(true);
+  state = await simulationState(page);
+  expect(state.plan?.slices?.count).toBeGreaterThan(4);
+  expect(state.status).toContain('sub-slices');
+  expect(state.status).toContain('extruded along z');
+
+  await page.locator('#simSlices').selectOption('off');
+  await page.locator('#simRun').click();
+  await expect.poll(async () => (await simulationState(page)).runs).toBe(2);
+  await expect.poll(async () => (await simulationState(page)).done && !(await simulationState(page)).running, { timeout: 60_000 }).toBe(true);
+  state = await simulationState(page);
+  expect(state.plan?.slices).toBeNull();
+  expect(state.status).toContain('Through-slice sampling is off');
 });
 
 test('exports ISMRMRD and NumPy raw data', async ({ page }) => {

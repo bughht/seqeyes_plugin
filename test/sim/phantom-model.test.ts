@@ -99,7 +99,7 @@ describe('field maps and coils in a run', () => {
             }
         }
         const phantom = { ...base, maps: { ...base.maps, b0, b1 } };
-        const job = new SimulationJob(bytes, path, { phantom: { kind: 'phantom', phantom }, coils: 4, subSpins: [8, 2] });
+        const job = new SimulationJob(bytes, path, { phantom: { kind: 'phantom', phantom }, coils: 4, subSpins: [8, 2], throughSlice: 'off' });
         expect(job.plan.coils).toBe(4);
         expect(job.plan.axes[1].folded).toBe(true);
         let total: ChunkAccumulator | null = null;
@@ -125,7 +125,11 @@ describe('field maps and coils in a run', () => {
     it('banded spins per voxel fold exactly, and short-T2 voxels get fewer', () => {
         // Two bands: T2 ≤ 0.1 s gets 4 spins along x, longer T2 gets 16.
         const phantom = sheppLoganPhantom2D(12, 0.024, 0.024);
-        const settings = { phantom: { kind: 'phantom' as const, phantom }, subSpins: { kind: 'bands' as const, edges: [0.1, Infinity], counts: [4, 16], y: 2 } };
+        const settings = {
+            phantom: { kind: 'phantom' as const, phantom },
+            subSpins: { kind: 'bands' as const, edges: [0.1, Infinity], counts: [4, 16], y: 2 },
+            throughSlice: 'off' as const,
+        };
         const job = new SimulationJob(bytes, path, settings);
         expect(job.plan.subSpins).toEqual([16, 2]);
         expect(job.plan.resolved).toEqual(settings.subSpins);

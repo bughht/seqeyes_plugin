@@ -125,9 +125,18 @@ export function simulateReference(program: SimProgram, spins: SpinSet, options: 
 
 function checkMembers(members: SpinMembers, classes: number): void {
     const points = members.foldPoints.length / 3;
+    let owners = classes;
+    if (members.profileOf) {
+        owners = members.profiles ?? 0;
+        if (members.profileOf.length !== classes) throw new Error(`${members.profileOf.length} class profiles for ${classes} classes.`);
+        for (let c = 0; c < classes; c++) {
+            const q = members.profileOf[c];
+            if (!(q >= 0 && q < owners)) throw new Error(`Class ${c} names profile ${q} of ${owners}.`);
+        }
+    }
     for (let m = 0; m < members.count; m++) {
         const c = members.classOf[m], p = members.foldOf[m];
-        if (!(c >= 0 && c < classes)) throw new Error(`Member ${m} names class ${c} of ${classes}.`);
+        if (!(c >= 0 && c < owners)) throw new Error(`Member ${m} names ${members.profileOf ? 'profile' : 'class'} ${c} of ${owners}.`);
         if (!(p >= 0 && p < points)) throw new Error(`Member ${m} names fold point ${p} of ${points}.`);
     }
 }
@@ -165,11 +174,15 @@ class PendingFree {
 }
 
 /**
- * applyFreeInterval with the work shared where spins allow, bit-identical to
- * it. Relaxation factors depend only on the interval length, which repeats
- * every TR, so they are cached per length; phases depend only on position and
- * off-resonance, so spins sharing both (the classes of a folded column) share
- * one cos/sin per interval. Neither changes a single operation's inputs.
+ * applyFreeInterval with the work shared where spins allow. Relaxation
+ * factors depend only on the interval length, which repeats every TR, so they
+ * are cached per length. Phases depend only on position and off-resonance, so
+ * spins sharing both (the classes of a folded column) share one phasor per
+ * interval. When those keys are many but their coordinates repeat (sub-slices
+ * along z times a continuous B0 map), the phasor is built as the product
+ * e^{i2πΔk_x·x}·e^{i2πΔk_y·y}·e^{i2πΔk_z·z}·e^{i2πΔf·t} from per-coordinate
+ * tables: a few complex products instead of a cos and sin per key, equal to
+ * the direct phasor to rounding (each factor's phase folded to ±½ cycle).
  */
 class FreeKernel {
     /** Distinct (x, y, z, Δf) of the spins, and each spin's entry. */
@@ -180,6 +193,8 @@ class FreeKernel {
     private readonly kdf: Float64Array;
     private readonly cos: Float64Array;
     private readonly sin: Float64Array;
+    /** Per coordinate (x, y, z, Δf): its distinct values, each key's index into them, phasor scratch. */
+    private readonly tables: { values: Float64Array; index: Int32Array; cos: Float64Array; sin: Float64Array }[] | null;
     private readonly relaxation = new Map<number, { e1: Float64Array; e2: Float64Array }>();
 
     constructor(private readonly spins: SpinSet) {
@@ -201,15 +216,33 @@ class FreeKernel {
         this.kdf = Float64Array.from(df);
         this.cos = new Float64Array(x.length);
         this.sin = new Float64Array(x.length);
+        const tables = [this.kx, this.ky, this.kz, this.kdf].map(coordinate => {
+            const distinct = new Map<number, number>();
+            const at = new Int32Array(coordinate.length);
+            for (let k = 0; k < coordinate.length; k++) {
+                let j = distinct.get(coordinate[k]);
+                if (j === undefined) distinct.set(coordinate[k], j = distinct.size);
+                at[k] = j;
+            }
+            const values = new Float64Array(distinct.size);
+            for (const [value, j] of distinct) values[j] = value;
+            return { values, index: at, cos: new Float64Array(values.length), sin: new Float64Array(values.length) };
+        });
+        const tableSize = tables.reduce((sum, table) => sum + table.values.length, 0);
+        this.tables = tableSize * 4 < x.length ? tables : null;
     }
 
     apply(dk: ArrayLike<number>, dt: number, state: SpinState): void {
         const twoPi = 2 * Math.PI;
-        for (let k = 0; k < this.kx.length; k++) {
-            const cycles = dk[0] * this.kx[k] + dk[1] * this.ky[k] + dk[2] * this.kz[k] + this.kdf[k] * dt;
-            const angle = twoPi * (cycles - Math.round(cycles));
-            this.cos[k] = Math.cos(angle);
-            this.sin[k] = Math.sin(angle);
+        if (this.tables) {
+            this.factorisedPhasors(dk, dt);
+        } else {
+            for (let k = 0; k < this.kx.length; k++) {
+                const cycles = dk[0] * this.kx[k] + dk[1] * this.ky[k] + dk[2] * this.kz[k] + this.kdf[k] * dt;
+                const angle = twoPi * (cycles - Math.round(cycles));
+                this.cos[k] = Math.cos(angle);
+                this.sin[k] = Math.sin(angle);
+            }
         }
         const { e1, e2 } = this.factors(dt);
         const { mx, my, mz } = state;
@@ -221,6 +254,48 @@ class FreeKernel {
             mx[i] = x * c - y * sn;
             my[i] = x * sn + y * c;
             mz[i] = mz[i] * e1[i] + (1 - e1[i]);
+        }
+    }
+
+    /** Each key's phasor as the product of its coordinates' factors (only those that turn). */
+    private factorisedPhasors(dk: ArrayLike<number>, dt: number): void {
+        const tables = this.tables!;
+        const scales = [dk[0], dk[1], dk[2], dt];
+        const active: number[] = [];
+        for (let a = 0; a < 4; a++) {
+            if (scales[a] === 0) continue;
+            const table = tables[a];
+            let turns = false;
+            for (let j = 0; j < table.values.length; j++) {
+                const cycles = scales[a] * table.values[j];
+                const angle = 2 * Math.PI * (cycles - Math.round(cycles));
+                table.cos[j] = Math.cos(angle);
+                table.sin[j] = Math.sin(angle);
+                if (angle !== 0) turns = true;
+            }
+            if (turns) active.push(a);
+        }
+        const keys = this.cos.length;
+        if (!active.length) {
+            this.cos.fill(1);
+            this.sin.fill(0);
+            return;
+        }
+        const first = tables[active[0]];
+        for (let k = 0; k < keys; k++) {
+            const j = first.index[k];
+            this.cos[k] = first.cos[j];
+            this.sin[k] = first.sin[j];
+        }
+        for (let n = 1; n < active.length; n++) {
+            const table = tables[active[n]];
+            for (let k = 0; k < keys; k++) {
+                const j = table.index[k];
+                const fc = table.cos[j], fs = table.sin[j];
+                const c = this.cos[k], s = this.sin[k];
+                this.cos[k] = c * fc - s * fs;
+                this.sin[k] = c * fs + s * fc;
+            }
         }
     }
 
@@ -656,9 +731,12 @@ function sumSpins(spins: SpinSet, groups: ReadoutGroups, state: SpinState, gRe: 
 /**
  * Group sums over folded members: each member's magnetization is its class's,
  * turned by e^{i2π·K·r} with K the area since the start and r its fold point.
+ * With profiles (through-slice sampling), a member's magnetization is its
+ * profile's: the sum of the profile's classes, each times the class weight.
  */
 function sumMembers(
     members: SpinMembers,
+    spins: SpinSet,
     groups: ReadoutGroups,
     state: SpinState,
     area: Float64Array,
@@ -675,22 +753,93 @@ function sumMembers(
         pRe[p] = Math.cos(angle);
         pIm[p] = Math.sin(angle);
     }
+    const profiles = members.profileOf ? profileSums(members, spins, groups, state) : null;
+    if (profiles && !profiles.shared) return sumMembersByClass(members, spins, groups, state, pRe, pIm, gRe, gIm);
+    const sx = profiles ? profiles.mx : state.mx, sy = profiles ? profiles.my : state.my;
+    const groupOf = profiles ? profiles.groupOf : groups.groupOf;
     let any = false;
     for (let m = 0; m < members.count; m++) {
         const k = members.classOf[m];
-        const cx = state.mx[k], cy = state.my[k];
+        const cx = sx[k], cy = sy[k];
         if (cx === 0 && cy === 0) continue;
         any = true;
         const p = members.foldOf[m];
         const mx = cx * pRe[p] - cy * pIm[p];
         const my = cx * pIm[p] + cy * pRe[p];
         const w = members.weight[m];
-        const g = groups.groupOf[k];
+        const g = groupOf[k];
         for (let c = 0; c < coils; c++) {
             const rr = members.rxRe[c * members.count + m];
             const ri = -members.rxIm[c * members.count + m];
             gRe[g * coils + c] += w * (rr * mx - ri * my);
             gIm[g * coils + c] += w * (rr * my + ri * mx);
+        }
+    }
+    return any;
+}
+
+/**
+ * Weighted sums of each profile's classes, and the readout group they share.
+ * `shared` is false when a profile's classes fall into different groups (a
+ * readout gradient along z); its sums are then not used.
+ */
+function profileSums(members: SpinMembers, spins: SpinSet, groups: ReadoutGroups, state: SpinState) {
+    const count = members.profiles ?? 0;
+    const profileOf = members.profileOf!;
+    const mx = new Float64Array(count), my = new Float64Array(count);
+    const groupOf = new Int32Array(count).fill(-1);
+    let shared = true;
+    for (let c = 0; c < spins.count; c++) {
+        const q = profileOf[c];
+        const g = groups.groupOf[c];
+        if (groupOf[q] < 0) groupOf[q] = g;
+        else if (groupOf[q] !== g) shared = false;
+        mx[q] += spins.weight[c] * state.mx[c];
+        my[q] += spins.weight[c] * state.my[c];
+    }
+    return { mx, my, groupOf, shared };
+}
+
+/** Member sums class by class: each member contributes through every class of its profile. */
+function sumMembersByClass(
+    members: SpinMembers,
+    spins: SpinSet,
+    groups: ReadoutGroups,
+    state: SpinState,
+    pRe: Float64Array,
+    pIm: Float64Array,
+    gRe: Float64Array,
+    gIm: Float64Array,
+): boolean {
+    const coils = members.coils;
+    const count = members.profiles ?? 0;
+    const profileOf = members.profileOf!;
+    // Classes of each profile, as CSR.
+    const start = new Int32Array(count + 1);
+    for (let c = 0; c < spins.count; c++) start[profileOf[c] + 1]++;
+    for (let q = 0; q < count; q++) start[q + 1] += start[q];
+    const fill = start.slice(0, count);
+    const classes = new Int32Array(spins.count);
+    for (let c = 0; c < spins.count; c++) classes[fill[profileOf[c]]++] = c;
+    let any = false;
+    for (let m = 0; m < members.count; m++) {
+        const q = members.classOf[m];
+        const p = members.foldOf[m];
+        for (let i = start[q]; i < start[q + 1]; i++) {
+            const k = classes[i];
+            const cx = state.mx[k] * spins.weight[k], cy = state.my[k] * spins.weight[k];
+            if (cx === 0 && cy === 0) continue;
+            any = true;
+            const mx = cx * pRe[p] - cy * pIm[p];
+            const my = cx * pIm[p] + cy * pRe[p];
+            const w = members.weight[m];
+            const g = groups.groupOf[k];
+            for (let c = 0; c < coils; c++) {
+                const rr = members.rxRe[c * members.count + m];
+                const ri = -members.rxIm[c * members.count + m];
+                gRe[g * coils + c] += w * (rr * mx - ri * my);
+                gIm[g * coils + c] += w * (rr * my + ri * mx);
+            }
         }
     }
     return any;
@@ -878,7 +1027,7 @@ function sampleAdc(
     const gRe = new Float64Array(groups.count * coils);
     const gIm = new Float64Array(groups.count * coils);
     const any = members
-        ? sumMembers(members, groups, state, area, gRe, gIm)
+        ? sumMembers(members, spins, groups, state, area, gRe, gIm)
         : sumSpins(spins, groups, state, gRe, gIm);
 
     const sumRe = new Float64Array(n * coils);

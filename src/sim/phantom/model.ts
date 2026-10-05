@@ -57,12 +57,56 @@ export interface CoilMaps {
 export interface Phantom2D {
     nx: number;
     ny: number;
-    /** Voxel size [m] along x and y, and the plane's thickness (informational). */
+    /** Voxel size [m] along x and y, and the spacing of planes along z. */
     voxel: [number, number, number];
     maps: PhantomMaps;
     coils?: CoilMaps;
+    /**
+     * Neighbouring planes of a 3-D phantom, for through-slice sampling: their
+     * offset from this plane in planes along z (voxel[2] apart), and maps.
+     * Without them the plane is extruded along z.
+     */
+    planes?: PhantomPlane[];
     source: string;
     notes: string[];
+}
+
+export interface PhantomPlane {
+    offset: number;
+    maps: PhantomMaps;
+}
+
+/**
+ * Spins along z: sub-slice centres, their signal weights, and the plane each
+ * takes its maps from (an index into Phantom2D.planes, or −1 for the
+ * phantom's own maps). See plan/slices.ts.
+ */
+export interface ThroughSlice {
+    z: Float64Array;
+    weight: Float64Array;
+    plane: Int32Array;
+}
+
+/** Maps of plane index p (−1: the phantom's own). */
+export function planeMaps(phantom: Phantom2D, plane: number): PhantomMaps {
+    return plane < 0 ? phantom.maps : phantom.planes![plane].maps;
+}
+
+/** Sub-slices to planes: the plane nearest each z, by offset round(z / Δz). */
+export function assignPlanes(phantom: Phantom2D, z: Float64Array): Int32Array {
+    const plane = new Int32Array(z.length).fill(-1);
+    const planes = phantom.planes;
+    if (!planes?.length || !(phantom.voxel[2] > 0)) return plane;
+    for (let k = 0; k < z.length; k++) {
+        const wanted = Math.round(z[k] / phantom.voxel[2]);
+        let best = -1, distance = Math.abs(wanted);          // the phantom's own plane is offset 0
+        for (let i = 0; i < planes.length; i++) {
+            const d = Math.abs(planes[i].offset - wanted);
+            if (d < distance) { distance = d; best = i; }
+        }
+        plane[k] = best;
+    }
+    return plane;
 }
 
 /** Which two volume axes become the simulated x and y. */
@@ -74,6 +118,12 @@ export interface SliceOptions {
     index?: number;
     /** Resample to this many voxels along the longer in-plane axis (nearest neighbour); default native. */
     matrix?: number;
+    /**
+     * Neighbouring planes to include for through-slice sampling, as the
+     * lowest and highest offset from `index` along the normal. Offsets
+     * outside the volume give empty planes (nothing is there).
+     */
+    neighbours?: [number, number];
 }
 
 /**
@@ -107,15 +157,36 @@ export function sliceVolume(volume: PhantomVolume, options: SliceOptions = {}): 
             source[row * nx + col] = u * strides[axes[0]] + v * strides[axes[1]] + index * strides[axes[2]];
         }
     }
-    const pick = (map: Float32Array) => {
-        const out = new Float32Array(nx * ny);
-        for (let i = 0; i < out.length; i++) out[i] = map[source[i]];
-        return out;
+    const mapsAt = (offset: number): PhantomMaps => {
+        const shift = offset * strides[axes[2]];
+        const pickAt = (map: Float32Array) => {
+            const out = new Float32Array(nx * ny);
+            for (let i = 0; i < out.length; i++) out[i] = map[source[i] + shift];
+            return out;
+        };
+        const maps: PhantomMaps = { pd: pickAt(volume.maps.pd), t1: pickAt(volume.maps.t1), t2: pickAt(volume.maps.t2) };
+        for (const name of ['t2prime', 'adc', 'b0', 'b1'] as const) {
+            const map = volume.maps[name];
+            if (map) maps[name] = pickAt(map);
+        }
+        return maps;
     };
-    const maps: PhantomMaps = { pd: pick(volume.maps.pd), t1: pick(volume.maps.t1), t2: pick(volume.maps.t2) };
-    for (const name of ['t2prime', 'adc', 'b0', 'b1'] as const) {
-        const map = volume.maps[name];
-        if (map) maps[name] = pick(map);
+    const maps = mapsAt(0);
+    const planes: PhantomPlane[] = [];
+    if (options.neighbours) {
+        const [lo, hi] = options.neighbours;
+        let empty: PhantomMaps | null = null;
+        for (let offset = Math.min(0, Math.round(lo)); offset <= Math.max(0, Math.round(hi)); offset++) {
+            if (offset === 0) continue;
+            const inside = index + offset >= 0 && index + offset < nw;
+            if (inside) {
+                planes.push({ offset, maps: mapsAt(offset) });
+            } else {
+                // Outside the volume: no tissue (one shared set of zero maps).
+                empty ??= { pd: new Float32Array(nx * ny), t1: new Float32Array(nx * ny), t2: new Float32Array(nx * ny) };
+                planes.push({ offset, maps: empty });
+            }
+        }
     }
     const label = 'xyz';
     return {
@@ -123,6 +194,7 @@ export function sliceVolume(volume: PhantomVolume, options: SliceOptions = {}): 
         ny,
         voxel: [fovU / nx, fovV / ny, volume.voxel[axes[2]]],
         maps,
+        planes: planes.length ? planes : undefined,
         source: `${volume.source} · ${label[axes[0]]}${label[axes[1]]} plane, ${label[axes[2]]} = ${index}`,
         notes: volume.notes.slice(),
     };
@@ -215,13 +287,18 @@ export function syntheticCoils(nx: number, ny: number, voxel: readonly [number, 
 }
 
 /** Row-major indices of the voxels with PD > 0. */
+/** Row-major indices of the voxels with PD > 0 in this plane or any neighbouring one. */
 export function occupiedVoxels(phantom: Phantom2D): Int32Array {
-    const pd = phantom.maps.pd;
+    const cells = phantom.nx * phantom.ny;
+    const any = new Uint8Array(cells);
+    for (const maps of [phantom.maps, ...(phantom.planes ?? []).map(plane => plane.maps)]) {
+        for (let i = 0; i < cells; i++) if (maps.pd[i] > 0) any[i] = 1;
+    }
     let count = 0;
-    for (let i = 0; i < pd.length; i++) if (pd[i] > 0) count++;
+    for (let i = 0; i < cells; i++) count += any[i];
     const voxels = new Int32Array(count);
     let k = 0;
-    for (let i = 0; i < pd.length; i++) if (pd[i] > 0) voxels[k++] = i;
+    for (let i = 0; i < cells; i++) if (any[i]) voxels[k++] = i;
     return voxels;
 }
 
@@ -236,7 +313,10 @@ export function rate(time: number): number {
  * Voxels sharing an index can share a simulated class when an axis folds.
  */
 export interface PhysicsTable {
+    /** Entry of every voxel of the phantom's own maps (−1 where PD is 0). */
     of: Int32Array;
+    /** The same for each neighbouring plane (Phantom2D.planes). */
+    ofPlanes: Int32Array[];
     t1: number[];
     t2: number[];
     df: number[];
@@ -244,26 +324,36 @@ export interface PhysicsTable {
 }
 
 export function physicsTable(phantom: Phantom2D): PhysicsTable {
-    const { pd, t1, t2, b0, b1 } = phantom.maps;
-    const of = new Int32Array(pd.length).fill(-1);
-    const table: PhysicsTable = { of, t1: [], t2: [], df: [], b1: [] };
+    const table: PhysicsTable = { of: new Int32Array(0), ofPlanes: [], t1: [], t2: [], df: [], b1: [] };
     const index = new Map<string, number>();
-    for (let i = 0; i < pd.length; i++) {
-        if (!(pd[i] > 0)) continue;
-        const df = b0 ? b0[i] : 0, gain = b1 ? b1[i] : 1;
-        const key = `${t1[i]}|${t2[i]}|${df}|${gain}`;
-        let k = index.get(key);
-        if (k === undefined) {
-            k = table.t1.length;
-            index.set(key, k);
-            table.t1.push(t1[i]);
-            table.t2.push(t2[i]);
-            table.df.push(df);
-            table.b1.push(gain);
+    const entries = (maps: PhantomMaps) => {
+        const { pd, t1, t2, b0, b1 } = maps;
+        const of = new Int32Array(pd.length).fill(-1);
+        for (let i = 0; i < pd.length; i++) {
+            if (!(pd[i] > 0)) continue;
+            const df = b0 ? b0[i] : 0, gain = b1 ? b1[i] : 1;
+            const key = `${t1[i]}|${t2[i]}|${df}|${gain}`;
+            let k = index.get(key);
+            if (k === undefined) {
+                k = table.t1.length;
+                index.set(key, k);
+                table.t1.push(t1[i]);
+                table.t2.push(t2[i]);
+                table.df.push(df);
+                table.b1.push(gain);
+            }
+            of[i] = k;
         }
-        of[i] = k;
-    }
+        return of;
+    };
+    table.of = entries(phantom.maps);
+    table.ofPlanes = (phantom.planes ?? []).map(plane => entries(plane.maps));
     return table;
+}
+
+/** Physics entries of plane p (−1: the phantom's own). */
+function entriesOf(physics: PhysicsTable, plane: number): Int32Array {
+    return plane < 0 ? physics.of : physics.ofPlanes[plane];
 }
 
 export interface SpinOptions {
@@ -277,6 +367,13 @@ export interface SpinOptions {
      * positions lie on one lattice of pitch Δx / (2·subSpins[0]).
      */
     countX?: Int32Array;
+    /** Through-slice sampling; without it every spin sits at z = 0 with weight 1. */
+    slices?: ThroughSlice;
+}
+
+/** The sub-slices to use: the given ones, or one at z = 0 taking the phantom's own maps. */
+function slicesOf(options: SpinOptions): ThroughSlice {
+    return options.slices ?? { z: Float64Array.of(0), weight: Float64Array.of(1), plane: Int32Array.of(-1) };
 }
 
 /** Spins along x in a voxel. */
@@ -284,10 +381,18 @@ function xCount(options: SpinOptions, index: number): number {
     return options.countX ? options.countX[index] : options.subSpins[0];
 }
 
-/** Spins in the given voxels. */
-export function spinCount(options: SpinOptions): number {
+/** Spins in the given voxels: every sub-slice whose plane has PD there. */
+export function spinCount(options: SpinOptions, phantom?: Phantom2D): number {
+    const slices = slicesOf(options);
     let total = 0;
-    for (let v = 0; v < options.voxels.length; v++) total += xCount(options, options.voxels[v]);
+    for (let v = 0; v < options.voxels.length; v++) {
+        const index = options.voxels[v];
+        let present = 0;
+        for (let k = 0; k < slices.z.length; k++) {
+            if (!phantom || planeMaps(phantom, slices.plane[k]).pd[index] > 0) present++;
+        }
+        total += xCount(options, index) * present;
+    }
     return total * options.subSpins[1];
 }
 
@@ -301,7 +406,8 @@ export function spinCount(options: SpinOptions): number {
 export function phantomSpins(phantom: Phantom2D, options: SpinOptions): SpinSet {
     const my = options.subSpins[1];
     const voxels = options.voxels;
-    const count = spinCount(options);
+    const slices = slicesOf(options);
+    const count = spinCount(options, phantom);
     const coils = phantom.coils?.count ?? 1;
     const set = {
         count,
@@ -313,7 +419,7 @@ export function phantomSpins(phantom: Phantom2D, options: SpinOptions): SpinSet 
         coils,
         rxRe: new Float64Array(coils * count), rxIm: new Float64Array(coils * count),
     };
-    const { pd, t1, t2, b0, b1 } = phantom.maps;
+    const cells = phantom.nx * phantom.ny;
     const [dx, dy] = phantom.voxel;
     const offsetsY = stratified(my);
     let k = 0;
@@ -324,24 +430,29 @@ export function phantomSpins(phantom: Phantom2D, options: SpinOptions): SpinSet 
         const col = index % phantom.nx, row = Math.floor(index / phantom.nx);
         const x0 = (col - phantom.nx / 2) * dx;
         const y0 = (phantom.ny / 2 - 1 - row) * dy;
-        const r1 = rate(t1[index]), r2 = rate(t2[index]);
-        const df = b0 ? b0[index] : 0;
-        const gain = b1 ? b1[index] : 1;
-        const weight = pd[index] / (mx * my);
-        for (const oy of offsetsY) {
-            for (const ox of offsetsX) {
-                set.x[k] = x0 + ox * dx;
-                set.y[k] = y0 + oy * dy;
-                set.df[k] = df;
-                set.r1[k] = r1;
-                set.r2[k] = r2;
-                set.weight[k] = weight;
-                set.b1Re[k] = gain;
-                for (let c = 0; c < coils; c++) {
-                    set.rxRe[c * count + k] = phantom.coils ? phantom.coils.re[c * pd.length + index] : 1;
-                    set.rxIm[c * count + k] = phantom.coils ? phantom.coils.im[c * pd.length + index] : 0;
+        for (let slice = 0; slice < slices.z.length; slice++) {
+            const { pd, t1, t2, b0, b1 } = planeMaps(phantom, slices.plane[slice]);
+            if (!(pd[index] > 0)) continue;
+            const r1 = rate(t1[index]), r2 = rate(t2[index]);
+            const df = b0 ? b0[index] : 0;
+            const gain = b1 ? b1[index] : 1;
+            const weight = pd[index] / (mx * my) * slices.weight[slice];
+            for (const oy of offsetsY) {
+                for (const ox of offsetsX) {
+                    set.x[k] = x0 + ox * dx;
+                    set.y[k] = y0 + oy * dy;
+                    set.z[k] = slices.z[slice];
+                    set.df[k] = df;
+                    set.r1[k] = r1;
+                    set.r2[k] = r2;
+                    set.weight[k] = weight;
+                    set.b1Re[k] = gain;
+                    for (let c = 0; c < coils; c++) {
+                        set.rxRe[c * count + k] = phantom.coils ? phantom.coils.re[c * cells + index] : 1;
+                        set.rxIm[c * count + k] = phantom.coils ? phantom.coils.im[c * cells + index] : 0;
+                    }
+                    k++;
                 }
-                k++;
             }
         }
     }
@@ -352,6 +463,12 @@ export function phantomSpins(phantom: Phantom2D, options: SpinOptions): SpinSet 
  * Folded spins for the given voxels: one class per physics entry and position
  * along the unfolded axes, and every spin as a member (engine/spins.ts).
  * `fold` has bit 0 for x and bit 1 for y.
+ *
+ * With through-slice sampling, members belong to profiles (position along
+ * the unfolded axes, plane, physics entry): what a class would be without z.
+ * Each profile has one class per sub-slice taking that plane, at the
+ * sub-slice's z and with its weight. Every sub-slice of a 2-D phantom shares
+ * the members, so the readout's member sums cost what they cost in 2-D.
  */
 export function foldedPhantomSpins(
     phantom: Phantom2D,
@@ -369,35 +486,50 @@ export function foldedPhantomSpins(
     const coils = phantom.coils?.count ?? 1;
     const cells = phantom.nx * phantom.ny;
 
-    const memberCount = spinCount(options);
+    const slices = slicesOf(options);
+    const through = options.slices !== undefined;
+    // The planes the sub-slices use, and which sub-slices use each.
+    const usedPlanes = [...new Set(Array.from(slices.plane))];
+    const slicesOfPlane = new Map<number, number[]>(usedPlanes.map(plane => [plane, [] as number[]]));
+    for (let k = 0; k < slices.z.length; k++) slicesOfPlane.get(slices.plane[k])!.push(k);
+    const planeSlot = new Map<number, number>(usedPlanes.map((plane, i) => [plane, i]));
+
+    let memberCount = 0;
+    for (let v = 0; v < voxels.length; v++) {
+        for (const plane of usedPlanes) if (planeMaps(phantom, plane).pd[voxels[v]] > 0) memberCount += xCount(options, voxels[v]) * my;
+    }
     const classOf = new Int32Array(memberCount);
     const weight = new Float64Array(memberCount);
     const foldOf = new Int32Array(memberCount);
     const rxRe = new Float64Array(coils * memberCount), rxIm = new Float64Array(coils * memberCount);
     const classIndex = new Map<number, number>();
     const pointIndex = new Map<number, number>();
-    const classX: number[] = [], classY: number[] = [], classEntry: number[] = [];
+    const classX: number[] = [], classY: number[] = [], classEntry: number[] = [], classPlane: number[] = [];
     const points: number[] = [];
     let m = 0;
     for (let v = 0; v < voxels.length; v++) {
-        const index = voxels[v];
+      const index = voxels[v];
+      for (const plane of usedPlanes) {
+        const maps = planeMaps(phantom, plane);
+        if (!(maps.pd[index] > 0)) continue;
         const mx = xCount(options, index);
         const offsetsX = stratified(mx);
         // Positions on the finest lattice, Δx / (2·finest): sub-spin a of m sits at (2a + 1)·(finest / m).
         const stepX = finest / mx;
         const col = index % phantom.nx, row = Math.floor(index / phantom.nx);
-        const entry = physics.of[index];
-        const w = phantom.maps.pd[index] / (mx * my);
+        const entry = entriesOf(physics, plane)[index];
+        const w = maps.pd[index] / (mx * my);
         const x0 = (col - phantom.nx / 2) * dx;
         const y0 = (phantom.ny / 2 - 1 - row) * dy;
+        const slot = planeSlot.get(plane)!;
         for (let ay = 0; ay < my; ay++) {
             const y = y0 + offsetsY[ay] * dy;
             const jy = row * my + ay;
             for (let ax = 0; ax < mx; ax++) {
                 const x = x0 + offsetsX[ax] * dx;
                 const jx = col * 2 * finest + (2 * ax + 1) * stepX;
-                // Class: physics entry and the position along the unfolded axes.
-                const classKey = ((foldX ? 0 : jx) * lineY + (foldY ? 0 : jy)) * entries + entry;
+                // Profile (a class, without slices): physics entry, plane and the position along the unfolded axes.
+                const classKey = (((foldX ? 0 : jx) * lineY + (foldY ? 0 : jy)) * entries + entry) * usedPlanes.length + slot;
                 let c = classIndex.get(classKey);
                 if (c === undefined) {
                     c = classX.length;
@@ -405,6 +537,7 @@ export function foldedPhantomSpins(
                     classX.push(foldX ? 0 : x);
                     classY.push(foldY ? 0 : y);
                     classEntry.push(entry);
+                    classPlane.push(plane);
                 }
                 // Fold point: the position along the folded axes.
                 const pointKey = (foldX ? jx : 0) * (lineY + 1) + (foldY ? jy : 0);
@@ -424,25 +557,56 @@ export function foldedPhantomSpins(
                 m++;
             }
         }
+      }
     }
-    const count = classX.length;
-    const classes: SpinSet = {
+    const profiles = classX.length;
+    if (!through) {
+        const classes: SpinSet = {
+            count: profiles,
+            x: Float64Array.from(classX), y: Float64Array.from(classY), z: new Float64Array(profiles),
+            df: Float64Array.from(classEntry, e => physics.df[e]),
+            r1: Float64Array.from(classEntry, e => rate(physics.t1[e])),
+            r2: Float64Array.from(classEntry, e => rate(physics.t2[e])),
+            weight: new Float64Array(profiles),
+            b1Re: Float64Array.from(classEntry, e => physics.b1[e]), b1Im: new Float64Array(profiles),
+            coils: 1,
+            rxRe: new Float64Array(profiles).fill(1), rxIm: new Float64Array(profiles),
+        };
+        const members: SpinMembers = { count: memberCount, classOf, weight, foldOf, foldPoints: Float64Array.from(points), coils, rxRe, rxIm };
+        return { classes, members };
+    }
+    // One class per profile and sub-slice of its plane.
+    let count = 0;
+    for (let q = 0; q < profiles; q++) count += slicesOfPlane.get(classPlane[q])!.length;
+    const profileOf = new Int32Array(count);
+    const classes = {
         count,
-        x: Float64Array.from(classX), y: Float64Array.from(classY), z: new Float64Array(count),
-        df: Float64Array.from(classEntry, e => physics.df[e]),
-        r1: Float64Array.from(classEntry, e => rate(physics.t1[e])),
-        r2: Float64Array.from(classEntry, e => rate(physics.t2[e])),
+        x: new Float64Array(count), y: new Float64Array(count), z: new Float64Array(count),
+        df: new Float64Array(count), r1: new Float64Array(count), r2: new Float64Array(count),
         weight: new Float64Array(count),
-        b1Re: Float64Array.from(classEntry, e => physics.b1[e]), b1Im: new Float64Array(count),
+        b1Re: new Float64Array(count), b1Im: new Float64Array(count),
         coils: 1,
         rxRe: new Float64Array(count).fill(1), rxIm: new Float64Array(count),
     };
+    let c = 0;
+    for (let q = 0; q < profiles; q++) {
+        const e = classEntry[q];
+        for (const k of slicesOfPlane.get(classPlane[q])!) {
+            classes.x[c] = classX[q];
+            classes.y[c] = classY[q];
+            classes.z[c] = slices.z[k];
+            classes.df[c] = physics.df[e];
+            classes.r1[c] = rate(physics.t1[e]);
+            classes.r2[c] = rate(physics.t2[e]);
+            classes.b1Re[c] = physics.b1[e];
+            classes.weight[c] = slices.weight[k];
+            profileOf[c] = q;
+            c++;
+        }
+    }
     const members: SpinMembers = {
-        count: memberCount,
-        classOf, weight, foldOf,
-        foldPoints: Float64Array.from(points),
-        coils,
-        rxRe, rxIm,
+        count: memberCount, classOf, weight, foldOf, foldPoints: Float64Array.from(points), coils, rxRe, rxIm,
+        profileOf, profiles,
     };
     return { classes, members };
 }

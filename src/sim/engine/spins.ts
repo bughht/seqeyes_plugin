@@ -55,6 +55,14 @@ export interface SpinMembers {
     readonly coils: number;
     readonly rxRe: Float64Array;
     readonly rxIm: Float64Array;
+    /**
+     * Through-slice sampling: the profile of each class (classes sharing a
+     * profile differ only in z). Members then index profiles in `classOf`,
+     * and a profile's signal is the sum of its classes, each weighted by the
+     * class row's weight. All classes of a profile must read out alike.
+     */
+    readonly profileOf?: Int32Array;
+    readonly profiles?: number;
 }
 
 export interface SpinState {
