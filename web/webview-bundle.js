@@ -8040,6 +8040,7 @@ var SeqEyesSimulation = (function () {
     ['none', 'B0/B1: ideal']
   ];
   var SLICE_CHOICES = [['auto', 'Slices: auto'], ['off', 'Slices: z = 0']];
+  var ENGINE_CHOICES = [['isochromat', 'Engine: isochromats'], ['phase-graph', 'Engine: phase graph']];
   var DATA_TABS = [['phantom', 'Phantom'], ['rf', 'RF pulses'], ['raw', 'Raw'], ['kspace', 'k-space'], ['image', 'Image']];
   var RF_AXES = [['z', 'across z'], ['frequency', 'against Δf']];
   /** Points of the RF views, and what they show of each pulse (from equilibrium, no relaxation). */
@@ -8066,6 +8067,7 @@ var SeqEyesSimulation = (function () {
   var spins = choice(get('seqeyes.simulation.spins'), SPIN_CHOICES, 'auto');
   var accuracy = choice(get('seqeyes.simulation.accuracy'), ACCURACY_CHOICES.map(function (a) { return a[0]; }), '0.02');
   var sliceMode = choice(get('seqeyes.simulation.slices'), SLICE_CHOICES.map(function (c) { return c[0]; }), 'auto');
+  var engine = choice(get('seqeyes.simulation.engine'), ENGINE_CHOICES.map(function (c) { return c[0]; }), 'isochromat');
   var rfAxis = choice(get('seqeyes.simulation.rfAxis'), RF_AXES.map(function (a) { return a[0]; }), 'z');
   var dataTab = choice(get('seqeyes.simulation.data'), DATA_TABS.map(function (t) { return t[0]; }), 'image');
   /* The progress card can sit minimized in the corner (remembered). */
@@ -8133,6 +8135,15 @@ var SeqEyesSimulation = (function () {
   }
 
   function describePlan(plan) {
+    if (plan.engine === 'phase-graph' && plan.phaseGraph) {
+      var pg = plan.phaseGraph;
+      return plan.phantom.source + ' · ' + plan.phantom.nx + '×' + plan.phantom.ny
+        + ' · phase graph: ' + pg.classes + (pg.classes === 1 ? ' tissue class' : ' tissue classes')
+        + (plan.slices ? ' × ' + plan.slices.count + ' sub-slices' : ' at z = 0')
+        + ', ≤ ' + pg.maxStates + ' states · ' + formatCount(pg.sources) + ' voxels'
+        + (plan.coils > 1 ? ' · ' + plan.coils + ' coils' : '')
+        + ' · ' + plan.rfEvents + ' RF, ' + plan.adcEvents + ' ADC';
+    }
     var axes = plan.axes.map(function (axis, i) {
       var name = 'xy'.charAt(i);
       if (i === 0 && plan.bands && plan.bands.length) return 'x by T2 (' + describeBands(plan.bands) + ')';
@@ -8384,9 +8395,9 @@ var SeqEyesSimulation = (function () {
     var lines = [p.source + ' · ' + p.nx + '×' + p.ny + ' at ' + (p.voxel[0] * 1000).toFixed(2) + '×' + (p.voxel[1] * 1000).toFixed(2) + ' mm'
       + (phantom.volume ? ' · volume ' + phantom.volume.shape.join('×') : '')];
     if (!result) {
-      lines.push('Press Run to simulate the open sequence on this phantom' + (sliceMode === 'auto'
-        ? ', with spins through the slab wherever the pulses act along z.'
-        : ' (2-D, every spin at z = 0).'));
+      lines.push('Press Run to simulate the open sequence on this phantom'
+        + (engine === 'phase-graph' ? ' with the phase-graph engine' : ' with isochromats')
+        + (sliceMode === 'auto' ? ', through the slab wherever the pulses act along z.' : ' (2-D, at z = 0).'));
     }
     setStatus(lines.concat(result ? statusForResultLines() : []), (p.notes || []).concat(result ? resultWarnings() : []));
   }
@@ -8400,6 +8411,10 @@ var SeqEyesSimulation = (function () {
   function readUploadedFiles(fileList) {
     var files = Array.prototype.slice.call(fileList || []);
     if (!files.length) return;
+    // Loading from now on: the old phantom is on its way out while the files are read.
+    phantom.status = 'loading';
+    phantom.id = ++phantomRequest;
+    syncControls();
     var reads = files.map(function (file) {
       return file.arrayBuffer().then(function (bytes) { return { name: file.name, bytes: bytes }; });
     });
@@ -8411,7 +8426,7 @@ var SeqEyesSimulation = (function () {
       syncControls();
       loadPhantom('choice');
     }).catch(function (error) {
-      setStatus([], ['Could not read the file: ' + (error && error.message || error)]);
+      phantomFailed(phantom.id, 'Could not read the file: ' + (error && error.message || error));
     });
   }
 
@@ -8425,7 +8440,7 @@ var SeqEyesSimulation = (function () {
   }
 
   function jobSettings() {
-    var settings = { phantom: { kind: 'phantom', phantom: phantom.data }, coils: coils, subSpins: 'auto', tolerance: +accuracy, throughSlice: sliceMode };
+    var settings = { phantom: { kind: 'phantom', phantom: phantom.data }, coils: coils, subSpins: 'auto', tolerance: +accuracy, throughSlice: sliceMode, engine: engine };
     if (spins !== 'auto') settings.subSpins = spins.split('x').map(Number);
     return settings;
   }
@@ -8510,7 +8525,7 @@ var SeqEyesSimulation = (function () {
           // Followers take the leader's spins per voxel and sub-slices: same chunks, no probe.
           var followers = Math.min(r.budget, r.plan.chunks) - 1;
           var settings = {
-            phantom: r.settings.phantom, coils: r.settings.coils, tolerance: r.settings.tolerance,
+            phantom: r.settings.phantom, coils: r.settings.coils, tolerance: r.settings.tolerance, engine: r.settings.engine,
             subSpins: r.plan.resolved, throughSlice: r.plan.resolvedSlices
           };
           for (var i = 0; i < followers; i++) {
@@ -8631,8 +8646,11 @@ var SeqEyesSimulation = (function () {
       var progress = chunkProgress(r);
       fraction = Math.min(1, (progress.done + progress.partial) / r.plan.chunks);
       var elapsed = now() - r.simulateStarted;
-      phase = 'Simulating';
-      stats = progress.done + '/' + r.plan.chunks + ' chunks · '
+      phase = r.plan.engine === 'phase-graph' ? 'Simulating (phase graph)' : 'Simulating';
+      stats = r.plan.engine === 'phase-graph'
+        ? progress.done + '/' + r.plan.chunks + ' chunks · ' + r.plan.phaseGraph.classes + ' tissue classes · '
+          + formatSeconds(elapsed) + (fraction > 0.03 ? ' · ~' + formatSeconds(elapsed * (1 - fraction) / fraction) + ' left' : '')
+        : progress.done + '/' + r.plan.chunks + ' chunks · '
         + formatCount(Math.round(fraction * r.plan.simulated)) + ' of ' + formatCount(r.plan.simulated) + ' spins · '
         + formatSeconds(elapsed) + (fraction > 0.03 ? ' · ~' + formatSeconds(elapsed * (1 - fraction) / fraction) + ' left' : '')
         + (elapsed > 500 ? ' · ' + formatCount(Math.round(fraction * r.plan.simulated / (elapsed / 1000))) + ' spins/s' : '');
@@ -9277,10 +9295,15 @@ var SeqEyesSimulation = (function () {
     fillSelect(fieldsSelect, FIELD_CHOICES, fields);
     if (fieldsSelect) fieldsSelect.hidden = isShepp;
     fillSelect(el('simCoils'), COIL_CHOICES.map(function (n) { return [String(n), n === 1 ? '1 coil' : n + ' coils']; }), coils);
-    fillSelect(el('simSpins'), SPIN_CHOICES.map(function (c) { return [c, c === 'auto' ? 'Auto' : c.replace('x', ' × ')]; }), spins);
+    fillSelect(el('simEngine'), ENGINE_CHOICES, engine);
+    var spinsSelect = el('simSpins'), spinsLabel = el('simSpinsLabel');
+    fillSelect(spinsSelect, SPIN_CHOICES.map(function (c) { return [c, c === 'auto' ? 'Auto' : c.replace('x', ' × ')]; }), spins);
+    // The phase graph has no spins per voxel; its accuracy sets pruning, sub-slices and binning.
+    if (spinsSelect) spinsSelect.hidden = engine === 'phase-graph';
+    if (spinsLabel) spinsLabel.hidden = engine === 'phase-graph';
     var accuracySelect = el('simAccuracy');
     fillSelect(accuracySelect, ACCURACY_CHOICES, accuracy);
-    if (accuracySelect) accuracySelect.hidden = spins !== 'auto';
+    if (accuracySelect) accuracySelect.hidden = engine !== 'phase-graph' && spins !== 'auto';
     fillSelect(el('simSlices'), SLICE_CHOICES, sliceMode);
 
     var volume3d = !isShepp && phantom.volume && Math.max(phantom.volume.shape[0], phantom.volume.shape[1], phantom.volume.shape[2]) > 1
@@ -9397,6 +9420,8 @@ var SeqEyesSimulation = (function () {
     if (spinSelect) spinSelect.onchange = function () { spins = this.value; set('seqeyes.simulation.spins', spins); syncControls(); };
     var accuracySelect = el('simAccuracy');
     if (accuracySelect) accuracySelect.onchange = function () { accuracy = this.value; set('seqeyes.simulation.accuracy', accuracy); };
+    var engineSelect = el('simEngine');
+    if (engineSelect) engineSelect.onchange = function () { engine = this.value; set('seqeyes.simulation.engine', engine); syncControls(); describePhantom(); };
     var sliceSelect = el('simSlices');
     if (sliceSelect) sliceSelect.onchange = function () {
       sliceMode = this.value;
@@ -9526,6 +9551,7 @@ var SeqEyesSimulation = (function () {
         source: phantom.data ? phantom.data.source : '' },
       coils: coils,
       spins: spins,
+      engine: engine,
       slices: sliceMode,
       pulses: { status: pulses.status, count: pulses.list ? pulses.list.length : 0,
         alongZ: datasets.rf ? datasets.rf.dims[2].size : 0, spectral: datasets.rfSpectral ? datasets.rfSpectral.dims[2].size : 0 },
@@ -9564,6 +9590,7 @@ var SeqEyesSimulation = (function () {
       if (SHEPP_SIZES.indexOf(options.size) >= 0) sheppSize = options.size;
       if (SPIN_CHOICES.indexOf(options.spins) >= 0) spins = options.spins;
       if (COIL_CHOICES.indexOf(options.coils) >= 0) coils = options.coils;
+      if (options.engine === 'isochromat' || options.engine === 'phase-graph') engine = options.engine;
       syncControls();
     },
     state: state,

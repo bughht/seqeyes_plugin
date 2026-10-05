@@ -202,7 +202,8 @@
     <select id="simMatrix" aria-label="Phantom matrix" title="Shepp–Logan matrix, or resampling of a loaded phantom (nearest neighbour; the field of view is kept)"></select>
     <select id="simFields" aria-label="B0 and B1 maps" title="Field maps: the file's B0/B1, MRzero-style maps where the file has none, or ideal fields"></select>
     <select id="simCoils" aria-label="Receive coils" title="Synthetic receive coils (smooth complex sensitivities on a ring) for phantoms without coil maps"></select>
-    <span class="ulbl">Spins/voxel</span>
+    <select id="simEngine" aria-label="Simulation engine" title="Isochromats: Bloch simulation of spins in every voxel, the reference. Phase graph: configuration states per tissue class (extended phase graphs with exact RF), much faster on spoiled and crushed sequences; it cannot simulate pulses played with in-plane gradients."></select>
+    <span class="ulbl" id="simSpinsLabel">Spins/voxel</span>
     <select id="simSpins" aria-label="Spins per voxel" title="Spins per voxel along x × y. Auto simulates one voxel per tissue to find how many the sequence's spoiling needs."></select>
     <select id="simAccuracy" aria-label="Accuracy target" title="What Auto aims for: the signal error it accepts from simulating each voxel with a finite number of spins. Long-T2 tissue (CSF) needs the most spins; a looser target is faster."></select>
     <select id="simSlices" aria-label="Through-slice sampling" title="Spins along z. Auto places sub-slices wherever the sequence's pulses act along z (slice profiles, refocusing and inversion slabs, multiband), with a spacing it checks by simulation; z = 0 keeps every spin in one plane."></select>

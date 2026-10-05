@@ -15,6 +15,10 @@
  *     act (plan/slices.ts), with a spacing probed like the spins per voxel;
  *   - chunks: whole columns (rows) when y (x) folds, else voxels in readout
  *     order, so classes and readout groups stay inside a chunk.
+ * The phase-graph engine (engine/phaseGraph.ts) is the other choice: no
+ * spins per voxel at all, configuration states per tissue class instead, and
+ * chunks of tissue classes.
+ *
  * The split depends only on the settings, never on the worker count, and
  * chunk signals are added in chunk order (ChunkAccumulator). A result is
  * therefore bit-identical however many workers produced it.
@@ -23,6 +27,8 @@
 import { evaluateAdcLabels } from '../pulseq/labels';
 import { parseSequenceBytes } from '../pulseq/sequenceReader';
 import { simulateReference, type SimulationOptions } from './engine/reference';
+import { simulatePhaseGraph, type PhaseGraphSources } from './engine/phaseGraph';
+import { phaseGraphPhantom, type ClassBinning, type PhaseGraphPhantom } from './phantom/phaseGraphModel';
 import { sheppLoganPhantom2D } from './phantom/builtin';
 import {
     assignPlanes,
@@ -75,8 +81,13 @@ export interface ResolvedSlices {
     coarsened: boolean;
 }
 
+/** Isochromats (Bloch, spins per voxel) or configuration states (phase graph). */
+export type SimulationEngine = 'isochromat' | 'phase-graph';
+
 export interface JobSettings {
     phantom: PhantomSource;
+    /** Default 'isochromat'. */
+    engine?: SimulationEngine;
     /** Synthetic receive coils for phantoms without coil maps (default 1: a uniform coil). */
     coils?: number;
     /** Spins per voxel along x and y, 'auto', or a resolved banded plan. */
@@ -114,7 +125,25 @@ export interface AxisPlan {
     probe?: { error: number; reference: number; capped: boolean; tested: { count: number; error: number }[] };
 }
 
+/** What the phase-graph engine simulates (JobPlan.phaseGraph). */
+export interface PhaseGraphPlan {
+    /** Tissue classes, and classes × sub-slices (the lanes states carry amplitudes on). */
+    classes: number;
+    lanes: number;
+    /** Emitting voxels (× planes of a 3-D phantom). */
+    sources: number;
+    /** States below this are dropped after each pulse; at most maxStates of each kind kept. */
+    prune: number;
+    maxStates: number;
+    /** Class binning: relative T1/T2 and absolute B1+ widths (0 = exact), and the off-resonance width of RF operators [Hz]. */
+    binning: ClassBinning;
+}
+
 export interface JobPlan {
+    /** The engine this plan runs. */
+    engine: SimulationEngine;
+    /** Phase-graph details, or null for the isochromat engine. */
+    phaseGraph: PhaseGraphPlan | null;
     blocks: number;
     duration: number;
     rfEvents: number;
@@ -212,6 +241,12 @@ const MAX_CHUNKS = 64;
 const MAX_SLICES = 512;
 /** Tissues the sub-slice density probe simulates. */
 const SLICE_PROBE_TISSUES = 2;
+/** Phase graph: most tissue classes (continuous maps get binned to fit), lanes per chunk, and chunks. */
+const PG_CLASS_BUDGET = 2048;
+const PG_LANES_PER_CHUNK = 512;
+const PG_MAX_CHUNKS = 64;
+/** Phase graph: sources per chunk, at most (a class's voxels split across chunks share its readout work). */
+const PG_SOURCES_PER_CHUNK = 2048;
 /** Programs up to this many blocks keep their segments in memory between chunks. */
 const REPLAY_BLOCK_LIMIT = 200_000;
 /** Tissues the probe simulates (the longest-lived first; see representativeTissues). */
@@ -244,6 +279,15 @@ export class SimulationJob {
     private readonly slices: ThroughSlice | null;
     /** The pulses as measured for this plan (empty when the sub-slices came resolved). */
     readonly pulses: PulseResponse[];
+    /** The phase-graph model and its chunks, or null for the isochromat engine. */
+    private readonly pg: {
+        phantom: PhaseGraphPhantom;
+        slices: { z: Float64Array; weight: Float64Array; reference: number };
+        chunkClasses: Int32Array[];
+        chunkSources: Int32Array[];
+        prune: number;
+        maxStates: number;
+    } | null;
     private readonly sequenceFov: [number, number, number] | null;
     private trajectory: AdcTrajectory | null = null;
     private readonly hooks: JobHooks;
@@ -270,6 +314,17 @@ export class SimulationJob {
 
         const voxels = occupiedVoxels(this.phantom);
         if (!voxels.length) throw new Error('The phantom plane is empty (no voxel has PD > 0).');
+        if ((settings.engine ?? 'isochromat') === 'phase-graph') {
+            const planned = this.planPhaseGraph(settings, voxels.length, fov);
+            this.countX = null;
+            this.slices = planned.slices;
+            this.pulses = planned.pulses;
+            this.chunkVoxels = [];
+            this.pg = planned.pg;
+            this.plan = planned.plan;
+            return;
+        }
+        this.pg = null;
         const banded = this.planBands(voxels, voxel[0], settings);
         const axes = [0, 1].map(axis => (axis === 0 && banded ? banded.axis : this.planAxis(axis as 0 | 1, voxel[axis], settings))) as [AxisPlan, AxisPlan];
         const subSpins: [number, number] = [axes[0].count, axes[1].count];
@@ -323,6 +378,8 @@ export class SimulationJob {
         for (const feature of this.program.ignoredFeatures) notes.push(`Not simulated: ${IGNORED_FEATURE_TEXT[feature]}.`);
 
         this.plan = {
+            engine: 'isochromat',
+            phaseGraph: null,
             blocks: this.program.blockCount,
             duration: this.program.totalDuration,
             rfEvents: this.analysis.rfEvents,
@@ -357,12 +414,150 @@ export class SimulationJob {
 
     /** Simulate one chunk; returns its delivered signal (see SimulationResult.signal). */
     simulateChunk(index: number, options: SimulationOptions = {}): Float64Array {
+        if (this.pg) return this.simulatePhaseGraphChunk(index, options);
         const voxels = this.chunkVoxels[index];
         if (!voxels) throw new Error(`No chunk ${index} (the job has ${this.chunkVoxels.length}).`);
         const spinOptions = { subSpins: this.plan.subSpins, voxels, countX: this.countX ?? undefined, slices: this.slices ?? undefined };
         if (!this.fold) return simulateReference(this.program, phantomSpins(this.phantom, spinOptions), options).signal;
         const { classes, members } = foldedPhantomSpins(this.phantom, this.physics, spinOptions, this.fold);
         return simulateReference(this.program, classes, { ...options, members }).signal;
+    }
+
+    private simulatePhaseGraphChunk(index: number, options: SimulationOptions): Float64Array {
+        const pg = this.pg!;
+        const classes = pg.chunkClasses[index], members = pg.chunkSources[index];
+        if (!classes) throw new Error(`No chunk ${index} (the job has ${pg.chunkClasses.length}).`);
+        const all = pg.phantom.sources;
+        const local = new Int32Array(pg.phantom.classes.length).fill(-1);
+        classes.forEach((c, i) => { local[c] = i; });
+        const n = members.length, coils = all.coils;
+        const pick = (array: Float64Array) => Float64Array.from(members, i => array[i]);
+        const rxRe = new Float64Array(coils * n), rxIm = new Float64Array(coils * n);
+        for (let c = 0; c < coils; c++) {
+            for (let j = 0; j < n; j++) {
+                rxRe[c * n + j] = all.rxRe[c * all.count + members[j]];
+                rxIm[c * n + j] = all.rxIm[c * all.count + members[j]];
+            }
+        }
+        const sources: PhaseGraphSources = {
+            count: n,
+            x: pick(all.x), y: pick(all.y), df: pick(all.df), pd: pick(all.pd),
+            classOf: Int32Array.from(members, i => local[all.classOf[i]]),
+            sliceFrom: Int32Array.from(members, i => all.sliceFrom[i]),
+            sliceTo: Int32Array.from(members, i => all.sliceTo[i]),
+            coils, rxRe, rxIm,
+        };
+        const model = {
+            classes: Array.from(classes, c => pg.phantom.classes[c]),
+            slices: pg.slices,
+            sources,
+            voxel: [this.phantom.voxel[0], this.phantom.voxel[1]] as [number, number],
+        };
+        return simulatePhaseGraph(this.program, model, {
+            prune: pg.prune, maxStates: pg.maxStates,
+            onProgress: options.onProgress, progressInterval: options.progressInterval, isCancelled: options.isCancelled, until: options.until,
+        }).signal;
+    }
+
+    /**
+     * The phase-graph plan: sub-slices at a density set by the accuracy
+     * target (configuration states need no spins per voxel, and their slab
+     * integral converges within a few sub-slices per resolution cell), tissue
+     * classes and their sources, and chunks of whole classes.
+     */
+    private planPhaseGraph(settings: JobSettings, voxelCount: number, fov: [number, number]) {
+        if (this.analysis.rfGradientAxes & 3) {
+            throw new Error('The phase-graph engine cannot simulate this sequence: its RF pulses play gradients along x or y '
+                + '(in-plane selective or oblique excitation). Use the isochromat engine.');
+        }
+        const tolerance = settings.tolerance ?? 0.02;
+        const tuning = tolerance <= 0.02
+            ? { prune: 1e-5, maxStates: 2000, density: 2, rfStep: 5, fine: { t: 0.005, b1: 0.0025 } }
+            : tolerance <= 0.05
+                ? { prune: 5e-5, maxStates: 800, density: 1.5, rfStep: 10, fine: { t: 0.01, b1: 0.005 } }
+                : { prune: 2e-4, maxStates: 300, density: 1, rfStep: 20, fine: { t: 0.02, b1: 0.01 } };
+        const through = this.planThroughSlice(settings, [1, 1], null, 0, tuning.density);
+        this.report('Grouping the phantom into tissue classes', 0.95);
+        const phantom = phaseGraphPhantom(this.phantom, through.slices, tuning.rfStep, tuning.fine, PG_CLASS_BUDGET);
+        const K = through.slices ? through.slices.z.length : 1;
+        const C = phantom.classes.length;
+        if (!phantom.sources.count) throw new Error('The phantom plane is empty (no voxel has PD > 0).');
+        const slices = through.slices && through.resolved !== 'off'
+            ? { z: through.slices.z, weight: through.slices.weight, reference: through.resolved.reference }
+            : { z: Float64Array.of(0), weight: Float64Array.of(1), reference: 1 };
+        // Chunks: whole classes, about PG_MAX_CHUNKS of them, at most PG_LANES_PER_CHUNK lanes each.
+        const perChunk = Math.max(1, Math.min(Math.floor(PG_LANES_PER_CHUNK / K) || 1, Math.ceil(C / PG_MAX_CHUNKS)));
+        const chunkClasses: Int32Array[] = [];
+        for (let c = 0; c < C; c += perChunk) chunkClasses.push(Int32Array.from({ length: Math.min(perChunk, C - c) }, (_, i) => c + i));
+        const chunkOf = new Int32Array(C);
+        chunkClasses.forEach((list, i) => list.forEach(c => { chunkOf[c] = i; }));
+        const lists: number[][] = chunkClasses.map(() => []);
+        for (let i = 0; i < phantom.sources.count; i++) lists[chunkOf[phantom.sources.classOf[i]]].push(i);
+        // Classes with many voxels are split across chunks: each piece evolves the class's
+        // states again (cheap) and synthesises its share of the readout (the costly part).
+        const finalClasses: Int32Array[] = [], chunkSources: Int32Array[] = [];
+        lists.forEach((list, i) => {
+            const pieces = Math.max(1, Math.ceil(list.length / PG_SOURCES_PER_CHUNK));
+            const size = Math.ceil(list.length / pieces);
+            for (let p = 0; p < pieces; p++) {
+                finalClasses.push(chunkClasses[i]);
+                chunkSources.push(Int32Array.from(list.slice(p * size, (p + 1) * size)));
+            }
+        });
+        chunkClasses.length = 0;
+        chunkClasses.push(...finalClasses);
+
+        const notes = through.notes.slice();
+        notes.push(`Phase graph: ${C} tissue classes × ${K} sub-slices; states below ${tuning.prune} are dropped (at most ${tuning.maxStates} of each kind). `
+            + 'Voxels are uniform boxes; each voxel\'s own B0 enters exactly through the states\' dephasing time.');
+        if (phantom.binning.t > 0 || phantom.binning.b1 > 0) {
+            notes.push(`Continuous maps were binned into ${C} classes: T1 and T2 to ${+(100 * phantom.binning.t).toFixed(2)} %, `
+                + `B1+ to ${+(100 * phantom.binning.b1).toFixed(2)} %.`);
+        }
+        if (phantom.sources.df.some(v => v !== 0)) {
+            notes.push(`Pulses act at off-resonance rounded to ${phantom.binning.df} Hz; free precession uses each voxel's exact B0.`);
+        }
+        if (this.phantom.maps.t2prime) notes.push('The T2′ map is loaded but not simulated yet (no intravoxel dephasing).');
+        if (this.phantom.maps.adc) notes.push('The ADC map is loaded but diffusion is not simulated yet.');
+        for (const note of this.phantom.notes) notes.push(note);
+        for (const feature of this.program.ignoredFeatures) notes.push(`Not simulated: ${IGNORED_FEATURE_TEXT[feature]}.`);
+        const none: AxisPlan = { count: 1, reason: 'none', folded: false };
+        const plan: JobPlan = {
+            engine: 'phase-graph',
+            phaseGraph: {
+                classes: C, lanes: C * K, sources: phantom.sources.count,
+                prune: tuning.prune, maxStates: tuning.maxStates, binning: phantom.binning,
+            },
+            blocks: this.program.blockCount,
+            duration: this.program.totalDuration,
+            rfEvents: this.analysis.rfEvents,
+            adcEvents: this.analysis.adcEvents,
+            adcSamples: this.analysis.adcSamples,
+            phantom: {
+                source: this.phantom.source,
+                nx: this.phantom.nx, ny: this.phantom.ny, fov,
+                voxels: voxelCount,
+                tissues: C,
+                maps: Object.keys(this.phantom.maps).filter(key => this.phantom.maps[key as keyof Phantom2D['maps']]),
+            },
+            axes: [none, { ...none }],
+            subSpins: [1, 1],
+            bands: null,
+            resolved: [1, 1],
+            slices: through.summary,
+            resolvedSlices: through.resolved,
+            spins: phantom.sources.count * K,
+            simulated: C * K,
+            chunks: chunkClasses.length,
+            coils: this.phantom.coils?.count ?? 1,
+            b0: this.program.b0,
+            gamma: this.program.gamma,
+            notes,
+        };
+        return {
+            plan, slices: through.slices, pulses: through.pulses,
+            pg: { phantom, slices, chunkClasses, chunkSources, prune: tuning.prune, maxStates: tuning.maxStates },
+        };
     }
 
     reconstruct(signal: Float64Array): CartesianRecon {
@@ -430,7 +625,7 @@ export class SimulationJob {
      * measured from the pulses with a density probed on one voxel of the
      * longest-lived tissues, at the in-plane spins this plan chose.
      */
-    private planThroughSlice(settings: JobSettings, subSpins: [number, number], bands: SpinBands | null, flatClasses: number): {
+    private planThroughSlice(settings: JobSettings, subSpins: [number, number], bands: SpinBands | null, flatClasses: number, fixedDensity?: number): {
         slices: ThroughSlice | null; summary: SliceSummary | null; resolved: ResolvedSlices | 'off'; pulses: PulseResponse[]; notes: string[];
     } {
         const mode = settings.throughSlice ?? 'auto';
@@ -464,13 +659,17 @@ export class SimulationJob {
                 ...tissue,
                 countX: this.fold & 1 ? 1 : bands ? bandCount(bands, tissue.t2) : subSpins[0],
             }));
-            const result = probeSliceDensity(this.program, pulses, tissues, {
-                ...options,
-                voxel: [this.phantom.voxel[0], this.phantom.voxel[1]],
-                countY: this.fold & 2 ? 1 : subSpins[1],
-                tolerance: settings.tolerance,
-            })!;
-            probe = { error: result.error, capped: result.capped, tested: result.tested };
+            // A fixed density (the phase graph) skips the isochromat probe.
+            const fixed = fixedDensity !== undefined ? planSlices(pulses, { ...options, density: fixedDensity }) : null;
+            const result = fixed
+                ? { plan: fixed, error: NaN, capped: false, tested: [] }
+                : probeSliceDensity(this.program, pulses, tissues, {
+                    ...options,
+                    voxel: [this.phantom.voxel[0], this.phantom.voxel[1]],
+                    countY: this.fold & 2 ? 1 : subSpins[1],
+                    tolerance: settings.tolerance,
+                })!;
+            probe = fixed ? null : { error: result.error, capped: result.capped, tested: result.tested };
             let chosen = result.plan;
             // Each sub-slice repeats the classes: past the budget, the finest
             // tested density that fits (the coarsest when none does).

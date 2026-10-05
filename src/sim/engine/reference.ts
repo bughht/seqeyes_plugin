@@ -1032,7 +1032,34 @@ function sampleAdc(
 
     const sumRe = new Float64Array(n * coils);
     const sumIm = new Float64Array(n * coils);
-    if (any) {
+    if (any) synthesizeReadout(segment, groups, gRe, gIm, coils, k, times, sumRe, sumIm, useLattice);
+    emitReadout(segment, sumRe, sumIm, coils, signal, sampleOffset);
+}
+
+/**
+ * Add the signal of readout groups to `sumRe`/`sumIm` (sample-major, × coils):
+ * group g emits its amplitude (gRe, gIm per coil) at the window start, then
+ * precesses at k(t)·r_g + Δf_g·τ and decays at R2_g. `k` is k at each sample
+ * relative to the window start (piecesKAt), `times` the sample times. Uses
+ * lattice synthesis where it applies (useLattice), else one phasor recurrence
+ * per group on a gradient plateau, else exact phases built per sample from
+ * tables of the groups' distinct positions and (Δf, R2). Shared by the
+ * isochromat and phase-graph engines.
+ */
+export function synthesizeReadout(
+    segment: AdcSegment,
+    groups: ReadoutGroups,
+    gRe: Float64Array,
+    gIm: Float64Array,
+    coils: number,
+    k: Float64Array,
+    times: Float64Array,
+    sumRe: Float64Array,
+    sumIm: Float64Array,
+    useLattice: boolean,
+): void {
+    const n = segment.numSamples;
+    {
         // On a gradient plateau every sample advances k by the same step, so the
         // phasor can advance by one multiplication per sample.
         let uniform = n > 1;
@@ -1047,6 +1074,7 @@ function sampleAdc(
         const dwell = segment.dwell;
         const lattice = uniform && useLattice
             && synthesizeOnLattice(segment, groups, gRe, gIm, coils, k, times, sumRe, sumIm);
+        if (!lattice && !uniform && synthesizeFactorised(segment, groups, gRe, gIm, coils, k, times, sumRe, sumIm)) return;
         for (let g = 0; g < groups.count && !lattice; g++) {
             let nonzero = false;
             for (let c = 0; c < coils; c++) if (gRe[g * coils + c] !== 0 || gIm[g * coils + c] !== 0) nonzero = true;
@@ -1084,7 +1112,97 @@ function sampleAdc(
             }
         }
     }
+}
 
+/**
+ * Exact phases without a per-group transcendental: e^{i2π(k·r + Δf·τ)}·e^{−R2·τ}
+ * is the product of per-axis position phasors and a (Δf, R2) factor, each
+ * computed once per sample for the distinct values the groups take. Pays
+ * off when groups share coordinates (a voxel grid); returns false, leaving
+ * the sums untouched, when they do not.
+ */
+function synthesizeFactorised(
+    segment: AdcSegment,
+    groups: ReadoutGroups,
+    gRe: Float64Array,
+    gIm: Float64Array,
+    coils: number,
+    k: Float64Array,
+    times: Float64Array,
+    sumRe: Float64Array,
+    sumIm: Float64Array,
+): boolean {
+    const active: number[] = [];
+    for (let g = 0; g < groups.count; g++) {
+        for (let c = 0; c < coils; c++) if (gRe[g * coils + c] !== 0 || gIm[g * coils + c] !== 0) { active.push(g); break; }
+    }
+    if (active.length < 16) return false;
+    const table = (value: (g: number) => number) => {
+        const index = new Map<number, number>();
+        const of = new Int32Array(active.length);
+        for (let i = 0; i < active.length; i++) {
+            const v = value(active[i]);
+            let j = index.get(v);
+            if (j === undefined) { j = index.size; index.set(v, j); }
+            of[i] = j;
+        }
+        return { values: Float64Array.from(index.keys()), of };
+    };
+    const tx = table(g => groups.x[g]), ty = table(g => groups.y[g]), tz = table(g => groups.z[g]);
+    const pairs = table(g => groups.df[g] * 1e6 + groups.r2[g]);       // key only; values below
+    const dfOf = new Float64Array(pairs.values.length), r2Of = new Float64Array(pairs.values.length);
+    for (let i = 0; i < active.length; i++) { dfOf[pairs.of[i]] = groups.df[active[i]]; r2Of[pairs.of[i]] = groups.r2[active[i]]; }
+    const tables = tx.values.length + ty.values.length + tz.values.length + pairs.values.length;
+    if (tables * 2 > active.length) return false;
+    const twoPi = 2 * Math.PI;
+    const phasors = (values: Float64Array, scale: number, re: Float64Array, im: Float64Array) => {
+        for (let j = 0; j < values.length; j++) {
+            const c = scale * values[j], a = twoPi * (c - Math.round(c));
+            re[j] = Math.cos(a); im[j] = Math.sin(a);
+        }
+    };
+    const xr = new Float64Array(tx.values.length), xi = new Float64Array(tx.values.length);
+    const yr = new Float64Array(ty.values.length), yi = new Float64Array(ty.values.length);
+    const zr = new Float64Array(tz.values.length), zi = new Float64Array(tz.values.length);
+    const dr = new Float64Array(dfOf.length), di = new Float64Array(dfOf.length);
+    const n = segment.numSamples;
+    for (let s = 0; s < n; s++) {
+        const tau = times[s] - segment.t0;
+        phasors(tx.values, k[3 * s], xr, xi);
+        phasors(ty.values, k[3 * s + 1], yr, yi);
+        phasors(tz.values, k[3 * s + 2], zr, zi);
+        for (let m = 0; m < dfOf.length; m++) {
+            const c = dfOf[m] * tau, a = twoPi * (c - Math.round(c)), d = Math.exp(-tau * r2Of[m]);
+            dr[m] = Math.cos(a) * d; di[m] = Math.sin(a) * d;
+        }
+        for (let i = 0; i < active.length; i++) {
+            const g = active[i];
+            const a = tx.of[i], b = ty.of[i], c = tz.of[i], m = pairs.of[i];
+            let pr = xr[a] * yr[b] - xi[a] * yi[b], pi = xr[a] * yi[b] + xi[a] * yr[b];
+            let nr = pr * zr[c] - pi * zi[c];
+            pi = pr * zi[c] + pi * zr[c];
+            pr = nr;
+            nr = pr * dr[m] - pi * di[m];
+            pi = pr * di[m] + pi * dr[m];
+            pr = nr;
+            for (let cc = 0; cc < coils; cc++) {
+                const ar = gRe[g * coils + cc], ai = gIm[g * coils + cc];
+                sumRe[s * coils + cc] += ar * pr - ai * pi;
+                sumIm[s * coils + cc] += ar * pi + ai * pr;
+            }
+        }
+    }
+    return true;
+}
+
+/**
+ * Write a readout's summed transverse signal to the delivered signal:
+ * receiver demodulation, then the output conjugation (conventions.ts).
+ */
+export function emitReadout(
+    segment: AdcSegment, sumRe: Float64Array, sumIm: Float64Array, coils: number, signal: Float64Array, sampleOffset: number,
+): void {
+    const n = segment.numSamples;
     for (let s = 0; s < n; s++) {
         const phase = demodulationPhase(segment.phaseOffset, segment.freqOffset, segment.dwell, s, segment.phaseModulation);
         const c = Math.cos(phase), sn = Math.sin(phase);

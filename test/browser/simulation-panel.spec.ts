@@ -23,6 +23,7 @@ interface SimulationState {
   workers: number;
   phantom: { choice: string; status: string; error: string | null; nx: number; ny: number; volume: number[] | null; plane: string; index: number | null; source: string };
   coils: number;
+  engine: string;
   slices: string;
   pulses: { status: string; count: number; alongZ: number; spectral: number };
   tab: string;
@@ -35,6 +36,8 @@ interface SimulationState {
     coils: number;
     axes: { count: number; reason: string; folded: boolean }[];
     slices: null | { count: number; reference: number; extent: string; planes: number };
+    engine: string;
+    phaseGraph: null | { classes: number; lanes: number; sources: number };
   };
   done: boolean;
   nu: number;
@@ -231,6 +234,30 @@ test('shows every RF pulse before a run, and samples the slab through or not', a
   state = await simulationState(page);
   expect(state.plan?.slices).toBeNull();
   expect(state.status).toContain('Through-slice sampling is off');
+});
+
+test('simulates with the phase-graph engine when chosen', async ({ page }) => {
+  await loadViewer(page, gre);
+  await openSimulation(page);
+  await expect.poll(async () => (await simulationState(page)).phantom.status).toBe('ready');
+  await page.locator('#simMatrix').selectOption('64');
+  await expect.poll(async () => (await simulationState(page)).phantom.nx).toBe(64);
+  await page.locator('#simEngine').selectOption('phase-graph');
+  // No spins per voxel to choose; the accuracy target still applies.
+  await expect(page.locator('#simSpins')).toBeHidden();
+  await expect(page.locator('#simAccuracy')).toBeVisible();
+  await page.locator('#simRun').click();
+  await expect.poll(async () => (await simulationState(page)).done, { timeout: 60_000 }).toBe(true);
+  const state = await simulationState(page);
+  expect(state.engine).toBe('phase-graph');
+  expect(state.plan?.engine).toBe('phase-graph');
+  expect(state.plan?.phaseGraph?.classes).toBe(5);
+  expect(state.status).toContain('phase graph:');
+  expect(state.status).toContain('Phase graph:');
+  await expectCanvasVaried(page.locator('#simCanvas'));
+  // Back to isochromats: the spins-per-voxel control returns.
+  await page.locator('#simEngine').selectOption('isochromat');
+  await expect(page.locator('#simSpins')).toBeVisible();
 });
 
 test('exports ISMRMRD and NumPy raw data', async ({ page }) => {

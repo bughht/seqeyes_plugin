@@ -245,6 +245,18 @@ pulses** tab shows each pulse's measured tip angle, |Mxy|, Mz, Mx and My
 across z, or against off-resonance for pulses without a z gradient, as soon
 as a sequence is open.
 
+**Engine.** **Isochromats** (the default and the reference) simulate spins in
+every voxel. **Phase graph** simulates configuration states per tissue class
+instead: an extended phase graph with the same exact RF, sub-slices and B0/B1
+maps. Spoilers and crushers become exact bookkeeping rather than something
+hundreds of spins per voxel must resolve, so it needs no spins per voxel and
+converges through crushed slabs (TSE, HASTE) in a few sub-slices. On the demo
+sequences it is about 5–15× faster. Voxels are uniform boxes. Each voxel's
+B0 enters exactly, through the states' dephasing time; pulses use it rounded
+to a few Hz. Continuous maps such as BrainWeb are binned into at most 2048
+tissue classes, with a note. It cannot simulate pulses played with in-plane
+gradients (in-plane selective or oblique excitation); use isochromats there.
+
 **Viewing the data.** Phantom maps, raw data (by the sequence's labels — LIN,
 PAR, SLC, ECO, REP, … — by acquisition, or every sample in time order),
 gridded k-space and images all open in one N-D viewer: pick any dimension for
