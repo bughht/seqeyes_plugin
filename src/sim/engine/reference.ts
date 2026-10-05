@@ -1217,9 +1217,12 @@ export function synthesizeReadout(
 /**
  * Exact phases without a per-group transcendental: e^{i2π(k·r + Δf·τ)}·e^{−R2·τ}
  * is the product of per-axis position phasors and a (Δf, R2) factor, each
- * computed once per sample for the distinct values the groups take. Pays
- * off when groups share coordinates (a voxel grid); returns false, leaving
- * the sums untouched, when they do not.
+ * computed once per sample for the distinct values the groups take.
+ * Positions on a lattice (a voxel grid) take their phasors as powers of the
+ * lattice step's, two transcendentals per axis and sample however many
+ * there are; the (Δf, R2) factors advance by one multiplication per dwell,
+ * exactly again every RECURRENCE_ANCHOR samples. Returns false, leaving the
+ * sums untouched, for so few groups that per-group phasors are cheaper.
  */
 function synthesizeFactorised(
     segment: AdcSegment,
@@ -1236,7 +1239,7 @@ function synthesizeFactorised(
     for (let g = 0; g < groups.count; g++) {
         for (let c = 0; c < coils; c++) if (gRe[g * coils + c] !== 0 || gIm[g * coils + c] !== 0) { active.push(g); break; }
     }
-    if (active.length < 16) return false;
+    if (active.length < 4) return false;
     const table = <K>(value: (g: number) => K) => {
         const index = new Map<K, number>();
         const of = new Int32Array(active.length);
@@ -1252,28 +1255,77 @@ function synthesizeFactorised(
     const pairs = table(g => `${groups.df[g]}|${groups.r2[g]}`);       // key only; values below
     const dfOf = new Float64Array(pairs.values.length), r2Of = new Float64Array(pairs.values.length);
     for (let i = 0; i < active.length; i++) { dfOf[pairs.of[i]] = groups.df[active[i]]; r2Of[pairs.of[i]] = groups.r2[active[i]]; }
-    const tables = tx.values.length + ty.values.length + tz.values.length + pairs.values.length;
-    if (tables * 2 > active.length) return false;
     const twoPi = 2 * Math.PI;
-    const phasors = (values: readonly number[], scale: number, re: Float64Array, im: Float64Array) => {
-        for (let j = 0; j < values.length; j++) {
-            const c = scale * values[j], a = twoPi * (c - Math.round(c));
-            re[j] = Math.cos(a); im[j] = Math.sin(a);
-        }
+    const cis = (cycles: number): [number, number] => {
+        const a = twoPi * (cycles - Math.round(cycles));
+        return [Math.cos(a), Math.sin(a)];
     };
-    const xr = new Float64Array(tx.values.length), xi = new Float64Array(tx.values.length);
-    const yr = new Float64Array(ty.values.length), yi = new Float64Array(ty.values.length);
-    const zr = new Float64Array(tz.values.length), zi = new Float64Array(tz.values.length);
+    // Each axis's phasors at a sample: from the lattice (base · step^slot) or value by value.
+    const axisPhasors = (values: readonly number[]) => {
+        const re = new Float64Array(values.length), im = new Float64Array(values.length);
+        const sorted = Float64Array.from(values).sort();
+        let pitch = Infinity;
+        for (let j = 1; j < sorted.length; j++) {
+            const gap = sorted[j] - sorted[j - 1];
+            if (gap > 1e-12 * Math.max(1, Math.abs(sorted[j])) && gap < pitch) pitch = gap;
+        }
+        const origin = sorted[0];
+        let slots: Int32Array | null = null, span = 0;
+        if (values.length > 2 && Number.isFinite(pitch)) {
+            span = Math.round((sorted[sorted.length - 1] - origin) / pitch) + 1;
+            slots = new Int32Array(values.length);
+            for (let j = 0; j < values.length && slots; j++) {
+                const offset = (values[j] - origin) / pitch;
+                slots[j] = Math.round(offset);
+                if (Math.abs(offset - slots[j]) > 1e-6) slots = null;
+            }
+            if (span > 4 * values.length) slots = null;
+        }
+        const slotRe = slots ? new Float64Array(span) : null, slotIm = slots ? new Float64Array(span) : null;
+        return {
+            re, im,
+            at(scale: number): void {
+                if (slots && slotRe && slotIm) {
+                    const [br, bi] = cis(scale * origin), [sr, si] = cis(scale * pitch);
+                    let pr = br, pi = bi;
+                    for (let j = 0; j < span; j++) {
+                        slotRe[j] = pr; slotIm[j] = pi;
+                        const nr = pr * sr - pi * si;
+                        pi = pr * si + pi * sr;
+                        pr = nr;
+                    }
+                    for (let j = 0; j < values.length; j++) { re[j] = slotRe[slots[j]]; im[j] = slotIm[slots[j]]; }
+                } else {
+                    for (let j = 0; j < values.length; j++) [re[j], im[j]] = cis(scale * values[j]);
+                }
+            },
+        };
+    };
+    const px = axisPhasors(tx.values), py = axisPhasors(ty.values), pz = axisPhasors(tz.values);
+    const xr = px.re, xi = px.im, yr = py.re, yi = py.im, zr = pz.re, zi = pz.im;
     const dr = new Float64Array(dfOf.length), di = new Float64Array(dfOf.length);
+    // Per dwell, e^{(−R2 + i2πΔf)·dwell}.
+    const stepR = new Float64Array(dfOf.length), stepI = new Float64Array(dfOf.length);
+    const dwell = segment.dwell;
+    for (let m = 0; m < dfOf.length; m++) {
+        const [cr, ci] = cis(dfOf[m] * dwell), d = Math.exp(-dwell * r2Of[m]);
+        stepR[m] = cr * d; stepI[m] = ci * d;
+    }
     const n = segment.numSamples;
     for (let s = 0; s < n; s++) {
         const tau = times[s] - segment.t0;
-        phasors(tx.values, k[3 * s], xr, xi);
-        phasors(ty.values, k[3 * s + 1], yr, yi);
-        phasors(tz.values, k[3 * s + 2], zr, zi);
+        px.at(k[3 * s]);
+        py.at(k[3 * s + 1]);
+        pz.at(k[3 * s + 2]);
         for (let m = 0; m < dfOf.length; m++) {
-            const c = dfOf[m] * tau, a = twoPi * (c - Math.round(c)), d = Math.exp(-tau * r2Of[m]);
-            dr[m] = Math.cos(a) * d; di[m] = Math.sin(a) * d;
+            if (s % RECURRENCE_ANCHOR === 0) {
+                const [cr, ci] = cis(dfOf[m] * tau), d = Math.exp(-tau * r2Of[m]);
+                dr[m] = cr * d; di[m] = ci * d;
+            } else {
+                const nr = dr[m] * stepR[m] - di[m] * stepI[m];
+                di[m] = dr[m] * stepI[m] + di[m] * stepR[m];
+                dr[m] = nr;
+            }
         }
         for (let i = 0; i < active.length; i++) {
             const g = active[i];

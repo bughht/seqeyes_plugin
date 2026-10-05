@@ -8,8 +8,10 @@ import { simulatePhaseGraph, type PhaseGraphModel } from '../../src/sim/engine/p
 import { simulateReference } from '../../src/sim/engine/reference';
 import { spinSetFrom, type SpinSet } from '../../src/sim/engine/spins';
 import { ChunkAccumulator, SimulationJob, type JobSettings } from '../../src/sim/job';
-import { sheppLoganPhantom2D, TISSUES } from '../../src/sim/phantom/builtin';
-import type { Phantom2D } from '../../src/sim/phantom/model';
+import { sheppLoganPhantom2D, sheppLoganVolume, TISSUES } from '../../src/sim/phantom/builtin';
+import { sliceVolume, type Phantom2D } from '../../src/sim/phantom/model';
+import { phaseGraphPhantom } from '../../src/sim/phantom/phaseGraphModel';
+import { spinWarp3d, spoiledGre3d } from './helpers/sequences';
 import { measurePulses, planSlices } from '../../src/sim/plan/slices';
 import { compileProgram } from '../../src/sim/program/compile';
 import { seqText, sincShape } from './helpers/seqBuilder';
@@ -390,6 +392,61 @@ describe('phase-graph engine', () => {
         expect(graph.plan.notes.some(note => note.startsWith('T2′ is exact'))).toBe(true);
         expect(graph.plan.notes.some(note => note.startsWith('Diffusion is exact'))).toBe(true);
         expect(graph.plan.phaseGraph?.classes).toBe(5);
+    });
+
+    it('integrates each plane of a 3-D phantom as a box: one sub-slice per plane is exact', () => {
+        // A non-selective 3-D spin warp: the RF profile is flat, so whether a
+        // plane holds one sub-slice or two, its box integral is the same.
+        const n = 8, nz = 4, fov = 0.032, fovZ = 0.016, pitch = fovZ / nz;
+        const program3d = compileProgram(parseSequenceText(spinWarp3d(n, nz, fov, fovZ)));
+        const phantom = sliceVolume(sheppLoganVolume(n, nz, [fov, fov, fovZ]), { neighbours: [-nz / 2, nz / 2 - 1] });
+        const run = (perPlane: number) => {
+            const z: number[] = [], plane: number[] = [];
+            for (let p = -nz / 2; p < nz / 2; p++) {
+                for (let s = 0; s < perPlane; s++) {
+                    z.push((p + (s + 0.5) / perPlane - 0.5) * pitch);
+                    plane.push(p === 0 ? -1 : phantom.planes!.findIndex(q => q.offset === p));
+                }
+            }
+            const slices = { z: Float64Array.from(z), weight: new Float64Array(z.length).fill(1 / perPlane), plane: Int32Array.from(plane) };
+            const pg = phaseGraphPhantom(phantom, slices, 5, { t: 0.005, b1: 0.0025 }, 2048);
+            return simulatePhaseGraph(program3d, {
+                classes: pg.classes, sources: pg.sources, voxel: [phantom.voxel[0], phantom.voxel[1]],
+                slices: { z: slices.z, weight: slices.weight, reference: pitch },
+            }).signal;
+        };
+        const one = run(1), two = run(2), three = run(3);
+        expect(relativeDifference(two, one)).toBeLessThan(1e-9);
+        expect(relativeDifference(three, one)).toBeLessThan(1e-9);
+    });
+
+    it('keeps each accuracy setting within its target, also on a balanced SSFP', () => {
+        // A binding state cap once put Draft 41 % off on writeTrufi; pruning now
+        // carries the trade-off. TSE (crushers, CPMG) and bSSFP (every pathway
+        // coherent) are the hardest demos for it.
+        for (const file of ['writeTSE.seq', 'writeTrufi.seq']) {
+            const settings = (tolerance: number): JobSettings => ({ phantom: { kind: 'shepp-logan', size: 32 }, subSpins: 'auto', engine: 'phase-graph', tolerance });
+            const reference = runJob(file, settings(0.02)).signal;
+            for (const tolerance of [0.05, 0.1, 0.25]) {
+                expect(relativeDifference(runJob(file, settings(tolerance)).signal, reference)).toBeLessThan(tolerance);
+            }
+        }
+        // And in 3-D: an RF-spoiled 3-D GRE on the 3-D phantom.
+        const fov: [number, number, number] = [0.064, 0.064, 0.032];
+        const bytes3d = new TextEncoder().encode(spoiledGre3d(16, 8, fov[0], fov[2]));
+        const phantom3d = sliceVolume(sheppLoganVolume(16, 8, fov), { neighbours: [-4, 3] });
+        const run3d = (tolerance: number) => {
+            const job = new SimulationJob(bytes3d, 'gre3d.seq', { phantom: { kind: 'phantom', phantom: phantom3d }, subSpins: 'auto', engine: 'phase-graph', tolerance });
+            let total: ChunkAccumulator | null = null;
+            for (let chunk = 0; chunk < job.plan.chunks; chunk++) {
+                const signal = job.simulateChunk(chunk);
+                total ??= new ChunkAccumulator(signal.length, job.plan.chunks);
+                total.add(chunk, signal);
+            }
+            return total!.signal;
+        };
+        const reference3d = run3d(0.02);
+        for (const tolerance of [0.05, 0.1, 0.25]) expect(relativeDifference(run3d(tolerance), reference3d)).toBeLessThan(tolerance);
     });
 
     it('refuses pulses played with in-plane gradients, pointing to the isochromat engine', () => {

@@ -1955,6 +1955,12 @@ var Pulseq = (() => {
   function decodeAllBlocks(seq) {
     return decodeBlockRange(seq, 0, seq.blocks.length, createSequenceDecodeContext(seq));
   }
+  var UNANALYZED_RF_RESPONSE = Object.freeze({
+    carrierAreaDeg: NaN,
+    bands: [],
+    spectrumAnalyzed: false,
+    limited: true
+  });
   function createSequenceDecodeContext(seq) {
     const blockStartTimes = new Float64Array(seq.blocks.length + 1);
     for (let index = 0; index < seq.blocks.length; index++) {
@@ -1987,7 +1993,7 @@ var Pulseq = (() => {
           const use = context.classifiedRfUses[i];
           let response = context.rfResponseCache.get(rf.id);
           if (!response) {
-            response = analyzeRfResponse(rf, seq, use);
+            response = context.skipRfResponse ? UNANALYZED_RF_RESPONSE : analyzeRfResponse(rf, seq, use);
             context.rfResponseCache.set(rf.id, response);
           }
           db.rf = decodeRF(seq, rf, cumulative, dur, use, response);

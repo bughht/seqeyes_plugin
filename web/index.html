@@ -205,7 +205,7 @@
     <select id="simEngine" aria-label="Simulation engine" title="Isochromats: Bloch simulation of spins in every voxel, the reference. Phase graph: configuration states per tissue class (extended phase graphs with exact RF), much faster on spoiled and crushed sequences; it cannot simulate pulses played with in-plane gradients."></select>
     <span class="ulbl" id="simSpinsLabel">Spins/voxel</span>
     <select id="simSpins" aria-label="Spins per voxel" title="Spins per voxel along x × y. Auto simulates one voxel per tissue to find how many the sequence's spoiling needs."></select>
-    <select id="simAccuracy" aria-label="Accuracy target" title="What Auto aims for: the signal error it accepts from simulating each voxel with a finite number of spins. Long-T2 tissue (CSF) needs the most spins; a looser target is faster."></select>
+    <select id="simAccuracy" aria-label="Accuracy target" title="The signal error a run may trade for speed. Isochromats: spins per voxel and sub-slices are probed to meet it; long-T2 tissue (CSF) needs the most spins. Phase graph: pruning and sub-slice sampling, measured against Accurate (worst cases: Fast 1 %, Draft 6 %, Sketch 13 %)."></select>
     <select id="simSlices" aria-label="Through-slice sampling" title="Spins along z. Auto places sub-slices wherever the sequence's pulses act along z (slice profiles, refocusing and inversion slabs, multiband), with a spacing it checks by simulation; z = 0 keeps every spin in one plane."></select>
     <button id="simRun" type="button" title="Simulate the open sequence">▶ Run</button>
     <button id="simCancel" type="button" disabled title="Stop the simulation">■</button>

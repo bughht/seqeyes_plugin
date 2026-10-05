@@ -70,7 +70,19 @@ export interface SequenceDecodeContext {
     readonly rfResponseCache: Map<number, ReturnType<typeof analyzeRfResponse>>;
     readonly triggerCache: Map<number, DecodedTriggerEvent>;
     readonly ncoCache: Map<number, DecodedNCOEvent>;
+    /**
+     * Leave RF events' spectral band analysis out (DecodedRFWaveform.response
+     * is then UNANALYZED_RF_RESPONSE): for callers that only need the
+     * waveforms, such as the simulator, where sequences with an RF library
+     * entry per event would analyse every one.
+     */
+    readonly skipRfResponse?: boolean;
 }
+
+/** The response of an RF event decoded without spectral analysis. */
+export const UNANALYZED_RF_RESPONSE: ReturnType<typeof analyzeRfResponse> = Object.freeze({
+    carrierAreaDeg: NaN, bands: [], spectrumAnalyzed: false, limited: true,
+}) as ReturnType<typeof analyzeRfResponse>;
 
 /** Build reusable timing and RF metadata for indexed block-range decoding. */
 export function createSequenceDecodeContext(seq: PulseqSequence): SequenceDecodeContext {
@@ -131,7 +143,7 @@ export function decodeBlockRange(
                 const use = context.classifiedRfUses[i];
                 let response = context.rfResponseCache.get(rf.id);
                 if (!response) {
-                    response = analyzeRfResponse(rf, seq, use);
+                    response = context.skipRfResponse ? UNANALYZED_RF_RESPONSE : analyzeRfResponse(rf, seq, use);
                     context.rfResponseCache.set(rf.id, response);
                 }
                 db.rf = decodeRF(seq, rf, cumulative, dur, use, response);

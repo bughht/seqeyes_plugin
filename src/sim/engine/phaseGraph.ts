@@ -294,7 +294,22 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
         ...emitters, r2: Float64Array.from(sources.classOf, c => r2[c] + sign * r2p[c]),
     });
     const after = anyT2p ? withRate(1) : grouper, before = anyT2p ? withRate(-1) : grouper;
-    const fullRange = Array.from({ length: sources.count }, (_, i) => sources.sliceFrom[i] === 0 && sources.sliceTo[i] === K).every(Boolean);
+    // Sources of one class over one run of sub-slices (a plane of a 3-D phantom, or the whole
+    // slab) share their lanes' slab-weighted sum: one sum per (class, run) and readout group.
+    const pairIndex = new Map<string, number>();
+    const pairOf = new Int32Array(sources.count);
+    const pairClass: number[] = [], pairFrom: number[] = [], pairTo: number[] = [];
+    for (let i = 0; i < sources.count; i++) {
+        const key = `${sources.classOf[i]}|${sources.sliceFrom[i]}|${sources.sliceTo[i]}`;
+        let p = pairIndex.get(key);
+        if (p === undefined) {
+            p = pairClass.length;
+            pairIndex.set(key, p);
+            pairClass.push(sources.classOf[i]); pairFrom.push(sources.sliceFrom[i]); pairTo.push(sources.sliceTo[i]);
+        }
+        pairOf[i] = p;
+    }
+    const pairSums = new Float64Array(2 * pairClass.length);
     // Without B0 differences between voxels, τ does not reach the signal and need not split readout groups.
     const anyB0 = sources.df.some(v => v !== 0);
     // Sources sit on few distinct x and y (a voxel grid): their phase e^{i2π(kx·x + ky·y)} is a product of two table entries.
@@ -323,6 +338,10 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
     };
     // Slab weights depend on q_z only, which configurations share.
     const slabCache = new Map<number, Float64Array>();
+    // Where a source's run of sub-slices starts or ends (a 3-D phantom's plane boundary), the
+    // profile is not interpolated across: each plane integrates over its own extent only.
+    const runStarts = new Uint8Array(K + 1);
+    for (let i = 0; i < sources.count; i++) { runStarts[sources.sliceFrom[i]] = 1; runStarts[sources.sliceTo[i]] = 1; }
 
     // Pending free precession (merged between pulses and readouts), with the
     // moments of K from its start that diffusion needs: ∫K dt and Σᵢ∫Kᵢ² dt.
@@ -646,7 +665,11 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
     /**
      * Configurations that share their in-plane k (and τ, when voxels differ
      * in B0) emit alike in-plane: they are summed first, each weighted by its
-     * slab integral, and synthesised together.
+     * slab integral, and synthesised together. With T2′, a configuration
+     * wholly after its echo (τ + t ≥ 0 over the window) or wholly before it
+     * decays at R2 ± R2′ with a constant e^{∓τ/T2′} per class, which is
+     * applied as it is summed: such configurations merge by side, and only
+     * those whose echo falls inside the window are synthesised one by one.
      */
     function readout(segment: AdcSegment): void {
         const n = segment.numSamples;
@@ -668,26 +691,37 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
         const shapeBound = (kx: number, ky: number) => boxBound(kx + kMin[0], kx + kMax[0], model.voxel[0]) * boxBound(ky + kMin[1], ky + kMax[1], model.voxel[1]);
         // Lane-wise slab-weighted amplitudes per emitting group: G[lane] = Σ_σ W_j(k_z,σ)·F_σ[lane].
         const table = new KeyTable(F.count);
-        const groupK: number[] = [];
+        const groupK: number[] = [], groupSide: number[] = [];
         let G = new Float64Array(2 * L * Math.max(8, Math.min(F.count, 64)));
         let count = 0;
+        const tauFirst = times[0] - segment.t0, tauLast = times[n - 1] - segment.t0;
+        // Side of the echo over the window: 0 no T2′, 1 after, 2 before, 3 across (its own group).
+        const sideOf = (tau: number) => (!anyT2p ? 0 : tau + tauFirst >= 0 ? 1 : tau + tauLast <= 0 ? 2 : 3);
+        const sideFactor = new Float64Array(C);
         // A configuration far below the pruning level even at its voxel response's bound cannot matter.
         const floor = 1e-2 * prune;
         for (let s = 0; s < F.count; s++) {
             if (shapeBound(F.k[3 * s], F.k[3 * s + 1]) * F.peak(s) < floor) continue;
-            const a = qk(F.k[3 * s]), b = qk(F.k[3 * s + 1]), d = anyB0 || anyT2p ? qt(F.tau[s]) : 0;
-            const g = table.claim(a, b, 0, d, count);
+            const side = sideOf(F.tau[s]);
+            const a = qk(F.k[3 * s]), b = qk(F.k[3 * s + 1]), d = anyB0 || side === 3 ? qt(F.tau[s]) : 0;
+            const g = table.claim(a, b, side, d, count);
             if (g === count) {
                 count++;
                 groupK.push(F.k[3 * s], F.k[3 * s + 1], F.tau[s]);
+                groupSide.push(side);
                 if (2 * L * count > G.length) { const grown = new Float64Array(2 * G.length); grown.set(G); G = grown; }
+            }
+            // e^{∓R2′·τ} per class for a configuration wholly on one side of its echo.
+            for (let c = 0; c < C; c++) {
+                sideFactor[c] = (side === 1 || side === 2) && r2p[c] > 0 ? Math.exp((side === 1 ? -1 : 1) * r2p[c] * F.tau[s]) : 1;
             }
             const weights = slabWeights(F.k[3 * s + 2]);
             const o = 2 * L * s, go = 2 * L * g;
             for (let c = 0; c < C; c++) {
+                const f = sideFactor[c];
                 for (let j = 0; j < K; j++) {
                     const lane = 2 * (c * K + j);
-                    const fr = F.amp[o + lane], fi = F.amp[o + lane + 1];
+                    const fr = F.amp[o + lane] * f, fi = F.amp[o + lane + 1] * f;
                     const wr = weights[2 * j], wi = weights[2 * j + 1];
                     G[go + lane] += fr * wr - fi * wi;
                     G[go + lane + 1] += fr * wi + fi * wr;
@@ -696,9 +730,7 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
         }
         const tmpRe = new Float64Array(n * coils), tmpIm = new Float64Array(n * coils);
         const shape = new Float64Array(n);
-        const perClass = new Float64Array(2 * C);
         const classFactor = new Float64Array(C).fill(1);
-        const tauFirst = times[0] - segment.t0, tauLast = times[n - 1] - segment.t0;
         const buffers = new Map<ReadoutGrouper, { groups: ReturnType<ReadoutGrouper['groups']>; gRe: Float64Array; gIm: Float64Array }>();
         const bufferFor = (which: ReadoutGrouper) => {
             let entry = buffers.get(which);
@@ -723,21 +755,19 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
             }
             if (shapePeak * peak < prune) continue;
             stats.emitted++;
-            if (fullRange) {
-                for (let c = 0; c < C; c++) {
-                    let ar = 0, ai = 0;
-                    for (let j = 0; j < K; j++) { ar += G[go + 2 * (c * K + j)]; ai += G[go + 2 * (c * K + j) + 1]; }
-                    perClass[2 * c] = ar; perClass[2 * c + 1] = ai;
-                }
+            for (let p = 0; p < pairClass.length; p++) {
+                const base = go + 2 * pairClass[p] * K;
+                let ar = 0, ai = 0;
+                for (let j = pairFrom[p]; j < pairTo[p]; j++) { ar += G[base + 2 * j]; ai += G[base + 2 * j + 1]; }
+                pairSums[2 * p] = ar; pairSums[2 * p + 1] = ai;
             }
             phaseTables(groupK[3 * g], groupK[3 * g + 1]);
-            const tau = groupK[3 * g + 2];
-            // Without T2′ one synthesis; with it, before and/or after the echo (τ + t = 0).
+            const tau = groupK[3 * g + 2], side = groupSide[g];
+            // One synthesis per side of the echo (τ + t = 0); a group across it splits there.
+            // Only that group's T2′ constant is applied here; the others' were applied as they were summed.
             const branches: { grouper: ReadoutGrouper; sign: number; from: number; to: number }[] = [];
-            if (!anyT2p || tau + tauFirst >= 0) {
-                branches.push({ grouper: after, sign: 1, from: 0, to: n });
-            } else if (tau + tauLast <= 0) {
-                branches.push({ grouper: before, sign: -1, from: 0, to: n });
+            if (side !== 3) {
+                branches.push(side === 2 ? { grouper: before, sign: -1, from: 0, to: n } : { grouper: after, sign: 1, from: 0, to: n });
             } else {
                 let cross = 0;
                 while (cross < n && tau + times[cross] - segment.t0 < 0) cross++;
@@ -745,18 +775,12 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
             }
             for (const branch of branches) {
                 const { groups, gRe, gIm } = bufferFor(branch.grouper);
-                for (let c = 0; c < C; c++) classFactor[c] = r2p[c] > 0 ? Math.exp(-branch.sign * r2p[c] * tau) : 1;
+                for (let c = 0; c < C; c++) classFactor[c] = side === 3 && r2p[c] > 0 ? Math.exp(-branch.sign * r2p[c] * tau) : 1;
                 gRe.fill(0); gIm.fill(0);
                 let any = false;
                 for (let i = 0; i < sources.count; i++) {
                     const c = sources.classOf[i];
-                    let ar: number, ai: number;
-                    if (fullRange) {
-                        ar = perClass[2 * c]; ai = perClass[2 * c + 1];
-                    } else {
-                        ar = 0; ai = 0;
-                        for (let j = sources.sliceFrom[i]; j < sources.sliceTo[i]; j++) { ar += G[go + 2 * (c * K + j)]; ai += G[go + 2 * (c * K + j) + 1]; }
-                    }
+                    let ar = pairSums[2 * pairOf[i]], ai = pairSums[2 * pairOf[i] + 1];
                     if (ar === 0 && ai === 0) continue;
                     any = true;
                     if (classFactor[c] !== 1) { ar *= classFactor[c]; ai *= classFactor[c]; }
@@ -866,7 +890,11 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
         return w;
     }
 
-    /** ∫F(z)·e^{i2πqz}dz / reference as complex weights on the sub-slice samples (piecewise-linear F, Filon). */
+    /**
+     * ∫F(z)·e^{i2πqz}dz / reference as complex weights on the sub-slice samples
+     * (piecewise-linear F, Filon), over runs of adjacent sub-slices that end at
+     * gaps and at plane boundaries, with flat caps half a sub-slice wide.
+     */
     function slabWeightsAt(q: number): Float64Array {
         const w = new Float64Array(2 * K);
         const z = slices.z, ref = slices.reference;
@@ -880,7 +908,7 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
         let start = 0;
         while (start < K) {
             let end = start;
-            while (end + 1 < K && z[end + 1] - z[end] <= 0.51 * (width(end) + width(end + 1)) + 1e-12) end++;
+            while (end + 1 < K && !runStarts[end + 1] && z[end + 1] - z[end] <= 0.51 * (width(end) + width(end + 1)) + 1e-12) end++;
             cap(w, start, z[start] - width(start) / 2, z[start], omega, ref);
             cap(w, end, z[end], z[end] + width(end) / 2, omega, ref);
             for (let j = start; j < end; j++) {

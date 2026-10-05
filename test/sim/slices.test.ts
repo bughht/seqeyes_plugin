@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { parseSequenceText } from '../../src/pulseq/reader';
 import { parseSequenceBytes } from '../../src/pulseq/sequenceReader';
 import { simulateReference } from '../../src/sim/engine/reference';
 import type { SpinSet } from '../../src/sim/engine/spins';
@@ -304,6 +305,43 @@ describe('through-slice simulation', () => {
         expect(energy(runJob(flat))).toBe(0);
         const z = Float64Array.from([-0.0029, -0.0012, 0.0004, 0.0016, 0.0026]);
         expect(Array.from(assignPlanes(phantom, z), p => (p < 0 ? 0 : phantom.planes![p].offset))).toEqual([-3, -1, 0, 2, 3]);
+    });
+
+    it('covers every plane of a 3-D phantom exactly once, without straddling plane boundaries', () => {
+        // The demo GRE's 3 mm slab over 1 mm planes, and a hard pulse over a 9-plane volume.
+        const { path, bytes } = demo('writeGradientEcho.seq');
+        const hard = compileProgram(parseSequenceText(seqText({
+            blocks: [{ ticks: 2, rf: 1 }, { ticks: 64, adc: 1 }],
+            rf: [{ amplitude: 1250, magShape: 1, centerUs: 10 }],
+            adc: [{ samples: 64, dwellNs: 10_000 }],
+            shapes: [Array(20).fill(1)],
+        })));
+        const pitch = 0.001;
+        const cases = [
+            { pulses: measurePulses(programOf(bytes, path)), volume: [-4.5 * pitch, 4.5 * pitch] as [number, number] },
+            { pulses: measurePulses(hard), volume: [-4.5 * pitch, 4.5 * pitch] as [number, number] },
+        ];
+        for (const { pulses, volume } of cases) {
+            for (const density of [1, 1.5, 2, 3]) {
+                for (const boxes of [false, true]) {
+                    const plan = planSlices(pulses, { density, planeThickness: pitch, volume, boxes })!;
+                    const perPlane = new Map<number, number>();
+                    plan.z.forEach((z, j) => {
+                        const plane = Math.round(z / pitch);
+                        // The sub-slice lies inside its plane.
+                        expect(Math.abs(z - plane * pitch) + plan.width[j] / 2).toBeLessThanOrEqual(0.5 * pitch * (1 + 1e-9));
+                        perPlane.set(plane, (perPlane.get(plane) ?? 0) + plan.weight[j] * plan.reference / pitch);
+                    });
+                    // A plane the sub-slices reach is covered whole, or by the slab's edge.
+                    for (const [plane, covered] of perPlane) {
+                        if (plan.extent === 'volume' || Math.abs(plane) < 1) expect(covered).toBeCloseTo(1, 9);
+                    }
+                }
+            }
+        }
+        // Boxes need only one sub-slice per plane where no pulse acts: the hard pulse's volume.
+        expect(planSlices(cases[1].pulses, { density: 3, planeThickness: pitch, volume: cases[1].volume, boxes: true })!.z.length).toBe(9);
+        expect(planSlices(cases[1].pulses, { density: 3, planeThickness: pitch, volume: cases[1].volume })!.z.length).toBe(27);
     });
 
     it('loses spin-echo amplitude to a refocusing slab narrower than the excitation', () => {

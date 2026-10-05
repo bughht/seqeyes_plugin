@@ -506,8 +506,9 @@ function* extensionChain(seq: PulseqSequence, extId: number) {
     }
 }
 
+/** The program reads waveforms, centres and uses only: no spectral analysis of RF events. */
 function programDecodeContext(seq: PulseqSequence, blockStartTimes: Float64Array): SequenceDecodeContext {
-    return { ...createSequenceDecodeContext(seq), blockStartTimes };
+    return { ...createSequenceDecodeContext(seq), blockStartTimes, skipRfResponse: true };
 }
 
 /**

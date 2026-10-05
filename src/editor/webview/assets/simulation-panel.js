@@ -73,7 +73,7 @@ var SeqEyesSimulation = (function () {
   var SPIN_CHOICES = ['auto', '1x1', '8x1', '32x1', '128x1', '384x1', '768x1'];
   var COIL_CHOICES = [1, 2, 4, 8, 16];
   /* What Auto aims for: the signal error it accepts from the spin discretisation (per tissue, relative L2). */
-  var ACCURACY_CHOICES = [['0.02', 'Accurate (2 %)'], ['0.05', 'Fast (5 %)'], ['0.1', 'Draft (10 %)']];
+  var ACCURACY_CHOICES = [['0.02', 'Accurate (2 %)'], ['0.05', 'Fast (5 %)'], ['0.1', 'Draft (10 %)'], ['0.25', 'Sketch (25 %)']];
   var FIELD_CHOICES = [
     ['file', 'B0/B1: file, else ideal'],
     ['mrzero', 'B0/B1: file, else MRzero-style'],

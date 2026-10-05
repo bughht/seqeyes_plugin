@@ -105,6 +105,22 @@ export interface JobSettings {
      * (default), 'off' keeps every spin at z = 0, or a resolved plan.
      */
     throughSlice?: 'auto' | 'off' | ResolvedSlices;
+    /** Phase graph: overrides of what `tolerance` sets (advanced). */
+    phaseGraphTuning?: Partial<PhaseGraphTuning>;
+}
+
+/** What the phase graph's accuracy setting chooses (see planPhaseGraph). */
+export interface PhaseGraphTuning {
+    /** States below this on every lane are dropped after each pulse. */
+    prune: number;
+    /** Most states of each kind kept. */
+    maxStates: number;
+    /** Sub-slices per resolution cell of the pulses' profiles. */
+    density: number;
+    /** Off-resonance bin of the RF operators [Hz]. */
+    rfStep: number;
+    /** Finest relative T1/T2 and absolute B1 bins when continuous maps exceed the class budget. */
+    fine: { t: number; b1: number };
 }
 
 /** Planning can take seconds (the probe simulates voxels); these report where it is. */
@@ -476,12 +492,9 @@ export class SimulationJob {
                 + '(in-plane selective or oblique excitation). Use the isochromat engine.');
         }
         const tolerance = settings.tolerance ?? 0.02;
-        const tuning = tolerance <= 0.02
-            ? { prune: 1e-5, maxStates: 2000, density: 2, rfStep: 5, fine: { t: 0.005, b1: 0.0025 } }
-            : tolerance <= 0.05
-                ? { prune: 5e-5, maxStates: 800, density: 1.5, rfStep: 10, fine: { t: 0.01, b1: 0.005 } }
-                : { prune: 2e-4, maxStates: 300, density: 1, rfStep: 20, fine: { t: 0.02, b1: 0.01 } };
-        const through = this.planThroughSlice(settings, [1, 1], null, 0, tuning.density);
+        const preset = phaseGraphPreset(tolerance);
+        const tuning: PhaseGraphTuning = { ...preset, ...settings.phaseGraphTuning };
+        const through = this.planThroughSlice(settings, [1, 1], null, 0, tuning.density, true);
         this.report('Grouping the phantom into tissue classes', 0.95);
         const phantom = phaseGraphPhantom(this.phantom, through.slices, tuning.rfStep, tuning.fine, PG_CLASS_BUDGET);
         const K = through.slices ? through.slices.z.length : 1;
@@ -632,7 +645,7 @@ export class SimulationJob {
      * measured from the pulses with a density probed on one voxel of the
      * longest-lived tissues, at the in-plane spins this plan chose.
      */
-    private planThroughSlice(settings: JobSettings, subSpins: [number, number], bands: SpinBands | null, flatClasses: number, fixedDensity?: number): {
+    private planThroughSlice(settings: JobSettings, subSpins: [number, number], bands: SpinBands | null, flatClasses: number, fixedDensity?: number, boxes = false): {
         slices: ThroughSlice | null; summary: SliceSummary | null; resolved: ResolvedSlices | 'off'; pulses: PulseResponse[]; notes: string[];
     } {
         const mode = settings.throughSlice ?? 'auto';
@@ -655,6 +668,7 @@ export class SimulationJob {
                 maxSlices: MAX_SLICES,
                 volume: volumeExtent(this.phantom) ?? undefined,
                 encodingZ: encodingExtent(this.adcTrajectory(), 2),
+                boxes,
             };
             const selective = pulses.some(p => p.axis === 'z' && p.bands.length);
             if (!planSlices(pulses, { ...options, density: 1 })) {
@@ -1033,6 +1047,23 @@ export function encodingExtent(trajectory: AdcTrajectory, axis: number): number 
     let largest = 0;
     for (let s = axis; s < trajectory.k.length; s += 3) largest = Math.max(largest, Math.abs(trajectory.k[s]));
     return largest;
+}
+
+/**
+ * The phase graph's settings for an accuracy target, measured against the
+ * Accurate preset on spoiled GRE, TSE, HASTE, EPI, diffusion EPI, balanced
+ * SSFP (2-D) and spoiled 3-D GRE demos, worst case: Fast 1.1 %, Draft 6 %,
+ * Sketch 13 %. Pruning carries the trade-off; the state cap is only a safety
+ * bound, because a cap that binds drops near-equal states arbitrarily and a
+ * balanced SSFP then goes 40 % wrong. Past 1e-2 pruning drops the transverse
+ * states of low flip angles (a 10° GRE loses 93 % at 3e-2), and below half a
+ * sub-slice per resolution cell slice profiles break (33–85 % at 0.25).
+ */
+export function phaseGraphPreset(tolerance: number): PhaseGraphTuning {
+    if (tolerance <= 0.02) return { prune: 1e-5, maxStates: 2000, density: 2, rfStep: 5, fine: { t: 0.005, b1: 0.0025 } };
+    if (tolerance <= 0.05) return { prune: 3e-4, maxStates: 2000, density: 1.5, rfStep: 10, fine: { t: 0.01, b1: 0.005 } };
+    if (tolerance <= 0.1) return { prune: 1e-3, maxStates: 2000, density: 1, rfStep: 20, fine: { t: 0.02, b1: 0.01 } };
+    return { prune: 1e-2, maxStates: 2000, density: 0.5, rfStep: 40, fine: { t: 0.04, b1: 0.02 } };
 }
 
 /** Consecutive units into chunks of about `target` spins (never splitting a unit). */

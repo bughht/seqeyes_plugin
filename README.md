@@ -299,9 +299,24 @@ reconstructing), overall progress with an ETA and throughput, and one bar per
 worker. Workers simulate strips of phantom columns through the whole
 sequence, so the raw data builds up as strips finish and the image fills in
 strip by strip; the result replaces the live preview when the run ends.
-**Accuracy** sets the signal error Auto accepts from simulating each voxel
-with a finite number of spins (2 %, 5 % or 10 %): long-T2 tissue such as CSF
-needs the most spins, so a looser target is faster on long scans.
+**Accuracy** (Accurate 2 %, Fast 5 %, Draft 10 %, Sketch 25 %) sets the
+signal error a run may trade for speed.
+
+- **Isochromats** probe the spins per voxel and the sub-slices needed to meet
+  it. Long-T2 tissue such as CSF needs the most spins.
+- **Phase graph**: each level is a pruning threshold and a sub-slice
+  sampling, measured against Accurate on the spoiled GRE, TSE, HASTE, EPI,
+  diffusion EPI, balanced SSFP and a spoiled 3-D GRE.
+
+| Phase graph | Pruning | Sub-slices | Worst error | Speed-up |
+|---|---|---|---|---|
+| Fast | 3e-4 | 1.5 per resolution cell | 1 % | 1.3–2.7× |
+| Draft | 1e-3 | 1 | 6 % | 1.4–3.9× |
+| Sketch | 1e-2 | 0.5 | 13 % | 2.1–7.1× |
+
+Sketch is as far as the measurements allow. Pruning above 1e-2 drops the
+small transverse states of low flip angles: a 10° GRE goes 93 % wrong at
+3e-2. Fewer sub-slices break slice profiles (33–85 % wrong at 0.25 per cell).
 
 **Export**: ISMRMRD raw data (`.h5`, readable by ismrmrd-python, h5py, MATLAB
 and Gadgetron), the ISMRMRD stream format, a NumPy `.npz` with data,

@@ -3664,6 +3664,12 @@
   function effPhaseOff(phaseOffset, phasePPM, b0) {
     return phaseOffset + phasePPM * 1e-6 * GAMMA_HZ_T2 * b0;
   }
+  var UNANALYZED_RF_RESPONSE = Object.freeze({
+    carrierAreaDeg: NaN,
+    bands: [],
+    spectrumAnalyzed: false,
+    limited: true
+  });
   function createSequenceDecodeContext(seq) {
     const blockStartTimes = new Float64Array(seq.blocks.length + 1);
     for (let index = 0; index < seq.blocks.length; index++) {
@@ -3696,7 +3702,7 @@
           const use = context.classifiedRfUses[i2];
           let response = context.rfResponseCache.get(rf.id);
           if (!response) {
-            response = analyzeRfResponse(rf, seq, use);
+            response = context.skipRfResponse ? UNANALYZED_RF_RESPONSE : analyzeRfResponse(rf, seq, use);
             context.rfResponseCache.set(rf.id, response);
           }
           db.rf = decodeRF(seq, rf, cumulative, dur, use, response);
@@ -6360,7 +6366,7 @@
     }
   }
   function programDecodeContext(seq, blockStartTimes) {
-    return { ...createSequenceDecodeContext(seq), blockStartTimes };
+    return { ...createSequenceDecodeContext(seq), blockStartTimes, skipRfResponse: true };
   }
   function computeNextPieceBlocks(seq) {
     const n = seq.blocks.length;
@@ -7354,7 +7360,7 @@
         break;
       }
     }
-    if (active.length < 16) return false;
+    if (active.length < 4) return false;
     const table = (value) => {
       const index = /* @__PURE__ */ new Map();
       const of = new Int32Array(active.length);
@@ -7376,30 +7382,82 @@
       dfOf[pairs.of[i2]] = groups.df[active[i2]];
       r2Of[pairs.of[i2]] = groups.r2[active[i2]];
     }
-    const tables = tx.values.length + ty.values.length + tz.values.length + pairs.values.length;
-    if (tables * 2 > active.length) return false;
     const twoPi = 2 * Math.PI;
-    const phasors = (values, scale2, re, im) => {
-      for (let j = 0; j < values.length; j++) {
-        const c = scale2 * values[j], a = twoPi * (c - Math.round(c));
-        re[j] = Math.cos(a);
-        im[j] = Math.sin(a);
-      }
+    const cis = (cycles) => {
+      const a = twoPi * (cycles - Math.round(cycles));
+      return [Math.cos(a), Math.sin(a)];
     };
-    const xr = new Float64Array(tx.values.length), xi = new Float64Array(tx.values.length);
-    const yr = new Float64Array(ty.values.length), yi = new Float64Array(ty.values.length);
-    const zr = new Float64Array(tz.values.length), zi = new Float64Array(tz.values.length);
+    const axisPhasors = (values) => {
+      const re = new Float64Array(values.length), im = new Float64Array(values.length);
+      const sorted = Float64Array.from(values).sort();
+      let pitch = Infinity;
+      for (let j = 1; j < sorted.length; j++) {
+        const gap = sorted[j] - sorted[j - 1];
+        if (gap > 1e-12 * Math.max(1, Math.abs(sorted[j])) && gap < pitch) pitch = gap;
+      }
+      const origin = sorted[0];
+      let slots = null, span = 0;
+      if (values.length > 2 && Number.isFinite(pitch)) {
+        span = Math.round((sorted[sorted.length - 1] - origin) / pitch) + 1;
+        slots = new Int32Array(values.length);
+        for (let j = 0; j < values.length && slots; j++) {
+          const offset = (values[j] - origin) / pitch;
+          slots[j] = Math.round(offset);
+          if (Math.abs(offset - slots[j]) > 1e-6) slots = null;
+        }
+        if (span > 4 * values.length) slots = null;
+      }
+      const slotRe = slots ? new Float64Array(span) : null, slotIm = slots ? new Float64Array(span) : null;
+      return {
+        re,
+        im,
+        at(scale2) {
+          if (slots && slotRe && slotIm) {
+            const [br, bi] = cis(scale2 * origin), [sr, si] = cis(scale2 * pitch);
+            let pr = br, pi = bi;
+            for (let j = 0; j < span; j++) {
+              slotRe[j] = pr;
+              slotIm[j] = pi;
+              const nr = pr * sr - pi * si;
+              pi = pr * si + pi * sr;
+              pr = nr;
+            }
+            for (let j = 0; j < values.length; j++) {
+              re[j] = slotRe[slots[j]];
+              im[j] = slotIm[slots[j]];
+            }
+          } else {
+            for (let j = 0; j < values.length; j++) [re[j], im[j]] = cis(scale2 * values[j]);
+          }
+        }
+      };
+    };
+    const px = axisPhasors(tx.values), py = axisPhasors(ty.values), pz = axisPhasors(tz.values);
+    const xr = px.re, xi = px.im, yr = py.re, yi = py.im, zr = pz.re, zi = pz.im;
     const dr = new Float64Array(dfOf.length), di = new Float64Array(dfOf.length);
+    const stepR = new Float64Array(dfOf.length), stepI = new Float64Array(dfOf.length);
+    const dwell = segment.dwell;
+    for (let m = 0; m < dfOf.length; m++) {
+      const [cr, ci] = cis(dfOf[m] * dwell), d = Math.exp(-dwell * r2Of[m]);
+      stepR[m] = cr * d;
+      stepI[m] = ci * d;
+    }
     const n = segment.numSamples;
     for (let s = 0; s < n; s++) {
       const tau = times[s] - segment.t0;
-      phasors(tx.values, k[3 * s], xr, xi);
-      phasors(ty.values, k[3 * s + 1], yr, yi);
-      phasors(tz.values, k[3 * s + 2], zr, zi);
+      px.at(k[3 * s]);
+      py.at(k[3 * s + 1]);
+      pz.at(k[3 * s + 2]);
       for (let m = 0; m < dfOf.length; m++) {
-        const c = dfOf[m] * tau, a = twoPi * (c - Math.round(c)), d = Math.exp(-tau * r2Of[m]);
-        dr[m] = Math.cos(a) * d;
-        di[m] = Math.sin(a) * d;
+        if (s % RECURRENCE_ANCHOR === 0) {
+          const [cr, ci] = cis(dfOf[m] * tau), d = Math.exp(-tau * r2Of[m]);
+          dr[m] = cr * d;
+          di[m] = ci * d;
+        } else {
+          const nr = dr[m] * stepR[m] - di[m] * stepI[m];
+          di[m] = dr[m] * stepI[m] + di[m] * stepR[m];
+          dr[m] = nr;
+        }
       }
       for (let i2 = 0; i2 < active.length; i2++) {
         const g = active[i2];
@@ -7591,7 +7649,22 @@
       r2: Float64Array.from(sources.classOf, (c) => r2[c] + sign * r2p[c])
     });
     const after = anyT2p ? withRate(1) : grouper, before = anyT2p ? withRate(-1) : grouper;
-    const fullRange = Array.from({ length: sources.count }, (_, i2) => sources.sliceFrom[i2] === 0 && sources.sliceTo[i2] === K).every(Boolean);
+    const pairIndex = /* @__PURE__ */ new Map();
+    const pairOf = new Int32Array(sources.count);
+    const pairClass = [], pairFrom = [], pairTo = [];
+    for (let i2 = 0; i2 < sources.count; i2++) {
+      const key = `${sources.classOf[i2]}|${sources.sliceFrom[i2]}|${sources.sliceTo[i2]}`;
+      let p = pairIndex.get(key);
+      if (p === void 0) {
+        p = pairClass.length;
+        pairIndex.set(key, p);
+        pairClass.push(sources.classOf[i2]);
+        pairFrom.push(sources.sliceFrom[i2]);
+        pairTo.push(sources.sliceTo[i2]);
+      }
+      pairOf[i2] = p;
+    }
+    const pairSums = new Float64Array(2 * pairClass.length);
     const anyB0 = sources.df.some((v) => v !== 0);
     const distinct = (values) => {
       const index = /* @__PURE__ */ new Map();
@@ -7622,6 +7695,11 @@
       }
     };
     const slabCache = /* @__PURE__ */ new Map();
+    const runStarts = new Uint8Array(K + 1);
+    for (let i2 = 0; i2 < sources.count; i2++) {
+      runStarts[sources.sliceFrom[i2]] = 1;
+      runStarts[sources.sliceTo[i2]] = 1;
+    }
     const pendingDk = new Float64Array(3), pendingM1 = new Float64Array(3);
     let pendingDt = 0, pendingM2 = 0, pending = false;
     const addPending = (moments, dt) => {
@@ -7991,29 +8069,38 @@
       }
       const shapeBound = (kx, ky) => boxBound(kx + kMin[0], kx + kMax[0], model.voxel[0]) * boxBound(ky + kMin[1], ky + kMax[1], model.voxel[1]);
       const table = new KeyTable(F.count);
-      const groupK = [];
+      const groupK = [], groupSide = [];
       let G = new Float64Array(2 * L * Math.max(8, Math.min(F.count, 64)));
       let count = 0;
+      const tauFirst = times[0] - segment.t0, tauLast = times[n - 1] - segment.t0;
+      const sideOf = (tau) => !anyT2p ? 0 : tau + tauFirst >= 0 ? 1 : tau + tauLast <= 0 ? 2 : 3;
+      const sideFactor = new Float64Array(C);
       const floor = 0.01 * prune;
       for (let s = 0; s < F.count; s++) {
         if (shapeBound(F.k[3 * s], F.k[3 * s + 1]) * F.peak(s) < floor) continue;
-        const a = qk(F.k[3 * s]), b = qk(F.k[3 * s + 1]), d = anyB0 || anyT2p ? qt(F.tau[s]) : 0;
-        const g = table.claim(a, b, 0, d, count);
+        const side = sideOf(F.tau[s]);
+        const a = qk(F.k[3 * s]), b = qk(F.k[3 * s + 1]), d = anyB0 || side === 3 ? qt(F.tau[s]) : 0;
+        const g = table.claim(a, b, side, d, count);
         if (g === count) {
           count++;
           groupK.push(F.k[3 * s], F.k[3 * s + 1], F.tau[s]);
+          groupSide.push(side);
           if (2 * L * count > G.length) {
             const grown = new Float64Array(2 * G.length);
             grown.set(G);
             G = grown;
           }
         }
+        for (let c = 0; c < C; c++) {
+          sideFactor[c] = (side === 1 || side === 2) && r2p[c] > 0 ? Math.exp((side === 1 ? -1 : 1) * r2p[c] * F.tau[s]) : 1;
+        }
         const weights = slabWeights(F.k[3 * s + 2]);
         const o = 2 * L * s, go = 2 * L * g;
         for (let c = 0; c < C; c++) {
+          const f = sideFactor[c];
           for (let j = 0; j < K; j++) {
             const lane2 = 2 * (c * K + j);
-            const fr = F.amp[o + lane2], fi = F.amp[o + lane2 + 1];
+            const fr = F.amp[o + lane2] * f, fi = F.amp[o + lane2 + 1] * f;
             const wr = weights[2 * j], wi = weights[2 * j + 1];
             G[go + lane2] += fr * wr - fi * wi;
             G[go + lane2 + 1] += fr * wi + fi * wr;
@@ -8022,9 +8109,7 @@
       }
       const tmpRe = new Float64Array(n * coils), tmpIm = new Float64Array(n * coils);
       const shape = new Float64Array(n);
-      const perClass = new Float64Array(2 * C);
       const classFactor = new Float64Array(C).fill(1);
-      const tauFirst = times[0] - segment.t0, tauLast = times[n - 1] - segment.t0;
       const buffers = /* @__PURE__ */ new Map();
       const bufferFor = (which) => {
         let entry = buffers.get(which);
@@ -8048,24 +8133,21 @@
         }
         if (shapePeak * peak < prune) continue;
         stats.emitted++;
-        if (fullRange) {
-          for (let c = 0; c < C; c++) {
-            let ar = 0, ai = 0;
-            for (let j = 0; j < K; j++) {
-              ar += G[go + 2 * (c * K + j)];
-              ai += G[go + 2 * (c * K + j) + 1];
-            }
-            perClass[2 * c] = ar;
-            perClass[2 * c + 1] = ai;
+        for (let p = 0; p < pairClass.length; p++) {
+          const base = go + 2 * pairClass[p] * K;
+          let ar = 0, ai = 0;
+          for (let j = pairFrom[p]; j < pairTo[p]; j++) {
+            ar += G[base + 2 * j];
+            ai += G[base + 2 * j + 1];
           }
+          pairSums[2 * p] = ar;
+          pairSums[2 * p + 1] = ai;
         }
         phaseTables(groupK[3 * g], groupK[3 * g + 1]);
-        const tau = groupK[3 * g + 2];
+        const tau = groupK[3 * g + 2], side = groupSide[g];
         const branches = [];
-        if (!anyT2p || tau + tauFirst >= 0) {
-          branches.push({ grouper: after, sign: 1, from: 0, to: n });
-        } else if (tau + tauLast <= 0) {
-          branches.push({ grouper: before, sign: -1, from: 0, to: n });
+        if (side !== 3) {
+          branches.push(side === 2 ? { grouper: before, sign: -1, from: 0, to: n } : { grouper: after, sign: 1, from: 0, to: n });
         } else {
           let cross = 0;
           while (cross < n && tau + times[cross] - segment.t0 < 0) cross++;
@@ -8073,24 +8155,13 @@
         }
         for (const branch of branches) {
           const { groups: groups2, gRe, gIm } = bufferFor(branch.grouper);
-          for (let c = 0; c < C; c++) classFactor[c] = r2p[c] > 0 ? Math.exp(-branch.sign * r2p[c] * tau) : 1;
+          for (let c = 0; c < C; c++) classFactor[c] = side === 3 && r2p[c] > 0 ? Math.exp(-branch.sign * r2p[c] * tau) : 1;
           gRe.fill(0);
           gIm.fill(0);
           let any = false;
           for (let i2 = 0; i2 < sources.count; i2++) {
             const c = sources.classOf[i2];
-            let ar, ai;
-            if (fullRange) {
-              ar = perClass[2 * c];
-              ai = perClass[2 * c + 1];
-            } else {
-              ar = 0;
-              ai = 0;
-              for (let j = sources.sliceFrom[i2]; j < sources.sliceTo[i2]; j++) {
-                ar += G[go + 2 * (c * K + j)];
-                ai += G[go + 2 * (c * K + j) + 1];
-              }
-            }
+            let ar = pairSums[2 * pairOf[i2]], ai = pairSums[2 * pairOf[i2] + 1];
             if (ar === 0 && ai === 0) continue;
             any = true;
             if (classFactor[c] !== 1) {
@@ -8206,7 +8277,7 @@
       let start = 0;
       while (start < K) {
         let end = start;
-        while (end + 1 < K && z[end + 1] - z[end] <= 0.51 * (width(end) + width(end + 1)) + 1e-12) end++;
+        while (end + 1 < K && !runStarts[end + 1] && z[end + 1] - z[end] <= 0.51 * (width(end) + width(end + 1)) + 1e-12) end++;
         cap(w, start, z[start] - width(start) / 2, z[start], omega, ref);
         cap(w, end, z[end], z[end] + width(end) / 2, omega, ref);
         for (let j = start; j < end; j++) {
@@ -9437,7 +9508,7 @@
     const volume2 = options.volume && options.volume[1] > options.volume[0] ? options.volume : null;
     if (!selective.length && !volume2) return null;
     const planeStep = volume2 && options.planeThickness && options.planeThickness > 0 ? options.planeThickness : Infinity;
-    const encodingStep = options.encodingZ && options.encodingZ > 0 ? 1 / (2 * options.encodingZ) : Infinity;
+    const encodingStep = !options.boxes && options.encodingZ && options.encodingZ > 0 ? 1 / (4 * options.encodingZ) : Infinity;
     const excites = (p) => p.role === "excitation" || p.role === "other";
     const offResonance = Math.abs(options.offResonance ?? 0);
     const widened = selective.map((p) => {
@@ -9466,9 +9537,9 @@
       reference = thicknesses.length ? Math.max(...thicknesses) : ranges.reduce((sum, [a, b]) => sum + (b - a), 0);
       extent = "pulses";
     }
-    const cap2 = Math.min(planeStep, encodingStep);
+    const cap2 = Math.min(options.boxes ? Infinity : planeStep, encodingStep);
     const finest = Math.min(cap2, ...selective.map((p) => 1 / p.extentZ));
-    const fallback = Number.isFinite(finest) ? finest : (ranges[0][1] - ranges[0][0]) / 8;
+    const fallback = Number.isFinite(finest) ? finest : options.boxes && Number.isFinite(planeStep) ? planeStep * density : (ranges[0][1] - ranges[0][0]) / 8;
     const stepAt = (z, scale2) => {
       let best = cap2;
       for (const w of widened) {
@@ -9478,10 +9549,13 @@
         for (const threshold of TIERS) if (level < threshold * w.peak) tier *= 2;
         best = Math.min(best, tier / w.pulse.extentZ);
       }
-      return (Number.isFinite(best) ? best : fallback) * scale2 / density;
+      const step = (Number.isFinite(best) ? best : fallback) * scale2 / density;
+      return options.boxes ? Math.min(step, planeStep * scale2) : step;
     };
+    const pitch = volume2 && options.planeThickness && options.planeThickness > 0 ? options.planeThickness : 0;
     for (let scale2 = 1, attempt = 0; attempt < 40; attempt++, scale2 *= 1.25) {
-      const cells = layout(ranges, (z) => stepAt(z, scale2), maxSlices + 1);
+      let cells = layout(ranges, (z) => stepAt(z, scale2), maxSlices + 1, pitch);
+      if (pitch > 0 && cells.length <= maxSlices) cells = splitAtPlanes(cells, pitch);
       if (cells.length <= maxSlices) {
         const centres = cells.map(([a, b]) => 0.5 * (a + b)), widths = cells.map(([a, b]) => b - a);
         return {
@@ -9498,10 +9572,24 @@
     }
     throw new Error("Could not fit the slab into the sub-slice budget.");
   }
-  function layout(ranges, stepAt, limit) {
+  function splitAtPlanes(cells, pitch) {
+    const out = [];
+    for (const [a, b] of cells) {
+      let from = a;
+      for (let k = Math.ceil(a / pitch - 0.5); (k + 0.5) * pitch < b; k++) {
+        const boundary = (k + 0.5) * pitch;
+        if (boundary - from > 1e-9 * pitch) out.push([from, boundary]);
+        from = Math.max(from, boundary);
+      }
+      if (b - from > 1e-9 * pitch) out.push([from, b]);
+    }
+    return out;
+  }
+  function layout(ranges, stepAt, limit, pitch = 0) {
     const cells = [];
     for (const [a, b] of ranges) {
-      const middle = 0.5 * (a + b);
+      let middle = 0.5 * (a + b);
+      if (pitch > 0) middle = Math.min(b, Math.max(a, (Math.round(middle / pitch - 0.5) + 0.5) * pitch));
       for (const direction of [1, -1]) {
         const end = direction > 0 ? b : a;
         let z = middle;
@@ -10194,8 +10282,9 @@
         throw new Error("The phase-graph engine cannot simulate this sequence: its RF pulses play gradients along x or y (in-plane selective or oblique excitation). Use the isochromat engine.");
       }
       const tolerance = settings.tolerance ?? 0.02;
-      const tuning = tolerance <= 0.02 ? { prune: 1e-5, maxStates: 2e3, density: 2, rfStep: 5, fine: { t: 5e-3, b1: 25e-4 } } : tolerance <= 0.05 ? { prune: 5e-5, maxStates: 800, density: 1.5, rfStep: 10, fine: { t: 0.01, b1: 5e-3 } } : { prune: 2e-4, maxStates: 300, density: 1, rfStep: 20, fine: { t: 0.02, b1: 0.01 } };
-      const through = this.planThroughSlice(settings, [1, 1], null, 0, tuning.density);
+      const preset = phaseGraphPreset(tolerance);
+      const tuning = { ...preset, ...settings.phaseGraphTuning };
+      const through = this.planThroughSlice(settings, [1, 1], null, 0, tuning.density, true);
       this.report("Grouping the phantom into tissue classes", 0.95);
       const phantom = phaseGraphPhantom(this.phantom, through.slices, tuning.rfStep, tuning.fine, PG_CLASS_BUDGET);
       const K = through.slices ? through.slices.z.length : 1;
@@ -10339,7 +10428,7 @@
      * measured from the pulses with a density probed on one voxel of the
      * longest-lived tissues, at the in-plane spins this plan chose.
      */
-    planThroughSlice(settings, subSpins, bands, flatClasses, fixedDensity) {
+    planThroughSlice(settings, subSpins, bands, flatClasses, fixedDensity, boxes = false) {
       const mode = settings.throughSlice ?? "auto";
       const flat = "one plane at z = 0, so slice profiles and through-slice dephasing are not simulated";
       if (mode === "off") {
@@ -10359,7 +10448,8 @@
           planeThickness: this.phantom.voxel[2],
           maxSlices: MAX_SLICES,
           volume: volumeExtent(this.phantom) ?? void 0,
-          encodingZ: encodingExtent(this.adcTrajectory(), 2)
+          encodingZ: encodingExtent(this.adcTrajectory(), 2),
+          boxes
         };
         const selective = pulses.some((p) => p.axis === "z" && p.bands.length);
         if (!planSlices(pulses, { ...options, density: 1 })) {
@@ -10669,6 +10759,12 @@
     let largest = 0;
     for (let s = axis; s < trajectory.k.length; s += 3) largest = Math.max(largest, Math.abs(trajectory.k[s]));
     return largest;
+  }
+  function phaseGraphPreset(tolerance) {
+    if (tolerance <= 0.02) return { prune: 1e-5, maxStates: 2e3, density: 2, rfStep: 5, fine: { t: 5e-3, b1: 25e-4 } };
+    if (tolerance <= 0.05) return { prune: 3e-4, maxStates: 2e3, density: 1.5, rfStep: 10, fine: { t: 0.01, b1: 5e-3 } };
+    if (tolerance <= 0.1) return { prune: 1e-3, maxStates: 2e3, density: 1, rfStep: 20, fine: { t: 0.02, b1: 0.01 } };
+    return { prune: 0.01, maxStates: 2e3, density: 0.5, rfStep: 40, fine: { t: 0.04, b1: 0.02 } };
   }
   function splitUnits(units, spinsOf, target) {
     const chunks = [];

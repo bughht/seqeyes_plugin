@@ -111,10 +111,19 @@ export interface SlicePlanOptions {
     volume?: [number, number];
     /**
      * The largest |kz| the readouts sample [1/m], e.g. 3-D phase encoding:
-     * sub-slices are at most 1/(2·density·kz) apart, so spins at points do
-     * not alias the encoding.
+     * sub-slices are at most 1/(4·density·kz) apart, so spins at points do
+     * not alias the encoding and a box voxel's response at the encoding's
+     * edge, sinc(½), comes out within ~3 % (four points per encoded voxel).
      */
     encodingZ?: number;
+    /**
+     * Sub-slices stand for boxes integrated over their extent (the
+     * phase-graph engine, whose states carry gradient dephasing in k): only
+     * the pulses' profiles need sampling, so a 3-D phantom's plane needs one
+     * sub-slice where no pulse acts, at any density, and the z encoding sets
+     * no spacing.
+     */
+    boxes?: boolean;
 }
 
 export interface SlicePlan {
@@ -542,7 +551,7 @@ export function planSlices(pulses: readonly PulseResponse[], options: SlicePlanO
     if (!selective.length && !volume) return null;
     // Caps on the spacing: every plane of a 3-D phantom, and the readouts' z encoding.
     const planeStep = volume && options.planeThickness && options.planeThickness > 0 ? options.planeThickness : Infinity;
-    const encodingStep = options.encodingZ && options.encodingZ > 0 ? 1 / (2 * options.encodingZ) : Infinity;
+    const encodingStep = !options.boxes && options.encodingZ && options.encodingZ > 0 ? 1 / (4 * options.encodingZ) : Infinity;
     const excites = (p: PulseResponse) => p.role === 'excitation' || p.role === 'other';
     const offResonance = Math.abs(options.offResonance ?? 0);
     // Bands widened by how far off-resonance moves them: Δz = Δf / Ḡz.
@@ -576,10 +585,11 @@ export function planSlices(pulses: readonly PulseResponse[], options: SlicePlanO
     }
 
     // The spacing at z: the finest the pulses acting there ask for, by tier,
-    // within the caps (and their finest where none acts).
-    const cap = Math.min(planeStep, encodingStep);
+    // within the caps (and their finest where none acts). Boxes need one per
+    // plane whatever the density.
+    const cap = Math.min(options.boxes ? Infinity : planeStep, encodingStep);
     const finest = Math.min(cap, ...selective.map(p => 1 / p.extentZ));
-    const fallback = Number.isFinite(finest) ? finest : (ranges[0][1] - ranges[0][0]) / 8;
+    const fallback = Number.isFinite(finest) ? finest : options.boxes && Number.isFinite(planeStep) ? planeStep * density : (ranges[0][1] - ranges[0][0]) / 8;
     const stepAt = (z: number, scale: number) => {
         let best = cap;
         for (const w of widened) {
@@ -590,10 +600,16 @@ export function planSlices(pulses: readonly PulseResponse[], options: SlicePlanO
             for (const threshold of TIERS) if (level < threshold * w.peak) tier *= 2;
             best = Math.min(best, tier / w.pulse.extentZ);
         }
-        return (Number.isFinite(best) ? best : fallback) * scale / density;
+        const step = (Number.isFinite(best) ? best : fallback) * scale / density;
+        return options.boxes ? Math.min(step, planeStep * scale) : step;
     };
+    // A 3-D phantom's planes: no sub-slice may straddle two, or one plane
+    // would weigh more than its neighbour (a ripple along z that partition
+    // encoding images). Cells are cut at the plane boundaries (k + ½)·Δz.
+    const pitch = volume && options.planeThickness && options.planeThickness > 0 ? options.planeThickness : 0;
     for (let scale = 1, attempt = 0; attempt < 40; attempt++, scale *= 1.25) {
-        const cells = layout(ranges, z => stepAt(z, scale), maxSlices + 1);
+        let cells = layout(ranges, z => stepAt(z, scale), maxSlices + 1, pitch);
+        if (pitch > 0 && cells.length <= maxSlices) cells = splitAtPlanes(cells, pitch);
         if (cells.length <= maxSlices) {
             const centres = cells.map(([a, b]) => 0.5 * (a + b)), widths = cells.map(([a, b]) => b - a);
             return {
@@ -611,16 +627,34 @@ export function planSlices(pulses: readonly PulseResponse[], options: SlicePlanO
     throw new Error('Could not fit the slab into the sub-slice budget.');
 }
 
+/** Cells cut wherever they cross a plane boundary (k + ½)·pitch; slivers under 1e-9 of a pitch are dropped. */
+function splitAtPlanes(cells: [number, number][], pitch: number): [number, number][] {
+    const out: [number, number][] = [];
+    for (const [a, b] of cells) {
+        let from = a;
+        for (let k = Math.ceil(a / pitch - 0.5); (k + 0.5) * pitch < b; k++) {
+            const boundary = (k + 0.5) * pitch;
+            if (boundary - from > 1e-9 * pitch) out.push([from, boundary]);
+            from = Math.max(from, boundary);
+        }
+        if (b - from > 1e-9 * pitch) out.push([from, b]);
+    }
+    return out;
+}
+
 /**
- * Sub-slices over the ranges, run outward from each range's middle with the
- * local step (looking half a step and a step ahead, so a dense region is not
- * stepped into). The last one on each side absorbs a remainder under half a
- * step. Stops early past `limit` cells.
+ * Sub-slices over the ranges, run outward from each range's middle (with
+ * planes, the plane boundary nearest it) with the local step (looking half a
+ * step and a step ahead, so a dense region is not stepped into). The last
+ * one on each side absorbs a remainder under half a step. Stops early past
+ * `limit` cells.
  */
-function layout(ranges: [number, number][], stepAt: (z: number) => number, limit: number): [number, number][] {
+function layout(ranges: [number, number][], stepAt: (z: number) => number, limit: number, pitch = 0): [number, number][] {
     const cells: [number, number][] = [];
     for (const [a, b] of ranges) {
-        const middle = 0.5 * (a + b);
+        // With planes, start on the plane boundary nearest the middle, so whole-plane steps fit the planes.
+        let middle = 0.5 * (a + b);
+        if (pitch > 0) middle = Math.min(b, Math.max(a, (Math.round(middle / pitch - 0.5) + 0.5) * pitch));
         for (const direction of [1, -1]) {
             const end = direction > 0 ? b : a;
             let z = middle;
