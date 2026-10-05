@@ -8919,7 +8919,7 @@
       if (plan.coarsened) notes.push(`The sub-slice spacing was widened to stay within ${MAX_SLICES} sub-slices.`);
       if (budgetNote) notes.push(budgetNote);
       if (probe?.capped) {
-        notes.push(`Through-slice: the finest spacing tried did not reach the ${tolerancePercent(settings)} target (error ${Number.isFinite(probe.error) ? (100 * probe.error).toFixed(0) : "?"} %).`);
+        notes.push(`Through-slice: the z sampling had not converged to the ${tolerancePercent(settings)} target at the finest spacing tried (${Number.isFinite(probe.error) ? (100 * probe.error).toFixed(0) : "?"} % between the two finest). Gradients along z such as crushers around refocusing pulses or diffusion lobes dephase faster than the sub-slices resolve, so some signal from pathways they should remove remains.`);
       }
       return { slices, summary, resolved: plan, pulses, notes };
     }
