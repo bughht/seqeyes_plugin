@@ -33,7 +33,8 @@ dependencies = [
 [project.optional-dependencies]
 pypulseq = ["pypulseq>=1.4"]
 desktop = ["pywebview>=5"]
-test = ["pytest>=7"]
+# h5py and ismrmrd read the simulator's ISMRMRD export fixtures (tests/test_ismrmrd_fixture.py).
+test = ["pytest>=7", "h5py>=3", "ismrmrd>=1.14.2"]
 
 [project.urls]
 Homepage = "https://github.com/bughht/seqeyes_plugin"

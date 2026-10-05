@@ -7,3 +7,8 @@ declare class TextDecoder {
     constructor(label?: string, options?: { fatal?: boolean; ignoreBOM?: boolean });
     decode(input?: ArrayBufferView | ArrayBuffer): string;
 }
+
+declare class TextEncoder {
+    constructor();
+    encode(input?: string): Uint8Array;
+}
