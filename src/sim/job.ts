@@ -372,7 +372,10 @@ export class SimulationJob {
                     + `(error ${(100 * plan.probe.error).toFixed(0)} %); expect residual stripes from incomplete spoiling.`);
             }
         }
-        if (this.phantom.maps.t2prime) notes.push('The T2′ map is loaded but not simulated yet (no intravoxel dephasing).');
+        if (this.phantom.maps.t2prime) {
+            notes.push('Not simulated: T2′ (the isochromat engine would need a Lorentzian line of spins in every voxel, '
+                + '50–100 × the spins). The phase-graph engine models it exactly.');
+        }
         if (this.phantom.maps.adc) notes.push('The ADC map is loaded but diffusion is not simulated yet.');
         for (const note of this.phantom.notes) notes.push(note);
         for (const feature of this.program.ignoredFeatures) notes.push(`Not simulated: ${IGNORED_FEATURE_TEXT[feature]}.`);
@@ -517,7 +520,7 @@ export class SimulationJob {
         if (phantom.sources.df.some(v => v !== 0)) {
             notes.push(`Pulses act at off-resonance rounded to ${phantom.binning.df} Hz; free precession uses each voxel's exact B0.`);
         }
-        if (this.phantom.maps.t2prime) notes.push('The T2′ map is loaded but not simulated yet (no intravoxel dephasing).');
+        if (phantom.classes.some(c => c.t2prime !== undefined && Number.isFinite(c.t2prime))) notes.push('T2′ is exact: each configuration decays by e^{−|τ|/T2′} (a Lorentzian line).');
         if (this.phantom.maps.adc) notes.push('The ADC map is loaded but diffusion is not simulated yet.');
         for (const note of this.phantom.notes) notes.push(note);
         for (const feature of this.program.ignoredFeatures) notes.push(`Not simulated: ${IGNORED_FEATURE_TEXT[feature]}.`);

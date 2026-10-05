@@ -12,8 +12,15 @@ export interface SpinSet {
     readonly x: Float64Array;
     readonly y: Float64Array;
     readonly z: Float64Array;
-    /** Off-resonance [Hz]: B0 map + chemical shift + T2′ offset. */
+    /** Off-resonance [Hz]: B0 map and chemical shift. RF pulses act at this one. */
     readonly df: Float64Array;
+    /**
+     * Extra off-resonance for free precession and readout only [Hz], which
+     * pulses do not see: for instance a Lorentzian line of offsets standing in
+     * for T2′, as the phase-graph engine models it (its tests build such
+     * spins; the job's isochromats carry none).
+     */
+    readonly dfFree?: Float64Array;
     /** Relaxation rates [1/s]; 0 means no relaxation. */
     readonly r1: Float64Array;
     readonly r2: Float64Array;

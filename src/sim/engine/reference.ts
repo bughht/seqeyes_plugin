@@ -202,12 +202,13 @@ class FreeKernel {
         const keyOf = new Int32Array(spins.count);
         const x: number[] = [], y: number[] = [], z: number[] = [], df: number[] = [];
         for (let i = 0; i < spins.count; i++) {
-            const key = `${spins.x[i]}|${spins.y[i]}|${spins.z[i]}|${spins.df[i]}`;
+            const freq = freeOffset(spins, i);
+            const key = `${spins.x[i]}|${spins.y[i]}|${spins.z[i]}|${freq}`;
             let k = index.get(key);
             if (k === undefined) {
                 k = x.length;
                 index.set(key, k);
-                x.push(spins.x[i]); y.push(spins.y[i]); z.push(spins.z[i]); df.push(spins.df[i]);
+                x.push(spins.x[i]); y.push(spins.y[i]); z.push(spins.z[i]); df.push(freq);
             }
             keyOf[i] = k;
         }
@@ -319,12 +320,19 @@ class FreeKernel {
 /** Interval lengths whose relaxation factors the free kernel keeps. */
 const FREE_CACHE_LENGTHS = 32;
 
+/** Off-resonance of spin i in free precession and readout: its own plus its T2′ offset. */
+export function freeOffset(spins: SpinSet, i: number): number {
+    return spins.dfFree ? spins.df[i] + spins.dfFree[i] : spins.df[i];
+}
+
 /** Exact free precession and relaxation over an interval with gradient area `dk`. */
 export function applyFreeInterval(dk: ArrayLike<number>, dt: number, spins: SpinSet, state: SpinState): void {
     const { mx, my, mz } = state;
     const twoPi = 2 * Math.PI;
+    const dfFree = spins.dfFree;
     for (let i = 0; i < spins.count; i++) {
-        const cycles = dk[0] * spins.x[i] + dk[1] * spins.y[i] + dk[2] * spins.z[i] + spins.df[i] * dt;
+        const df = dfFree ? spins.df[i] + dfFree[i] : spins.df[i];
+        const cycles = dk[0] * spins.x[i] + dk[1] * spins.y[i] + dk[2] * spins.z[i] + df * dt;
         const angle = twoPi * (cycles - Math.round(cycles));
         const e2 = Math.exp(-dt * spins.r2[i]);
         const e1 = Math.exp(-dt * spins.r1[i]);
@@ -684,7 +692,7 @@ export class ReadoutGrouper {
             const gz = mask < 0 || mask & 4 ? spins.z[i] : 0;
             let group: number | undefined;
             if (mask >= 0) {
-                const signature = `${gx}|${gy}|${gz}|${spins.df[i]}|${spins.r2[i]}`;
+                const signature = `${gx}|${gy}|${gz}|${freeOffset(spins, i)}|${spins.r2[i]}`;
                 group = index.get(signature);
                 if (group === undefined) {
                     group = x.length;
@@ -694,7 +702,7 @@ export class ReadoutGrouper {
                 group = x.length;
             }
             if (group === x.length) {
-                x.push(gx); y.push(gy); z.push(gz); df.push(spins.df[i]); r2.push(spins.r2[i]);
+                x.push(gx); y.push(gy); z.push(gz); df.push(freeOffset(spins, i)); r2.push(spins.r2[i]);
             }
             groupOf[i] = group;
         }
@@ -1137,8 +1145,8 @@ function synthesizeFactorised(
         for (let c = 0; c < coils; c++) if (gRe[g * coils + c] !== 0 || gIm[g * coils + c] !== 0) { active.push(g); break; }
     }
     if (active.length < 16) return false;
-    const table = (value: (g: number) => number) => {
-        const index = new Map<number, number>();
+    const table = <K>(value: (g: number) => K) => {
+        const index = new Map<K, number>();
         const of = new Int32Array(active.length);
         for (let i = 0; i < active.length; i++) {
             const v = value(active[i]);
@@ -1146,16 +1154,16 @@ function synthesizeFactorised(
             if (j === undefined) { j = index.size; index.set(v, j); }
             of[i] = j;
         }
-        return { values: Float64Array.from(index.keys()), of };
+        return { values: [...index.keys()], of };
     };
     const tx = table(g => groups.x[g]), ty = table(g => groups.y[g]), tz = table(g => groups.z[g]);
-    const pairs = table(g => groups.df[g] * 1e6 + groups.r2[g]);       // key only; values below
+    const pairs = table(g => `${groups.df[g]}|${groups.r2[g]}`);       // key only; values below
     const dfOf = new Float64Array(pairs.values.length), r2Of = new Float64Array(pairs.values.length);
     for (let i = 0; i < active.length; i++) { dfOf[pairs.of[i]] = groups.df[active[i]]; r2Of[pairs.of[i]] = groups.r2[active[i]]; }
     const tables = tx.values.length + ty.values.length + tz.values.length + pairs.values.length;
     if (tables * 2 > active.length) return false;
     const twoPi = 2 * Math.PI;
-    const phasors = (values: Float64Array, scale: number, re: Float64Array, im: Float64Array) => {
+    const phasors = (values: readonly number[], scale: number, re: Float64Array, im: Float64Array) => {
         for (let j = 0; j < values.length; j++) {
             const c = scale * values[j], a = twoPi * (c - Math.round(c));
             re[j] = Math.cos(a); im[j] = Math.sin(a);

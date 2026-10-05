@@ -191,7 +191,7 @@ test('loads an MRzero-format 3-D phantom, slices it and simulates it', async ({ 
   await expect.poll(async () => (await simulationState(page)).done, { timeout: 60_000 }).toBe(true);
   state = await simulationState(page);
   expect(state.status).toContain('MRzero');
-  expect(state.status).toContain('T2′ map is loaded but not simulated');
+  expect(state.status).toContain('Not simulated: T2′');
   await expectCanvasVaried(page.locator('#simCanvas'));
 });
 
@@ -254,6 +254,8 @@ test('simulates with the phase-graph engine when chosen', async ({ page }) => {
   expect(state.plan?.phaseGraph?.classes).toBe(5);
   expect(state.status).toContain('phase graph:');
   expect(state.status).toContain('Phase graph:');
+  // The built-in phantom's T2′, which isochromats leave out.
+  expect(state.status).toContain('T2′ is exact');
   await expectCanvasVaried(page.locator('#simCanvas'));
   // Back to isochromats: the spins-per-voxel control returns.
   await page.locator('#simEngine').selectOption('isochromat');

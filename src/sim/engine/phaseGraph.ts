@@ -16,16 +16,21 @@
  *   - free precession over (Δk, Δt): every F moves to (k + Δk, τ + Δt) and
  *     decays by E2; Z decays by E1, and Z_(0,0) recovers by 1 − E1;
  *   - an RF pulse: the exact rotation (with relaxation) the isochromat engine
- *     steps for a spin at the sub-slice's z, at the class's off-resonance and
- *     B1. The gradient under the pulse is split at its centre:
- *     R(z) = Rz(2πk_post·z)·R̃(z)·Rz(2πk_pre·z). Each F shifts by k_pre, then
- *     R̃ mixes (F_(k,τ), conj F_(−k,−τ), Z_(k,τ)) pointwise in z, then each F
- *     shifts by k_post. R̃ is smooth in z (the rephased profile), so a few
+ *     steps for a spin at the sub-slice's z, at the class's off-resonance Δf
+ *     and B1. The precession under the pulse is split at its centre:
+ *     R(z) = Rz(2π(k_post·z + Δf·t_post))·R̃(z)·Rz(2π(k_pre·z + Δf·t_pre)).
+ *     Each F shifts by (k_pre, t_pre), then R̃ mixes (F_(k,τ),
+ *     conj F_(−k,−τ), Z_(k,τ)) pointwise in z, then each F shifts by
+ *     (k_post, t_post). R̃ is smooth in z (the rephased profile), so a few
  *     sub-slices per resolution cell sample it. Shaped, adiabatic, multiband,
  *     VERSE and spectral pulses are therefore exact as in the isochromat
- *     engine;
+ *     engine; a voxel whose B0 differs from its class's precesses at its own
+ *     through the pulse, about its centre;
  *   - a readout: each configuration emits from every voxel of its class as a
- *     uniform box, sinc(q_x·Δx)·sinc(q_y·Δy), with q = k + k(t). Through the
+ *     uniform box, sinc(q_x·Δx)·sinc(q_y·Δy), with q = k + k(t), and decays
+ *     by e^{−|τ + t|/T2′}: a Lorentzian line of reversible dephasing (T2′),
+ *     which a spin echo refocuses because a refocusing pulse turns τ into −τ.
+ *     The line acts about each pulse's centre, as a narrow line does. Through the
  *     slab it is the oscillatory integral ∫F(z)·e^{i2πq_z·z}dz of the
  *     piecewise-linear F (Filon). Crushed configurations, at large q_z,
  *     integrate to almost nothing instead of aliasing. In-plane, the voxels
@@ -60,6 +65,8 @@ export interface PhaseGraphClass {
     b1Im: number;
     /** Off-resonance the class's RF operators are built at [Hz] (free precession uses each voxel's own). */
     df: number;
+    /** T2′ [s] of a Lorentzian line (absent or Infinity: none). */
+    t2prime?: number;
 }
 
 /** The voxels (one per plane of a 3-D phantom) that emit signal. */
@@ -269,6 +276,13 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
         rxRe: new Float64Array(sources.count), rxIm: new Float64Array(sources.count),
     };
     const grouper = new ReadoutGrouper(emitters);
+    // T2′: |τ + t| decays at R2 + R2′ once past the echo (τ + t ≥ 0) and grows back at R2 − R2′ before it.
+    const r2p = classes.map(c => (c.t2prime !== undefined && Number.isFinite(c.t2prime) && c.t2prime > 0 ? 1 / c.t2prime : 0));
+    const anyT2p = r2p.some(v => v > 0);
+    const withRate = (sign: number): ReadoutGrouper => new ReadoutGrouper({
+        ...emitters, r2: Float64Array.from(sources.classOf, c => r2[c] + sign * r2p[c]),
+    });
+    const after = anyT2p ? withRate(1) : grouper, before = anyT2p ? withRate(-1) : grouper;
     const fullRange = Array.from({ length: sources.count }, (_, i) => sources.sliceFrom[i] === 0 && sources.sliceTo[i] === K).every(Boolean);
     // Without B0 differences between voxels, τ does not reach the signal and need not split readout groups.
     const anyB0 = sources.df.some(v => v !== 0);
@@ -386,6 +400,7 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
             }
         }
         const pre = segment.kToCenter[2], post = segment.moments.dk[2] - segment.kToCenter[2];
+        const tPre = segment.centerTime - segment.t0, tPost = segment.t1 - segment.centerTime;
         const out = new Float64Array(COEFFICIENTS * L);
         const one: SpinSet = {
             count: 1, x: Float64Array.of(0), y: Float64Array.of(0), z: Float64Array.of(0),
@@ -402,9 +417,11 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
                 const ex = stepRfVector(cells, one, 0, 1, 0, 0);
                 const ey = stepRfVector(cells, one, 0, 0, 1, 0);
                 const ez = stepRfVector(cells, one, 0, 0, 0, 1);
-                // A (affine linear part), then R̃ = Rz(−a_post)·A·Rz(−a_pre).
+                // A (affine linear part), then R̃ = Rz(−a_post)·A·Rz(−a_pre): the precession
+                // up to and after the centre (gradient at z, the class's off-resonance) moves
+                // into the states' k and τ.
                 const a = [ex[0] - c0[0], ey[0] - c0[0], ez[0] - c0[0], ex[1] - c0[1], ey[1] - c0[1], ez[1] - c0[1], ex[2] - c0[2], ey[2] - c0[2], ez[2] - c0[2]];
-                const aPre = TWO_PI * pre * z, aPost = TWO_PI * post * z;
+                const aPre = TWO_PI * (pre * z + cls.df * tPre), aPost = TWO_PI * (post * z + cls.df * tPost);
                 const cp = Math.cos(-aPre), sp = Math.sin(-aPre), cq = Math.cos(-aPost), sq = Math.sin(-aPost);
                 // A·Rz(θ): columns 0,1 mix.
                 const m = a.slice();
@@ -437,7 +454,8 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
 
     function pulse(segment: RfSegment, coefficients: Float64Array): void {
         const pre = segment.kToCenter, total = segment.moments.dk;
-        for (let i = 0; i < F.count; i++) { F.k[3 * i] += pre[0]; F.k[3 * i + 1] += pre[1]; F.k[3 * i + 2] += pre[2]; }
+        const tPre = segment.centerTime - segment.t0, tPost = segment.t1 - segment.centerTime;
+        for (let i = 0; i < F.count; i++) { F.k[3 * i] += pre[0]; F.k[3 * i + 1] += pre[1]; F.k[3 * i + 2] += pre[2]; F.tau[i] += tPre; }
         const phi = segment.phaseOffset;
         const p1r = Math.cos(phi), p1i = Math.sin(phi), p2r = Math.cos(2 * phi), p2i = Math.sin(2 * phi);
 
@@ -524,7 +542,10 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
         }
         F = keepStrongest(nextF, fPeaks, false);
         Z = keepStrongest(nextZ, zPeaks, true);
-        for (let i = 0; i < F.count; i++) { F.k[3 * i] += total[0] - pre[0]; F.k[3 * i + 1] += total[1] - pre[1]; F.k[3 * i + 2] += total[2] - pre[2]; }
+        for (let i = 0; i < F.count; i++) {
+            F.k[3 * i] += total[0] - pre[0]; F.k[3 * i + 1] += total[1] - pre[1]; F.k[3 * i + 2] += total[2] - pre[2];
+            F.tau[i] += tPost;
+        }
     }
 
     function addInto(states: States, owner: number, other: number): void {
@@ -582,7 +603,7 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
         const floor = 1e-2 * prune;
         for (let s = 0; s < F.count; s++) {
             if (shapeBound(F.k[3 * s], F.k[3 * s + 1]) * F.peak(s) < floor) continue;
-            const a = qk(F.k[3 * s]), b = qk(F.k[3 * s + 1]), d = anyB0 ? qt(F.tau[s]) : 0;
+            const a = qk(F.k[3 * s]), b = qk(F.k[3 * s + 1]), d = anyB0 || anyT2p ? qt(F.tau[s]) : 0;
             const g = table.claim(a, b, 0, d, count);
             if (g === count) {
                 count++;
@@ -601,10 +622,21 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
                 }
             }
         }
-        const gRe = new Float64Array(groups.count * coils), gIm = new Float64Array(groups.count * coils);
         const tmpRe = new Float64Array(n * coils), tmpIm = new Float64Array(n * coils);
         const shape = new Float64Array(n);
         const perClass = new Float64Array(2 * C);
+        const classFactor = new Float64Array(C).fill(1);
+        const tauFirst = times[0] - segment.t0, tauLast = times[n - 1] - segment.t0;
+        const buffers = new Map<ReadoutGrouper, { groups: ReturnType<ReadoutGrouper['groups']>; gRe: Float64Array; gIm: Float64Array }>();
+        const bufferFor = (which: ReadoutGrouper) => {
+            let entry = buffers.get(which);
+            if (!entry) {
+                const gs = which.groups(segment.activeAxes);
+                entry = { groups: gs, gRe: new Float64Array(gs.count * coils), gIm: new Float64Array(gs.count * coils) };
+                buffers.set(which, entry);
+            }
+            return entry;
+        };
         for (let g = 0; g < count; g++) {
             const go = 2 * L * g;
             let peak = 0;
@@ -626,46 +658,62 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
                     perClass[2 * c] = ar; perClass[2 * c + 1] = ai;
                 }
             }
-            gRe.fill(0); gIm.fill(0);
-            let any = false;
             phaseTables(groupK[3 * g], groupK[3 * g + 1]);
             const tau = groupK[3 * g + 2];
-            for (let i = 0; i < sources.count; i++) {
-                const c = sources.classOf[i];
-                let ar: number, ai: number;
-                if (fullRange) {
-                    ar = perClass[2 * c]; ai = perClass[2 * c + 1];
-                } else {
-                    ar = 0; ai = 0;
-                    for (let j = sources.sliceFrom[i]; j < sources.sliceTo[i]; j++) { ar += G[go + 2 * (c * K + j)]; ai += G[go + 2 * (c * K + j) + 1]; }
-                }
-                if (ar === 0 && ai === 0) continue;
-                any = true;
-                // e^{i2π(kx·x + ky·y)} from the tables, then e^{i2πΔf·τ} where voxels differ in B0.
-                const xi = xs.of[i], yi = ys.of[i];
-                let pr = xRe[xi] * yRe[yi] - xIm[xi] * yIm[yi], pi = xRe[xi] * yIm[yi] + xIm[xi] * yRe[yi];
-                if (anyB0 && sources.df[i] !== 0) {
-                    const cyc = sources.df[i] * tau, a = TWO_PI * (cyc - Math.round(cyc));
-                    const cr = Math.cos(a), ci = Math.sin(a);
-                    const nr = pr * cr - pi * ci;
-                    pi = pr * ci + pi * cr;
-                    pr = nr;
-                }
-                const pd = sources.pd[i];
-                const vr = (ar * pr - ai * pi) * pd, vi = (ar * pi + ai * pr) * pd;
-                const gg = groups.groupOf[i];
-                for (let cc = 0; cc < coils; cc++) {
-                    const rr = sources.rxRe[cc * sources.count + i], ri = -sources.rxIm[cc * sources.count + i];
-                    gRe[gg * coils + cc] += rr * vr - ri * vi;
-                    gIm[gg * coils + cc] += rr * vi + ri * vr;
-                }
+            // Without T2′ one synthesis; with it, before and/or after the echo (τ + t = 0).
+            const branches: { grouper: ReadoutGrouper; sign: number; from: number; to: number }[] = [];
+            if (!anyT2p || tau + tauFirst >= 0) {
+                branches.push({ grouper: after, sign: 1, from: 0, to: n });
+            } else if (tau + tauLast <= 0) {
+                branches.push({ grouper: before, sign: -1, from: 0, to: n });
+            } else {
+                let cross = 0;
+                while (cross < n && tau + times[cross] - segment.t0 < 0) cross++;
+                branches.push({ grouper: before, sign: -1, from: 0, to: cross }, { grouper: after, sign: 1, from: cross, to: n });
             }
-            if (!any) continue;
-            tmpRe.fill(0); tmpIm.fill(0);
-            synthesizeReadout(segment, groups, gRe, gIm, coils, k, times, tmpRe, tmpIm, true);
-            for (let i = 0; i < n; i++) {
-                const v = shape[i];
-                for (let c = 0; c < coils; c++) { sumRe[i * coils + c] += v * tmpRe[i * coils + c]; sumIm[i * coils + c] += v * tmpIm[i * coils + c]; }
+            for (const branch of branches) {
+                const { groups, gRe, gIm } = bufferFor(branch.grouper);
+                for (let c = 0; c < C; c++) classFactor[c] = r2p[c] > 0 ? Math.exp(-branch.sign * r2p[c] * tau) : 1;
+                gRe.fill(0); gIm.fill(0);
+                let any = false;
+                for (let i = 0; i < sources.count; i++) {
+                    const c = sources.classOf[i];
+                    let ar: number, ai: number;
+                    if (fullRange) {
+                        ar = perClass[2 * c]; ai = perClass[2 * c + 1];
+                    } else {
+                        ar = 0; ai = 0;
+                        for (let j = sources.sliceFrom[i]; j < sources.sliceTo[i]; j++) { ar += G[go + 2 * (c * K + j)]; ai += G[go + 2 * (c * K + j) + 1]; }
+                    }
+                    if (ar === 0 && ai === 0) continue;
+                    any = true;
+                    if (classFactor[c] !== 1) { ar *= classFactor[c]; ai *= classFactor[c]; }
+                    // e^{i2π(kx·x + ky·y)} from the tables, then e^{i2πΔf·τ} where voxels differ in B0.
+                    const xi = xs.of[i], yi = ys.of[i];
+                    let pr = xRe[xi] * yRe[yi] - xIm[xi] * yIm[yi], pi = xRe[xi] * yIm[yi] + xIm[xi] * yRe[yi];
+                    if (anyB0 && sources.df[i] !== 0) {
+                        const cyc = sources.df[i] * tau, a = TWO_PI * (cyc - Math.round(cyc));
+                        const cr = Math.cos(a), ci = Math.sin(a);
+                        const nr = pr * cr - pi * ci;
+                        pi = pr * ci + pi * cr;
+                        pr = nr;
+                    }
+                    const pd = sources.pd[i];
+                    const vr = (ar * pr - ai * pi) * pd, vi = (ar * pi + ai * pr) * pd;
+                    const gg = groups.groupOf[i];
+                    for (let cc = 0; cc < coils; cc++) {
+                        const rr = sources.rxRe[cc * sources.count + i], ri = -sources.rxIm[cc * sources.count + i];
+                        gRe[gg * coils + cc] += rr * vr - ri * vi;
+                        gIm[gg * coils + cc] += rr * vi + ri * vr;
+                    }
+                }
+                if (!any) continue;
+                tmpRe.fill(0); tmpIm.fill(0);
+                synthesizeReadout(segment, groups, gRe, gIm, coils, k, times, tmpRe, tmpIm, true);
+                for (let i = branch.from; i < branch.to; i++) {
+                    const v = shape[i];
+                    for (let c = 0; c < coils; c++) { sumRe[i * coils + c] += v * tmpRe[i * coils + c]; sumIm[i * coils + c] += v * tmpIm[i * coils + c]; }
+                }
             }
         }
         emitReadout(segment, sumRe, sumIm, coils, signal, sampleOffset);
@@ -689,6 +737,7 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
                 const shape = sinc((F.k[3 * s] + k[3 * t]) * model.voxel[0]) * sinc((F.k[3 * s + 1] + k[3 * t + 1]) * model.voxel[1]);
                 if (shape === 0) continue;
                 const weights = slabWeights(F.k[3 * s + 2] + k[3 * t + 2]);
+                const tau = times[t] - segment.t0;
                 gRe.fill(0); gIm.fill(0);
                 for (let i = 0; i < sources.count; i++) {
                     const c = sources.classOf[i];
@@ -698,10 +747,12 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
                         ar += fr * weights[2 * j] - fi * weights[2 * j + 1];
                         ai += fr * weights[2 * j + 1] + fi * weights[2 * j];
                     }
-                    if (ar !== 0 || ai !== 0) accumulate(i, F.k[3 * s], F.k[3 * s + 1], F.tau[s], ar, ai, groups.groupOf[i], gRe, gIm);
+                    if (ar === 0 && ai === 0) continue;
+                    // T2′ at this sample, per class: e^{−|τ_σ + t|/T2′}.
+                    const lorentz = r2p[c] > 0 ? Math.exp(-r2p[c] * Math.abs(F.tau[s] + tau)) : 1;
+                    accumulate(i, F.k[3 * s], F.k[3 * s + 1], F.tau[s], ar * lorentz, ai * lorentz, groups.groupOf[i], gRe, gIm);
                 }
                 // The groups' phase at this one sample (positions, own Δf, decay).
-                const tau = times[t] - segment.t0;
                 for (let g = 0; g < groups.count; g++) {
                     const cycles = k[3 * t] * groups.x[g] + k[3 * t + 1] * groups.y[g] + groups.df[g] * tau;
                     const angle = TWO_PI * (cycles - Math.round(cycles));

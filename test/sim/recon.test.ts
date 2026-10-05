@@ -8,8 +8,9 @@ import { analyzeRfResponse } from '../../src/pulseq/rfResponse';
 import { parseSequenceText } from '../../src/pulseq/reader';
 import { compileProgram } from '../../src/sim/program/compile';
 import { simulateReference } from '../../src/sim/engine/reference';
-import { sheppLoganPhantom, spinsFromGrid2D } from '../../src/sim/phantom/builtin';
-import { ChunkAccumulator, SimulationJob } from '../../src/sim/job';
+import { sheppLoganPhantom, sheppLoganPhantom2D, spinsFromGrid2D, TISSUES } from '../../src/sim/phantom/builtin';
+import type { Phantom2D } from '../../src/sim/phantom/model';
+import { ChunkAccumulator, SimulationJob, type JobSettings } from '../../src/sim/job';
 import { adcTrajectory } from '../../src/sim/recon/trajectory';
 import { reconstructCartesian } from '../../src/sim/recon/cartesian';
 import { seqText, type BlockRow, type TrapRow } from './helpers/seqBuilder';
@@ -140,6 +141,52 @@ describe('simulate and reconstruct a Pulseq demo GRE', () => {
         const flipped = new Float32Array(m * m);
         for (let r = 0; r < m; r++) flipped.set(expected.subarray((m - 1 - r) * m, (m - r) * m), r * m);
         expect(fit).toBeGreaterThan(pearson(image, flipped) + 0.1);
+    });
+
+    it('weights each tissue by e^{−TE/T2′} with the phase-graph engine', () => {
+        // The same 32² object as above, with and without its T2′ map. Inside
+        // each tissue the image scales by that tissue's factor at the echo.
+        const m = 32, voxel = fov[0] / n;
+        const base = sheppLoganPhantom2D(m, m * voxel, m * voxel);
+        const image = (phantom: Phantom2D) => {
+            const settings: JobSettings = { phantom: { kind: 'phantom', phantom }, subSpins: 'auto', engine: 'phase-graph', throughSlice: 'off' };
+            const job = new SimulationJob(bytes, path, settings);
+            let total: ChunkAccumulator | null = null;
+            for (let chunk = 0; chunk < job.plan.chunks; chunk++) {
+                const signal = job.simulateChunk(chunk);
+                total ??= new ChunkAccumulator(signal.length, job.plan.chunks);
+                total.add(chunk, signal);
+            }
+            const recon = job.reconstruct(total!.signal);
+            const out = new Float32Array(m * m);
+            for (let r = 0; r < m; r++) {
+                for (let c = 0; c < m; c++) out[r * m + c] = recon.images[(n / 2 - m / 2 + r) * n + (n / 2 - m / 2 + c)];
+            }
+            return out;
+        };
+        const lorentz = image(base);
+        const plain = image({ ...base, maps: { ...base.maps, t2prime: undefined } });
+        let rf = NaN, adc = NaN;
+        for (const segment of compileProgram(seq).segments()) {
+            if (segment.kind === 'rf' && Number.isNaN(rf)) rf = segment.centerTime;
+            if (segment.kind === 'adc') { adc = 0.5 * (segment.t0 + segment.t1); break; }
+        }
+        const te = adc - rf;
+        // Voxels whose 3×3 neighbourhood is one tissue, per tissue; the median ratio.
+        const t2p = base.maps.t2prime!;
+        for (const tissue of [TISSUES.whiteMatter, TISSUES.greyMatter, TISSUES.csf]) {
+            const ratios: number[] = [];
+            for (let r = 1; r < m - 1; r++) {
+                for (let c = 1; c < m - 1; c++) {
+                    let inside = true;
+                    for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) if (t2p[(r + dr) * m + c + dc] !== Math.fround(tissue.t2prime)) inside = false;
+                    if (inside) ratios.push(lorentz[r * m + c] / plain[r * m + c]);
+                }
+            }
+            ratios.sort((a, b) => a - b);
+            expect(ratios.length).toBeGreaterThan(3);
+            expect(ratios[ratios.length >> 1]).toBeCloseTo(Math.exp(-te / tissue.t2prime), 2);
+        }
     });
 });
 

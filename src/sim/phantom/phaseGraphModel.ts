@@ -53,7 +53,7 @@ export function phaseGraphPhantom(
     const cells = phantom.nx * phantom.ny;
     const [dx, dy] = phantom.voxel;
     const xs: number[] = [], ys: number[] = [], dfs: number[] = [], pds: number[] = [], froms: number[] = [], tos: number[] = [];
-    const t1s: number[] = [], t2s: number[] = [], b1s: number[] = [], cellOf: number[] = [];
+    const t1s: number[] = [], t2s: number[] = [], t2ps: number[] = [], b1s: number[] = [], cellOf: number[] = [];
     for (const v of voxels) {
         const col = v % phantom.nx, row = Math.floor(v / phantom.nx);
         for (const run of runs) {
@@ -68,6 +68,7 @@ export function phaseGraphPhantom(
             tos.push(run.to);
             t1s.push(maps.t1[v]);
             t2s.push(maps.t2[v]);
+            t2ps.push(maps.t2prime ? maps.t2prime[v] : Infinity);
             b1s.push(maps.b1 ? maps.b1[v] : 1);
             cellOf.push(v);
         }
@@ -87,19 +88,24 @@ export function phaseGraphPhantom(
     const classOf = assignment.classOf;
     const C = assignment.keys.size;
     // PD-weighted means per class.
-    const sum = new Float64Array(5 * C);
+    // T2′ averages as a rate (1/T2′), so a class without T2′ keeps none.
+    const sum = new Float64Array(6 * C);
     for (let i = 0; i < count; i++) {
         const c = classOf[i], w = pds[i];
-        sum[5 * c] += w;
-        sum[5 * c + 1] += w * finiteOr(t1s[i], 1e6);
-        sum[5 * c + 2] += w * finiteOr(t2s[i], 1e6);
-        sum[5 * c + 3] += w * b1s[i];
-        sum[5 * c + 4] += w * dfs[i];
+        sum[6 * c] += w;
+        sum[6 * c + 1] += w * finiteOr(t1s[i], 1e6);
+        sum[6 * c + 2] += w * finiteOr(t2s[i], 1e6);
+        sum[6 * c + 3] += w * b1s[i];
+        sum[6 * c + 4] += w * dfs[i];
+        sum[6 * c + 5] += w * (Number.isFinite(t2ps[i]) && t2ps[i] > 0 ? 1 / t2ps[i] : 0);
     }
     const classes: PhaseGraphClass[] = [];
     for (let c = 0; c < C; c++) {
-        const w = sum[5 * c];
-        classes.push({ t1: sum[5 * c + 1] / w, t2: sum[5 * c + 2] / w, b1Re: sum[5 * c + 3] / w, b1Im: 0, df: sum[5 * c + 4] / w });
+        const w = sum[6 * c], rate = sum[6 * c + 5] / w;
+        classes.push({
+            t1: sum[6 * c + 1] / w, t2: sum[6 * c + 2] / w, b1Re: sum[6 * c + 3] / w, b1Im: 0, df: sum[6 * c + 4] / w,
+            t2prime: rate > 0 ? 1 / rate : Infinity,
+        });
     }
 
     const coils = phantom.coils?.count ?? 1;
@@ -127,7 +133,7 @@ export function phaseGraphPhantom(
         const logStep = (step: number) => Math.log1p(step);
         const timeKey = (t: number) => (!(Number.isFinite(t) && t > 0) ? 'inf' : bins.t > 0 ? String(Math.round(Math.log(t) / logStep(bins.t))) : String(t));
         for (let i = 0; i < count; i++) {
-            const key = `${timeKey(t1s[i])}|${timeKey(t2s[i])}|${bins.b1 > 0 ? Math.round(b1s[i] / bins.b1) : b1s[i]}|${Math.round(dfs[i] / bins.df)}`;
+            const key = `${timeKey(t1s[i])}|${timeKey(t2s[i])}|${timeKey(t2ps[i])}|${bins.b1 > 0 ? Math.round(b1s[i] / bins.b1) : b1s[i]}|${Math.round(dfs[i] / bins.df)}`;
             let c = keys.get(key);
             if (c === undefined) { c = keys.size; keys.set(key, c); }
             classOf[i] = c;

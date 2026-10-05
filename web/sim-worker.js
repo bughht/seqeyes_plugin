@@ -6520,7 +6520,8 @@
       const keyOf = new Int32Array(spins.count);
       const x2 = [], y = [], z = [], df = [];
       for (let i2 = 0; i2 < spins.count; i2++) {
-        const key = `${spins.x[i2]}|${spins.y[i2]}|${spins.z[i2]}|${spins.df[i2]}`;
+        const freq = freeOffset(spins, i2);
+        const key = `${spins.x[i2]}|${spins.y[i2]}|${spins.z[i2]}|${freq}`;
         let k = index.get(key);
         if (k === void 0) {
           k = x2.length;
@@ -6528,7 +6529,7 @@
           x2.push(spins.x[i2]);
           y.push(spins.y[i2]);
           z.push(spins.z[i2]);
-          df.push(spins.df[i2]);
+          df.push(freq);
         }
         keyOf[i2] = k;
       }
@@ -6635,6 +6636,9 @@
     }
   };
   var FREE_CACHE_LENGTHS = 32;
+  function freeOffset(spins, i2) {
+    return spins.dfFree ? spins.df[i2] + spins.dfFree[i2] : spins.df[i2];
+  }
   function rfCells(segment, phaseOffset = segment.phaseOffset) {
     const op = segment.operator;
     if (op.ptxChannels > 1) throw new Error("Dynamic pTx RF (pTx-Pulseq layout) is not supported yet.");
@@ -6859,7 +6863,7 @@
         const gz = mask < 0 || mask & 4 ? spins.z[i2] : 0;
         let group;
         if (mask >= 0) {
-          const signature = `${gx}|${gy}|${gz}|${spins.df[i2]}|${spins.r2[i2]}`;
+          const signature = `${gx}|${gy}|${gz}|${freeOffset(spins, i2)}|${spins.r2[i2]}`;
           group = index.get(signature);
           if (group === void 0) {
             group = x2.length;
@@ -6872,7 +6876,7 @@
           x2.push(gx);
           y.push(gy);
           z.push(gz);
-          df.push(spins.df[i2]);
+          df.push(freeOffset(spins, i2));
           r2.push(spins.r2[i2]);
         }
         groupOf[i2] = group;
@@ -7193,10 +7197,10 @@
         }
         of[i2] = j;
       }
-      return { values: Float64Array.from(index.keys()), of };
+      return { values: [...index.keys()], of };
     };
     const tx = table((g) => groups.x[g]), ty = table((g) => groups.y[g]), tz = table((g) => groups.z[g]);
-    const pairs = table((g) => groups.df[g] * 1e6 + groups.r2[g]);
+    const pairs = table((g) => `${groups.df[g]}|${groups.r2[g]}`);
     const dfOf = new Float64Array(pairs.values.length), r2Of = new Float64Array(pairs.values.length);
     for (let i2 = 0; i2 < active.length; i2++) {
       dfOf[pairs.of[i2]] = groups.df[active[i2]];
@@ -7406,6 +7410,13 @@
       rxIm: new Float64Array(sources.count)
     };
     const grouper = new ReadoutGrouper(emitters);
+    const r2p = classes.map((c) => c.t2prime !== void 0 && Number.isFinite(c.t2prime) && c.t2prime > 0 ? 1 / c.t2prime : 0);
+    const anyT2p = r2p.some((v) => v > 0);
+    const withRate = (sign) => new ReadoutGrouper({
+      ...emitters,
+      r2: Float64Array.from(sources.classOf, (c) => r2[c] + sign * r2p[c])
+    });
+    const after = anyT2p ? withRate(1) : grouper, before = anyT2p ? withRate(-1) : grouper;
     const fullRange = Array.from({ length: sources.count }, (_, i2) => sources.sliceFrom[i2] === 0 && sources.sliceTo[i2] === K).every(Boolean);
     const anyB0 = sources.df.some((v) => v !== 0);
     const distinct = (values) => {
@@ -7527,6 +7538,7 @@
         }
       }
       const pre = segment.kToCenter[2], post = segment.moments.dk[2] - segment.kToCenter[2];
+      const tPre = segment.centerTime - segment.t0, tPost = segment.t1 - segment.centerTime;
       const out = new Float64Array(COEFFICIENTS * L);
       const one = {
         count: 1,
@@ -7558,7 +7570,7 @@
           const ey = stepRfVector(cells, one, 0, 0, 1, 0);
           const ez = stepRfVector(cells, one, 0, 0, 0, 1);
           const a = [ex[0] - c0[0], ey[0] - c0[0], ez[0] - c0[0], ex[1] - c0[1], ey[1] - c0[1], ez[1] - c0[1], ex[2] - c0[2], ey[2] - c0[2], ez[2] - c0[2]];
-          const aPre = TWO_PI * pre * z, aPost = TWO_PI * post * z;
+          const aPre = TWO_PI * (pre * z + cls.df * tPre), aPost = TWO_PI * (post * z + cls.df * tPost);
           const cp = Math.cos(-aPre), sp = Math.sin(-aPre), cq = Math.cos(-aPost), sq = Math.sin(-aPost);
           const m = a.slice();
           for (let row = 0; row < 3; row++) {
@@ -7594,10 +7606,12 @@
     }
     function pulse(segment, coefficients) {
       const pre = segment.kToCenter, total = segment.moments.dk;
+      const tPre = segment.centerTime - segment.t0, tPost = segment.t1 - segment.centerTime;
       for (let i2 = 0; i2 < F.count; i2++) {
         F.k[3 * i2] += pre[0];
         F.k[3 * i2 + 1] += pre[1];
         F.k[3 * i2 + 2] += pre[2];
+        F.tau[i2] += tPre;
       }
       const phi = segment.phaseOffset;
       const p1r = Math.cos(phi), p1i = Math.sin(phi), p2r = Math.cos(2 * phi), p2i = Math.sin(2 * phi);
@@ -7703,6 +7717,7 @@
         F.k[3 * i2] += total[0] - pre[0];
         F.k[3 * i2 + 1] += total[1] - pre[1];
         F.k[3 * i2 + 2] += total[2] - pre[2];
+        F.tau[i2] += tPost;
       }
     }
     function addInto(states, owner, other) {
@@ -7754,7 +7769,7 @@
       const floor = 0.01 * prune;
       for (let s = 0; s < F.count; s++) {
         if (shapeBound(F.k[3 * s], F.k[3 * s + 1]) * F.peak(s) < floor) continue;
-        const a = qk(F.k[3 * s]), b = qk(F.k[3 * s + 1]), d = anyB0 ? qt(F.tau[s]) : 0;
+        const a = qk(F.k[3 * s]), b = qk(F.k[3 * s + 1]), d = anyB0 || anyT2p ? qt(F.tau[s]) : 0;
         const g = table.claim(a, b, 0, d, count);
         if (g === count) {
           count++;
@@ -7777,10 +7792,21 @@
           }
         }
       }
-      const gRe = new Float64Array(groups.count * coils), gIm = new Float64Array(groups.count * coils);
       const tmpRe = new Float64Array(n * coils), tmpIm = new Float64Array(n * coils);
       const shape = new Float64Array(n);
       const perClass = new Float64Array(2 * C);
+      const classFactor = new Float64Array(C).fill(1);
+      const tauFirst = times[0] - segment.t0, tauLast = times[n - 1] - segment.t0;
+      const buffers = /* @__PURE__ */ new Map();
+      const bufferFor = (which) => {
+        let entry = buffers.get(which);
+        if (!entry) {
+          const gs = which.groups(segment.activeAxes);
+          entry = { groups: gs, gRe: new Float64Array(gs.count * coils), gIm: new Float64Array(gs.count * coils) };
+          buffers.set(which, entry);
+        }
+        return entry;
+      };
       for (let g = 0; g < count; g++) {
         const go = 2 * L * g;
         let peak = 0;
@@ -7805,54 +7831,72 @@
             perClass[2 * c + 1] = ai;
           }
         }
-        gRe.fill(0);
-        gIm.fill(0);
-        let any = false;
         phaseTables(groupK[3 * g], groupK[3 * g + 1]);
         const tau = groupK[3 * g + 2];
-        for (let i2 = 0; i2 < sources.count; i2++) {
-          const c = sources.classOf[i2];
-          let ar, ai;
-          if (fullRange) {
-            ar = perClass[2 * c];
-            ai = perClass[2 * c + 1];
-          } else {
-            ar = 0;
-            ai = 0;
-            for (let j = sources.sliceFrom[i2]; j < sources.sliceTo[i2]; j++) {
-              ar += G[go + 2 * (c * K + j)];
-              ai += G[go + 2 * (c * K + j) + 1];
+        const branches = [];
+        if (!anyT2p || tau + tauFirst >= 0) {
+          branches.push({ grouper: after, sign: 1, from: 0, to: n });
+        } else if (tau + tauLast <= 0) {
+          branches.push({ grouper: before, sign: -1, from: 0, to: n });
+        } else {
+          let cross = 0;
+          while (cross < n && tau + times[cross] - segment.t0 < 0) cross++;
+          branches.push({ grouper: before, sign: -1, from: 0, to: cross }, { grouper: after, sign: 1, from: cross, to: n });
+        }
+        for (const branch of branches) {
+          const { groups: groups2, gRe, gIm } = bufferFor(branch.grouper);
+          for (let c = 0; c < C; c++) classFactor[c] = r2p[c] > 0 ? Math.exp(-branch.sign * r2p[c] * tau) : 1;
+          gRe.fill(0);
+          gIm.fill(0);
+          let any = false;
+          for (let i2 = 0; i2 < sources.count; i2++) {
+            const c = sources.classOf[i2];
+            let ar, ai;
+            if (fullRange) {
+              ar = perClass[2 * c];
+              ai = perClass[2 * c + 1];
+            } else {
+              ar = 0;
+              ai = 0;
+              for (let j = sources.sliceFrom[i2]; j < sources.sliceTo[i2]; j++) {
+                ar += G[go + 2 * (c * K + j)];
+                ai += G[go + 2 * (c * K + j) + 1];
+              }
+            }
+            if (ar === 0 && ai === 0) continue;
+            any = true;
+            if (classFactor[c] !== 1) {
+              ar *= classFactor[c];
+              ai *= classFactor[c];
+            }
+            const xi = xs.of[i2], yi = ys.of[i2];
+            let pr = xRe[xi] * yRe[yi] - xIm[xi] * yIm[yi], pi = xRe[xi] * yIm[yi] + xIm[xi] * yRe[yi];
+            if (anyB0 && sources.df[i2] !== 0) {
+              const cyc = sources.df[i2] * tau, a = TWO_PI * (cyc - Math.round(cyc));
+              const cr = Math.cos(a), ci = Math.sin(a);
+              const nr = pr * cr - pi * ci;
+              pi = pr * ci + pi * cr;
+              pr = nr;
+            }
+            const pd = sources.pd[i2];
+            const vr = (ar * pr - ai * pi) * pd, vi = (ar * pi + ai * pr) * pd;
+            const gg = groups2.groupOf[i2];
+            for (let cc = 0; cc < coils; cc++) {
+              const rr = sources.rxRe[cc * sources.count + i2], ri = -sources.rxIm[cc * sources.count + i2];
+              gRe[gg * coils + cc] += rr * vr - ri * vi;
+              gIm[gg * coils + cc] += rr * vi + ri * vr;
             }
           }
-          if (ar === 0 && ai === 0) continue;
-          any = true;
-          const xi = xs.of[i2], yi = ys.of[i2];
-          let pr = xRe[xi] * yRe[yi] - xIm[xi] * yIm[yi], pi = xRe[xi] * yIm[yi] + xIm[xi] * yRe[yi];
-          if (anyB0 && sources.df[i2] !== 0) {
-            const cyc = sources.df[i2] * tau, a = TWO_PI * (cyc - Math.round(cyc));
-            const cr = Math.cos(a), ci = Math.sin(a);
-            const nr = pr * cr - pi * ci;
-            pi = pr * ci + pi * cr;
-            pr = nr;
-          }
-          const pd = sources.pd[i2];
-          const vr = (ar * pr - ai * pi) * pd, vi = (ar * pi + ai * pr) * pd;
-          const gg = groups.groupOf[i2];
-          for (let cc = 0; cc < coils; cc++) {
-            const rr = sources.rxRe[cc * sources.count + i2], ri = -sources.rxIm[cc * sources.count + i2];
-            gRe[gg * coils + cc] += rr * vr - ri * vi;
-            gIm[gg * coils + cc] += rr * vi + ri * vr;
-          }
-        }
-        if (!any) continue;
-        tmpRe.fill(0);
-        tmpIm.fill(0);
-        synthesizeReadout(segment, groups, gRe, gIm, coils, k, times, tmpRe, tmpIm, true);
-        for (let i2 = 0; i2 < n; i2++) {
-          const v = shape[i2];
-          for (let c = 0; c < coils; c++) {
-            sumRe[i2 * coils + c] += v * tmpRe[i2 * coils + c];
-            sumIm[i2 * coils + c] += v * tmpIm[i2 * coils + c];
+          if (!any) continue;
+          tmpRe.fill(0);
+          tmpIm.fill(0);
+          synthesizeReadout(segment, groups2, gRe, gIm, coils, k, times, tmpRe, tmpIm, true);
+          for (let i2 = branch.from; i2 < branch.to; i2++) {
+            const v = shape[i2];
+            for (let c = 0; c < coils; c++) {
+              sumRe[i2 * coils + c] += v * tmpRe[i2 * coils + c];
+              sumIm[i2 * coils + c] += v * tmpIm[i2 * coils + c];
+            }
           }
         }
       }
@@ -7869,6 +7913,7 @@
           const shape = sinc2((F.k[3 * s] + k[3 * t]) * model.voxel[0]) * sinc2((F.k[3 * s + 1] + k[3 * t + 1]) * model.voxel[1]);
           if (shape === 0) continue;
           const weights = slabWeights(F.k[3 * s + 2] + k[3 * t + 2]);
+          const tau = times[t] - segment.t0;
           gRe.fill(0);
           gIm.fill(0);
           for (let i2 = 0; i2 < sources.count; i2++) {
@@ -7879,9 +7924,10 @@
               ar += fr * weights[2 * j] - fi * weights[2 * j + 1];
               ai += fr * weights[2 * j + 1] + fi * weights[2 * j];
             }
-            if (ar !== 0 || ai !== 0) accumulate(i2, F.k[3 * s], F.k[3 * s + 1], F.tau[s], ar, ai, groups.groupOf[i2], gRe, gIm);
+            if (ar === 0 && ai === 0) continue;
+            const lorentz = r2p[c] > 0 ? Math.exp(-r2p[c] * Math.abs(F.tau[s] + tau)) : 1;
+            accumulate(i2, F.k[3 * s], F.k[3 * s + 1], F.tau[s], ar * lorentz, ai * lorentz, groups.groupOf[i2], gRe, gIm);
           }
-          const tau = times[t] - segment.t0;
           for (let g = 0; g < groups.count; g++) {
             const cycles = k[3 * t] * groups.x[g] + k[3 * t + 1] * groups.y[g] + groups.df[g] * tau;
             const angle = TWO_PI * (cycles - Math.round(cycles));
@@ -8425,7 +8471,7 @@
     const cells = phantom.nx * phantom.ny;
     const [dx, dy] = phantom.voxel;
     const xs = [], ys = [], dfs = [], pds = [], froms = [], tos = [];
-    const t1s = [], t2s = [], b1s = [], cellOf = [];
+    const t1s = [], t2s = [], t2ps = [], b1s = [], cellOf = [];
     for (const v of voxels) {
       const col = v % phantom.nx, row = Math.floor(v / phantom.nx);
       for (const run of runs) {
@@ -8440,6 +8486,7 @@
         tos.push(run.to);
         t1s.push(maps.t1[v]);
         t2s.push(maps.t2[v]);
+        t2ps.push(maps.t2prime ? maps.t2prime[v] : Infinity);
         b1s.push(maps.b1 ? maps.b1[v] : 1);
         cellOf.push(v);
       }
@@ -8454,19 +8501,27 @@
     }
     const classOf = assignment.classOf;
     const C = assignment.keys.size;
-    const sum = new Float64Array(5 * C);
+    const sum = new Float64Array(6 * C);
     for (let i2 = 0; i2 < count; i2++) {
       const c = classOf[i2], w = pds[i2];
-      sum[5 * c] += w;
-      sum[5 * c + 1] += w * finiteOr(t1s[i2], 1e6);
-      sum[5 * c + 2] += w * finiteOr(t2s[i2], 1e6);
-      sum[5 * c + 3] += w * b1s[i2];
-      sum[5 * c + 4] += w * dfs[i2];
+      sum[6 * c] += w;
+      sum[6 * c + 1] += w * finiteOr(t1s[i2], 1e6);
+      sum[6 * c + 2] += w * finiteOr(t2s[i2], 1e6);
+      sum[6 * c + 3] += w * b1s[i2];
+      sum[6 * c + 4] += w * dfs[i2];
+      sum[6 * c + 5] += w * (Number.isFinite(t2ps[i2]) && t2ps[i2] > 0 ? 1 / t2ps[i2] : 0);
     }
     const classes = [];
     for (let c = 0; c < C; c++) {
-      const w = sum[5 * c];
-      classes.push({ t1: sum[5 * c + 1] / w, t2: sum[5 * c + 2] / w, b1Re: sum[5 * c + 3] / w, b1Im: 0, df: sum[5 * c + 4] / w });
+      const w = sum[6 * c], rate2 = sum[6 * c + 5] / w;
+      classes.push({
+        t1: sum[6 * c + 1] / w,
+        t2: sum[6 * c + 2] / w,
+        b1Re: sum[6 * c + 3] / w,
+        b1Im: 0,
+        df: sum[6 * c + 4] / w,
+        t2prime: rate2 > 0 ? 1 / rate2 : Infinity
+      });
     }
     const coils = phantom.coils?.count ?? 1;
     const rxRe = new Float64Array(coils * count), rxIm = new Float64Array(coils * count);
@@ -8499,7 +8554,7 @@
       const logStep = (step) => Math.log1p(step);
       const timeKey = (t) => !(Number.isFinite(t) && t > 0) ? "inf" : bins.t > 0 ? String(Math.round(Math.log(t) / logStep(bins.t))) : String(t);
       for (let i2 = 0; i2 < count; i2++) {
-        const key = `${timeKey(t1s[i2])}|${timeKey(t2s[i2])}|${bins.b1 > 0 ? Math.round(b1s[i2] / bins.b1) : b1s[i2]}|${Math.round(dfs[i2] / bins.df)}`;
+        const key = `${timeKey(t1s[i2])}|${timeKey(t2s[i2])}|${timeKey(t2ps[i2])}|${bins.b1 > 0 ? Math.round(b1s[i2] / bins.b1) : b1s[i2]}|${Math.round(dfs[i2] / bins.df)}`;
         let c = keys.get(key);
         if (c === void 0) {
           c = keys.size;
@@ -8516,11 +8571,11 @@
 
   // src/sim/phantom/builtin.ts
   var TISSUES = {
-    skin: { name: "skin", pd: 0.9, t1: 0.25, t2: 0.07 },
-    whiteMatter: { name: "white matter", pd: 0.69, t1: 0.83, t2: 0.08 },
-    greyMatter: { name: "grey matter", pd: 0.8, t1: 1.33, t2: 0.11 },
-    csf: { name: "CSF", pd: 1, t1: 4, t2: 2 },
-    lesion: { name: "lesion", pd: 0.85, t1: 1.6, t2: 0.25 }
+    skin: { name: "skin", pd: 0.9, t1: 0.25, t2: 0.07, t2prime: 0.07 },
+    whiteMatter: { name: "white matter", pd: 0.69, t1: 0.83, t2: 0.08, t2prime: 0.15 },
+    greyMatter: { name: "grey matter", pd: 0.8, t1: 1.33, t2: 0.11, t2prime: 0.17 },
+    csf: { name: "CSF", pd: 1, t1: 4, t2: 2, t2prime: 0.5 },
+    lesion: { name: "lesion", pd: 0.85, t1: 1.6, t2: 0.25, t2prime: 0.12 }
   };
   var SHEPP_LOGAN = [
     { a: 0.69, b: 0.92, x0: 0, y0: 0, deg: 0, tissue: TISSUES.skin },
@@ -8544,7 +8599,8 @@
       fovY,
       pd: new Float32Array(size),
       t1: new Float32Array(size).fill(Infinity),
-      t2: new Float32Array(size).fill(Infinity)
+      t2: new Float32Array(size).fill(Infinity),
+      t2prime: new Float32Array(size).fill(Infinity)
     };
     for (let iy = 0; iy < n; iy++) {
       const v = 2 * (n / 2 - 1 - iy) / n;
@@ -8563,6 +8619,7 @@
         grid.pd[index] = tissue.pd;
         grid.t1[index] = tissue.t1;
         grid.t2[index] = tissue.t2;
+        grid.t2prime[index] = tissue.t2prime;
       }
     }
     return grid;
@@ -8573,7 +8630,7 @@
       nx: n,
       ny: n,
       voxel: [fovX / n, fovY / n, 0],
-      maps: { pd: grid.pd, t1: grid.t1, t2: grid.t2 },
+      maps: { pd: grid.pd, t1: grid.t1, t2: grid.t2, t2prime: grid.t2prime },
       source: `Shepp\u2013Logan ${n}\xB2`,
       notes: []
     };
@@ -9656,7 +9713,9 @@
           notes.push(`${"xy"[axis]}: ${plan.count} spins per voxel did not reach the ${tolerancePercent(settings)} target (error ${(100 * plan.probe.error).toFixed(0)} %); expect residual stripes from incomplete spoiling.`);
         }
       }
-      if (this.phantom.maps.t2prime) notes.push("The T2\u2032 map is loaded but not simulated yet (no intravoxel dephasing).");
+      if (this.phantom.maps.t2prime) {
+        notes.push("Not simulated: T2\u2032 (the isochromat engine would need a Lorentzian line of spins in every voxel, 50\u2013100 \xD7 the spins). The phase-graph engine models it exactly.");
+      }
       if (this.phantom.maps.adc) notes.push("The ADC map is loaded but diffusion is not simulated yet.");
       for (const note of this.phantom.notes) notes.push(note);
       for (const feature of this.program.ignoredFeatures) notes.push(`Not simulated: ${IGNORED_FEATURE_TEXT[feature]}.`);
@@ -9798,7 +9857,7 @@
       if (phantom.sources.df.some((v) => v !== 0)) {
         notes.push(`Pulses act at off-resonance rounded to ${phantom.binning.df} Hz; free precession uses each voxel's exact B0.`);
       }
-      if (this.phantom.maps.t2prime) notes.push("The T2\u2032 map is loaded but not simulated yet (no intravoxel dephasing).");
+      if (phantom.classes.some((c) => c.t2prime !== void 0 && Number.isFinite(c.t2prime))) notes.push("T2\u2032 is exact: each configuration decays by e^{\u2212|\u03C4|/T2\u2032} (a Lorentzian line).");
       if (this.phantom.maps.adc) notes.push("The ADC map is loaded but diffusion is not simulated yet.");
       for (const note of this.phantom.notes) notes.push(note);
       for (const feature of this.program.ignoredFeatures) notes.push(`Not simulated: ${IGNORED_FEATURE_TEXT[feature]}.`);

@@ -4,7 +4,7 @@
  * The Shepp–Logan layout (Toft's modified ellipses) is painted as tissue
  * classes in drawing order — the last ellipse covering a voxel decides its
  * tissue — rather than with the original additive intensities, so every voxel
- * has physical PD, T1 and T2 and contrast follows from the sequence.
+ * has physical PD, T1, T2 and T2′ and contrast follows from the sequence.
  */
 
 import type { SpinSet } from '../engine/spins';
@@ -22,6 +22,7 @@ export interface VoxelGrid2D {
     /** Relaxation times [s]; Infinity means none. */
     t1: Float32Array;
     t2: Float32Array;
+    t2prime: Float32Array;
 }
 
 export interface Tissue {
@@ -29,15 +30,17 @@ export interface Tissue {
     pd: number;
     t1: number;
     t2: number;
+    /** Reversible dephasing [s]: 1/T2* = 1/T2 + 1/T2′. */
+    t2prime: number;
 }
 
-/** Representative 3 T tissue values. */
+/** Representative 3 T tissue values (T2′ from T2* of about 35, 53, 66, 400 and 80 ms). */
 export const TISSUES = {
-    skin: { name: 'skin', pd: 0.9, t1: 0.25, t2: 0.07 },
-    whiteMatter: { name: 'white matter', pd: 0.69, t1: 0.83, t2: 0.08 },
-    greyMatter: { name: 'grey matter', pd: 0.8, t1: 1.33, t2: 0.11 },
-    csf: { name: 'CSF', pd: 1, t1: 4.0, t2: 2.0 },
-    lesion: { name: 'lesion', pd: 0.85, t1: 1.6, t2: 0.25 },
+    skin: { name: 'skin', pd: 0.9, t1: 0.25, t2: 0.07, t2prime: 0.07 },
+    whiteMatter: { name: 'white matter', pd: 0.69, t1: 0.83, t2: 0.08, t2prime: 0.15 },
+    greyMatter: { name: 'grey matter', pd: 0.8, t1: 1.33, t2: 0.11, t2prime: 0.17 },
+    csf: { name: 'CSF', pd: 1, t1: 4.0, t2: 2.0, t2prime: 0.5 },
+    lesion: { name: 'lesion', pd: 0.85, t1: 1.6, t2: 0.25, t2prime: 0.12 },
 } as const satisfies Record<string, Tissue>;
 
 /** Ellipse: semi-axes (a, b) and centre (x0, y0) in [−1, 1] units, rotation in degrees. */
@@ -71,6 +74,7 @@ export function sheppLoganPhantom(n: number, fovX: number, fovY: number): VoxelG
         pd: new Float32Array(size),
         t1: new Float32Array(size).fill(Infinity),
         t2: new Float32Array(size).fill(Infinity),
+        t2prime: new Float32Array(size).fill(Infinity),
     };
     for (let iy = 0; iy < n; iy++) {
         // Normalised coordinates of the voxel centre (see spinsFromGrid2D), y up.
@@ -90,6 +94,7 @@ export function sheppLoganPhantom(n: number, fovX: number, fovY: number): VoxelG
             grid.pd[index] = tissue.pd;
             grid.t1[index] = tissue.t1;
             grid.t2[index] = tissue.t2;
+            grid.t2prime[index] = tissue.t2prime;
         }
     }
     return grid;
@@ -183,7 +188,7 @@ export function sheppLoganPhantom2D(n: number, fovX: number, fovY: number): Phan
         nx: n,
         ny: n,
         voxel: [fovX / n, fovY / n, 0],
-        maps: { pd: grid.pd, t1: grid.t1, t2: grid.t2 },
+        maps: { pd: grid.pd, t1: grid.t1, t2: grid.t2, t2prime: grid.t2prime },
         source: `Shepp–Logan ${n}²`,
         notes: [],
     };
