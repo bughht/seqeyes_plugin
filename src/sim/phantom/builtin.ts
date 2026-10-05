@@ -8,6 +8,7 @@
  */
 
 import type { SpinSet } from '../engine/spins';
+import type { Phantom2D } from './model';
 
 /** A 2D voxel grid in the x–y plane, centred on the isocentre. */
 export interface VoxelGrid2D {
@@ -173,4 +174,17 @@ export function spinsFromGrid2D(grid: VoxelGrid2D, options: GridSpinOptions = {}
         }
     }
     return set;
+}
+
+/** The tissue Shepp–Logan as a simulator phantom (no field maps, one coil). */
+export function sheppLoganPhantom2D(n: number, fovX: number, fovY: number): Phantom2D {
+    const grid = sheppLoganPhantom(n, fovX, fovY);
+    return {
+        nx: n,
+        ny: n,
+        voxel: [fovX / n, fovY / n, 0],
+        maps: { pd: grid.pd, t1: grid.t1, t2: grid.t2 },
+        source: `Shepp–Logan ${n}²`,
+        notes: [],
+    };
 }

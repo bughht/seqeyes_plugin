@@ -107,7 +107,9 @@ export function foldableAxes(analysis: DephasingAnalysis, extent: readonly [numb
  */
 export function resolutionCount(analysis: DephasingAnalysis, axis: number, voxel: number): number {
     const extent = analysis.readoutExtent[axis] * voxel;
-    return extent > 0.5 + 1e-3 ? Math.ceil(4 * extent) : 1;
+    // Rounding slack: a phantom exactly twice the pixel (extent 1 plus the
+    // half-cell of a Pulseq readout) needs 4, not 5.
+    return extent > 0.5 + 1e-3 ? Math.ceil(4 * extent - 0.05) : 1;
 }
 
 /**

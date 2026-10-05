@@ -24,6 +24,9 @@ export interface AdcTrajectory {
     excitation: Int32Array;
     /** For each readout, the RF key of that excitation ('' before any). */
     excitationKey: string[];
+    /** Readout window start [s, program clock] and sample spacing [s]; sample s sits at t0 + (s + ½)·dwell. */
+    t0: Float64Array;
+    dwell: Float64Array;
 }
 
 export function adcTrajectory(program: SimProgram): AdcTrajectory {
@@ -31,6 +34,8 @@ export function adcTrajectory(program: SimProgram): AdcTrajectory {
     const offsets: number[] = [];
     const excitation: number[] = [];
     const excitationKey: string[] = [];
+    const t0: number[] = [];
+    const dwell: number[] = [];
     const chunks: Float64Array[] = [];
     const k = [0, 0, 0];
     let total = 0;
@@ -60,6 +65,8 @@ export function adcTrajectory(program: SimProgram): AdcTrajectory {
             samples.push(segment.numSamples);
             excitation.push(excitations);
             excitationKey.push(currentKey);
+            t0.push(segment.t0);
+            dwell.push(segment.dwell);
             total += segment.numSamples;
             for (let a = 0; a < 3; a++) k[a] += segment.moments.dk[a];
         } else {
@@ -79,5 +86,7 @@ export function adcTrajectory(program: SimProgram): AdcTrajectory {
         k: kAll,
         excitation: Int32Array.from(excitation),
         excitationKey,
+        t0: Float64Array.from(t0),
+        dwell: Float64Array.from(dwell),
     };
 }

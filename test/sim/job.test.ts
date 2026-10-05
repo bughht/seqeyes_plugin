@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { parseSequenceBytes } from '../../src/pulseq/sequenceReader';
 import { simulateReference } from '../../src/sim/engine/reference';
 import { ChunkAccumulator, SimulationJob } from '../../src/sim/job';
-import { spinsFromGrid2D } from '../../src/sim/phantom/builtin';
+import { sheppLoganPhantom, spinsFromGrid2D } from '../../src/sim/phantom/builtin';
 import { analyzeDephasing, foldableAxes } from '../../src/sim/plan/dephasing';
 import { probeSubSpins } from '../../src/sim/plan/probe';
 import { compileProgram } from '../../src/sim/program/compile';
@@ -70,19 +70,20 @@ describe('simulation jobs', () => {
     const { path, bytes } = demo('writeGradientEcho.seq');
 
     it('folded classes give the signal of every spin simulated on its own', () => {
-        const settings = { phantom: 'shepp-logan' as const, size: 16, fov: [0.032, 0.032] as [number, number], subSpins: [8, 3] as [number, number] };
+        const settings = { phantom: { kind: 'shepp-logan' as const, size: 16, fov: [0.032, 0.032] as [number, number] }, subSpins: [8, 3] as [number, number] };
         const job = new SimulationJob(bytes, path, settings);
         expect(job.plan.axes.map(axis => axis.folded)).toEqual([false, true]);
         expect(job.plan.simulated).toBeLessThan(job.plan.spins);
         const folded = runAll(job, Array.from({ length: job.plan.chunks }, (_, i) => i));
 
-        const spins = spinsFromGrid2D(job.grid, { subSpins: [8, 3] });
+        // The legacy grid path places spins exactly as the phantom model does.
+        const spins = spinsFromGrid2D(sheppLoganPhantom(16, 0.032, 0.032), { subSpins: [8, 3] });
         const direct = simulateReference(compileProgram(parseSequenceBytes(bytes, path)), spins).signal;
         expect(relativeDifference(folded, direct)).toBeLessThan(1e-11);
     });
 
     it('sums to the same bits whatever order chunks finish in', () => {
-        const job = new SimulationJob(bytes, path, { phantom: 'shepp-logan', size: 48, subSpins: [16, 4] });
+        const job = new SimulationJob(bytes, path, { phantom: { kind: 'shepp-logan', size: 48 }, subSpins: [16, 4] });
         expect(job.plan.chunks).toBeGreaterThan(1);
         const ascending = Array.from({ length: job.plan.chunks }, (_, i) => i);
         const forward = runAll(job, ascending);
@@ -90,8 +91,23 @@ describe('simulation jobs', () => {
         expect(Buffer.from(backward.buffer).equals(Buffer.from(forward.buffer))).toBe(true);
     });
 
+    it('lets other workers reproduce an automatic plan exactly', () => {
+        // 8 mm phantom voxels on 2 mm pixels: x is spoiled (banded probe),
+        // y folded with several spins per voxel for resolution.
+        const leader = new SimulationJob(bytes, path, { phantom: { kind: 'shepp-logan', size: 32 }, subSpins: 'auto' });
+        expect(leader.plan.bands?.length).toBeGreaterThan(0);
+        expect(leader.plan.subSpins[1]).toBeGreaterThan(1);
+        const follower = new SimulationJob(bytes, path, { phantom: { kind: 'shepp-logan', size: 32 }, subSpins: leader.plan.resolved });
+        expect(follower.plan.subSpins).toEqual(leader.plan.subSpins);
+        expect([follower.plan.spins, follower.plan.simulated, follower.plan.chunks])
+            .toEqual([leader.plan.spins, leader.plan.simulated, leader.plan.chunks]);
+        const chunk = Math.floor(leader.plan.chunks / 2);
+        const a = leader.simulateChunk(chunk), b = follower.simulateChunk(chunk);
+        expect(Buffer.from(b.buffer).equals(Buffer.from(a.buffer))).toBe(true);
+    });
+
     it('chooses spins per voxel automatically and reports why', () => {
-        const job = new SimulationJob(bytes, path, { phantom: 'shepp-logan', size: 64, subSpins: 'auto' });
+        const job = new SimulationJob(bytes, path, { phantom: { kind: 'shepp-logan', size: 64 }, subSpins: 'auto' });
         const [x, y] = job.plan.axes;
         // 4 mm voxels. x is spoiled: ~5 cycles per TR over 128 TRs needs more
         // than ~640 spins per voxel (the probe settles on 768). y is folded and

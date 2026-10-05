@@ -1,31 +1,61 @@
 /**
  * Simulation worker: the panel's only route into the simulator. Bundled on its
- * own (web/sim-worker.js) so the page never loads the engine.
+ * own (web/sim-worker.js) so the page never loads the engine or the parsers.
  *
  * Messages (panel → worker):
- *   { type: 'open',   job, bytes, name, settings }  parse, compile, plan
- *   { type: 'chunk',  job, chunk }                   simulate one chunk
- *   { type: 'recon',  job, signal }                  image, k-space and raw views
- *   { type: 'close',  job }                          release the job
+ *   { type: 'phantom', id, request }                 load or re-slice a phantom
+ *   { type: 'open',    job, bytes, name, settings, layout? }  parse, compile, plan
+ *   { type: 'previewOpen', id, bytes, name }         recon context for live previews
+ *   { type: 'preview', id, signal, coils }           reconstruct a partial signal
+ *   { type: 'chunk',   job, chunk }                  simulate one chunk
+ *   { type: 'recon',   job, signal }                 images, k-space, raw layout
+ *   { type: 'export',  job, id, format, signal }     ISMRMRD / NumPy file bytes
+ *   { type: 'close',   job }                         release the job
  * Replies (worker → panel):
- *   { type: 'plan', job, plan }   { type: 'progress', job, chunk, fraction }
- *   { type: 'chunk', job, chunk, signal, ms }   { type: 'recon', job, ... }
- *   { type: 'error', job, message }
+ *   { type: 'phantom', id, volume, phantom }   { type: 'plan', job, plan, layout? }
+ *   { type: 'planProgress', job, message, fraction }   { type: 'preview', id, recon }
+ *   { type: 'progress', job, chunk, fraction } { type: 'chunk', job, chunk, signal, ms }
+ *   { type: 'recon', job, recon, layout }      { type: 'export', job, id, name, mime, bytes }
+ *   { type: 'error', job?, id?, message }
  * Several workers serve one job, each opening it; the panel hands out chunks
- * and sums them in order (job.ts). Cancelling terminates the workers.
+ * and sums them in order (job.ts). One worker keeps the job after the run
+ * for exports. Cancelling terminates the workers.
  */
 
+import { buildExport, type ExportFormat } from '../io/export';
 import { SimulationJob, type JobSettings } from '../job';
+import { sheppLoganPhantom2D } from '../phantom/builtin';
+import { loadPhantomFiles, withFieldMode, type FieldMapMode } from '../phantom/files';
+import { sliceVolume, type Phantom2D, type PhantomVolume, type SliceOptions } from '../phantom/model';
 import { standardSelfPort } from '../platform/browser';
+import { compileProgram } from '../program/compile';
+import { reconstructCartesian } from '../recon/cartesian';
+import { adcTrajectory, type AdcTrajectory } from '../recon/trajectory';
+import { parseSequenceBytes } from '../../pulseq/sequenceReader';
+
+type PhantomRequest =
+    /** The built-in phantom in the FOV of the given sequence (0.256 m without one). */
+    | { kind: 'shepp-logan'; size: number; sequence?: ArrayBuffer; name?: string }
+    /** Parse files into a volume (kept for re-slicing) and return one plane. */
+    | { kind: 'files'; files: { name: string; bytes: ArrayBuffer }[]; fields: FieldMapMode; slice: SliceOptions }
+    /** Another plane, or other field maps, of the volume loaded last. */
+    | { kind: 'slice'; fields: FieldMapMode; slice: SliceOptions };
 
 type Request =
-    | { type: 'open'; job: number; bytes: ArrayBuffer; name: string; settings: JobSettings }
+    | { type: 'phantom'; id: number; request: PhantomRequest }
+    | { type: 'open'; job: number; bytes: ArrayBuffer; name: string; settings: JobSettings; layout?: boolean }
+    | { type: 'previewOpen'; id: number; bytes: ArrayBuffer; name: string }
+    | { type: 'preview'; id: number; signal: Float64Array; coils: number }
     | { type: 'chunk'; job: number; chunk: number }
     | { type: 'recon'; job: number; signal: Float64Array }
+    | { type: 'export'; job: number; id: number; format: ExportFormat; signal: Float64Array }
     | { type: 'close'; job: number };
 
 const port = standardSelfPort();
 const jobs = new Map<number, SimulationJob>();
+let volume: PhantomVolume | null = null;
+/** Trajectory and FOV of the sequence being run, for reconstructing partial signals. */
+let previewSession: { id: number; trajectory: AdcTrajectory; fov: [number, number, number] | null } | null = null;
 /** Progress messages per chunk are spaced at least this far apart [ms]. */
 const PROGRESS_SPACING_MS = 100;
 
@@ -44,14 +74,90 @@ function jobFor(id: number): SimulationJob {
     return job;
 }
 
+/** Every buffer a phantom holds, so it can be transferred rather than copied. */
+function phantomBuffers(phantom: Phantom2D): ArrayBuffer[] {
+    const buffers = new Set<ArrayBuffer>();
+    for (const map of Object.values(phantom.maps)) if (map) buffers.add(map.buffer as ArrayBuffer);
+    if (phantom.coils) {
+        buffers.add(phantom.coils.re.buffer as ArrayBuffer);
+        buffers.add(phantom.coils.im.buffer as ArrayBuffer);
+    }
+    return [...buffers];
+}
+
+function volumeSummary(v: PhantomVolume) {
+    return {
+        shape: v.shape,
+        voxel: v.voxel,
+        source: v.source,
+        notes: v.notes,
+        maps: Object.keys(v.maps).filter(key => v.maps[key as keyof PhantomVolume['maps']]),
+    };
+}
+
+function loadPhantom(request: PhantomRequest): { volume: ReturnType<typeof volumeSummary> | null; phantom: Phantom2D } {
+    if (request.kind === 'shepp-logan') {
+        let fov: [number, number] = [0.256, 0.256];
+        if (request.sequence) {
+            const definition = parseSequenceBytes(new Uint8Array(request.sequence), request.name ?? '').definitions.get('FOV');
+            if (definition && definition.length >= 2 && +definition[0] > 0 && +definition[1] > 0) fov = [+definition[0], +definition[1]];
+        }
+        return { volume: null, phantom: sheppLoganPhantom2D(request.size, fov[0], fov[1]) };
+    }
+    if (request.kind === 'files') {
+        volume = loadPhantomFiles(request.files.map(file => ({ name: file.name, bytes: new Uint8Array(file.bytes) })));
+    } else if (!volume) {
+        throw new Error('Load a phantom file first.');
+    }
+    const phantom = sliceVolume(withFieldMode(volume, request.fields), request.slice);
+    return { volume: volumeSummary(volume), phantom };
+}
+
 function handle(request: Request): void {
     switch (request.type) {
+        case 'phantom': {
+            const result = loadPhantom(request.request);
+            port.post({ type: 'phantom', id: request.id, ...result }, phantomBuffers(result.phantom));
+            return;
+        }
         case 'open': {
             // One job at a time: a new open replaces whatever ran before.
             jobs.clear();
-            const job = new SimulationJob(new Uint8Array(request.bytes), request.name, request.settings);
+            let last = -Infinity;
+            const job = new SimulationJob(new Uint8Array(request.bytes), request.name, request.settings, {
+                onPlanProgress: (message, fraction) => {
+                    const t = now();
+                    if (t - last < PROGRESS_SPACING_MS) return;
+                    last = t;
+                    port.post({ type: 'planProgress', job: request.job, message, fraction }, []);
+                },
+            });
             jobs.set(request.job, job);
-            port.post({ type: 'plan', job: request.job, plan: job.plan }, []);
+            // The leader sends where every sample sits, so the panel can show partial raw data.
+            const layout = request.layout ? job.rawLayout() : undefined;
+            port.post({ type: 'plan', job: request.job, plan: job.plan, layout }, layout ? [layout.k.buffer as ArrayBuffer] : []);
+            return;
+        }
+        case 'previewOpen': {
+            const seq = parseSequenceBytes(new Uint8Array(request.bytes), request.name);
+            const definition = seq.definitions.get('FOV');
+            const fov: [number, number, number] | null = definition && definition.length >= 2 && definition.every(v => Number.isFinite(+v))
+                ? [+definition[0], +definition[1], definition.length > 2 ? +definition[2] : 0]
+                : null;
+            previewSession = { id: request.id, trajectory: adcTrajectory(compileProgram(seq)), fov };
+            return;
+        }
+        case 'preview': {
+            if (!previewSession || previewSession.id !== request.id) throw new Error('No preview session for this run.');
+            const recon = reconstructCartesian(previewSession.trajectory, request.signal, request.coils, { fov: previewSession.fov });
+            port.post({
+                type: 'preview',
+                id: request.id,
+                recon: {
+                    axes: recon.axes, nu: recon.nu, nv: recon.nv, delta: recon.delta, frames: recon.frames,
+                    images: recon.images, kspace: recon.kspace,
+                },
+            }, [recon.images.buffer as ArrayBuffer, recon.kspace.buffer as ArrayBuffer]);
             return;
         }
         case 'chunk': {
@@ -76,7 +182,12 @@ function handle(request: Request): void {
         case 'recon': {
             const job = jobFor(request.job);
             const recon = job.reconstruct(request.signal);
-            const raw = job.rawMagnitude(request.signal);
+            const layout = job.rawLayout();
+            const transfer: ArrayBuffer[] = [recon.images.buffer as ArrayBuffer, recon.kspace.buffer as ArrayBuffer];
+            for (const stack of [recon.coilImages, recon.coilKspace]) {
+                if (stack) transfer.push(stack.re.buffer as ArrayBuffer, stack.im.buffer as ArrayBuffer);
+            }
+            transfer.push(layout.k.buffer as ArrayBuffer);
             port.post({
                 type: 'recon',
                 job: request.job,
@@ -84,15 +195,26 @@ function handle(request: Request): void {
                     axes: recon.axes,
                     nu: recon.nu,
                     nv: recon.nv,
+                    delta: recon.delta,
                     frames: recon.frames,
                     images: recon.images,
                     kspace: recon.kspace,
+                    coilImages: recon.coilImages,
+                    coilKspace: recon.coilKspace,
                     fill: recon.fill,
                     offGridFraction: recon.offGridFraction,
                     warnings: recon.warnings,
                 },
-                raw,
-            }, [recon.images.buffer as ArrayBuffer, recon.kspace.buffer as ArrayBuffer, raw.magnitude.buffer as ArrayBuffer]);
+                // The phantom the job simulated (resolved coils included), for the Phantom view.
+                phantom: job.phantom,
+                layout,
+            }, transfer);
+            return;
+        }
+        case 'export': {
+            const job = jobFor(request.job);
+            const file = buildExport(job, request.signal, request.format);
+            port.post({ type: 'export', job: request.job, id: request.id, ...file }, [file.bytes.buffer as ArrayBuffer]);
             return;
         }
         case 'close':
@@ -106,6 +228,7 @@ port.onMessage(data => {
     try {
         handle(request);
     } catch (error) {
-        port.post({ type: 'error', job: request?.job ?? -1, message: errorMessage(error) }, []);
+        const ids = request as { job?: number; id?: number };
+        port.post({ type: 'error', job: ids.job ?? -1, id: ids.id ?? -1, message: errorMessage(error) }, []);
     }
 });

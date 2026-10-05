@@ -20,6 +20,14 @@ export interface CartesianOptions {
     maxSize?: number;
     /** Most frames to reconstruct. */
     maxFrames?: number;
+    /** Also return complex per-coil images and gridded k-space. */
+    complex?: boolean;
+}
+
+/** Complex data, frames × coils × nv × nu, rows top-down like the magnitude images. */
+export interface ComplexStack {
+    re: Float32Array;
+    im: Float32Array;
 }
 
 export interface CartesianRecon {
@@ -27,6 +35,9 @@ export interface CartesianRecon {
     axes: [number, number];
     nu: number;
     nv: number;
+    /** Grid spacing per image axis [1/m] (pixel size = 1/(n·Δk)), and the half-cell offset of each lattice. */
+    delta: [number, number];
+    offset: [number, number];
     frames: number;
     /** Magnitude images, frames × nv × nu (coil root-sum-of-squares). */
     images: Float32Array;
@@ -40,6 +51,9 @@ export interface CartesianRecon {
     /** Samples falling off the Cartesian grid by more than 10 % of a cell. */
     offGridFraction: number;
     warnings: string[];
+    /** With options.complex: per-coil complex images and k-space. */
+    coilImages?: ComplexStack;
+    coilKspace?: ComplexStack;
 }
 
 export function reconstructCartesian(
@@ -147,6 +161,11 @@ export function reconstructCartesian(
 
     const images = new Float32Array(frames * cells);
     const kspace = new Float32Array(frames * cells);
+    const complexSize = options.complex ? frames * coils * cells : 0;
+    const coilImages: ComplexStack | undefined = options.complex
+        ? { re: new Float32Array(complexSize), im: new Float32Array(complexSize) } : undefined;
+    const coilKspace: ComplexStack | undefined = options.complex
+        ? { re: new Float32Array(complexSize), im: new Float32Array(complexSize) } : undefined;
     const twiddleU = centredTwiddles(nu, offset[0]);
     const twiddleV = centredTwiddles(nv, offset[1]);
     const workRe = new Float64Array(cells), workIm = new Float64Array(cells);
@@ -160,6 +179,7 @@ export function reconstructCartesian(
                 workIm[i] = gridIm[base + i];
                 ks[i] += workRe[i] * workRe[i] + workIm[i] * workIm[i];
             }
+            if (coilKspace) copyTopDown(workRe, workIm, nu, nv, coilKspace, base);
             inverseDft2(workRe, workIm, nu, nv, twiddleU, twiddleV);
             // Grid row iv holds v = (iv − nv/2)·Δv; image row r shows the top first.
             for (let iv = 0; iv < nv; iv++) {
@@ -169,6 +189,7 @@ export function reconstructCartesian(
                     image[row * nu + iu] += workRe[i] * workRe[i] + workIm[i] * workIm[i];
                 }
             }
+            if (coilImages) copyTopDown(workRe, workIm, nu, nv, coilImages, base);
         }
         for (let i = 0; i < cells; i++) {
             image[i] = Math.sqrt(image[i]);
@@ -183,6 +204,8 @@ export function reconstructCartesian(
         axes,
         nu,
         nv,
+        delta,
+        offset,
         frames,
         images,
         kspace,
@@ -191,7 +214,20 @@ export function reconstructCartesian(
         fill: frames > 0 ? filledCount / (frames * cells) : 0,
         offGridFraction,
         warnings,
+        coilImages,
+        coilKspace,
     };
+}
+
+/** Copy a grid (row iv = v index, bottom-up) into a stack with the top row first. */
+function copyTopDown(re: Float64Array, im: Float64Array, nu: number, nv: number, out: ComplexStack, base: number): void {
+    for (let iv = 0; iv < nv; iv++) {
+        const row = nv - 1 - iv;
+        for (let iu = 0; iu < nu; iu++) {
+            out.re[base + row * nu + iu] = re[iv * nu + iu];
+            out.im[base + row * nu + iu] = im[iv * nu + iu];
+        }
+    }
 }
 
 /** Smallest positive spacing between distinct k values along an axis. */

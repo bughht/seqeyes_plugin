@@ -47,7 +47,12 @@ export interface ProbeOptions {
     reference?: number;
     /** Simulated time from the sequence start [s] (default 4 s). */
     horizon?: number;
+    /** Counts to try, ascending (default a mixed list; powers of two keep voxels on one lattice). */
+    candidates?: readonly number[];
 }
+
+/** Powers of two from 1 to 4096: counts whose stratified positions nest on one lattice. */
+export const POWER_OF_TWO_COUNTS: readonly number[] = Array.from({ length: 13 }, (_, i) => 2 ** i);
 
 export interface ProbeResult {
     /** Chosen spins per voxel along the axis. */
@@ -97,7 +102,9 @@ export function probeSubSpins(
         return signal;
     };
 
-    const candidates = [minimum, ...CANDIDATES.filter(n => n > minimum && n <= maximum)];
+    const list = options.candidates ?? CANDIDATES;
+    const first = options.candidates ? list.find(n => n >= minimum) ?? maximum : minimum;
+    const candidates = [first, ...list.filter(n => n > first && n <= maximum)];
     const tested: { count: number; error: number }[] = [];
     for (const count of candidates) {
         let error = 0;
