@@ -198,6 +198,17 @@ describe('simulate and reconstruct a Pulseq demo GRE', () => {
     });
 });
 
+describe('reconstruct a balanced SSFP', () => {
+    it('keeps every line in one frame, though each RF block carries the rewinder of the line before', () => {
+        // writeTrufi: 256 lines; the pulses' operator keys differ line by line, the slice does not.
+        const path = join(__dirname, '..', 'seqeyes_demo_seq_files', 'writeTrufi.seq');
+        const job = new SimulationJob(new Uint8Array(readFileSync(path)), path, { phantom: { kind: 'shepp-logan', size: 16 }, subSpins: [1, 1], throughSlice: 'off', engine: 'phase-graph' });
+        const recon = job.reconstruct(new Float64Array(2 * job.plan.adcSamples).fill(1));
+        expect(recon.frames).toBe(1);
+        expect(recon.fill).toBe(1);
+    });
+});
+
 describe('reconstruct a spin-echo train', () => {
     it('grids a TSE whose echoes land a hair apart in k', () => {
         // writeTSE has no FOV definition, so the grid step is estimated from

@@ -10027,7 +10027,7 @@
         if (use === "e" || use === "" || use === "u") {
           k.fill(0);
           excitations++;
-          currentKey = segment.key;
+          currentKey = String(segment.operator.freqOffset);
         } else if (use === "r") {
           for (let a = 0; a < 3; a++) k[a] = -k[a];
         }

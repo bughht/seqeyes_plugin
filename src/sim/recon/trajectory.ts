@@ -22,7 +22,12 @@ export interface AdcTrajectory {
     k: Float64Array;
     /** For each readout, the ordinal of the excitation it follows (−1 before any). */
     excitation: Int32Array;
-    /** For each readout, the RF key of that excitation ('' before any). */
+    /**
+     * For each readout, which slice its excitation selects ('' before any):
+     * the excitation's frequency offset, which is what places a slice. Not the
+     * pulse's operator key, which also changes with the phase-encode rewinders
+     * sharing its block or an RF phase cycle, and would make a slice of every TR.
+     */
     excitationKey: string[];
     /** Readout window start [s, program clock] and sample spacing [s]; sample s sits at t0 + (s + ½)·dwell. */
     t0: Float64Array;
@@ -48,7 +53,7 @@ export function adcTrajectory(program: SimProgram): AdcTrajectory {
             if (use === 'e' || use === '' || use === 'u') {
                 k.fill(0);
                 excitations++;
-                currentKey = segment.key;
+                currentKey = String(segment.operator.freqOffset);
             } else if (use === 'r') {
                 for (let a = 0; a < 3; a++) k[a] = -k[a];
             }
