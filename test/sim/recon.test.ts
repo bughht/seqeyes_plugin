@@ -143,6 +143,29 @@ describe('simulate and reconstruct a Pulseq demo GRE', () => {
     });
 });
 
+describe('reconstruct a spin-echo train', () => {
+    it('grids a TSE whose echoes land a hair apart in k', () => {
+        // writeTSE has no FOV definition, so the grid step is estimated from
+        // the samples; successive echoes differ by ~1e-4 of a step, which must
+        // not pass for the step itself.
+        const path = join(__dirname, '..', 'seqeyes_demo_seq_files', 'writeTSE.seq');
+        const job = new SimulationJob(new Uint8Array(readFileSync(path)), path, { phantom: { kind: 'shepp-logan', size: 16 }, subSpins: [1, 1], throughSlice: 'off' });
+        expect(job.fieldOfView).toBeNull();
+        let total: ChunkAccumulator | null = null;
+        for (let chunk = 0; chunk < job.plan.chunks; chunk++) {
+            const signal = job.simulateChunk(chunk);
+            total ??= new ChunkAccumulator(signal.length, job.plan.chunks);
+            total.add(chunk, signal);
+        }
+        const recon = job.reconstruct(total!.signal);
+        expect([recon.nu, recon.nv]).toEqual([256, 256]);
+        recon.delta.forEach(step => expect(step).toBeCloseTo(3.9, 1));
+        expect(recon.fill).toBe(1);
+        expect(recon.warnings).toEqual([]);
+        expect(Math.max(...recon.images)).toBeGreaterThan(0);
+    });
+});
+
 describe('simulate and reconstruct', () => {
     const n = 32, fov = 0.25;
     const seq = parseSequenceText(spinWarp(n, fov));

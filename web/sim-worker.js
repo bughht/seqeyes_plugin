@@ -8373,7 +8373,7 @@
     const delta = axes.map((axis) => {
       const fov = options.fov?.[axis];
       if (fov && fov > 0) return 1 / fov;
-      return estimateStep(trajectory, axis);
+      return estimateStep(trajectory, axis, 2 * extent[axis]);
     });
     const offset = axes.map((axis, i2) => gridOffset(k, axis, delta[i2]));
     const size = axes.map((axis, i2) => {
@@ -8508,7 +8508,7 @@
       }
     }
   }
-  function estimateStep(trajectory, axis) {
+  function estimateStep(trajectory, axis, span) {
     const values = [];
     for (let r = 0; r < trajectory.readouts; r++) {
       const centre = trajectory.offsets[r] + (trajectory.samples[r] >> 1);
@@ -8520,10 +8520,9 @@
     }
     values.sort((a, b) => a - b);
     let step = Infinity;
-    const span = values.length ? values[values.length - 1] - values[0] : 0;
     for (let i2 = 1; i2 < values.length; i2++) {
       const d = values[i2] - values[i2 - 1];
-      if (d > span * 1e-6 && d < step) step = d;
+      if (d > span * 1e-4 && d < step) step = d;
     }
     return Number.isFinite(step) && step > 0 ? step : 1;
   }

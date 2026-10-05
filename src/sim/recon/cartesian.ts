@@ -79,7 +79,7 @@ export function reconstructCartesian(
     const delta = axes.map(axis => {
         const fov = options.fov?.[axis];
         if (fov && fov > 0) return 1 / fov;
-        return estimateStep(trajectory, axis);
+        return estimateStep(trajectory, axis, 2 * extent[axis]);
     }) as [number, number];
     // Pulseq's spin-warp readouts sample kx at half-integer positions,
     // (s − N/2 + ½)·Δk, with no sample at k = 0; phase encodes sit on integers.
@@ -230,8 +230,12 @@ function copyTopDown(re: Float64Array, im: Float64Array, nu: number, nv: number,
     }
 }
 
-/** Smallest positive spacing between distinct k values along an axis. */
-function estimateStep(trajectory: AdcTrajectory, axis: number): number {
+/**
+ * Smallest spacing between distinct k values along an axis. Values closer
+ * than 1e-4 of the axis's whole k span are one value: echoes of a spin-echo
+ * train land a hair apart (sub-0.1 % of a step) and must not pass for a grid.
+ */
+function estimateStep(trajectory: AdcTrajectory, axis: number, span: number): number {
     const values: number[] = [];
     for (let r = 0; r < trajectory.readouts; r++) {
         const centre = trajectory.offsets[r] + (trajectory.samples[r] >> 1);
@@ -243,10 +247,9 @@ function estimateStep(trajectory: AdcTrajectory, axis: number): number {
     }
     values.sort((a, b) => a - b);
     let step = Infinity;
-    const span = values.length ? values[values.length - 1] - values[0] : 0;
     for (let i = 1; i < values.length; i++) {
         const d = values[i] - values[i - 1];
-        if (d > span * 1e-6 && d < step) step = d;
+        if (d > span * 1e-4 && d < step) step = d;
     }
     return Number.isFinite(step) && step > 0 ? step : 1;
 }
