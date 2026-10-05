@@ -7251,6 +7251,7 @@ var SeqEyesNdView = (function () {
     var transformed = null;     // { key, re, im } for the active FFT mask
     var offscreen = null, offscreenKey = '';
     var sliceCache = null;      // { key, values, width, height, min, max, rowStep }
+    var rangeCache = null;      // { key, min, max } over every plane the sliders reach
     var hover = null;           // { kind: 'image'|'plot', x, y, label }
     var drag = null;
 
@@ -7278,6 +7279,7 @@ var SeqEyesNdView = (function () {
       dataset = ds;
       transformed = null;
       sliceCache = null;
+      rangeCache = null;
       offscreenKey = '';
       hover = null;
       if (!ds) { state = null; syncControls(); render(); return; }
@@ -7346,6 +7348,40 @@ var SeqEyesNdView = (function () {
       return dataset.valueUnit || '';
     }
 
+    /**
+     * The display range shared by every plane the sliders reach, so planes,
+     * frames, echoes and coils compare at a glance: an empty plane of a
+     * volume shows dark, not its own faint ringing stretched to white. A
+     * dimension whose entries carry their own units (phantom maps, RF
+     * quantities) stays at its current entry; with one on X or Y the image
+     * mixes units, and each plane keeps its own range (null).
+     */
+    function sharedRange() {
+      var own = [];
+      for (var d = 0; d < dataset.dims.length; d++) {
+        if (!dataset.dims[d].units) continue;
+        if (d === state.x || d === state.y) return null;
+        own.push(d);
+      }
+      var key = [fftKey(), state.part, own.map(function (o) { return state.indices[o]; }).join(',')].join('|');
+      if (rangeCache && rangeCache.key === key) return rangeCache;
+      var src = source();
+      var st = strides();
+      var min = Infinity, max = -Infinity;
+      for (var i = 0; i < src.re.length; i++) {
+        var keep = true;
+        for (var k = 0; k < own.length && keep; k++) {
+          if (Math.floor(i / st[own[k]]) % dataset.dims[own[k]].size !== state.indices[own[k]]) keep = false;
+        }
+        if (!keep) continue;
+        var v = partValue(src.re, src.im, i);
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+      rangeCache = { key: key, min: min, max: max };
+      return rangeCache;
+    }
+
     /** The displayed plane, cached until anything that changes it does. */
     function slice() {
       var key = [fftKey(), state.x, state.y, state.indices.join(','), state.part, state.log ? 1 : 0].join('|');
@@ -7373,15 +7409,18 @@ var SeqEyesNdView = (function () {
           if (state.part === 'abs' && v > peak) peak = v;
         }
       }
+      var shared = state.part === 'phase' ? null : sharedRange();
       if (state.part === 'abs' && state.log) {
+        var top = shared && shared.max > 0 ? shared.max : peak;
         for (var p = 0; p < values.length; p++) {
-          values[p] = peak > 0 && values[p] > 0 ? Math.max(-LOG_RANGE_DB, 20 * Math.log10(values[p] / peak)) : -LOG_RANGE_DB;
+          values[p] = top > 0 && values[p] > 0 ? Math.max(-LOG_RANGE_DB, 20 * Math.log10(values[p] / top)) : -LOG_RANGE_DB;
         }
         min = -LOG_RANGE_DB; max = 0;
       } else if (state.part === 'phase') {
         min = -Math.PI; max = Math.PI;
-      } else if (!(max > min)) {
-        max = min + 1;
+      } else {
+        if (shared && Number.isFinite(shared.min) && Number.isFinite(shared.max)) { min = shared.min; max = shared.max; }
+        if (!(max > min)) max = min + 1;
       }
       if (state.part === 'abs' && !state.log) min = 0;
       sliceCache = { key: key, values: values, width: width, height: height, min: min, max: max, rowStep: rowStep };
@@ -7927,7 +7966,10 @@ var SeqEyesNdView = (function () {
       var data = line();
       var lineMax = 0;
       for (i = 0; i < data.re.length; i++) lineMax = Math.max(lineMax, Math.hypot(data.re[i], data.im[i]));
-      return { width: sl.width, height: sl.height, mean: sum / sl.values.length, max: max, lineLength: data.re.length, lineMax: lineMax };
+      return {
+        width: sl.width, height: sl.height, mean: sum / sl.values.length, max: max,
+        windowMin: sl.min, windowMax: sl.max, lineLength: data.re.length, lineMax: lineMax
+      };
     }
 
     return {
