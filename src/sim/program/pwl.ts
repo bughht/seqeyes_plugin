@@ -123,6 +123,27 @@ export function piecesMoments(pieces: GradientPieces): SegmentMoments {
     return { dk, kIntegral, kSecond };
 }
 
+/** Exact moments over [a, b] ⊆ window, K measured from a. */
+export function windowMoments(pieces: GradientPieces, a: number, b: number): SegmentMoments {
+    const t: number[] = [], ga: number[] = [], gb: number[] = [];
+    const n = pieceCount(pieces);
+    for (let piece = 0; piece < n; piece++) {
+        const t0 = pieces.t[piece], t1 = pieces.t[piece + 1];
+        const u = Math.max(a, t0), v = Math.min(b, t1);
+        if (!(v > u)) continue;
+        const o = 3 * piece;
+        if (!t.length) t.push(u);
+        t.push(v);
+        for (let axis = 0; axis < 3; axis++) {
+            const g0 = pieces.ga[o + axis], g1 = pieces.gb[o + axis];
+            ga.push(t1 > t0 ? g0 + (g1 - g0) * (u - t0) / (t1 - t0) : g0);
+            gb.push(t1 > t0 ? g0 + (g1 - g0) * (v - t0) / (t1 - t0) : g1);
+        }
+    }
+    if (!t.length) return { dk: new Float64Array(3), kIntegral: new Float64Array(3), kSecond: new Float64Array(6) };
+    return piecesMoments({ t: Float64Array.from(t), ga: Float64Array.from(ga), gb: Float64Array.from(gb) });
+}
+
 /**
  * K(t) − K(t0) at ascending times inside the window, written xyz-interleaved
  * into `out` (length 3·times.length).

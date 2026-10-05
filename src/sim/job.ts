@@ -372,11 +372,13 @@ export class SimulationJob {
                     + `(error ${(100 * plan.probe.error).toFixed(0)} %); expect residual stripes from incomplete spoiling.`);
             }
         }
-        if (this.phantom.maps.t2prime) {
-            notes.push('Not simulated: T2′ (the isochromat engine would need a Lorentzian line of spins in every voxel, '
-                + '50–100 × the spins). The phase-graph engine models it exactly.');
+        const hasT2prime = this.physics.t2p.some(Number.isFinite), hasDiffusion = this.physics.adc.some(d => d > 0);
+        if (hasT2prime || hasDiffusion) {
+            notes.push(`${hasT2prime && hasDiffusion ? 'T2′ and diffusion follow' : hasT2prime ? 'T2′ follows' : 'Diffusion follows'} `
+                + 'the main echo pathway (from each excitation, reversed by each refocusing pulse): exact for gradient and spin '
+                + 'echoes, CPMG trains and diffusion-weighted EPI; approximate where other pathways carry signal (balanced SSFP, '
+                + 'stimulated echoes, spoiled steady states). The phase-graph engine is exact for every pathway.');
         }
-        if (this.phantom.maps.adc) notes.push('The ADC map is loaded but diffusion is not simulated yet.');
         for (const note of this.phantom.notes) notes.push(note);
         for (const feature of this.program.ignoredFeatures) notes.push(`Not simulated: ${IGNORED_FEATURE_TEXT[feature]}.`);
 
@@ -521,7 +523,9 @@ export class SimulationJob {
             notes.push(`Pulses act at off-resonance rounded to ${phantom.binning.df} Hz; free precession uses each voxel's exact B0.`);
         }
         if (phantom.classes.some(c => c.t2prime !== undefined && Number.isFinite(c.t2prime))) notes.push('T2′ is exact: each configuration decays by e^{−|τ|/T2′} (a Lorentzian line).');
-        if (this.phantom.maps.adc) notes.push('The ADC map is loaded but diffusion is not simulated yet.');
+        if (phantom.classes.some(c => (c.adc ?? 0) > 0)) {
+            notes.push('Diffusion is exact: each configuration decays by e^{−bD}, b from its own gradient history (isotropic D).');
+        }
         for (const note of this.phantom.notes) notes.push(note);
         for (const feature of this.program.ignoredFeatures) notes.push(`Not simulated: ${IGNORED_FEATURE_TEXT[feature]}.`);
         const none: AxisPlan = { count: 1, reason: 'none', folded: false };

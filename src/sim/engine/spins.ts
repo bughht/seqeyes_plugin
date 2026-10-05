@@ -24,6 +24,13 @@ export interface SpinSet {
     /** Relaxation rates [1/s]; 0 means no relaxation. */
     readonly r1: Float64Array;
     readonly r2: Float64Array;
+    /**
+     * Reversible dephasing rate 1/T2′ [1/s] and apparent diffusion
+     * coefficient [m²/s], applied at readout along the main echo pathway
+     * (engine/pathway.ts). Absent or 0: none.
+     */
+    readonly r2prime?: Float64Array;
+    readonly adc?: Float64Array;
     /** Signal weight: PD · voxel volume / spins in the voxel. */
     readonly weight: Float64Array;
     /** Effective complex B1+ scale (1 = nominal), real and imaginary parts. */
@@ -82,6 +89,9 @@ export interface SpinSpec {
     x?: number; y?: number; z?: number;
     df?: number;
     t1?: number; t2?: number;
+    t2prime?: number;
+    /** Apparent diffusion coefficient [m²/s]. */
+    adc?: number;
     weight?: number;
     b1?: [number, number];
     rx?: [number, number][];
@@ -90,11 +100,14 @@ export interface SpinSpec {
 /** Build a spin set from per-spin descriptions (tests and probes). */
 export function spinSetFrom(specs: SpinSpec[], coils = 1): SpinSet {
     const count = specs.length;
+    const pathway = specs.some(spec => spec.t2prime !== undefined || spec.adc !== undefined);
     const set = {
         count,
         x: new Float64Array(count), y: new Float64Array(count), z: new Float64Array(count),
         df: new Float64Array(count),
         r1: new Float64Array(count), r2: new Float64Array(count),
+        r2prime: pathway ? new Float64Array(count) : undefined,
+        adc: pathway ? new Float64Array(count) : undefined,
         weight: new Float64Array(count),
         b1Re: new Float64Array(count), b1Im: new Float64Array(count),
         coils,
@@ -107,6 +120,10 @@ export function spinSetFrom(specs: SpinSpec[], coils = 1): SpinSet {
         set.df[i] = spec.df ?? 0;
         set.r1[i] = spec.t1 && Number.isFinite(spec.t1) ? 1 / spec.t1 : 0;
         set.r2[i] = spec.t2 && Number.isFinite(spec.t2) ? 1 / spec.t2 : 0;
+        if (set.r2prime && set.adc) {
+            set.r2prime[i] = spec.t2prime && Number.isFinite(spec.t2prime) ? 1 / spec.t2prime : 0;
+            set.adc[i] = spec.adc ?? 0;
+        }
         set.weight[i] = spec.weight ?? 1;
         set.b1Re[i] = spec.b1?.[0] ?? 1;
         set.b1Im[i] = spec.b1?.[1] ?? 0;

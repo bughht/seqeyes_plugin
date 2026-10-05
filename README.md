@@ -215,7 +215,8 @@ simulation of the open sequence on a phantom, entirely in your browser
 
 **Phantoms**
 
-- the built-in tissue Shepp–Logan (PD, T1, T2, T2′ at 3 T) in the sequence's FOV;
+- the built-in tissue Shepp–Logan (PD, T1, T2, T2′ and ADC at 3 T) in the
+  sequence's FOV;
 - MRzero's example phantoms: the cropped 2-D brain and the BrainWeb-derived
   3-D subjects. They are downloaded from
   [MRsources/MRzero-Core](https://github.com/MRsources/MRzero-Core) (AGPL-3.0)
@@ -255,13 +256,23 @@ sequences it is about 5–15× faster. Voxels are uniform boxes. Each voxel's
 B0 enters exactly, through the states' dephasing time; pulses use it rounded
 to a few Hz. **T2′** is exact too: each state decays by e^{−|τ|/T2′}, with τ
 its dephasing time counted from the pulses' centres. That is a Lorentzian line
-of reversible dephasing, which spin echoes refocus. The isochromat engine
-leaves T2′ out and says so: pairing each spin with one Lorentzian offset
-undoes the spoiling cancellation, and giving every spin a full line of offsets
-costs 50–100 × the spins. Continuous maps such as BrainWeb are binned into at
+of reversible dephasing, which spin echoes refocus. So is **diffusion**: each
+state decays by e^{−bD}, with b = 4π²∫|k|²dt over its own history, Z states
+included, so stimulated echoes and the diffusion damping of spoiled steady
+states come out right. Continuous maps such as BrainWeb are binned into at
 most 2048 tissue classes, with a note. It cannot simulate pulses played with
 in-plane gradients (in-plane selective or oblique excitation); use isochromats
 there.
+
+Isochromats sum every pathway in each spin, so they weight T2′ and diffusion
+by the **main echo pathway**: from each excitation, reversed by each
+refocusing pulse. That is exact for gradient and spin echoes, CPMG trains and
+diffusion-weighted EPI. It is approximate where other pathways carry signal:
+balanced SSFP, stimulated echoes, and the diffusion damping of spoiled steady
+states. Lorentzian offsets on the spins themselves were tried and dropped.
+Pairing each spin with one offset undoes the spoiling cancellation (still
+8–16 % off at 2048 spins per voxel), and giving every spin a full line of
+offsets costs 50–100 × the spins.
 
 **Viewing the data.** Phantom maps, raw data (by the sequence's labels — LIN,
 PAR, SLC, ECO, REP, … — by acquisition, or every sample in time order),
@@ -293,8 +304,8 @@ finds the count whose signal stays within 2 % of a reference that cannot
 alias; long-T2 CSF in an RF-spoiled GRE needs a few hundred. Sub-slices
 multiply the work. When a continuous map such as BrainWeb would take too
 long, the plan takes a coarser tested spacing and says so. **Not yet**:
-- diffusion: the ADC map is shown but not simulated;
-- T2′ with isochromats (the phase-graph engine simulates it);
+- anisotropic diffusion (the ADC is a scalar) and Monte Carlo diffusion in
+  restricted geometries;
 - 3-D encoding;
 - dynamic pTx;
 - non-Cartesian gridding (the preview recon snaps samples to the nearest

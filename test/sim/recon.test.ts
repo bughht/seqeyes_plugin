@@ -113,7 +113,8 @@ describe('simulate and reconstruct a Pulseq demo GRE', () => {
         }
 
         // Prediction: flip, TR and TE measured from the program; ideal spoiling
-        // from equilibrium up to the k-space centre line (linear order, line N/2).
+        // from equilibrium up to the k-space centre line (linear order, line N/2),
+        // T2* decay to TE.
         const centres: number[] = [];
         let flipDeg = 0, firstAdcCentre = NaN;
         for (const segment of program.segments()) {
@@ -134,7 +135,7 @@ describe('simulate and reconstruct a Pulseq demo GRE', () => {
             const e1 = Math.exp(-tr / grid.t1[i]);
             let mz = 1;
             for (let line = 0; line < n / 2; line++) mz = mz * Math.cos(alpha) * e1 + 1 - e1;
-            expected[i] = grid.pd[i] * mz * Math.sin(alpha) * Math.exp(-te / grid.t2[i]);
+            expected[i] = grid.pd[i] * mz * Math.sin(alpha) * Math.exp(-te / grid.t2[i]) * Math.exp(-te / grid.t2prime[i]);
         }
         const fit = pearson(image, expected);
         expect(fit).toBeGreaterThan(0.99);

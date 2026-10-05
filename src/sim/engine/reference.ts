@@ -9,7 +9,9 @@
  *     in the frame rotating at the pulse frequency offset so the offset's
  *     phase ramp is exact rather than sampled;
  *   - every ADC sample is evaluated from the segment-start state (spins that
- *     evolve identically are summed first; see ReadoutGrouper).
+ *     evolve identically are summed first; see ReadoutGrouper), weighted by
+ *     the spins' T2′ and diffusion along the main echo pathway
+ *     (see pathway.ts).
  * By default each RF operator is stepped once per spin and cached as the
  * exact affine map it applies (see RfOperatorCache); stepping every event
  * ('stepping') remains available and is the check on the cache.
@@ -23,6 +25,7 @@ import type { SimProgram } from '../program/compile';
 import { adcSampleTimes } from '../program/compile';
 import { addPiecesIntegral, piecesKAt, relativePieces } from '../program/pwl';
 import type { AdcSegment, RfSegment } from '../program/types';
+import { MainPathway } from './pathway';
 import type { SpinMembers, SpinSet, SpinState } from './spins';
 import { equilibriumState } from './spins';
 
@@ -94,6 +97,7 @@ export function simulateReference(program: SimProgram, spins: SpinSet, options: 
     const lattice = (options.readout ?? 'lattice') === 'lattice';
     const interval = Math.max(1, options.progressInterval ?? 64);
     const free = new PendingFree(new FreeKernel(spins));
+    const weighting = PathwayWeighting.of(spins, options.readout ?? 'lattice');
     let sampleOffset = 0;
     let processed = 0;
     const until = options.until ?? Infinity;
@@ -101,16 +105,19 @@ export function simulateReference(program: SimProgram, spins: SpinSet, options: 
         if (segment.t0 >= until) break;
         if (segment.kind === 'free') {
             free.add(segment.moments.dk, segment.t1 - segment.t0);
+            weighting?.pathway.free(segment.moments, segment.t1 - segment.t0);
         } else if (segment.kind === 'rf') {
             free.flush(spins, state);
             if (cache) cache.apply(segment, state);
             else applyRf(segment, spins, state);
+            weighting?.pathway.pulse(segment);
         } else {
             free.flush(spins, state);
-            sampleAdc(segment, spins, state, signal, sampleOffset, grouper, members, area, lattice);
+            sampleAdc(segment, spins, state, signal, sampleOffset, grouper, members, area, lattice, weighting);
             sampleOffset += segment.numSamples;
             // The window itself is free precession from the state just sampled.
             free.add(segment.moments.dk, segment.t1 - segment.t0);
+            weighting?.pathway.free(segment.moments, segment.t1 - segment.t0);
         }
         for (let a = 0; a < 3; a++) area[a] += segment.moments.dk[a];
         if (++processed % interval === 0) {
@@ -1013,6 +1020,69 @@ function synthesizeOnLattice(
 /** Samples between exact re-evaluations of the phasor recurrence. */
 const RECURRENCE_ANCHOR = 64;
 
+/**
+ * T2′ and diffusion of spins that carry them, along the main echo pathway:
+ * at a readout each spin's magnetization is scaled by e^{−bD} and by
+ * e^{−|τ|/T2′} at the window start, and then decays at R2 + R2′ while |τ|
+ * grows (after the echo) or at R2 − R2′ while it shrinks (before it). Each
+ * side reads out through groupings with that rate.
+ */
+class PathwayWeighting {
+    readonly pathway = new MainPathway();
+    private readonly groupers = new Map<number, ReadoutGrouper>();
+    /** Each spin's (D, R2′) pair, and the distinct pairs. */
+    private readonly pairOf: Int32Array;
+    private readonly pairs: { adc: number; rate: number }[] = [];
+    private readonly factor: Float64Array;
+    private readonly mx: Float64Array;
+    private readonly my: Float64Array;
+
+    private constructor(private readonly spins: SpinSet, private readonly grouped: boolean) {
+        const index = new Map<string, number>();
+        this.pairOf = new Int32Array(spins.count);
+        for (let i = 0; i < spins.count; i++) {
+            const adc = spins.adc ? Math.max(0, spins.adc[i]) : 0, rate = spins.r2prime ? Math.max(0, spins.r2prime[i]) : 0;
+            const key = `${adc}|${rate}`;
+            let p = index.get(key);
+            if (p === undefined) { p = this.pairs.length; index.set(key, p); this.pairs.push({ adc, rate }); }
+            this.pairOf[i] = p;
+        }
+        this.factor = new Float64Array(this.pairs.length);
+        this.mx = new Float64Array(spins.count);
+        this.my = new Float64Array(spins.count);
+    }
+
+    static of(spins: SpinSet, readout: string): PathwayWeighting | null {
+        const used = (values?: Float64Array) => !!values && values.some(v => v > 0);
+        return used(spins.r2prime) || used(spins.adc) ? new PathwayWeighting(spins, readout !== 'direct') : null;
+    }
+
+    /** Groupings whose decay rate is R2 + sign·R2′. */
+    grouper(sign: number): ReadoutGrouper {
+        let grouper = this.groupers.get(sign);
+        if (!grouper) {
+            const { r2, r2prime } = this.spins;
+            const rate = r2prime ? Float64Array.from(r2, (v, i) => v + sign * Math.max(0, r2prime[i])) : r2;
+            grouper = new ReadoutGrouper({ ...this.spins, r2: rate }, this.grouped);
+            this.groupers.set(sign, grouper);
+        }
+        return grouper;
+    }
+
+    /** The state scaled per spin by e^{−bD}·e^{−sign·R2′·τ} (τ at the window start); reuses its buffers. */
+    scaled(state: SpinState, sign: number): SpinState {
+        const { tau, b } = this.pathway;
+        this.pairs.forEach((pair, p) => { this.factor[p] = Math.exp(-b * pair.adc - sign * pair.rate * tau); });
+        const { mx, my, factor, pairOf } = this;
+        for (let i = 0; i < mx.length; i++) {
+            const f = factor[pairOf[i]];
+            mx[i] = state.mx[i] * f;
+            my[i] = state.my[i] * f;
+        }
+        return { mx, my, mz: state.mz };
+    }
+}
+
 function sampleAdc(
     segment: AdcSegment,
     spins: SpinSet,
@@ -1023,24 +1093,46 @@ function sampleAdc(
     members: SpinMembers | null,
     area: Float64Array,
     useLattice: boolean,
+    weighting: PathwayWeighting | null = null,
 ): void {
     const n = segment.numSamples;
     const coils = members ? members.coils : spins.coils;
     const times = adcSampleTimes(segment);
     const k = new Float64Array(3 * n);
     piecesKAt(segment.gradient, times, k);
-    const groups = grouper.groups(segment.activeAxes);
-
-    // Weighted, coil-weighted transverse magnetization of each group at t0.
-    const gRe = new Float64Array(groups.count * coils);
-    const gIm = new Float64Array(groups.count * coils);
-    const any = members
-        ? sumMembers(members, spins, groups, state, area, gRe, gIm)
-        : sumSpins(spins, groups, state, gRe, gIm);
-
     const sumRe = new Float64Array(n * coils);
     const sumIm = new Float64Array(n * coils);
-    if (any) synthesizeReadout(segment, groups, gRe, gIm, coils, k, times, sumRe, sumIm, useLattice);
+
+    // One synthesis, or with T2′ one each side of the main pathway's echo (τ + t = 0).
+    const branches: { sign: number; from: number; to: number }[] = [{ sign: 1, from: 0, to: n }];
+    const active = weighting?.pathway.excited ? weighting : null;
+    if (active && spins.r2prime) {
+        const tau = active.pathway.tau;
+        if (tau + times[0] - segment.t0 < 0) {
+            let cross = 0;
+            while (cross < n && tau + times[cross] - segment.t0 < 0) cross++;
+            branches.splice(0, 1, { sign: -1, from: 0, to: cross });
+            if (cross < n) branches.push({ sign: 1, from: cross, to: n });
+        }
+    }
+    const tmpRe = branches.length > 1 ? new Float64Array(n * coils) : sumRe;
+    const tmpIm = branches.length > 1 ? new Float64Array(n * coils) : sumIm;
+    for (const branch of branches) {
+        const groups = (active ? active.grouper(branch.sign) : grouper).groups(segment.activeAxes);
+        const source = active ? active.scaled(state, branch.sign) : state;
+        // Weighted, coil-weighted transverse magnetization of each group at t0.
+        const gRe = new Float64Array(groups.count * coils);
+        const gIm = new Float64Array(groups.count * coils);
+        const any = members
+            ? sumMembers(members, spins, groups, source, area, gRe, gIm)
+            : sumSpins(spins, groups, source, gRe, gIm);
+        if (!any) continue;
+        if (tmpRe !== sumRe) { tmpRe.fill(0); tmpIm.fill(0); }
+        synthesizeReadout(segment, groups, gRe, gIm, coils, k, times, tmpRe, tmpIm, useLattice);
+        if (tmpRe !== sumRe) {
+            for (let o = branch.from * coils; o < branch.to * coils; o++) { sumRe[o] += tmpRe[o]; sumIm[o] += tmpIm[o]; }
+        }
+    }
     emitReadout(segment, sumRe, sumIm, coils, signal, sampleOffset);
 }
 

@@ -14,7 +14,11 @@
  *
  * Operators, per lane (tissue class × sub-slice):
  *   - free precession over (Δk, Δt): every F moves to (k + Δk, τ + Δt) and
- *     decays by E2; Z decays by E1, and Z_(0,0) recovers by 1 − E1;
+ *     decays by E2; Z decays by E1, and Z_(0,0) recovers by 1 − E1. With an
+ *     ADC D, each configuration also decays by e^{−bD} with its own
+ *     b = 4π²∫|k(t)|²dt over the interval (Z states keep their k): exact
+ *     isotropic Gaussian diffusion for every pathway, stimulated echoes
+ *     included;
  *   - an RF pulse: the exact rotation (with relaxation) the isochromat engine
  *     steps for a spin at the sub-slice's z, at the class's off-resonance Δf
  *     and B1. The precession under the pulse is split at its centre:
@@ -44,7 +48,7 @@
  */
 
 import { adcSampleTimes, type SimProgram } from '../program/compile';
-import { piecesKAt } from '../program/pwl';
+import { piecesKAt, windowMoments, type SegmentMoments } from '../program/pwl';
 import type { AdcSegment, RfSegment } from '../program/types';
 import {
     countAdcSamples,
@@ -67,6 +71,8 @@ export interface PhaseGraphClass {
     df: number;
     /** T2′ [s] of a Lorentzian line (absent or Infinity: none). */
     t2prime?: number;
+    /** Apparent diffusion coefficient [m²/s], isotropic (absent or 0: none). */
+    adc?: number;
 }
 
 /** The voxels (one per plane of a 3-D phantom) that emit signal. */
@@ -135,6 +141,7 @@ export interface PhaseGraphResult {
 const K_QUANTUM = 1e-3;
 const TAU_QUANTUM = 1e-9;
 const TWO_PI = 2 * Math.PI;
+const FOUR_PI2 = 4 * Math.PI * Math.PI;
 
 /** Configuration states with amplitudes on every lane, in flat arrays. */
 class States {
@@ -250,6 +257,10 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
     const coils = sources.coils;
     const r1 = classes.map(c => (Number.isFinite(c.t1) && c.t1 > 0 ? 1 / c.t1 : 0));
     const r2 = classes.map(c => (Number.isFinite(c.t2) && c.t2 > 0 ? 1 / c.t2 : 0));
+    const diffusion = classes.map(c => (c.adc !== undefined && Number.isFinite(c.adc) && c.adc > 0 ? c.adc : 0));
+    const anyDiffusion = diffusion.some(d => d > 0);
+    // Per class, scratch for e^{−bD}.
+    const attenuation = new Float64Array(C);
 
     let F = new States(L), Z = new States(L);
     // Equilibrium: Z_(0,0) = 1 on every lane.
@@ -313,23 +324,35 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
     // Slab weights depend on q_z only, which configurations share.
     const slabCache = new Map<number, Float64Array>();
 
-    // Pending free precession (merged between pulses and readouts).
-    const pendingDk = new Float64Array(3);
-    let pendingDt = 0, pending = false;
+    // Pending free precession (merged between pulses and readouts), with the
+    // moments of K from its start that diffusion needs: ∫K dt and Σᵢ∫Kᵢ² dt.
+    const pendingDk = new Float64Array(3), pendingM1 = new Float64Array(3);
+    let pendingDt = 0, pendingM2 = 0, pending = false;
+    const addPending = (moments: SegmentMoments, dt: number) => {
+        if (anyDiffusion) {
+            for (let a = 0; a < 3; a++) {
+                pendingM2 += pendingDk[a] * pendingDk[a] * dt + 2 * pendingDk[a] * moments.kIntegral[a] + moments.kSecond[a];
+                pendingM1[a] += pendingDk[a] * dt + moments.kIntegral[a];
+            }
+        }
+        for (let a = 0; a < 3; a++) pendingDk[a] += moments.dk[a];
+        pendingDt += dt;
+        pending = true;
+    };
     const flush = () => {
         if (!pending) return;
-        free(pendingDk, pendingDt);
-        pendingDk.fill(0); pendingDt = 0; pending = false;
+        free(pendingDk, pendingDt, pendingM1, pendingM2);
+        pendingDk.fill(0); pendingM1.fill(0); pendingDt = 0; pendingM2 = 0; pending = false;
     };
+    // The moments of each pulse's halves before and after its centre, per operator key.
+    const halves = new Map<string, { pre: SegmentMoments; post: SegmentMoments }>();
     const until = options.until ?? Infinity;
     const interval = Math.max(1, options.progressInterval ?? 64);
 
     for (const segment of program.segments()) {
         if (segment.t0 >= until) break;
         if (segment.kind === 'free') {
-            for (let a = 0; a < 3; a++) pendingDk[a] += segment.moments.dk[a];
-            pendingDt += segment.t1 - segment.t0;
-            pending = true;
+            addPending(segment.moments, segment.t1 - segment.t0);
         } else if (segment.kind === 'rf') {
             flush();
             pulse(segment, operators.get(segment.key) ?? buildOperator(segment));
@@ -340,9 +363,7 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
             stats.meanStates += F.count;
             readouts++;
             sampleOffset += segment.numSamples;
-            for (let a = 0; a < 3; a++) pendingDk[a] += segment.moments.dk[a];
-            pendingDt += segment.t1 - segment.t0;
-            pending = true;
+            addPending(segment.moments, segment.t1 - segment.t0);
         }
         if (++processed % interval === 0) {
             if (options.isCancelled?.()) throw new SimulationCancelledError();
@@ -363,23 +384,30 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
         return entry;
     }
 
-    function free(dk: ArrayLike<number>, dt: number): void {
+    function free(dk: ArrayLike<number>, dt: number, m1: ArrayLike<number>, m2: number): void {
         const { e1, e2 } = factors(dt);
         for (let i = 0; i < F.count; i++) {
+            if (anyDiffusion) {
+                // b over the interval for this configuration: 4π²(|k₀|²Δt + 2k₀·∫K dt + Σ∫K² dt).
+                const kx = F.k[3 * i], ky = F.k[3 * i + 1], kz = F.k[3 * i + 2];
+                diffuse(FOUR_PI2 * ((kx * kx + ky * ky + kz * kz) * dt + 2 * (kx * m1[0] + ky * m1[1] + kz * m1[2]) + m2));
+            }
             F.k[3 * i] += dk[0]; F.k[3 * i + 1] += dk[1]; F.k[3 * i + 2] += dk[2];
             F.tau[i] += dt;
             let o = 2 * L * i;
             for (let c = 0; c < C; c++) {
-                const d = e2[c];
+                const d = anyDiffusion ? e2[c] * attenuation[c] : e2[c];
                 for (let j = 0; j < K; j++, o += 2) { F.amp[o] *= d; F.amp[o + 1] *= d; }
             }
         }
         let zero = -1;
         for (let i = 0; i < Z.count; i++) {
-            if (Z.k[3 * i] === 0 && Z.k[3 * i + 1] === 0 && Z.k[3 * i + 2] === 0 && Z.tau[i] === 0) zero = i;
+            const kx = Z.k[3 * i], ky = Z.k[3 * i + 1], kz = Z.k[3 * i + 2];
+            if (kx === 0 && ky === 0 && kz === 0 && Z.tau[i] === 0) zero = i;
+            if (anyDiffusion) diffuse(FOUR_PI2 * (kx * kx + ky * ky + kz * kz) * dt);
             let o = 2 * L * i;
             for (let c = 0; c < C; c++) {
-                const d = e1[c];
+                const d = anyDiffusion ? e1[c] * attenuation[c] : e1[c];
                 for (let j = 0; j < K; j++, o += 2) { Z.amp[o] *= d; Z.amp[o + 1] *= d; }
             }
         }
@@ -388,6 +416,37 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
         for (let c = 0; c < C; c++) {
             const add = 1 - e1[c];
             for (let j = 0; j < K; j++, o += 2) Z.amp[o] += add;
+        }
+    }
+
+    /** e^{−b·D} per class into `attenuation`. */
+    function diffuse(b: number): void {
+        for (let c = 0; c < C; c++) attenuation[c] = diffusion[c] > 0 && b > 0 ? Math.exp(-b * diffusion[c]) : 1;
+    }
+
+    /**
+     * Diffusion over half a pulse (before or after its centre): F at its k
+     * with the half's own gradient, Z at its k. Relaxation is in the operator.
+     */
+    function diffuseHalf(moments: SegmentMoments, dt: number): void {
+        if (!(dt > 0)) return;
+        let m2 = 0;
+        for (let a = 0; a < 3; a++) m2 += moments.kSecond[a];
+        const m1 = moments.kIntegral;
+        for (const [states, moving] of [[F, true], [Z, false]] as const) {
+            for (let i = 0; i < states.count; i++) {
+                const kx = states.k[3 * i], ky = states.k[3 * i + 1], kz = states.k[3 * i + 2];
+                const b = moving
+                    ? FOUR_PI2 * ((kx * kx + ky * ky + kz * kz) * dt + 2 * (kx * m1[0] + ky * m1[1] + kz * m1[2]) + m2)
+                    : FOUR_PI2 * (kx * kx + ky * ky + kz * kz) * dt;
+                if (!(b > 0)) continue;
+                diffuse(b);
+                let o = 2 * L * i;
+                for (let c = 0; c < C; c++) {
+                    const d = attenuation[c];
+                    for (let j = 0; j < K; j++, o += 2) { states.amp[o] *= d; states.amp[o + 1] *= d; }
+                }
+            }
         }
     }
 
@@ -455,6 +514,18 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
     function pulse(segment: RfSegment, coefficients: Float64Array): void {
         const pre = segment.kToCenter, total = segment.moments.dk;
         const tPre = segment.centerTime - segment.t0, tPost = segment.t1 - segment.centerTime;
+        let half: { pre: SegmentMoments; post: SegmentMoments } | undefined;
+        if (anyDiffusion) {
+            half = halves.get(segment.key);
+            if (!half) {
+                half = {
+                    pre: windowMoments(segment.gradient, segment.t0, segment.centerTime),
+                    post: windowMoments(segment.gradient, segment.centerTime, segment.t1),
+                };
+                halves.set(segment.key, half);
+            }
+            diffuseHalf(half.pre, tPre);
+        }
         for (let i = 0; i < F.count; i++) { F.k[3 * i] += pre[0]; F.k[3 * i + 1] += pre[1]; F.k[3 * i + 2] += pre[2]; F.tau[i] += tPre; }
         const phi = segment.phaseOffset;
         const p1r = Math.cos(phi), p1i = Math.sin(phi), p2r = Math.cos(2 * phi), p2i = Math.sin(2 * phi);
@@ -542,6 +613,7 @@ export function simulatePhaseGraph(program: SimProgram, model: PhaseGraphModel, 
         }
         F = keepStrongest(nextF, fPeaks, false);
         Z = keepStrongest(nextZ, zPeaks, true);
+        if (half) diffuseHalf(half.post, tPost);
         for (let i = 0; i < F.count; i++) {
             F.k[3 * i] += total[0] - pre[0]; F.k[3 * i + 1] += total[1] - pre[1]; F.k[3 * i + 2] += total[2] - pre[2];
             F.tau[i] += tPost;

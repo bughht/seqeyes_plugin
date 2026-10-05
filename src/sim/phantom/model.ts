@@ -309,8 +309,9 @@ export function rate(time: number): number {
 
 /**
  * The parameters that decide how a voxel's magnetization evolves (T1, T2,
- * off-resonance and B1+), as an index into a table of distinct combinations.
- * Voxels sharing an index can share a simulated class when an axis folds.
+ * T2′, ADC, off-resonance and B1+), as an index into a table of distinct
+ * combinations. Voxels sharing an index can share a simulated class when an
+ * axis folds.
  */
 export interface PhysicsTable {
     /** Entry of every voxel of the phantom's own maps (−1 where PD is 0). */
@@ -319,28 +320,38 @@ export interface PhysicsTable {
     ofPlanes: Int32Array[];
     t1: number[];
     t2: number[];
+    /** T2′ [s] (Infinity: none) and ADC [m²/s] (0: none). */
+    t2p: number[];
+    adc: number[];
     df: number[];
     b1: number[];
+    /** Some entry has a T2′ or an ADC (spins then carry them; engine/pathway.ts). */
+    pathway: boolean;
 }
 
 export function physicsTable(phantom: Phantom2D): PhysicsTable {
-    const table: PhysicsTable = { of: new Int32Array(0), ofPlanes: [], t1: [], t2: [], df: [], b1: [] };
+    const table: PhysicsTable = { of: new Int32Array(0), ofPlanes: [], t1: [], t2: [], t2p: [], adc: [], df: [], b1: [], pathway: false };
     const index = new Map<string, number>();
     const entries = (maps: PhantomMaps) => {
-        const { pd, t1, t2, b0, b1 } = maps;
+        const { pd, t1, t2, t2prime, adc, b0, b1 } = maps;
         const of = new Int32Array(pd.length).fill(-1);
         for (let i = 0; i < pd.length; i++) {
             if (!(pd[i] > 0)) continue;
             const df = b0 ? b0[i] : 0, gain = b1 ? b1[i] : 1;
-            const key = `${t1[i]}|${t2[i]}|${df}|${gain}`;
+            const t2p = t2prime && Number.isFinite(t2prime[i]) && t2prime[i] > 0 ? t2prime[i] : Infinity;
+            const d = adc && adc[i] > 0 ? adc[i] : 0;
+            const key = `${t1[i]}|${t2[i]}|${t2p}|${d}|${df}|${gain}`;
             let k = index.get(key);
             if (k === undefined) {
                 k = table.t1.length;
                 index.set(key, k);
                 table.t1.push(t1[i]);
                 table.t2.push(t2[i]);
+                table.t2p.push(t2p);
+                table.adc.push(d);
                 table.df.push(df);
                 table.b1.push(gain);
+                if (Number.isFinite(t2p) || d > 0) table.pathway = true;
             }
             of[i] = k;
         }
@@ -409,11 +420,14 @@ export function phantomSpins(phantom: Phantom2D, options: SpinOptions): SpinSet 
     const slices = slicesOf(options);
     const count = spinCount(options, phantom);
     const coils = phantom.coils?.count ?? 1;
+    const pathway = [phantom.maps, ...(phantom.planes ?? []).map(plane => plane.maps)].some(maps => maps.t2prime || maps.adc);
     const set = {
         count,
         x: new Float64Array(count), y: new Float64Array(count), z: new Float64Array(count),
         df: new Float64Array(count),
         r1: new Float64Array(count), r2: new Float64Array(count),
+        r2prime: pathway ? new Float64Array(count) : undefined,
+        adc: pathway ? new Float64Array(count) : undefined,
         weight: new Float64Array(count),
         b1Re: new Float64Array(count), b1Im: new Float64Array(count),
         coils,
@@ -431,9 +445,10 @@ export function phantomSpins(phantom: Phantom2D, options: SpinOptions): SpinSet 
         const x0 = (col - phantom.nx / 2) * dx;
         const y0 = (phantom.ny / 2 - 1 - row) * dy;
         for (let slice = 0; slice < slices.z.length; slice++) {
-            const { pd, t1, t2, b0, b1 } = planeMaps(phantom, slices.plane[slice]);
+            const { pd, t1, t2, t2prime, adc, b0, b1 } = planeMaps(phantom, slices.plane[slice]);
             if (!(pd[index] > 0)) continue;
             const r1 = rate(t1[index]), r2 = rate(t2[index]);
+            const r2p = t2prime ? rate(t2prime[index]) : 0, d = adc && adc[index] > 0 ? adc[index] : 0;
             const df = b0 ? b0[index] : 0;
             const gain = b1 ? b1[index] : 1;
             const weight = pd[index] / (mx * my) * slices.weight[slice];
@@ -445,6 +460,7 @@ export function phantomSpins(phantom: Phantom2D, options: SpinOptions): SpinSet 
                     set.df[k] = df;
                     set.r1[k] = r1;
                     set.r2[k] = r2;
+                    if (set.r2prime && set.adc) { set.r2prime[k] = r2p; set.adc[k] = d; }
                     set.weight[k] = weight;
                     set.b1Re[k] = gain;
                     for (let c = 0; c < coils; c++) {
@@ -567,6 +583,8 @@ export function foldedPhantomSpins(
             df: Float64Array.from(classEntry, e => physics.df[e]),
             r1: Float64Array.from(classEntry, e => rate(physics.t1[e])),
             r2: Float64Array.from(classEntry, e => rate(physics.t2[e])),
+            r2prime: physics.pathway ? Float64Array.from(classEntry, e => rate(physics.t2p[e])) : undefined,
+            adc: physics.pathway ? Float64Array.from(classEntry, e => physics.adc[e]) : undefined,
             weight: new Float64Array(profiles),
             b1Re: Float64Array.from(classEntry, e => physics.b1[e]), b1Im: new Float64Array(profiles),
             coils: 1,
@@ -583,6 +601,8 @@ export function foldedPhantomSpins(
         count,
         x: new Float64Array(count), y: new Float64Array(count), z: new Float64Array(count),
         df: new Float64Array(count), r1: new Float64Array(count), r2: new Float64Array(count),
+        r2prime: physics.pathway ? new Float64Array(count) : undefined,
+        adc: physics.pathway ? new Float64Array(count) : undefined,
         weight: new Float64Array(count),
         b1Re: new Float64Array(count), b1Im: new Float64Array(count),
         coils: 1,
@@ -598,6 +618,7 @@ export function foldedPhantomSpins(
             classes.df[c] = physics.df[e];
             classes.r1[c] = rate(physics.t1[e]);
             classes.r2[c] = rate(physics.t2[e]);
+            if (classes.r2prime && classes.adc) { classes.r2prime[c] = rate(physics.t2p[e]); classes.adc[c] = physics.adc[e]; }
             classes.b1Re[c] = physics.b1[e];
             classes.weight[c] = slices.weight[k];
             profileOf[c] = q;

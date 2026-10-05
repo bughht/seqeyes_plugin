@@ -4,21 +4,22 @@
  *     sub-slices take (a 3-D phantom), with its centre, its own B0, PD, coil
  *     sensitivities and the run of sub-slices it covers;
  *   - tissue classes: what the configuration amplitudes depend on, namely
- *     T1, T2, B1+ and the off-resonance the RF operators are built at. Each
- *     voxel's own B0 enters exactly at readout (through the dephasing time),
- *     so off-resonance is binned only for the pulses, to `binning.df` Hz.
+ *     T1, T2, T2′, ADC, B1+ and the off-resonance the RF operators are built
+ *     at. Each voxel's own B0 enters exactly at readout (through the
+ *     dephasing time), so off-resonance is binned only for the pulses, to
+ *     `binning.df` Hz.
  * Phantoms with few tissues (Shepp–Logan, label maps) keep their exact
- * T1/T2/B1. Continuous maps would make a class of nearly every voxel; past
- * `budget` classes, T1 and T2 are binned on a relative grid and B1 on an
- * absolute one, coarser until the budget holds. A class takes the
- * PD-weighted mean of its members.
+ * values. Continuous maps would make a class of nearly every voxel; past
+ * `budget` classes, T1, T2, T2′ and ADC are binned on a relative grid and
+ * B1 on an absolute one, coarser until the budget holds. A class takes the
+ * PD-weighted mean of its members (T2′ as a rate).
  */
 
 import type { PhaseGraphClass, PhaseGraphSources } from '../engine/phaseGraph';
 import { occupiedVoxels, planeMaps, type Phantom2D, type ThroughSlice } from './model';
 
 export interface ClassBinning {
-    /** Relative T1/T2 bin width (0: exact). */
+    /** Relative T1/T2/T2′/ADC bin width (0: exact). */
     t: number;
     /** Absolute B1+ bin width (0: exact). */
     b1: number;
@@ -53,7 +54,7 @@ export function phaseGraphPhantom(
     const cells = phantom.nx * phantom.ny;
     const [dx, dy] = phantom.voxel;
     const xs: number[] = [], ys: number[] = [], dfs: number[] = [], pds: number[] = [], froms: number[] = [], tos: number[] = [];
-    const t1s: number[] = [], t2s: number[] = [], t2ps: number[] = [], b1s: number[] = [], cellOf: number[] = [];
+    const t1s: number[] = [], t2s: number[] = [], t2ps: number[] = [], adcs: number[] = [], b1s: number[] = [], cellOf: number[] = [];
     for (const v of voxels) {
         const col = v % phantom.nx, row = Math.floor(v / phantom.nx);
         for (const run of runs) {
@@ -69,6 +70,7 @@ export function phaseGraphPhantom(
             t1s.push(maps.t1[v]);
             t2s.push(maps.t2[v]);
             t2ps.push(maps.t2prime ? maps.t2prime[v] : Infinity);
+            adcs.push(maps.adc && maps.adc[v] > 0 ? maps.adc[v] : 0);
             b1s.push(maps.b1 ? maps.b1[v] : 1);
             cellOf.push(v);
         }
@@ -89,22 +91,25 @@ export function phaseGraphPhantom(
     const C = assignment.keys.size;
     // PD-weighted means per class.
     // T2′ averages as a rate (1/T2′), so a class without T2′ keeps none.
-    const sum = new Float64Array(6 * C);
+    const S = 7;
+    const sum = new Float64Array(S * C);
     for (let i = 0; i < count; i++) {
         const c = classOf[i], w = pds[i];
-        sum[6 * c] += w;
-        sum[6 * c + 1] += w * finiteOr(t1s[i], 1e6);
-        sum[6 * c + 2] += w * finiteOr(t2s[i], 1e6);
-        sum[6 * c + 3] += w * b1s[i];
-        sum[6 * c + 4] += w * dfs[i];
-        sum[6 * c + 5] += w * (Number.isFinite(t2ps[i]) && t2ps[i] > 0 ? 1 / t2ps[i] : 0);
+        sum[S * c] += w;
+        sum[S * c + 1] += w * finiteOr(t1s[i], 1e6);
+        sum[S * c + 2] += w * finiteOr(t2s[i], 1e6);
+        sum[S * c + 3] += w * b1s[i];
+        sum[S * c + 4] += w * dfs[i];
+        sum[S * c + 5] += w * (Number.isFinite(t2ps[i]) && t2ps[i] > 0 ? 1 / t2ps[i] : 0);
+        sum[S * c + 6] += w * adcs[i];
     }
     const classes: PhaseGraphClass[] = [];
     for (let c = 0; c < C; c++) {
-        const w = sum[6 * c], rate = sum[6 * c + 5] / w;
+        const w = sum[S * c], rate = sum[S * c + 5] / w;
         classes.push({
-            t1: sum[6 * c + 1] / w, t2: sum[6 * c + 2] / w, b1Re: sum[6 * c + 3] / w, b1Im: 0, df: sum[6 * c + 4] / w,
+            t1: sum[S * c + 1] / w, t2: sum[S * c + 2] / w, b1Re: sum[S * c + 3] / w, b1Im: 0, df: sum[S * c + 4] / w,
             t2prime: rate > 0 ? 1 / rate : Infinity,
+            adc: sum[S * c + 6] / w,
         });
     }
 
@@ -133,7 +138,8 @@ export function phaseGraphPhantom(
         const logStep = (step: number) => Math.log1p(step);
         const timeKey = (t: number) => (!(Number.isFinite(t) && t > 0) ? 'inf' : bins.t > 0 ? String(Math.round(Math.log(t) / logStep(bins.t))) : String(t));
         for (let i = 0; i < count; i++) {
-            const key = `${timeKey(t1s[i])}|${timeKey(t2s[i])}|${timeKey(t2ps[i])}|${bins.b1 > 0 ? Math.round(b1s[i] / bins.b1) : b1s[i]}|${Math.round(dfs[i] / bins.df)}`;
+            const key = `${timeKey(t1s[i])}|${timeKey(t2s[i])}|${timeKey(t2ps[i])}|${timeKey(adcs[i])}|`
+                + `${bins.b1 > 0 ? Math.round(b1s[i] / bins.b1) : b1s[i]}|${Math.round(dfs[i] / bins.df)}`;
             let c = keys.get(key);
             if (c === undefined) { c = keys.size; keys.set(key, c); }
             classOf[i] = c;

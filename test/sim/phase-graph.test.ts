@@ -6,7 +6,7 @@ import { parseSequenceText } from '../../src/pulseq/reader';
 import { parseSequenceBytes } from '../../src/pulseq/sequenceReader';
 import { simulatePhaseGraph, type PhaseGraphModel } from '../../src/sim/engine/phaseGraph';
 import { simulateReference } from '../../src/sim/engine/reference';
-import type { SpinSet } from '../../src/sim/engine/spins';
+import { spinSetFrom, type SpinSet } from '../../src/sim/engine/spins';
 import { ChunkAccumulator, SimulationJob, type JobSettings } from '../../src/sim/job';
 import { sheppLoganPhantom2D, TISSUES } from '../../src/sim/phantom/builtin';
 import type { Phantom2D } from '../../src/sim/phantom/model';
@@ -63,9 +63,13 @@ function voxelModel(t1: number, t2: number, size: number, slices?: { z: Float64A
     };
 }
 
-/** The phantom without its T2′ map: the isochromat engine does not simulate T2′. */
-function withoutT2prime(phantom: Phantom2D): Phantom2D {
-    return { ...phantom, maps: { ...phantom.maps, t2prime: undefined } };
+/**
+ * The phantom without its ADC map. Isochromats weight diffusion by the main
+ * echo pathway only, which misses what diffusion does to the stimulated
+ * pathways of a spoiled steady state (the phase graph has it).
+ */
+function withoutDiffusion(phantom: Phantom2D): Phantom2D {
+    return { ...phantom, maps: { ...phantom.maps, adc: undefined } };
 }
 
 /**
@@ -111,6 +115,49 @@ function spinEchoProgram(options: { exciteDeg: number; refocusDeg: number; gradi
     })));
 }
 
+/** A point in y and a box along x and y, one tissue: for pathway-level checks. */
+function boxModel(tissue: { t1?: number; t2?: number; t2prime?: number; adc?: number }, voxel: [number, number]): PhaseGraphModel {
+    const model = voxelModel(tissue.t1 ?? Infinity, tissue.t2 ?? Infinity, voxel[0], undefined, tissue.t2prime);
+    return { ...model, classes: [{ ...model.classes[0], adc: tissue.adc }], voxel };
+}
+
+/**
+ * Diffusion lobes along x (2 MHz/m, 0.1 ms ramps, 4.9 ms flat: 10 cycles
+ * across 1 mm) around 20 µs hard 90° pulses, and a 32-sample readout at the
+ * echo without gradients. PGSE: 90° at 10 µs, 180° at 20.01 ms, lobes 25 ms
+ * apart, echo at 40.01 ms. STEAM: 90°s at 10 µs, 10.01 ms and 110.03 ms, a
+ * y crusher in the 100 ms mixing time, lobes 110.02 ms apart, stimulated
+ * echo at 120.03 ms. Returns the program and the Stejskal–Tanner b.
+ */
+function diffusionProgram(kind: 'pgse' | 'steam') {
+    const g = 2e6, rise = 1e-4, flat = 4.9e-3;
+    const rf = [
+        { amplitude: (90 / 360) / 20e-6, magShape: 1, centerUs: 10 },
+        { amplitude: (180 / 360) / 20e-6, magShape: 1, centerUs: 10, phase: Math.PI / 2, use: 'r' },
+    ];
+    const traps = [
+        { amplitude: g, riseUs: 100, flatUs: 4900, fallUs: 100 },
+        { amplitude: 2e4 / 1e-3, riseUs: 100, flatUs: 900, fallUs: 100 },          // 20 cycles across 1 mm in y
+    ];
+    const adc = [{ samples: 32, dwellNs: 10_000 }];
+    const shapes = [Array(20).fill(1)];
+    const blocks = kind === 'pgse'
+        ? [
+            { ticks: 2, rf: 1 }, { ticks: 510, gx: 1 }, { ticks: 1488 },            // lobe from 20 µs; 180° block at 20 ms
+            { ticks: 2, rf: 2 }, { ticks: 500 }, { ticks: 510, gx: 1 },             // second lobe from 25.02 ms
+            { ticks: 973 }, { ticks: 32, adc: 1 },                                   // readout 39.85–40.17 ms
+        ]
+        : [
+            { ticks: 2, rf: 1 }, { ticks: 510, gx: 1 }, { ticks: 488 },             // second 90° block at 10 ms
+            { ticks: 2, rf: 1 }, { ticks: 4000 }, { ticks: 110, gy: 2 }, { ticks: 5890 },   // mixing, crushed in y
+            { ticks: 2, rf: 1 }, { ticks: 510, gx: 1 }, { ticks: 473 }, { ticks: 32, adc: 1 },  // lobe from 110.04 ms
+        ];
+    const program = compileProgram(parseSequenceText(seqText({ blocks, rf, traps, adc, shapes })));
+    const delta = flat + rise, spacing = kind === 'pgse' ? 25e-3 : 110.02e-3;
+    const b = (2 * Math.PI * g) ** 2 * (delta ** 2 * (spacing - delta / 3) + rise ** 3 / 30 - delta * rise ** 2 / 6);
+    return { program, b };
+}
+
 describe('phase-graph engine', () => {
     it('resolves the RF-spoiled GRE voxel that isochromats need thousands of spins for', () => {
         const gre = program('writeGradientEcho.seq');
@@ -153,9 +200,11 @@ describe('phase-graph engine', () => {
         expect(relativeDifference(pruned.signal, exact.signal)).toBeLessThan(0.005);
     });
 
-    it('images the demo GRE as the isochromat engine does, given enough spins for CSF', () => {
+    it('images the demo GRE as the isochromat engine does, given enough spins for CSF, T2′ included', () => {
         // 2 mm voxels in a 32 mm field at z = 0; isochromats resolve the box voxel along x and y.
-        const phantom = { kind: 'phantom' as const, phantom: withoutT2prime(sheppLoganPhantom2D(16, 0.032, 0.032)) };
+        // Every pathway a spoiled GRE echo collects shares the FID's τ, so the
+        // isochromats' main-pathway T2′ is exact here.
+        const phantom = { kind: 'phantom' as const, phantom: withoutDiffusion(sheppLoganPhantom2D(16, 0.032, 0.032)) };
         const spins = runJob('writeGradientEcho.seq', { phantom, subSpins: [1024, 16], throughSlice: 'off' });
         const graph = runJob('writeGradientEcho.seq', { phantom, subSpins: 'auto', engine: 'phase-graph', throughSlice: 'off' });
         expect(graph.job.plan.engine).toBe('phase-graph');
@@ -166,7 +215,7 @@ describe('phase-graph engine', () => {
 
     it('agrees through the slab, with each voxel B0, B1 and coil sensitivity applied', () => {
         // Linear B0 (±12 Hz) and a smooth B1 across a small Shepp–Logan, two coils.
-        const base = withoutT2prime(sheppLoganPhantom2D(12, 0.024, 0.024));
+        const base = withoutDiffusion(sheppLoganPhantom2D(12, 0.024, 0.024));
         const n = 12 * 12;
         const b0 = new Float32Array(n), b1 = new Float32Array(n);
         for (let row = 0; row < 12; row++) {
@@ -266,12 +315,80 @@ describe('phase-graph engine', () => {
         expect(relativeDifference(plain, reference)).toBeGreaterThan(0.03);
     });
 
-    it("models the built-in phantom's T2′, which the isochromat engine reports it leaves out", () => {
+    it('attenuates a spin echo and a stimulated echo by e^{−bD}, the stimulated one diffusing as Z through the mixing time', () => {
+        // Ideal pulses, no relaxation; at the echo only the echo pathway has
+        // k = 0 (the others sit at multiples of 10 cycles per voxel, where
+        // the box voxel is zero), so the ratio to D = 0 is e^{−bD} exactly.
+        const D = 3e-9;
+        for (const kind of ['pgse', 'steam'] as const) {
+            const { program: seq, b } = diffusionProgram(kind);
+            const still = simulatePhaseGraph(seq, boxModel({}, [1e-3, 1e-3])).signal;
+            const moving = simulatePhaseGraph(seq, boxModel({ adc: D }, [1e-3, 1e-3])).signal;
+            const factor = Math.exp(-b * D);
+            expect(factor).toBeLessThan(kind === 'pgse' ? 0.8 : 0.3);
+            let worst = 0, peak = 0;
+            for (let i = 0; i < still.length; i++) {
+                peak = Math.max(peak, Math.abs(still[i]));
+                worst = Math.max(worst, Math.abs(moving[i] - factor * still[i]));
+            }
+            // The echo is there: half the magnetization for the stimulated echo.
+            expect(Math.hypot(still[32], still[33])).toBeCloseTo(kind === 'pgse' ? 1 : 0.5, 6);
+            expect(worst / peak).toBeLessThan(1e-9);
+        }
+    });
+
+    it('weights isochromats by the main echo pathway: T2′ about a spin echo and PGSE diffusion, exactly', () => {
+        // One pathway in each sequence, so the main pathway's τ and b are the
+        // whole story: one spin, with and without T2′ or D.
+        const se = spinEchoProgram({ exciteDeg: 90, refocusDeg: 180, gradients: false, pulseUs: 20 });
+        const t2prime = 0.004;
+        const plain = simulateReference(se, spinSetFrom([{}])).signal;
+        const lorentz = simulateReference(se, spinSetFrom([{ t2prime }])).signal;
+        let worst = 0;
+        for (let s = 0; s < 192; s++) {
+            const t = s < 64 ? (20 + (s + 0.5) * 50) * 1e-6 - 10e-6 : (3260 + (s - 64 + 0.5) * 50) * 1e-6 - 6.47e-3;
+            const f = Math.exp(-Math.abs(t) / t2prime);
+            worst = Math.max(worst, Math.hypot(lorentz[2 * s] - f * plain[2 * s], lorentz[2 * s + 1] - f * plain[2 * s + 1]));
+        }
+        expect(worst).toBeLessThan(1e-9);
+        // Agreeing with the graph, which has every pathway.
+        const graph = simulatePhaseGraph(se, voxelModel(Infinity, Infinity, 0, undefined, t2prime)).signal;
+        expect(relativeDifference(lorentz, graph)).toBeLessThan(1e-6);
+
+        const { program: pgse, b } = diffusionProgram('pgse');
+        const D = 3e-9;
+        const still = simulateReference(pgse, spinSetFrom([{}])).signal;
+        const moving = simulateReference(pgse, spinSetFrom([{ adc: D }])).signal;
+        const factor = Math.exp(-b * D);
+        for (let i = 0; i < still.length; i++) expect(Math.abs(moving[i] - factor * still[i])).toBeLessThan(1e-9);
+    });
+
+    it('attenuates the demo diffusion-weighted EPI alike in both engines', () => {
+        // b ≈ 1000 s/mm² on a 16² Shepp–Logan at the slab centre; the spin echo is
+        // the main pathway, so the isochromats' pathway b is the graph's.
+        const fov = new SimulationJob(demoBytes('writeEpiDiffusionRS.seq'), 'dwi.seq', { phantom: { kind: 'shepp-logan', size: 16 }, subSpins: [1, 1], throughSlice: 'off' }).plan.phantom.fov;
+        const base = sheppLoganPhantom2D(16, fov[0], fov[1]);
+        const energy = (signal: Float64Array) => Math.sqrt(signal.reduce((sum, v) => sum + v * v, 0));
+        const ratio = (engine: 'isochromat' | 'phase-graph') => {
+            const run = (phantom: Phantom2D) => runJob('writeEpiDiffusionRS.seq', { phantom: { kind: 'phantom', phantom }, subSpins: 'auto', engine, throughSlice: 'off' }).signal;
+            const moving = run(base), still = run(withoutDiffusion(base));
+            return { moving, value: energy(moving) / energy(still) };
+        };
+        const spins = ratio('isochromat'), graph = ratio('phase-graph');
+        // White matter alone would keep e^{−0.7} ≈ 0.50, CSF e^{−3} ≈ 0.05.
+        expect(graph.value).toBeGreaterThan(0.2);
+        expect(graph.value).toBeLessThan(0.35);
+        expect(Math.abs(spins.value - graph.value)).toBeLessThan(0.005);
+        expect(relativeDifference(spins.moving, graph.moving)).toBeLessThan(0.05);
+    });
+
+    it("models the built-in phantom's T2′ and diffusion, which isochromats weight by the main pathway", () => {
         const settings: JobSettings = { phantom: { kind: 'shepp-logan', size: 16 }, subSpins: [1, 1], throughSlice: 'off' };
         const spins = new SimulationJob(demoBytes('writeGradientEcho.seq'), 'gre.seq', settings);
         const graph = new SimulationJob(demoBytes('writeGradientEcho.seq'), 'gre.seq', { ...settings, engine: 'phase-graph' });
-        expect(spins.plan.notes.some(note => note.startsWith('Not simulated: T2′'))).toBe(true);
+        expect(spins.plan.notes.some(note => note.startsWith('T2′ and diffusion follow the main echo pathway'))).toBe(true);
         expect(graph.plan.notes.some(note => note.startsWith('T2′ is exact'))).toBe(true);
+        expect(graph.plan.notes.some(note => note.startsWith('Diffusion is exact'))).toBe(true);
         expect(graph.plan.phaseGraph?.classes).toBe(5);
     });
 

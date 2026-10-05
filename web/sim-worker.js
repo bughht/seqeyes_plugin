@@ -5912,6 +5912,25 @@
     }
     return { dk, kIntegral, kSecond };
   }
+  function windowMoments(pieces, a, b) {
+    const t = [], ga = [], gb = [];
+    const n = pieceCount(pieces);
+    for (let piece = 0; piece < n; piece++) {
+      const t0 = pieces.t[piece], t1 = pieces.t[piece + 1];
+      const u = Math.max(a, t0), v = Math.min(b, t1);
+      if (!(v > u)) continue;
+      const o = 3 * piece;
+      if (!t.length) t.push(u);
+      t.push(v);
+      for (let axis = 0; axis < 3; axis++) {
+        const g0 = pieces.ga[o + axis], g1 = pieces.gb[o + axis];
+        ga.push(t1 > t0 ? g0 + (g1 - g0) * (u - t0) / (t1 - t0) : g0);
+        gb.push(t1 > t0 ? g0 + (g1 - g0) * (v - t0) / (t1 - t0) : g1);
+      }
+    }
+    if (!t.length) return { dk: new Float64Array(3), kIntegral: new Float64Array(3), kSecond: new Float64Array(6) };
+    return piecesMoments({ t: Float64Array.from(t), ga: Float64Array.from(ga), gb: Float64Array.from(gb) });
+  }
   function piecesKAt(pieces, times, out) {
     const n = pieceCount(pieces);
     let piece = 0;
@@ -6401,6 +6420,53 @@
     }
   };
 
+  // src/sim/engine/pathway.ts
+  var FOUR_PI2 = 4 * Math.PI * Math.PI;
+  var MainPathway = class {
+    constructor() {
+      /** Dephasing time since the last excitation, reversed by refocusing [s]. */
+      __publicField(this, "tau", 0);
+      /** b-value since the last excitation [s/m²]. */
+      __publicField(this, "b", 0);
+      /** An excitation has happened; before it there is no pathway to weight. */
+      __publicField(this, "excited", false);
+      /** The pathway's gradient area [1/m]. */
+      __publicField(this, "k", new Float64Array(3));
+      __publicField(this, "halves", /* @__PURE__ */ new Map());
+    }
+    /** Free precession (or a readout window) of `dt` with these moments. */
+    free(moments, dt) {
+      const k = this.k, m1 = moments.kIntegral, m2 = moments.kSecond;
+      this.b += FOUR_PI2 * ((k[0] * k[0] + k[1] * k[1] + k[2] * k[2]) * dt + 2 * (k[0] * m1[0] + k[1] * m1[1] + k[2] * m1[2]) + m2[0] + m2[1] + m2[2]);
+      k[0] += moments.dk[0];
+      k[1] += moments.dk[1];
+      k[2] += moments.dk[2];
+      this.tau += dt;
+    }
+    /** An RF pulse: the half before its centre, its action there, the half after. */
+    pulse(segment) {
+      let half = this.halves.get(segment.key);
+      if (!half) {
+        half = {
+          pre: windowMoments(segment.gradient, segment.t0, segment.centerTime),
+          post: windowMoments(segment.gradient, segment.centerTime, segment.t1)
+        };
+        this.halves.set(segment.key, half);
+      }
+      this.free(half.pre, segment.centerTime - segment.t0);
+      if (segment.use === "e") {
+        this.k.fill(0);
+        this.tau = 0;
+        this.b = 0;
+        this.excited = true;
+      } else if (segment.use === "r") {
+        for (let a = 0; a < 3; a++) this.k[a] = -this.k[a] + 0;
+        this.tau = -this.tau;
+      }
+      this.free(half.post, segment.t1 - segment.centerTime);
+    }
+  };
+
   // src/sim/engine/spins.ts
   function equilibriumState(count) {
     const mz = new Float64Array(count);
@@ -6436,6 +6502,7 @@
     const lattice = (options.readout ?? "lattice") === "lattice";
     const interval = Math.max(1, options.progressInterval ?? 64);
     const free = new PendingFree(new FreeKernel(spins));
+    const weighting = PathwayWeighting.of(spins, options.readout ?? "lattice");
     let sampleOffset = 0;
     let processed = 0;
     const until = options.until ?? Infinity;
@@ -6443,15 +6510,18 @@
       if (segment.t0 >= until) break;
       if (segment.kind === "free") {
         free.add(segment.moments.dk, segment.t1 - segment.t0);
+        weighting?.pathway.free(segment.moments, segment.t1 - segment.t0);
       } else if (segment.kind === "rf") {
         free.flush(spins, state);
         if (cache) cache.apply(segment, state);
         else applyRf(segment, spins, state);
+        weighting?.pathway.pulse(segment);
       } else {
         free.flush(spins, state);
-        sampleAdc(segment, spins, state, signal, sampleOffset, grouper, members, area, lattice);
+        sampleAdc(segment, spins, state, signal, sampleOffset, grouper, members, area, lattice, weighting);
         sampleOffset += segment.numSamples;
         free.add(segment.moments.dk, segment.t1 - segment.t0);
+        weighting?.pathway.free(segment.moments, segment.t1 - segment.t0);
       }
       for (let a = 0; a < 3; a++) area[a] += segment.moments.dk[a];
       if (++processed % interval === 0) {
@@ -7108,19 +7178,105 @@
     return true;
   }
   var RECURRENCE_ANCHOR = 64;
-  function sampleAdc(segment, spins, state, signal, sampleOffset, grouper, members, area, useLattice) {
+  var PathwayWeighting = class _PathwayWeighting {
+    constructor(spins, grouped) {
+      __publicField(this, "spins", spins);
+      __publicField(this, "grouped", grouped);
+      __publicField(this, "pathway", new MainPathway());
+      __publicField(this, "groupers", /* @__PURE__ */ new Map());
+      /** Each spin's (D, R2′) pair, and the distinct pairs. */
+      __publicField(this, "pairOf");
+      __publicField(this, "pairs", []);
+      __publicField(this, "factor");
+      __publicField(this, "mx");
+      __publicField(this, "my");
+      const index = /* @__PURE__ */ new Map();
+      this.pairOf = new Int32Array(spins.count);
+      for (let i2 = 0; i2 < spins.count; i2++) {
+        const adc = spins.adc ? Math.max(0, spins.adc[i2]) : 0, rate2 = spins.r2prime ? Math.max(0, spins.r2prime[i2]) : 0;
+        const key = `${adc}|${rate2}`;
+        let p = index.get(key);
+        if (p === void 0) {
+          p = this.pairs.length;
+          index.set(key, p);
+          this.pairs.push({ adc, rate: rate2 });
+        }
+        this.pairOf[i2] = p;
+      }
+      this.factor = new Float64Array(this.pairs.length);
+      this.mx = new Float64Array(spins.count);
+      this.my = new Float64Array(spins.count);
+    }
+    static of(spins, readout) {
+      const used = (values) => !!values && values.some((v) => v > 0);
+      return used(spins.r2prime) || used(spins.adc) ? new _PathwayWeighting(spins, readout !== "direct") : null;
+    }
+    /** Groupings whose decay rate is R2 + sign·R2′. */
+    grouper(sign) {
+      let grouper = this.groupers.get(sign);
+      if (!grouper) {
+        const { r2, r2prime } = this.spins;
+        const rate2 = r2prime ? Float64Array.from(r2, (v, i2) => v + sign * Math.max(0, r2prime[i2])) : r2;
+        grouper = new ReadoutGrouper({ ...this.spins, r2: rate2 }, this.grouped);
+        this.groupers.set(sign, grouper);
+      }
+      return grouper;
+    }
+    /** The state scaled per spin by e^{−bD}·e^{−sign·R2′·τ} (τ at the window start); reuses its buffers. */
+    scaled(state, sign) {
+      const { tau, b } = this.pathway;
+      this.pairs.forEach((pair, p) => {
+        this.factor[p] = Math.exp(-b * pair.adc - sign * pair.rate * tau);
+      });
+      const { mx, my, factor, pairOf } = this;
+      for (let i2 = 0; i2 < mx.length; i2++) {
+        const f = factor[pairOf[i2]];
+        mx[i2] = state.mx[i2] * f;
+        my[i2] = state.my[i2] * f;
+      }
+      return { mx, my, mz: state.mz };
+    }
+  };
+  function sampleAdc(segment, spins, state, signal, sampleOffset, grouper, members, area, useLattice, weighting = null) {
     const n = segment.numSamples;
     const coils = members ? members.coils : spins.coils;
     const times = adcSampleTimes(segment);
     const k = new Float64Array(3 * n);
     piecesKAt(segment.gradient, times, k);
-    const groups = grouper.groups(segment.activeAxes);
-    const gRe = new Float64Array(groups.count * coils);
-    const gIm = new Float64Array(groups.count * coils);
-    const any = members ? sumMembers(members, spins, groups, state, area, gRe, gIm) : sumSpins(spins, groups, state, gRe, gIm);
     const sumRe = new Float64Array(n * coils);
     const sumIm = new Float64Array(n * coils);
-    if (any) synthesizeReadout(segment, groups, gRe, gIm, coils, k, times, sumRe, sumIm, useLattice);
+    const branches = [{ sign: 1, from: 0, to: n }];
+    const active = weighting?.pathway.excited ? weighting : null;
+    if (active && spins.r2prime) {
+      const tau = active.pathway.tau;
+      if (tau + times[0] - segment.t0 < 0) {
+        let cross = 0;
+        while (cross < n && tau + times[cross] - segment.t0 < 0) cross++;
+        branches.splice(0, 1, { sign: -1, from: 0, to: cross });
+        if (cross < n) branches.push({ sign: 1, from: cross, to: n });
+      }
+    }
+    const tmpRe = branches.length > 1 ? new Float64Array(n * coils) : sumRe;
+    const tmpIm = branches.length > 1 ? new Float64Array(n * coils) : sumIm;
+    for (const branch of branches) {
+      const groups = (active ? active.grouper(branch.sign) : grouper).groups(segment.activeAxes);
+      const source = active ? active.scaled(state, branch.sign) : state;
+      const gRe = new Float64Array(groups.count * coils);
+      const gIm = new Float64Array(groups.count * coils);
+      const any = members ? sumMembers(members, spins, groups, source, area, gRe, gIm) : sumSpins(spins, groups, source, gRe, gIm);
+      if (!any) continue;
+      if (tmpRe !== sumRe) {
+        tmpRe.fill(0);
+        tmpIm.fill(0);
+      }
+      synthesizeReadout(segment, groups, gRe, gIm, coils, k, times, tmpRe, tmpIm, useLattice);
+      if (tmpRe !== sumRe) {
+        for (let o = branch.from * coils; o < branch.to * coils; o++) {
+          sumRe[o] += tmpRe[o];
+          sumIm[o] += tmpIm[o];
+        }
+      }
+    }
     emitReadout(segment, sumRe, sumIm, coils, signal, sampleOffset);
   }
   function synthesizeReadout(segment, groups, gRe, gIm, coils, k, times, sumRe, sumIm, useLattice) {
@@ -7270,6 +7426,7 @@
   var K_QUANTUM = 1e-3;
   var TAU_QUANTUM = 1e-9;
   var TWO_PI = 2 * Math.PI;
+  var FOUR_PI22 = 4 * Math.PI * Math.PI;
   var States = class {
     constructor(lanes, capacity = 64) {
       __publicField(this, "lanes", lanes);
@@ -7385,6 +7542,9 @@
     const coils = sources.coils;
     const r1 = classes.map((c) => Number.isFinite(c.t1) && c.t1 > 0 ? 1 / c.t1 : 0);
     const r2 = classes.map((c) => Number.isFinite(c.t2) && c.t2 > 0 ? 1 / c.t2 : 0);
+    const diffusion = classes.map((c) => c.adc !== void 0 && Number.isFinite(c.adc) && c.adc > 0 ? c.adc : 0);
+    const anyDiffusion = diffusion.some((d) => d > 0);
+    const attenuation = new Float64Array(C);
     let F = new States(L), Z = new States(L);
     const z0 = Z.add(0, 0, 0, 0);
     for (let lane2 = 0; lane2 < L; lane2++) Z.amp[2 * (L * z0 + lane2)] = 1;
@@ -7448,23 +7608,35 @@
       }
     };
     const slabCache = /* @__PURE__ */ new Map();
-    const pendingDk = new Float64Array(3);
-    let pendingDt = 0, pending = false;
+    const pendingDk = new Float64Array(3), pendingM1 = new Float64Array(3);
+    let pendingDt = 0, pendingM2 = 0, pending = false;
+    const addPending = (moments, dt) => {
+      if (anyDiffusion) {
+        for (let a = 0; a < 3; a++) {
+          pendingM2 += pendingDk[a] * pendingDk[a] * dt + 2 * pendingDk[a] * moments.kIntegral[a] + moments.kSecond[a];
+          pendingM1[a] += pendingDk[a] * dt + moments.kIntegral[a];
+        }
+      }
+      for (let a = 0; a < 3; a++) pendingDk[a] += moments.dk[a];
+      pendingDt += dt;
+      pending = true;
+    };
     const flush = () => {
       if (!pending) return;
-      free(pendingDk, pendingDt);
+      free(pendingDk, pendingDt, pendingM1, pendingM2);
       pendingDk.fill(0);
+      pendingM1.fill(0);
       pendingDt = 0;
+      pendingM2 = 0;
       pending = false;
     };
+    const halves = /* @__PURE__ */ new Map();
     const until = options.until ?? Infinity;
     const interval = Math.max(1, options.progressInterval ?? 64);
     for (const segment of program.segments()) {
       if (segment.t0 >= until) break;
       if (segment.kind === "free") {
-        for (let a = 0; a < 3; a++) pendingDk[a] += segment.moments.dk[a];
-        pendingDt += segment.t1 - segment.t0;
-        pending = true;
+        addPending(segment.moments, segment.t1 - segment.t0);
       } else if (segment.kind === "rf") {
         flush();
         pulse(segment, operators.get(segment.key) ?? buildOperator(segment));
@@ -7475,9 +7647,7 @@
         stats.meanStates += F.count;
         readouts++;
         sampleOffset += segment.numSamples;
-        for (let a = 0; a < 3; a++) pendingDk[a] += segment.moments.dk[a];
-        pendingDt += segment.t1 - segment.t0;
-        pending = true;
+        addPending(segment.moments, segment.t1 - segment.t0);
       }
       if (++processed % interval === 0) {
         if (options.isCancelled?.()) throw new SimulationCancelledError();
@@ -7495,16 +7665,20 @@
       relaxation.set(dt, entry);
       return entry;
     }
-    function free(dk, dt) {
+    function free(dk, dt, m1, m2) {
       const { e1, e2 } = factors(dt);
       for (let i2 = 0; i2 < F.count; i2++) {
+        if (anyDiffusion) {
+          const kx = F.k[3 * i2], ky = F.k[3 * i2 + 1], kz = F.k[3 * i2 + 2];
+          diffuse(FOUR_PI22 * ((kx * kx + ky * ky + kz * kz) * dt + 2 * (kx * m1[0] + ky * m1[1] + kz * m1[2]) + m2));
+        }
         F.k[3 * i2] += dk[0];
         F.k[3 * i2 + 1] += dk[1];
         F.k[3 * i2 + 2] += dk[2];
         F.tau[i2] += dt;
         let o2 = 2 * L * i2;
         for (let c = 0; c < C; c++) {
-          const d = e2[c];
+          const d = anyDiffusion ? e2[c] * attenuation[c] : e2[c];
           for (let j = 0; j < K; j++, o2 += 2) {
             F.amp[o2] *= d;
             F.amp[o2 + 1] *= d;
@@ -7513,10 +7687,12 @@
       }
       let zero = -1;
       for (let i2 = 0; i2 < Z.count; i2++) {
-        if (Z.k[3 * i2] === 0 && Z.k[3 * i2 + 1] === 0 && Z.k[3 * i2 + 2] === 0 && Z.tau[i2] === 0) zero = i2;
+        const kx = Z.k[3 * i2], ky = Z.k[3 * i2 + 1], kz = Z.k[3 * i2 + 2];
+        if (kx === 0 && ky === 0 && kz === 0 && Z.tau[i2] === 0) zero = i2;
+        if (anyDiffusion) diffuse(FOUR_PI22 * (kx * kx + ky * ky + kz * kz) * dt);
         let o2 = 2 * L * i2;
         for (let c = 0; c < C; c++) {
-          const d = e1[c];
+          const d = anyDiffusion ? e1[c] * attenuation[c] : e1[c];
           for (let j = 0; j < K; j++, o2 += 2) {
             Z.amp[o2] *= d;
             Z.amp[o2 + 1] *= d;
@@ -7528,6 +7704,31 @@
       for (let c = 0; c < C; c++) {
         const add = 1 - e1[c];
         for (let j = 0; j < K; j++, o += 2) Z.amp[o] += add;
+      }
+    }
+    function diffuse(b) {
+      for (let c = 0; c < C; c++) attenuation[c] = diffusion[c] > 0 && b > 0 ? Math.exp(-b * diffusion[c]) : 1;
+    }
+    function diffuseHalf(moments, dt) {
+      if (!(dt > 0)) return;
+      let m2 = 0;
+      for (let a = 0; a < 3; a++) m2 += moments.kSecond[a];
+      const m1 = moments.kIntegral;
+      for (const [states, moving] of [[F, true], [Z, false]]) {
+        for (let i2 = 0; i2 < states.count; i2++) {
+          const kx = states.k[3 * i2], ky = states.k[3 * i2 + 1], kz = states.k[3 * i2 + 2];
+          const b = moving ? FOUR_PI22 * ((kx * kx + ky * ky + kz * kz) * dt + 2 * (kx * m1[0] + ky * m1[1] + kz * m1[2]) + m2) : FOUR_PI22 * (kx * kx + ky * ky + kz * kz) * dt;
+          if (!(b > 0)) continue;
+          diffuse(b);
+          let o = 2 * L * i2;
+          for (let c = 0; c < C; c++) {
+            const d = attenuation[c];
+            for (let j = 0; j < K; j++, o += 2) {
+              states.amp[o] *= d;
+              states.amp[o + 1] *= d;
+            }
+          }
+        }
       }
     }
     function buildOperator(segment) {
@@ -7607,6 +7808,18 @@
     function pulse(segment, coefficients) {
       const pre = segment.kToCenter, total = segment.moments.dk;
       const tPre = segment.centerTime - segment.t0, tPost = segment.t1 - segment.centerTime;
+      let half;
+      if (anyDiffusion) {
+        half = halves.get(segment.key);
+        if (!half) {
+          half = {
+            pre: windowMoments(segment.gradient, segment.t0, segment.centerTime),
+            post: windowMoments(segment.gradient, segment.centerTime, segment.t1)
+          };
+          halves.set(segment.key, half);
+        }
+        diffuseHalf(half.pre, tPre);
+      }
       for (let i2 = 0; i2 < F.count; i2++) {
         F.k[3 * i2] += pre[0];
         F.k[3 * i2 + 1] += pre[1];
@@ -7713,6 +7926,7 @@
       }
       F = keepStrongest(nextF, fPeaks, false);
       Z = keepStrongest(nextZ, zPeaks, true);
+      if (half) diffuseHalf(half.post, tPost);
       for (let i2 = 0; i2 < F.count; i2++) {
         F.k[3 * i2] += total[0] - pre[0];
         F.k[3 * i2 + 1] += total[1] - pre[1];
@@ -8199,23 +8413,28 @@
     return Number.isFinite(time) && time > 0 ? 1 / time : 0;
   }
   function physicsTable(phantom) {
-    const table = { of: new Int32Array(0), ofPlanes: [], t1: [], t2: [], df: [], b1: [] };
+    const table = { of: new Int32Array(0), ofPlanes: [], t1: [], t2: [], t2p: [], adc: [], df: [], b1: [], pathway: false };
     const index = /* @__PURE__ */ new Map();
     const entries = (maps) => {
-      const { pd, t1, t2, b0, b1 } = maps;
+      const { pd, t1, t2, t2prime, adc, b0, b1 } = maps;
       const of = new Int32Array(pd.length).fill(-1);
       for (let i2 = 0; i2 < pd.length; i2++) {
         if (!(pd[i2] > 0)) continue;
         const df = b0 ? b0[i2] : 0, gain = b1 ? b1[i2] : 1;
-        const key = `${t1[i2]}|${t2[i2]}|${df}|${gain}`;
+        const t2p = t2prime && Number.isFinite(t2prime[i2]) && t2prime[i2] > 0 ? t2prime[i2] : Infinity;
+        const d = adc && adc[i2] > 0 ? adc[i2] : 0;
+        const key = `${t1[i2]}|${t2[i2]}|${t2p}|${d}|${df}|${gain}`;
         let k = index.get(key);
         if (k === void 0) {
           k = table.t1.length;
           index.set(key, k);
           table.t1.push(t1[i2]);
           table.t2.push(t2[i2]);
+          table.t2p.push(t2p);
+          table.adc.push(d);
           table.df.push(df);
           table.b1.push(gain);
+          if (Number.isFinite(t2p) || d > 0) table.pathway = true;
         }
         of[i2] = k;
       }
@@ -8253,6 +8472,7 @@
     const slices = slicesOf(options);
     const count = spinCount(options, phantom);
     const coils = phantom.coils?.count ?? 1;
+    const pathway = [phantom.maps, ...(phantom.planes ?? []).map((plane) => plane.maps)].some((maps) => maps.t2prime || maps.adc);
     const set = {
       count,
       x: new Float64Array(count),
@@ -8261,6 +8481,8 @@
       df: new Float64Array(count),
       r1: new Float64Array(count),
       r2: new Float64Array(count),
+      r2prime: pathway ? new Float64Array(count) : void 0,
+      adc: pathway ? new Float64Array(count) : void 0,
       weight: new Float64Array(count),
       b1Re: new Float64Array(count),
       b1Im: new Float64Array(count),
@@ -8280,9 +8502,10 @@
       const x0 = (col - phantom.nx / 2) * dx;
       const y0 = (phantom.ny / 2 - 1 - row) * dy;
       for (let slice = 0; slice < slices.z.length; slice++) {
-        const { pd, t1, t2, b0, b1 } = planeMaps(phantom, slices.plane[slice]);
+        const { pd, t1, t2, t2prime, adc, b0, b1 } = planeMaps(phantom, slices.plane[slice]);
         if (!(pd[index] > 0)) continue;
         const r1 = rate(t1[index]), r2 = rate(t2[index]);
+        const r2p = t2prime ? rate(t2prime[index]) : 0, d = adc && adc[index] > 0 ? adc[index] : 0;
         const df = b0 ? b0[index] : 0;
         const gain = b1 ? b1[index] : 1;
         const weight = pd[index] / (mx * my) * slices.weight[slice];
@@ -8294,6 +8517,10 @@
             set.df[k] = df;
             set.r1[k] = r1;
             set.r2[k] = r2;
+            if (set.r2prime && set.adc) {
+              set.r2prime[k] = r2p;
+              set.adc[k] = d;
+            }
             set.weight[k] = weight;
             set.b1Re[k] = gain;
             for (let c = 0; c < coils; c++) {
@@ -8395,6 +8622,8 @@
         df: Float64Array.from(classEntry, (e) => physics.df[e]),
         r1: Float64Array.from(classEntry, (e) => rate(physics.t1[e])),
         r2: Float64Array.from(classEntry, (e) => rate(physics.t2[e])),
+        r2prime: physics.pathway ? Float64Array.from(classEntry, (e) => rate(physics.t2p[e])) : void 0,
+        adc: physics.pathway ? Float64Array.from(classEntry, (e) => physics.adc[e]) : void 0,
         weight: new Float64Array(profiles),
         b1Re: Float64Array.from(classEntry, (e) => physics.b1[e]),
         b1Im: new Float64Array(profiles),
@@ -8416,6 +8645,8 @@
       df: new Float64Array(count),
       r1: new Float64Array(count),
       r2: new Float64Array(count),
+      r2prime: physics.pathway ? new Float64Array(count) : void 0,
+      adc: physics.pathway ? new Float64Array(count) : void 0,
       weight: new Float64Array(count),
       b1Re: new Float64Array(count),
       b1Im: new Float64Array(count),
@@ -8433,6 +8664,10 @@
         classes.df[c] = physics.df[e];
         classes.r1[c] = rate(physics.t1[e]);
         classes.r2[c] = rate(physics.t2[e]);
+        if (classes.r2prime && classes.adc) {
+          classes.r2prime[c] = rate(physics.t2p[e]);
+          classes.adc[c] = physics.adc[e];
+        }
         classes.b1Re[c] = physics.b1[e];
         classes.weight[c] = slices.weight[k];
         profileOf[c] = q;
@@ -8471,7 +8706,7 @@
     const cells = phantom.nx * phantom.ny;
     const [dx, dy] = phantom.voxel;
     const xs = [], ys = [], dfs = [], pds = [], froms = [], tos = [];
-    const t1s = [], t2s = [], t2ps = [], b1s = [], cellOf = [];
+    const t1s = [], t2s = [], t2ps = [], adcs = [], b1s = [], cellOf = [];
     for (const v of voxels) {
       const col = v % phantom.nx, row = Math.floor(v / phantom.nx);
       for (const run of runs) {
@@ -8487,6 +8722,7 @@
         t1s.push(maps.t1[v]);
         t2s.push(maps.t2[v]);
         t2ps.push(maps.t2prime ? maps.t2prime[v] : Infinity);
+        adcs.push(maps.adc && maps.adc[v] > 0 ? maps.adc[v] : 0);
         b1s.push(maps.b1 ? maps.b1[v] : 1);
         cellOf.push(v);
       }
@@ -8501,26 +8737,29 @@
     }
     const classOf = assignment.classOf;
     const C = assignment.keys.size;
-    const sum = new Float64Array(6 * C);
+    const S = 7;
+    const sum = new Float64Array(S * C);
     for (let i2 = 0; i2 < count; i2++) {
       const c = classOf[i2], w = pds[i2];
-      sum[6 * c] += w;
-      sum[6 * c + 1] += w * finiteOr(t1s[i2], 1e6);
-      sum[6 * c + 2] += w * finiteOr(t2s[i2], 1e6);
-      sum[6 * c + 3] += w * b1s[i2];
-      sum[6 * c + 4] += w * dfs[i2];
-      sum[6 * c + 5] += w * (Number.isFinite(t2ps[i2]) && t2ps[i2] > 0 ? 1 / t2ps[i2] : 0);
+      sum[S * c] += w;
+      sum[S * c + 1] += w * finiteOr(t1s[i2], 1e6);
+      sum[S * c + 2] += w * finiteOr(t2s[i2], 1e6);
+      sum[S * c + 3] += w * b1s[i2];
+      sum[S * c + 4] += w * dfs[i2];
+      sum[S * c + 5] += w * (Number.isFinite(t2ps[i2]) && t2ps[i2] > 0 ? 1 / t2ps[i2] : 0);
+      sum[S * c + 6] += w * adcs[i2];
     }
     const classes = [];
     for (let c = 0; c < C; c++) {
-      const w = sum[6 * c], rate2 = sum[6 * c + 5] / w;
+      const w = sum[S * c], rate2 = sum[S * c + 5] / w;
       classes.push({
-        t1: sum[6 * c + 1] / w,
-        t2: sum[6 * c + 2] / w,
-        b1Re: sum[6 * c + 3] / w,
+        t1: sum[S * c + 1] / w,
+        t2: sum[S * c + 2] / w,
+        b1Re: sum[S * c + 3] / w,
         b1Im: 0,
-        df: sum[6 * c + 4] / w,
-        t2prime: rate2 > 0 ? 1 / rate2 : Infinity
+        df: sum[S * c + 4] / w,
+        t2prime: rate2 > 0 ? 1 / rate2 : Infinity,
+        adc: sum[S * c + 6] / w
       });
     }
     const coils = phantom.coils?.count ?? 1;
@@ -8554,7 +8793,7 @@
       const logStep = (step) => Math.log1p(step);
       const timeKey = (t) => !(Number.isFinite(t) && t > 0) ? "inf" : bins.t > 0 ? String(Math.round(Math.log(t) / logStep(bins.t))) : String(t);
       for (let i2 = 0; i2 < count; i2++) {
-        const key = `${timeKey(t1s[i2])}|${timeKey(t2s[i2])}|${timeKey(t2ps[i2])}|${bins.b1 > 0 ? Math.round(b1s[i2] / bins.b1) : b1s[i2]}|${Math.round(dfs[i2] / bins.df)}`;
+        const key = `${timeKey(t1s[i2])}|${timeKey(t2s[i2])}|${timeKey(t2ps[i2])}|${timeKey(adcs[i2])}|${bins.b1 > 0 ? Math.round(b1s[i2] / bins.b1) : b1s[i2]}|${Math.round(dfs[i2] / bins.df)}`;
         let c = keys.get(key);
         if (c === void 0) {
           c = keys.size;
@@ -8571,11 +8810,11 @@
 
   // src/sim/phantom/builtin.ts
   var TISSUES = {
-    skin: { name: "skin", pd: 0.9, t1: 0.25, t2: 0.07, t2prime: 0.07 },
-    whiteMatter: { name: "white matter", pd: 0.69, t1: 0.83, t2: 0.08, t2prime: 0.15 },
-    greyMatter: { name: "grey matter", pd: 0.8, t1: 1.33, t2: 0.11, t2prime: 0.17 },
-    csf: { name: "CSF", pd: 1, t1: 4, t2: 2, t2prime: 0.5 },
-    lesion: { name: "lesion", pd: 0.85, t1: 1.6, t2: 0.25, t2prime: 0.12 }
+    skin: { name: "skin", pd: 0.9, t1: 0.25, t2: 0.07, t2prime: 0.07, adc: 5e-10 },
+    whiteMatter: { name: "white matter", pd: 0.69, t1: 0.83, t2: 0.08, t2prime: 0.15, adc: 7e-10 },
+    greyMatter: { name: "grey matter", pd: 0.8, t1: 1.33, t2: 0.11, t2prime: 0.17, adc: 8e-10 },
+    csf: { name: "CSF", pd: 1, t1: 4, t2: 2, t2prime: 0.5, adc: 3e-9 },
+    lesion: { name: "lesion", pd: 0.85, t1: 1.6, t2: 0.25, t2prime: 0.12, adc: 14e-10 }
   };
   var SHEPP_LOGAN = [
     { a: 0.69, b: 0.92, x0: 0, y0: 0, deg: 0, tissue: TISSUES.skin },
@@ -8600,7 +8839,8 @@
       pd: new Float32Array(size),
       t1: new Float32Array(size).fill(Infinity),
       t2: new Float32Array(size).fill(Infinity),
-      t2prime: new Float32Array(size).fill(Infinity)
+      t2prime: new Float32Array(size).fill(Infinity),
+      adc: new Float32Array(size)
     };
     for (let iy = 0; iy < n; iy++) {
       const v = 2 * (n / 2 - 1 - iy) / n;
@@ -8620,6 +8860,7 @@
         grid.t1[index] = tissue.t1;
         grid.t2[index] = tissue.t2;
         grid.t2prime[index] = tissue.t2prime;
+        grid.adc[index] = tissue.adc;
       }
     }
     return grid;
@@ -8630,7 +8871,7 @@
       nx: n,
       ny: n,
       voxel: [fovX / n, fovY / n, 0],
-      maps: { pd: grid.pd, t1: grid.t1, t2: grid.t2, t2prime: grid.t2prime },
+      maps: { pd: grid.pd, t1: grid.t1, t2: grid.t2, t2prime: grid.t2prime, adc: grid.adc },
       source: `Shepp\u2013Logan ${n}\xB2`,
       notes: []
     };
@@ -9713,10 +9954,10 @@
           notes.push(`${"xy"[axis]}: ${plan.count} spins per voxel did not reach the ${tolerancePercent(settings)} target (error ${(100 * plan.probe.error).toFixed(0)} %); expect residual stripes from incomplete spoiling.`);
         }
       }
-      if (this.phantom.maps.t2prime) {
-        notes.push("Not simulated: T2\u2032 (the isochromat engine would need a Lorentzian line of spins in every voxel, 50\u2013100 \xD7 the spins). The phase-graph engine models it exactly.");
+      const hasT2prime = this.physics.t2p.some(Number.isFinite), hasDiffusion = this.physics.adc.some((d) => d > 0);
+      if (hasT2prime || hasDiffusion) {
+        notes.push(`${hasT2prime && hasDiffusion ? "T2\u2032 and diffusion follow" : hasT2prime ? "T2\u2032 follows" : "Diffusion follows"} the main echo pathway (from each excitation, reversed by each refocusing pulse): exact for gradient and spin echoes, CPMG trains and diffusion-weighted EPI; approximate where other pathways carry signal (balanced SSFP, stimulated echoes, spoiled steady states). The phase-graph engine is exact for every pathway.`);
       }
-      if (this.phantom.maps.adc) notes.push("The ADC map is loaded but diffusion is not simulated yet.");
       for (const note of this.phantom.notes) notes.push(note);
       for (const feature of this.program.ignoredFeatures) notes.push(`Not simulated: ${IGNORED_FEATURE_TEXT[feature]}.`);
       this.plan = {
@@ -9858,7 +10099,9 @@
         notes.push(`Pulses act at off-resonance rounded to ${phantom.binning.df} Hz; free precession uses each voxel's exact B0.`);
       }
       if (phantom.classes.some((c) => c.t2prime !== void 0 && Number.isFinite(c.t2prime))) notes.push("T2\u2032 is exact: each configuration decays by e^{\u2212|\u03C4|/T2\u2032} (a Lorentzian line).");
-      if (this.phantom.maps.adc) notes.push("The ADC map is loaded but diffusion is not simulated yet.");
+      if (phantom.classes.some((c) => (c.adc ?? 0) > 0)) {
+        notes.push("Diffusion is exact: each configuration decays by e^{\u2212bD}, b from its own gradient history (isotropic D).");
+      }
       for (const note of this.phantom.notes) notes.push(note);
       for (const feature of this.program.ignoredFeatures) notes.push(`Not simulated: ${IGNORED_FEATURE_TEXT[feature]}.`);
       const none = { count: 1, reason: "none", folded: false };
