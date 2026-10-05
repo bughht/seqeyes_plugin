@@ -1482,6 +1482,7 @@
       const values = {};
       for (const counter of COUNTERS) values[counter] = label(a, LABEL_OF[counter]);
       if (!has("LIN") && grid.delta) values.kspace_encode_step_1 = gridLine(layout2, a, grid);
+      if (!has("PAR") && grid.delta && partitioned(grid)) values.kspace_encode_step_2 = gridPartition(layout2, a, grid);
       raw.push(values);
     }
     const counterOffsets = {};
@@ -1496,7 +1497,7 @@
       counterOffsets[counter] = min;
       const span = max2 - min;
       if (span > 65535) throw new Error(`The ${counter} counter spans ${span + 1} values, more than ISMRMRD's 16 bits hold.`);
-      const center = counter === "kspace_encode_step_1" && !has("LIN") && grid.delta ? Math.round(grid.nv / 2) - min : Math.floor(span / 2);
+      const center = counter === "kspace_encode_step_1" && !has("LIN") && grid.delta ? Math.round(grid.nv / 2) - min : counter === "kspace_encode_step_2" && !has("PAR") && grid.delta && partitioned(grid) ? Math.round(grid.nw / 2) - min : Math.floor(span / 2);
       limits[counter] = { minimum: 0, maximum: span, center: Math.max(0, Math.min(span, center)) };
     }
     const acquisitions = raw.map((values, a) => {
@@ -1578,6 +1579,14 @@
     const centre = 3 * (layout2.offsets[a] + (layout2.samples[a] >> 1));
     const kv = layout2.k[centre + grid.axes[1]];
     return Math.round(kv / grid.delta[1] - grid.offset[1]) + (grid.nv >> 1);
+  }
+  function partitioned(grid) {
+    return grid.wAxis !== void 0 && grid.wAxis >= 0 && (grid.nw ?? 1) > 1 && (grid.deltaW ?? 0) > 0;
+  }
+  function gridPartition(layout2, a, grid) {
+    const centre = 3 * (layout2.offsets[a] + (layout2.samples[a] >> 1));
+    const kw = layout2.k[centre + grid.wAxis];
+    return Math.round(kw / grid.deltaW - (grid.offsetW ?? 0)) + (grid.nw >> 1);
   }
   function normalisedTrajectory(layout2, a, kmax, axes) {
     const n = layout2.samples[a];
@@ -3107,7 +3116,11 @@
       axes: recon.axes,
       nu: recon.nu,
       nv: recon.nv,
-      offset: recon.offset
+      offset: recon.offset,
+      wAxis: recon.wAxis,
+      nw: recon.nw,
+      deltaW: recon.deltaW,
+      offsetW: recon.offsetW
     };
     const plan = planExport(job.rawLayout(), grid);
     const xml = buildIsmrmrdHeaderXml(headerInfo(job, plan, grid, cartesian));
@@ -3130,8 +3143,9 @@
     const timing = detectSequenceTiming(job.program.sequence);
     const fov = job.fieldOfView;
     const p = job.plan;
-    const fieldOfView_mm = fov ? { x: fov[0] * 1e3, y: fov[1] * 1e3, z: Math.max(fov[2], 0) * 1e3 } : grid.delta ? { x: 1e3 / grid.delta[0], y: 1e3 / grid.delta[1], z: 1 } : { x: p.phantom.fov[0] * 1e3, y: p.phantom.fov[1] * 1e3, z: 1 };
-    const matrixSize = { x: grid.nu, y: grid.nv, z: 1 };
+    const planes = grid.nw && grid.nw > 1 && grid.deltaW ? grid.nw : 1;
+    const fieldOfView_mm = fov ? { x: fov[0] * 1e3, y: fov[1] * 1e3, z: Math.max(fov[2], 0) * 1e3 } : grid.delta ? { x: 1e3 / grid.delta[0], y: 1e3 / grid.delta[1], z: planes > 1 ? 1e3 / grid.deltaW : 1 } : { x: p.phantom.fov[0] * 1e3, y: p.phantom.fov[1] * 1e3, z: 1 };
+    const matrixSize = { x: grid.nu, y: grid.nv, z: planes };
     const encodingLimits = {
       kspace_encoding_step_0: { minimum: 0, maximum: Math.max(0, grid.nu - 1), center: grid.nu >> 1 }
     };
@@ -8828,6 +8842,63 @@
     { a: 0.023, b: 0.023, x0: 0, y0: -0.606, deg: 0, tissue: TISSUES.lesion },
     { a: 0.023, b: 0.046, x0: 0.06, y0: -0.605, deg: 0, tissue: TISSUES.lesion }
   ];
+  var SHEPP_LOGAN_3D = [
+    { ...SHEPP_LOGAN[0], c: 0.81, z0: 0 },
+    { ...SHEPP_LOGAN[1], c: 0.78, z0: 0 },
+    { ...SHEPP_LOGAN[2], c: 0.22, z0: 0 },
+    { ...SHEPP_LOGAN[3], c: 0.28, z0: 0 },
+    { ...SHEPP_LOGAN[4], c: 0.41, z0: -0.15 },
+    { ...SHEPP_LOGAN[5], c: 0.05, z0: 0.25 },
+    { ...SHEPP_LOGAN[6], c: 0.05, z0: 0.25 },
+    { ...SHEPP_LOGAN[7], c: 0.05, z0: 0 },
+    { ...SHEPP_LOGAN[8], c: 0.02, z0: 0 },
+    { ...SHEPP_LOGAN[9], c: 0.02, z0: 0 }
+  ];
+  function sheppLoganVolume(n, nz, fov) {
+    if (!(n >= 2) || !Number.isInteger(n) || !(nz >= 1) || !Number.isInteger(nz)) {
+      throw new Error(`phantom size must be integers n \u2265 2 and nz \u2265 1, got ${n} \xD7 ${n} \xD7 ${nz}`);
+    }
+    const size = n * n * nz;
+    const maps = {
+      pd: new Float32Array(size),
+      t1: new Float32Array(size).fill(Infinity),
+      t2: new Float32Array(size).fill(Infinity),
+      t2prime: new Float32Array(size).fill(Infinity),
+      adc: new Float32Array(size)
+    };
+    const rotations = SHEPP_LOGAN_3D.map((e) => [Math.cos(e.deg * Math.PI / 180), Math.sin(e.deg * Math.PI / 180)]);
+    for (let k = 0; k < nz; k++) {
+      const w = 2 * (k - nz / 2) / nz;
+      for (let j = 0; j < n; j++) {
+        const v = 2 * (j - n / 2) / n;
+        for (let i2 = 0; i2 < n; i2++) {
+          const u = 2 * (i2 - n / 2) / n;
+          let tissue = null;
+          SHEPP_LOGAN_3D.forEach((e, index2) => {
+            const [cos, sin] = rotations[index2];
+            const dx = u - e.x0, dy = v - e.y0;
+            const xr = dx * cos + dy * sin, yr = -dx * sin + dy * cos;
+            if ((xr / e.a) ** 2 + (yr / e.b) ** 2 + ((w - e.z0) / e.c) ** 2 <= 1) tissue = e.tissue;
+          });
+          if (!tissue) continue;
+          const t = tissue;
+          const index = (k * n + j) * n + i2;
+          maps.pd[index] = t.pd;
+          maps.t1[index] = t.t1;
+          maps.t2[index] = t.t2;
+          maps.t2prime[index] = t.t2prime;
+          maps.adc[index] = t.adc;
+        }
+      }
+    }
+    return {
+      shape: [n, n, nz],
+      voxel: [fov[0] / n, fov[1] / n, fov[2] / nz],
+      maps,
+      source: `Shepp\u2013Logan 3-D ${n}\xD7${n}\xD7${nz}`,
+      notes: []
+    };
+  }
   function sheppLoganPhantom(n, fovX, fovY) {
     if (!(n >= 2) || !Number.isInteger(n)) throw new Error(`phantom size must be an integer \u2265 2, got ${n}`);
     const size = n * n;
@@ -9363,7 +9434,10 @@
     const density = Math.max(0.25, options.density ?? 2);
     const maxSlices = Math.max(4, Math.floor(options.maxSlices ?? 512));
     const selective = pulses.filter((p) => p.axis === "z" && p.bands.length);
-    if (!selective.length) return null;
+    const volume2 = options.volume && options.volume[1] > options.volume[0] ? options.volume : null;
+    if (!selective.length && !volume2) return null;
+    const planeStep = volume2 && options.planeThickness && options.planeThickness > 0 ? options.planeThickness : Infinity;
+    const encodingStep = options.encodingZ && options.encodingZ > 0 ? 1 / (2 * options.encodingZ) : Infinity;
     const excites = (p) => p.role === "excitation" || p.role === "other";
     const offResonance = Math.abs(options.offResonance ?? 0);
     const widened = selective.map((p) => {
@@ -9375,7 +9449,11 @@
     let ranges;
     let reference;
     let extent;
-    if (pulses.some((p) => p.role === "excitation" && p.axis !== "z")) {
+    if (volume2 && (!selective.length || pulses.some((p) => p.role === "excitation" && p.axis !== "z"))) {
+      ranges = [volume2];
+      reference = options.planeThickness && options.planeThickness > 0 ? options.planeThickness : volume2[1] - volume2[0];
+      extent = "volume";
+    } else if (pulses.some((p) => p.role === "excitation" && p.axis !== "z")) {
       const thickness = options.planeThickness ?? 0;
       if (!(thickness > 0)) return null;
       ranges = [[-thickness / 2, thickness / 2]];
@@ -9388,9 +9466,11 @@
       reference = thicknesses.length ? Math.max(...thicknesses) : ranges.reduce((sum, [a, b]) => sum + (b - a), 0);
       extent = "pulses";
     }
-    const finest = Math.min(...selective.map((p) => 1 / p.extentZ));
+    const cap2 = Math.min(planeStep, encodingStep);
+    const finest = Math.min(cap2, ...selective.map((p) => 1 / p.extentZ));
+    const fallback = Number.isFinite(finest) ? finest : (ranges[0][1] - ranges[0][0]) / 8;
     const stepAt = (z, scale2) => {
-      let best = Infinity;
+      let best = cap2;
       for (const w of widened) {
         if (!w.bands.some(([a, b]) => z >= a && z <= b)) continue;
         const level = Math.max(activityAt(w.pulse, z), activityAt(w.pulse, z - w.margin), activityAt(w.pulse, z + w.margin));
@@ -9398,7 +9478,7 @@
         for (const threshold of TIERS) if (level < threshold * w.peak) tier *= 2;
         best = Math.min(best, tier / w.pulse.extentZ);
       }
-      return (Number.isFinite(best) ? best : finest) * scale2 / density;
+      return (Number.isFinite(best) ? best : fallback) * scale2 / density;
     };
     for (let scale2 = 1, attempt = 0; attempt < 40; attempt++, scale2 *= 1.25) {
       const cells = layout(ranges, (z) => stepAt(z, scale2), maxSlices + 1);
@@ -9565,12 +9645,30 @@
     const warnings = [];
     const k = trajectory.k;
     const totalSamples = k.length / 3;
-    const extent = [0, 0, 0];
+    const extent = [0, 0, 0], within = [0, 0, 0];
     for (let s = 0; s < totalSamples; s++) {
       for (let a = 0; a < 3; a++) extent[a] = Math.max(extent[a], Math.abs(k[3 * s + a]));
     }
+    for (let r = 0; r < trajectory.readouts; r++) {
+      const first = trajectory.offsets[r], last = first + trajectory.samples[r] - 1;
+      for (let a = 0; a < 3; a++) {
+        let lo = Infinity, hi = -Infinity;
+        for (let s = first; s <= last; s++) {
+          lo = Math.min(lo, k[3 * s + a]);
+          hi = Math.max(hi, k[3 * s + a]);
+        }
+        if (hi > lo) within[a] = Math.max(within[a], hi - lo);
+      }
+    }
     const ranked = [0, 1, 2].sort((a, b) => extent[b] - extent[a]);
-    const axes = [ranked[0], ranked[1]].sort((a, b) => a - b);
+    const encoded = (axis) => extent[axis] >= Math.max(1, 0.01 * extent[ranked[1]]);
+    let third = ranked[2];
+    if (encoded(ranked[2])) {
+      const still = [0, 1, 2].filter((axis) => within[axis] <= 0.01 * Math.max(...within));
+      const narrower = (a, b) => Math.abs(extent[a] - extent[b]) <= 0.01 * Math.max(extent[a], extent[b]) ? b - a : extent[a] - extent[b];
+      if (still.length) third = still.sort(narrower)[0];
+    }
+    const axes = [0, 1, 2].filter((axis) => axis !== third);
     const delta = axes.map((axis) => {
       const fov = options.fov?.[axis];
       if (fov && fov > 0) return 1 / fov;
@@ -9582,6 +9680,24 @@
       return Math.max(2, Math.min(maxSize, n));
     });
     const [nu, nv] = size;
+    let wAxis = -1, nw = 1, deltaW = 0, offsetW = 0;
+    if (encoded(third)) {
+      const fov = options.fov?.[third];
+      const step = fov && fov > 0 ? 1 / fov : estimateStep(trajectory, third, 2 * extent[third]);
+      const lattice = gridOffset(k, third, step);
+      const planes = /* @__PURE__ */ new Set();
+      for (let r = 0; r < trajectory.readouts; r++) {
+        const centre = trajectory.offsets[r] + (trajectory.samples[r] >> 1);
+        planes.add(Math.round(k[3 * centre + third] / step - lattice));
+      }
+      if (planes.size >= 2) {
+        wAxis = third;
+        deltaW = step;
+        offsetW = lattice;
+        nw = Math.max(2, Math.min(options.maxPlanes ?? 256, 2 * Math.round(extent[third] / step + (lattice ? 0.5 : 0))));
+      }
+    }
+    const planeOf = (index) => wAxis < 0 ? 0 : Math.round(k[3 * index + wAxis] / deltaW - offsetW) + (nw >> 1);
     const groupIds = /* @__PURE__ */ new Map();
     const groupFrames = /* @__PURE__ */ new Map();
     const frameOfReadout = new Int32Array(trajectory.readouts);
@@ -9596,7 +9712,7 @@
         groupIds.set(key, group);
       }
       const centre = trajectory.offsets[r] + (trajectory.samples[r] >> 1);
-      const row = Math.round(k[3 * centre + axes[1]] / delta[1] - offset[1]);
+      const row = Math.round(k[3 * centre + axes[1]] / delta[1] - offset[1]) * (nw + 1) + planeOf(centre);
       let current = groupFrames.get(group);
       if (!current || current.rows.has(row)) {
         const repeat = repeats.get(group) ?? 0;
@@ -9614,7 +9730,8 @@
       warnings.push(`Only the first ${maxFrames} of ${frames} frames are reconstructed.`);
       frames = maxFrames;
     }
-    const cells = nu * nv;
+    const plane = nu * nv;
+    const cells = plane * nw;
     const gridRe = new Float64Array(frames * coils * cells);
     const gridIm = new Float64Array(frames * coils * cells);
     const filled = new Uint8Array(frames * cells);
@@ -9630,8 +9747,9 @@
         if (Math.abs(fu - cu) > 0.1 || Math.abs(fv - cv) > 0.1) offGrid++;
         const iu = cu + (nu >> 1);
         const iv = cv + (nv >> 1);
-        if (iu < 0 || iu >= nu || iv < 0 || iv >= nv) continue;
-        const cell = iv * nu + iu;
+        const iw = planeOf(index);
+        if (iu < 0 || iu >= nu || iv < 0 || iv >= nv || iw < 0 || iw >= nw) continue;
+        const cell = (iw * nv + iv) * nu + iu;
         filled[frame * cells + cell] = 1;
         for (let c = 0; c < coils; c++) {
           const o = (frame * coils + c) * cells + cell;
@@ -9652,7 +9770,9 @@
     const coilKspace = options.complex ? { re: new Float32Array(complexSize), im: new Float32Array(complexSize) } : void 0;
     const twiddleU = centredTwiddles(nu, offset[0]);
     const twiddleV = centredTwiddles(nv, offset[1]);
+    const twiddleW = nw > 1 ? centredTwiddles(nw, offsetW) : null;
     const workRe = new Float64Array(cells), workIm = new Float64Array(cells);
+    const lineRe = new Float64Array(nw), lineIm = new Float64Array(nw);
     for (let frame = 0; frame < frames; frame++) {
       const image = images.subarray(frame * cells, (frame + 1) * cells);
       const ks = kspace.subarray(frame * cells, (frame + 1) * cells);
@@ -9663,22 +9783,30 @@
           workIm[i2] = gridIm[base + i2];
           ks[i2] += workRe[i2] * workRe[i2] + workIm[i2] * workIm[i2];
         }
-        if (coilKspace) copyTopDown(workRe, workIm, nu, nv, coilKspace, base);
-        inverseDft2(workRe, workIm, nu, nv, twiddleU, twiddleV);
-        for (let iv = 0; iv < nv; iv++) {
-          const row = nv - 1 - iv;
-          for (let iu = 0; iu < nu; iu++) {
-            const i2 = iv * nu + iu;
-            image[row * nu + iu] += workRe[i2] * workRe[i2] + workIm[i2] * workIm[i2];
-          }
+        for (let iw = 0; iw < nw; iw++) {
+          const at = iw * plane;
+          if (coilKspace) copyTopDown(workRe.subarray(at, at + plane), workIm.subarray(at, at + plane), nu, nv, coilKspace, base + at);
+          inverseDft2(workRe.subarray(at, at + plane), workIm.subarray(at, at + plane), nu, nv, twiddleU, twiddleV);
         }
-        if (coilImages) copyTopDown(workRe, workIm, nu, nv, coilImages, base);
+        if (twiddleW) {
+          for (let i2 = 0; i2 < plane; i2++) transformLine(workRe, workIm, i2, plane, nw, twiddleW, lineRe, lineIm);
+        }
+        for (let iw = 0; iw < nw; iw++) {
+          for (let iv = 0; iv < nv; iv++) {
+            const row = nv - 1 - iv;
+            for (let iu = 0; iu < nu; iu++) {
+              const i2 = (iw * nv + iv) * nu + iu;
+              image[iw * plane + row * nu + iu] += workRe[i2] * workRe[i2] + workIm[i2] * workIm[i2];
+            }
+          }
+          if (coilImages) copyTopDown(workRe.subarray(iw * plane, (iw + 1) * plane), workIm.subarray(iw * plane, (iw + 1) * plane), nu, nv, coilImages, base + iw * plane);
+        }
       }
       for (let i2 = 0; i2 < cells; i2++) {
         image[i2] = Math.sqrt(image[i2]);
         ks[i2] = Math.sqrt(ks[i2]);
       }
-      flipRows(ks, nu, nv);
+      for (let iw = 0; iw < nw; iw++) flipRows(ks.subarray(iw * plane, (iw + 1) * plane), nu, nv);
     }
     let filledCount = 0;
     for (let i2 = 0; i2 < filled.length; i2++) filledCount += filled[i2];
@@ -9688,6 +9816,10 @@
       nv,
       delta,
       offset,
+      wAxis,
+      nw,
+      deltaW,
+      offsetW,
       frames,
       images,
       kspace,
@@ -10225,7 +10357,9 @@
         const options = {
           offResonance: this.largestOffResonance(),
           planeThickness: this.phantom.voxel[2],
-          maxSlices: MAX_SLICES
+          maxSlices: MAX_SLICES,
+          volume: volumeExtent(this.phantom) ?? void 0,
+          encodingZ: encodingExtent(this.adcTrajectory(), 2)
         };
         const selective = pulses.some((p) => p.axis === "z" && p.bands.length);
         if (!planSlices(pulses, { ...options, density: 1 })) {
@@ -10282,7 +10416,7 @@
       const mm = (value) => +(value * 1e3).toFixed(2);
       const notes = [];
       const span = plan.ranges.map(([a, b]) => `${mm(a)}\u2026${mm(b)}`).join(", ");
-      notes.push(plan.extent === "plane" ? `An excitation is not selective along z: ${z.length} sub-slices span only the phantom plane's ${mm(this.phantom.voxel[2])} mm.` : `Through-slice: ${z.length} sub-slices over z = ${span} mm (slice ${mm(plan.reference)} mm FWHM).`);
+      notes.push(plan.extent === "plane" ? `An excitation is not selective along z: ${z.length} sub-slices span only the phantom plane's ${mm(this.phantom.voxel[2])} mm.` : plan.extent === "volume" ? `The excitation reaches the whole phantom along z: ${z.length} sub-slices over z = ${span} mm.` : `Through-slice: ${z.length} sub-slices over z = ${span} mm (slice ${mm(plan.reference)} mm FWHM).`);
       notes.push(this.phantom.planes?.length ? `${planes} phantom planes along z, ${mm(this.phantom.voxel[2])} mm apart.` : "The 2-D phantom is extruded along z: every sub-slice sees the same plane.");
       if (plan.coarsened) notes.push(`The sub-slice spacing was widened to stay within ${MAX_SLICES} sub-slices.`);
       if (budgetNote) notes.push(budgetNote);
@@ -10520,6 +10654,21 @@
     const byT1 = indices.slice().sort((a, b) => life(physics.t1[b]) - life(physics.t1[a]));
     const chosen = /* @__PURE__ */ new Set([byT2[0], byT1[0], byT2[Math.floor(byT2.length / 2)], byT2[1]]);
     return [...chosen].slice(0, PROBE_TISSUES).map((i2) => ({ t1: physics.t1[i2], t2: physics.t2[i2] }));
+  }
+  function volumeExtent(phantom) {
+    const dz = phantom.voxel[2];
+    if (!phantom.planes?.length || !(dz > 0)) return null;
+    let lo = 0, hi = 0;
+    for (const plane of phantom.planes) {
+      lo = Math.min(lo, plane.offset);
+      hi = Math.max(hi, plane.offset);
+    }
+    return [(lo - 0.5) * dz, (hi + 0.5) * dz];
+  }
+  function encodingExtent(trajectory, axis) {
+    let largest = 0;
+    for (let s = axis; s < trajectory.k.length; s += 3) largest = Math.max(largest, Math.abs(trajectory.k[s]));
+    return largest;
   }
   function splitUnits(units, spinsOf, target) {
     const chunks = [];
@@ -11326,6 +11475,8 @@
     }
     if (request.kind === "files") {
       volume = loadPhantomFiles(request.files.map((file) => ({ name: file.name, bytes: new Uint8Array(file.bytes) })));
+    } else if (request.kind === "shepp-logan-3d") {
+      volume = sheppLogan3d(request.size, request.sequence ? sequenceFov(request.sequence, request.name ?? "") : null);
     } else if (!volume) {
       throw new Error("Load a phantom file first.");
     }
@@ -11338,20 +11489,38 @@
     const phantom = sliceVolume(fielded, slice);
     return { volume: volumeSummary(volume), phantom };
   }
+  function sequenceFov(bytes, name) {
+    const definition = parseSequenceBytes(new Uint8Array(bytes), name).definitions.get("FOV");
+    if (!definition || definition.length < 2) return null;
+    const fov = Array.from(definition, Number);
+    return fov.slice(0, 2).every((v) => v > 0) ? fov : null;
+  }
+  function sheppLogan3d(size, fov) {
+    const fx = fov ? fov[0] : 0.256, fy = fov ? fov[1] : 0.256;
+    const fz = fov && fov.length > 2 && fov[2] >= 0.25 * fx ? fov[2] : fx;
+    const nz = Math.max(2, Math.min(64, Math.round(size * fz / fx)));
+    return sheppLoganVolume(size, nz, [fx, fy, fz]);
+  }
   function neighbourRange(v, slice, sequence, name) {
     const plane = slice.plane ?? "xy";
     const normal = plane === "xy" ? 2 : plane === "xz" ? 1 : 0;
-    if (v.shape[normal] < 2) return void 0;
+    const planes = v.shape[normal];
+    if (planes < 2) return void 0;
     const spacing = v.voxel[normal];
+    const index = Math.round(slice.index ?? Math.floor(planes / 2));
     let offResonance = 0;
     if (v.maps.b0) {
       for (let i2 = 0; i2 < v.maps.b0.length; i2++) if (v.maps.pd[i2] > 0) offResonance = Math.max(offResonance, Math.abs(v.maps.b0[i2]));
     }
-    const plan = planSlices(measurePulses(compileProgram(parseSequenceBytes(sequence, name))), {
+    const program = compileProgram(parseSequenceBytes(sequence, name));
+    const plan = planSlices(measurePulses(program), {
       density: 1,
       planeThickness: spacing,
-      offResonance
+      offResonance,
+      volume: [(-index - 0.5) * spacing, (planes - 1 - index + 0.5) * spacing],
+      encodingZ: encodingExtent(adcTrajectory(program), normal)
     });
+    if (plan?.extent === "volume") return [-index, planes - 1 - index];
     if (!plan || plan.extent === "plane" || !(spacing > 0)) return void 0;
     const lo = Math.min(...plan.ranges.map((r) => Math.round(r[0] / spacing)));
     const hi = Math.max(...plan.ranges.map((r) => Math.round(r[1] / spacing)));
@@ -11407,6 +11576,9 @@
             nv: recon.nv,
             delta: recon.delta,
             frames: recon.frames,
+            wAxis: recon.wAxis,
+            nw: recon.nw,
+            deltaW: recon.deltaW,
             images: recon.images,
             kspace: recon.kspace
           }
@@ -11449,6 +11621,9 @@
             nu: recon.nu,
             nv: recon.nv,
             delta: recon.delta,
+            wAxis: recon.wAxis,
+            nw: recon.nw,
+            deltaW: recon.deltaW,
             frames: recon.frames,
             images: recon.images,
             kspace: recon.kspace,

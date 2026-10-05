@@ -102,6 +102,19 @@ export interface SlicePlanOptions {
     offResonance?: number;
     /** The phantom plane's thickness [m], the range when an excitation is not selective along z. */
     planeThickness?: number;
+    /**
+     * A 3-D phantom's extent along z [m]. An excitation that is not
+     * selective along z (or a sequence without any selective pulse) then
+     * excites all of it, and every plane gets sub-slices: they are at most
+     * planeThickness apart.
+     */
+    volume?: [number, number];
+    /**
+     * The largest |kz| the readouts sample [1/m], e.g. 3-D phase encoding:
+     * sub-slices are at most 1/(2·density·kz) apart, so spins at points do
+     * not alias the encoding.
+     */
+    encodingZ?: number;
 }
 
 export interface SlicePlan {
@@ -116,8 +129,8 @@ export interface SlicePlan {
     reference: number;
     /** The merged ranges the sub-slices cover [m]. */
     ranges: [number, number][];
-    /** Whether the range comes from the pulses' bands or the phantom plane's thickness. */
-    extent: 'pulses' | 'plane';
+    /** Whether the range comes from the pulses' bands, the phantom plane's thickness or a 3-D phantom's extent. */
+    extent: 'pulses' | 'plane' | 'volume';
     /** The spacing was widened to stay within maxSlices. */
     coarsened: boolean;
 }
@@ -518,13 +531,18 @@ function findBands(scan: Scan, role: PulseRole, resolution: number): PulseBand[]
 
 /**
  * Sub-slices for the measured pulses, or null when no pulse is selective
- * along z (or an excitation is not, and the plane has no thickness).
+ * along z (or an excitation is not, and the plane has no thickness) and the
+ * phantom is not 3-D.
  */
 export function planSlices(pulses: readonly PulseResponse[], options: SlicePlanOptions = {}): SlicePlan | null {
     const density = Math.max(0.25, options.density ?? 2);
     const maxSlices = Math.max(4, Math.floor(options.maxSlices ?? 512));
     const selective = pulses.filter(p => p.axis === 'z' && p.bands.length);
-    if (!selective.length) return null;
+    const volume = options.volume && options.volume[1] > options.volume[0] ? options.volume : null;
+    if (!selective.length && !volume) return null;
+    // Caps on the spacing: every plane of a 3-D phantom, and the readouts' z encoding.
+    const planeStep = volume && options.planeThickness && options.planeThickness > 0 ? options.planeThickness : Infinity;
+    const encodingStep = options.encodingZ && options.encodingZ > 0 ? 1 / (2 * options.encodingZ) : Infinity;
     const excites = (p: PulseResponse) => p.role === 'excitation' || p.role === 'other';
     const offResonance = Math.abs(options.offResonance ?? 0);
     // Bands widened by how far off-resonance moves them: Δz = Δf / Ḡz.
@@ -538,7 +556,12 @@ export function planSlices(pulses: readonly PulseResponse[], options: SlicePlanO
     let ranges: [number, number][];
     let reference: number;
     let extent: SlicePlan['extent'];
-    if (pulses.some(p => p.role === 'excitation' && p.axis !== 'z')) {
+    if (volume && (!selective.length || pulses.some(p => p.role === 'excitation' && p.axis !== 'z'))) {
+        // Everything is excited: the whole volume, each plane weighing one.
+        ranges = [volume];
+        reference = options.planeThickness && options.planeThickness > 0 ? options.planeThickness : volume[1] - volume[0];
+        extent = 'volume';
+    } else if (pulses.some(p => p.role === 'excitation' && p.axis !== 'z')) {
         const thickness = options.planeThickness ?? 0;
         if (!(thickness > 0)) return null;
         ranges = [[-thickness / 2, thickness / 2]];
@@ -552,10 +575,13 @@ export function planSlices(pulses: readonly PulseResponse[], options: SlicePlanO
         extent = 'pulses';
     }
 
-    // The spacing at z: the finest the pulses acting there ask for, by tier.
-    const finest = Math.min(...selective.map(p => 1 / p.extentZ));
+    // The spacing at z: the finest the pulses acting there ask for, by tier,
+    // within the caps (and their finest where none acts).
+    const cap = Math.min(planeStep, encodingStep);
+    const finest = Math.min(cap, ...selective.map(p => 1 / p.extentZ));
+    const fallback = Number.isFinite(finest) ? finest : (ranges[0][1] - ranges[0][0]) / 8;
     const stepAt = (z: number, scale: number) => {
-        let best = Infinity;
+        let best = cap;
         for (const w of widened) {
             if (!w.bands.some(([a, b]) => z >= a && z <= b)) continue;
             // Off-resonant spins see the profile shifted by up to the margin.
@@ -564,7 +590,7 @@ export function planSlices(pulses: readonly PulseResponse[], options: SlicePlanO
             for (const threshold of TIERS) if (level < threshold * w.peak) tier *= 2;
             best = Math.min(best, tier / w.pulse.extentZ);
         }
-        return (Number.isFinite(best) ? best : finest) * scale / density;
+        return (Number.isFinite(best) ? best : fallback) * scale / density;
     };
     for (let scale = 1, attempt = 0; attempt < 40; attempt++, scale *= 1.25) {
         const cells = layout(ranges, z => stepAt(z, scale), maxSlices + 1);

@@ -2,8 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { buildExport } from '../../src/sim/io/export';
 import { ACQ_FLAG_BITS, planExport } from '../../src/sim/io/exportPlan';
 import { SimulationJob } from '../../src/sim/job';
+import { sheppLoganVolume } from '../../src/sim/phantom/builtin';
+import { sliceVolume } from '../../src/sim/phantom/model';
+import { spinWarp3d } from './helpers/sequences';
 
 function job(file: string): SimulationJob {
     const path = join(__dirname, '..', 'seqeyes_demo_seq_files', file);
@@ -12,10 +16,28 @@ function job(file: string): SimulationJob {
 
 function gridOf(j: SimulationJob) {
     const recon = j.reconstruct(new Float64Array(j.plan.adcSamples * 2));
-    return { delta: recon.delta, axes: recon.axes, nu: recon.nu, nv: recon.nv, offset: recon.offset };
+    return {
+        delta: recon.delta, axes: recon.axes, nu: recon.nu, nv: recon.nv, offset: recon.offset,
+        wAxis: recon.wAxis, nw: recon.nw, deltaW: recon.deltaW, offsetW: recon.offsetW,
+    };
 }
 
 describe('ISMRMRD export planning', () => {
+    it('numbers the partitions of an unlabelled 3-D acquisition from the grid', () => {
+        const n = 8, nz = 4;
+        const phantom = sliceVolume(sheppLoganVolume(n, nz, [0.032, 0.032, 0.016]), { neighbours: [-nz / 2, nz / 2 - 1] });
+        const j = new SimulationJob(new TextEncoder().encode(spinWarp3d(n, nz, 0.032, 0.016)), 'warp3d.seq', {
+            phantom: { kind: 'phantom', phantom }, subSpins: [1, 1], throughSlice: 'off',
+        });
+        const plan = planExport(j.rawLayout(), gridOf(j));
+        // Partition-major order: 8 lines in each of 4 partitions.
+        expect(plan.acquisitions.map(p => p.idx.kspace_encode_step_2)).toEqual(Array.from({ length: n * nz }, (_, a) => Math.floor(a / n)));
+        expect(plan.acquisitions.map(p => p.idx.kspace_encode_step_1)).toEqual(Array.from({ length: n * nz }, (_, a) => a % n));
+        expect(plan.limits.kspace_encode_step_2).toEqual({ minimum: 0, maximum: nz - 1, center: nz / 2 });
+        const xml = new TextDecoder().decode(buildExport(j, new Float64Array(2 * j.plan.adcSamples), 'ismrmrd-stream').bytes);
+        expect(xml.replace(/\s+/g, '')).toContain('<encodedSpace><matrixSize><x>8</x><y>8</y><z>4</z></matrixSize>');
+    });
+
     it('takes the phase-encode line from the LIN label', () => {
         const j = job('writeGradientEcho_label.seq');
         const layout = j.rawLayout();

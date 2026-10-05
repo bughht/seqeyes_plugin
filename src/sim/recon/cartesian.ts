@@ -1,6 +1,8 @@
 /**
- * Preview reconstruction for Cartesian 2D data: place each sample on a grid by
- * its k-space position, then apply a centred inverse DFT.
+ * Preview reconstruction for Cartesian 2D and 3D data: place each sample on a
+ * grid by its k-space position, then apply a centred inverse DFT. A third
+ * axis whose readouts sit on two or more planes of a Cartesian lattice (3-D
+ * phase encoding) is reconstructed too, as planes.
  *
  * Placement by trajectory rather than by labels works for files without
  * labels and handles reversed EPI lines for free; ramp-sampled points snap to
@@ -20,11 +22,13 @@ export interface CartesianOptions {
     maxSize?: number;
     /** Most frames to reconstruct. */
     maxFrames?: number;
+    /** Largest number of planes along a 3-D acquisition's third axis. */
+    maxPlanes?: number;
     /** Also return complex per-coil images and gridded k-space. */
     complex?: boolean;
 }
 
-/** Complex data, frames × coils × nv × nu, rows top-down like the magnitude images. */
+/** Complex data, frames × coils × nw × nv × nu, rows top-down like the magnitude images. */
 export interface ComplexStack {
     re: Float32Array;
     im: Float32Array;
@@ -38,10 +42,19 @@ export interface CartesianRecon {
     /** Grid spacing per image axis [1/m] (pixel size = 1/(n·Δk)), and the half-cell offset of each lattice. */
     delta: [number, number];
     offset: [number, number];
+    /**
+     * A 3-D acquisition's third axis (physical axis index, −1 in 2-D), its
+     * planes (1 in 2-D), their k spacing and lattice offset. Plane p sits at
+     * w = (p − nw/2)·(1/(nw·Δw)), ascending.
+     */
+    wAxis: number;
+    nw: number;
+    deltaW: number;
+    offsetW: number;
     frames: number;
-    /** Magnitude images, frames × nv × nu (coil root-sum-of-squares). */
+    /** Magnitude images, frames × nw × nv × nu (coil root-sum-of-squares). */
     images: Float32Array;
-    /** Gridded k-space magnitudes, frames × nv × nu. */
+    /** Gridded k-space magnitudes, frames × nw × nv × nu. */
     kspace: Float32Array;
     /** For each frame, the excitation group it came from and its repeat index. */
     frameGroup: Int32Array;
@@ -68,13 +81,33 @@ export function reconstructCartesian(
     const k = trajectory.k;
     const totalSamples = k.length / 3;
 
-    // The two axes with the widest k extent are the image axes, in axis order.
-    const extent = [0, 0, 0];
+    // The image axes: the two with the widest k extent, in axis order. When
+    // all three are encoded (3-D), the third is a partition axis instead: one
+    // that does not move within readouts, the narrowest such (z on a tie).
+    // Rounding leaves a 2-D sequence ~1e-3 /m along z; a partition encode
+    // reaches at least ~2 /m (two partitions over half a metre).
+    const extent = [0, 0, 0], within = [0, 0, 0];
     for (let s = 0; s < totalSamples; s++) {
         for (let a = 0; a < 3; a++) extent[a] = Math.max(extent[a], Math.abs(k[3 * s + a]));
     }
+    for (let r = 0; r < trajectory.readouts; r++) {
+        const first = trajectory.offsets[r], last = first + trajectory.samples[r] - 1;
+        for (let a = 0; a < 3; a++) {
+            let lo = Infinity, hi = -Infinity;
+            for (let s = first; s <= last; s++) { lo = Math.min(lo, k[3 * s + a]); hi = Math.max(hi, k[3 * s + a]); }
+            if (hi > lo) within[a] = Math.max(within[a], hi - lo);
+        }
+    }
     const ranked = [0, 1, 2].sort((a, b) => extent[b] - extent[a]);
-    const axes = [ranked[0], ranked[1]].sort((a, b) => a - b) as [number, number];
+    const encoded = (axis: number) => extent[axis] >= Math.max(1, 0.01 * extent[ranked[1]]);
+    let third = ranked[2];
+    if (encoded(ranked[2])) {
+        const still = [0, 1, 2].filter(axis => within[axis] <= 0.01 * Math.max(...within));
+        // Extents within 1 % are a tie (rounding), which goes to the later axis.
+        const narrower = (a: number, b: number) => (Math.abs(extent[a] - extent[b]) <= 0.01 * Math.max(extent[a], extent[b]) ? b - a : extent[a] - extent[b]);
+        if (still.length) third = still.sort(narrower)[0];
+    }
+    const axes = [0, 1, 2].filter(axis => axis !== third) as [number, number];
 
     const delta = axes.map(axis => {
         const fov = options.fov?.[axis];
@@ -92,8 +125,28 @@ export function reconstructCartesian(
     }) as [number, number];
     const [nu, nv] = size;
 
+    // A third axis with readouts on several planes of a lattice: 3-D encoding.
+    let wAxis = -1, nw = 1, deltaW = 0, offsetW = 0;
+    if (encoded(third)) {
+        const fov = options.fov?.[third];
+        const step = fov && fov > 0 ? 1 / fov : estimateStep(trajectory, third, 2 * extent[third]);
+        const lattice = gridOffset(k, third, step);
+        const planes = new Set<number>();
+        for (let r = 0; r < trajectory.readouts; r++) {
+            const centre = trajectory.offsets[r] + (trajectory.samples[r] >> 1);
+            planes.add(Math.round(k[3 * centre + third] / step - lattice));
+        }
+        if (planes.size >= 2) {
+            wAxis = third;
+            deltaW = step;
+            offsetW = lattice;
+            nw = Math.max(2, Math.min(options.maxPlanes ?? 256, 2 * Math.round(extent[third] / step + (lattice ? 0.5 : 0))));
+        }
+    }
+    const planeOf = (index: number) => (wAxis < 0 ? 0 : Math.round(k[3 * index + wAxis] / deltaW - offsetW) + (nw >> 1));
+
     // Frames: one excitation group (e.g. one slice) each; within a group a new
-    // frame starts whenever a readout returns to a row already filled.
+    // frame starts whenever a readout returns to a row (of a plane) already filled.
     const groupIds = new Map<string, number>();
     const groupFrames = new Map<number, { frame: number; rows: Set<number> }>();
     const frameOfReadout = new Int32Array(trajectory.readouts);
@@ -108,7 +161,7 @@ export function reconstructCartesian(
             groupIds.set(key, group);
         }
         const centre = trajectory.offsets[r] + (trajectory.samples[r] >> 1);
-        const row = Math.round(k[3 * centre + axes[1]] / delta[1] - offset[1]);
+        const row = Math.round(k[3 * centre + axes[1]] / delta[1] - offset[1]) * (nw + 1) + planeOf(centre);
         let current = groupFrames.get(group);
         if (!current || current.rows.has(row)) {
             const repeat = repeats.get(group) ?? 0;
@@ -127,7 +180,8 @@ export function reconstructCartesian(
         frames = maxFrames;
     }
 
-    const cells = nu * nv;
+    const plane = nu * nv;
+    const cells = plane * nw;
     const gridRe = new Float64Array(frames * coils * cells);
     const gridIm = new Float64Array(frames * coils * cells);
     const filled = new Uint8Array(frames * cells);
@@ -143,8 +197,9 @@ export function reconstructCartesian(
             if (Math.abs(fu - cu) > 0.1 || Math.abs(fv - cv) > 0.1) offGrid++;
             const iu = cu + (nu >> 1);
             const iv = cv + (nv >> 1);
-            if (iu < 0 || iu >= nu || iv < 0 || iv >= nv) continue;
-            const cell = iv * nu + iu;
+            const iw = planeOf(index);
+            if (iu < 0 || iu >= nu || iv < 0 || iv >= nv || iw < 0 || iw >= nw) continue;
+            const cell = (iw * nv + iv) * nu + iu;
             filled[frame * cells + cell] = 1;
             for (let c = 0; c < coils; c++) {
                 const o = ((frame * coils + c) * cells) + cell;
@@ -168,7 +223,9 @@ export function reconstructCartesian(
         ? { re: new Float32Array(complexSize), im: new Float32Array(complexSize) } : undefined;
     const twiddleU = centredTwiddles(nu, offset[0]);
     const twiddleV = centredTwiddles(nv, offset[1]);
+    const twiddleW = nw > 1 ? centredTwiddles(nw, offsetW) : null;
     const workRe = new Float64Array(cells), workIm = new Float64Array(cells);
+    const lineRe = new Float64Array(nw), lineIm = new Float64Array(nw);
     for (let frame = 0; frame < frames; frame++) {
         const image = images.subarray(frame * cells, (frame + 1) * cells);
         const ks = kspace.subarray(frame * cells, (frame + 1) * cells);
@@ -179,24 +236,32 @@ export function reconstructCartesian(
                 workIm[i] = gridIm[base + i];
                 ks[i] += workRe[i] * workRe[i] + workIm[i] * workIm[i];
             }
-            if (coilKspace) copyTopDown(workRe, workIm, nu, nv, coilKspace, base);
-            inverseDft2(workRe, workIm, nu, nv, twiddleU, twiddleV);
-            // Grid row iv holds v = (iv − nv/2)·Δv; image row r shows the top first.
-            for (let iv = 0; iv < nv; iv++) {
-                const row = nv - 1 - iv;
-                for (let iu = 0; iu < nu; iu++) {
-                    const i = iv * nu + iu;
-                    image[row * nu + iu] += workRe[i] * workRe[i] + workIm[i] * workIm[i];
-                }
+            for (let iw = 0; iw < nw; iw++) {
+                const at = iw * plane;
+                if (coilKspace) copyTopDown(workRe.subarray(at, at + plane), workIm.subarray(at, at + plane), nu, nv, coilKspace, base + at);
+                inverseDft2(workRe.subarray(at, at + plane), workIm.subarray(at, at + plane), nu, nv, twiddleU, twiddleV);
             }
-            if (coilImages) copyTopDown(workRe, workIm, nu, nv, coilImages, base);
+            if (twiddleW) {
+                for (let i = 0; i < plane; i++) transformLine(workRe, workIm, i, plane, nw, twiddleW, lineRe, lineIm);
+            }
+            // Grid row iv holds v = (iv − nv/2)·Δv; image row r shows the top first.
+            for (let iw = 0; iw < nw; iw++) {
+                for (let iv = 0; iv < nv; iv++) {
+                    const row = nv - 1 - iv;
+                    for (let iu = 0; iu < nu; iu++) {
+                        const i = (iw * nv + iv) * nu + iu;
+                        image[iw * plane + row * nu + iu] += workRe[i] * workRe[i] + workIm[i] * workIm[i];
+                    }
+                }
+                if (coilImages) copyTopDown(workRe.subarray(iw * plane, (iw + 1) * plane), workIm.subarray(iw * plane, (iw + 1) * plane), nu, nv, coilImages, base + iw * plane);
+            }
         }
         for (let i = 0; i < cells; i++) {
             image[i] = Math.sqrt(image[i]);
             ks[i] = Math.sqrt(ks[i]);
         }
-        // k-space rows likewise top-down (largest kv first).
-        flipRows(ks, nu, nv);
+        // k-space rows likewise top-down (largest kv first), plane by plane.
+        for (let iw = 0; iw < nw; iw++) flipRows(ks.subarray(iw * plane, (iw + 1) * plane), nu, nv);
     }
     let filledCount = 0;
     for (let i = 0; i < filled.length; i++) filledCount += filled[i];
@@ -206,6 +271,10 @@ export function reconstructCartesian(
         nv,
         delta,
         offset,
+        wAxis,
+        nw,
+        deltaW,
+        offsetW,
         frames,
         images,
         kspace,

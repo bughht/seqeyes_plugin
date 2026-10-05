@@ -8,12 +8,13 @@ import { analyzeRfResponse } from '../../src/pulseq/rfResponse';
 import { parseSequenceText } from '../../src/pulseq/reader';
 import { compileProgram } from '../../src/sim/program/compile';
 import { simulateReference } from '../../src/sim/engine/reference';
-import { sheppLoganPhantom, sheppLoganPhantom2D, spinsFromGrid2D, TISSUES } from '../../src/sim/phantom/builtin';
-import type { Phantom2D } from '../../src/sim/phantom/model';
+import { sheppLoganPhantom, sheppLoganPhantom2D, sheppLoganVolume, spinsFromGrid2D, TISSUES } from '../../src/sim/phantom/builtin';
+import { sliceVolume, type Phantom2D } from '../../src/sim/phantom/model';
 import { ChunkAccumulator, SimulationJob, type JobSettings } from '../../src/sim/job';
 import { adcTrajectory } from '../../src/sim/recon/trajectory';
 import { reconstructCartesian } from '../../src/sim/recon/cartesian';
 import { seqText, type BlockRow, type TrapRow } from './helpers/seqBuilder';
+import { spinWarp3d } from './helpers/sequences';
 
 /**
  * A minimal 2D spin-warp sequence: hard 90° pulse, phase encode with readout
@@ -52,6 +53,12 @@ function spinWarp(n: number, fov: number): string {
         shapes: [Array(100).fill(1)],
         extraDefinitions: `FOV ${fov} ${fov} 0.005`,
     });
+}
+
+function relativeDifference(a: Float64Array, b: Float64Array): number {
+    let diff = 0, norm = 0;
+    for (let i = 0; i < a.length; i++) { diff += (a[i] - b[i]) ** 2; norm += b[i] ** 2; }
+    return Math.sqrt(diff / norm);
 }
 
 function pearson(a: ArrayLike<number>, b: ArrayLike<number>): number {
@@ -211,6 +218,49 @@ describe('reconstruct a spin-echo train', () => {
         expect(recon.fill).toBe(1);
         expect(recon.warnings).toEqual([]);
         expect(Math.max(...recon.images)).toBeGreaterThan(0);
+    });
+});
+
+describe('simulate and reconstruct in 3-D', () => {
+    // 16 × 16 × 8 voxels of 4 mm, the 3-D Shepp–Logan with all its planes.
+    const n = 16, nz = 8, fov = 0.064, fovZ = 0.032;
+    const bytes = new TextEncoder().encode(spinWarp3d(n, nz, fov, fovZ));
+    const volume = sheppLoganVolume(n, nz, [fov, fov, fovZ]);
+    const phantom = sliceVolume(volume, { neighbours: [-nz / 2, nz / 2 - 1] });
+    // The phantom's PD as the recon lays it out: planes ascending in z, rows top-down.
+    const expected = new Float32Array(n * n * nz);
+    for (let k = 0; k < nz; k++) {
+        for (let row = 0; row < n; row++) {
+            for (let col = 0; col < n; col++) expected[(k * n + row) * n + col] = volume.maps.pd[(k * n + (n - 1 - row)) * n + col];
+        }
+    }
+    const run = (engine: 'isochromat' | 'phase-graph') => {
+        const job = new SimulationJob(bytes, 'warp3d.seq', { phantom: { kind: 'phantom', phantom }, subSpins: 'auto', engine });
+        let total: ChunkAccumulator | null = null;
+        for (let chunk = 0; chunk < job.plan.chunks; chunk++) {
+            const signal = job.simulateChunk(chunk);
+            total ??= new ChunkAccumulator(signal.length, job.plan.chunks);
+            total.add(chunk, signal);
+        }
+        return { job, signal: total!.signal, recon: job.reconstruct(total!.signal) };
+    };
+
+    it('excites the whole volume and reconstructs it plane by plane, in both engines', () => {
+        const spins = run('isochromat'), graph = run('phase-graph');
+        expect(spins.job.plan.slices?.extent).toBe('volume');
+        expect(spins.job.plan.slices?.planes).toBe(nz);
+        for (const { recon } of [spins, graph]) {
+            expect([recon.nu, recon.nv, recon.nw, recon.wAxis]).toEqual([n, n, nz, 2]);
+            expect(recon.fill).toBe(1);
+            expect(recon.frames).toBe(1);
+            // The PD volume, the right way up in z: flipping z correlates far worse.
+            const fit = pearson(recon.images, expected);
+            expect(fit).toBeGreaterThan(0.95);
+            const flipped = new Float32Array(expected.length);
+            for (let k = 0; k < nz; k++) flipped.set(expected.subarray((nz - 1 - k) * n * n, (nz - k) * n * n), k * n * n);
+            expect(fit).toBeGreaterThan(pearson(recon.images, flipped) + 0.05);
+        }
+        expect(relativeDifference(graph.signal, spins.signal)).toBeLessThan(0.02);
     });
 });
 

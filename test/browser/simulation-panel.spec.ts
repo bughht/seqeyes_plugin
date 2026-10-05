@@ -1,7 +1,9 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { expect, test, type Locator, type Page } from '@playwright/test';
+
+import { spinWarp3d } from '../sim/helpers/sequences';
 
 interface ViewState {
   dataset: string;
@@ -42,6 +44,7 @@ interface SimulationState {
   done: boolean;
   nu: number;
   nv: number;
+  nw: number;
   frames: number;
   acquisitions: number;
   labelView: boolean;
@@ -261,6 +264,32 @@ test('simulates with the phase-graph engine when chosen', async ({ page }) => {
   // Back to isochromats: the spins-per-voxel control returns.
   await page.locator('#simEngine').selectOption('isochromat');
   await expect(page.locator('#simSpins')).toBeVisible();
+});
+
+test('images the 3-D Shepp–Logan with a 3-D sequence, plane by plane', async ({ page }, testInfo) => {
+  // 16 × 16 phase encodes in-plane, 8 partitions along z, a non-selective pulse.
+  const sequence = testInfo.outputPath('warp3d.seq');
+  writeFileSync(sequence, spinWarp3d(16, 8, 0.064, 0.032));
+  await loadViewer(page, sequence);
+  await openSimulation(page);
+  await page.locator('#simPhantom').selectOption('shepp-logan-3d');
+  await page.locator('#simMatrix').selectOption('32');
+  await expect.poll(async () => (await simulationState(page)).phantom.status).toBe('ready');
+  let state = await simulationState(page);
+  // In-plane 32², planes along the sequence's 32 mm in z at the in-plane pitch: 16.
+  expect(state.phantom.volume).toEqual([32, 32, 16]);
+  await expect(page.locator('#simSliceGroup')).toBeVisible();
+  await page.locator('#simEngine').selectOption('phase-graph');
+  await page.locator('#simRun').click();
+  await expect.poll(async () => (await simulationState(page)).done, { timeout: 60_000 }).toBe(true);
+  state = await simulationState(page);
+  expect(state.plan?.slices?.extent).toBe('volume');
+  expect(state.plan?.slices?.planes).toBe(16);
+  expect([state.nu, state.nv, state.nw]).toEqual([16, 16, 8]);
+  expect(state.status).toContain('×8');
+  await page.locator('#simData button[data-tab="image"]').click();
+  await expect.poll(async () => (await simulationState(page)).view?.dims.map(d => d.name).slice(0, 3)).toEqual(['x', 'y', 'z']);
+  await expectCanvasVaried(page.locator('#simCanvas'));
 });
 
 test('exports ISMRMRD and NumPy raw data', async ({ page }) => {

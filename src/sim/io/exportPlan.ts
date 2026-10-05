@@ -65,6 +65,11 @@ export interface GridInfo {
     nv: number;
     /** Half-cell offset of each lattice (Pulseq's half-integer kx). */
     offset: [number, number];
+    /** A 3-D acquisition's partition axis (−1 in 2-D), its planes, spacing [1/m] and lattice offset. */
+    wAxis?: number;
+    nw?: number;
+    deltaW?: number;
+    offsetW?: number;
 }
 
 export function planExport(layout: RawLayout, grid: GridInfo): ExportPlan {
@@ -83,6 +88,7 @@ export function planExport(layout: RawLayout, grid: GridInfo): ExportPlan {
         const values = {} as Record<EncodingCounter, number>;
         for (const counter of COUNTERS) values[counter] = label(a, LABEL_OF[counter]);
         if (!has('LIN') && grid.delta) values.kspace_encode_step_1 = gridLine(layout, a, grid);
+        if (!has('PAR') && grid.delta && partitioned(grid)) values.kspace_encode_step_2 = gridPartition(layout, a, grid);
         raw.push(values);
     }
 
@@ -101,7 +107,9 @@ export function planExport(layout: RawLayout, grid: GridInfo): ExportPlan {
         // Phase encodes are centred on k = 0 when they come from the grid.
         const center = counter === 'kspace_encode_step_1' && !has('LIN') && grid.delta
             ? Math.round(grid.nv / 2) - min
-            : Math.floor(span / 2);
+            : counter === 'kspace_encode_step_2' && !has('PAR') && grid.delta && partitioned(grid)
+                ? Math.round(grid.nw! / 2) - min
+                : Math.floor(span / 2);
         limits[counter] = { minimum: 0, maximum: span, center: Math.max(0, Math.min(span, center)) };
     }
 
@@ -189,6 +197,18 @@ function gridLine(layout: RawLayout, a: number, grid: GridInfo): number {
     const centre = 3 * (layout.offsets[a] + (layout.samples[a] >> 1));
     const kv = layout.k[centre + grid.axes[1]];
     return Math.round(kv / grid.delta![1] - grid.offset[1]) + (grid.nv >> 1);
+}
+
+/** A 3-D grid: partitions along a third axis. */
+function partitioned(grid: GridInfo): boolean {
+    return grid.wAxis !== undefined && grid.wAxis >= 0 && (grid.nw ?? 1) > 1 && (grid.deltaW ?? 0) > 0;
+}
+
+/** The partition a readout sits on, from its k along the grid's third axis. */
+function gridPartition(layout: RawLayout, a: number, grid: GridInfo): number {
+    const centre = 3 * (layout.offsets[a] + (layout.samples[a] >> 1));
+    const kw = layout.k[centre + grid.wAxis!];
+    return Math.round(kw / grid.deltaW! - (grid.offsetW ?? 0)) + (grid.nw! >> 1);
 }
 
 /**

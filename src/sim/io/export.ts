@@ -48,6 +48,7 @@ export function buildExport(job: SimulationJob, signal: Float64Array, format: Ex
     const grid: GridInfo = {
         delta: cartesian ? recon.delta : null,
         axes: recon.axes, nu: recon.nu, nv: recon.nv, offset: recon.offset,
+        wAxis: recon.wAxis, nw: recon.nw, deltaW: recon.deltaW, offsetW: recon.offsetW,
     };
     const plan = planExport(job.rawLayout(), grid);
     const xml = buildIsmrmrdHeaderXml(headerInfo(job, plan, grid, cartesian));
@@ -73,12 +74,13 @@ function headerInfo(job: SimulationJob, plan: ExportPlan, grid: GridInfo, cartes
     const timing = detectSequenceTiming(job.program.sequence);
     const fov = job.fieldOfView;
     const p = job.plan;
+    const planes = grid.nw && grid.nw > 1 && grid.deltaW ? grid.nw : 1;
     const fieldOfView_mm = fov
         ? { x: fov[0] * 1000, y: fov[1] * 1000, z: Math.max(fov[2], 0) * 1000 }
         : grid.delta
-            ? { x: 1000 / grid.delta[0], y: 1000 / grid.delta[1], z: 1 }
+            ? { x: 1000 / grid.delta[0], y: 1000 / grid.delta[1], z: planes > 1 ? 1000 / grid.deltaW! : 1 }
             : { x: p.phantom.fov[0] * 1000, y: p.phantom.fov[1] * 1000, z: 1 };
-    const matrixSize = { x: grid.nu, y: grid.nv, z: 1 };
+    const matrixSize = { x: grid.nu, y: grid.nv, z: planes };
     const encodingLimits: IsmrmrdEncodingLimits = {
         kspace_encoding_step_0: { minimum: 0, maximum: Math.max(0, grid.nu - 1), center: grid.nu >> 1 },
     };

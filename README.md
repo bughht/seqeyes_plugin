@@ -216,7 +216,9 @@ simulation of the open sequence on a phantom, entirely in your browser
 **Phantoms**
 
 - the built-in tissue Shepp–Logan (PD, T1, T2, T2′ and ADC at 3 T) in the
-  sequence's FOV;
+  sequence's FOV, in 2-D or as a 3-D volume (the 3-D ellipsoids). The volume
+  spans the sequence's FOV along z for a 3-D sequence and is a cube
+  otherwise;
 - MRzero's example phantoms: the cropped 2-D brain and the BrainWeb-derived
   3-D subjects. They are downloaded from
   [MRsources/MRzero-Core](https://github.com/MRsources/MRzero-Core) (AGPL-3.0)
@@ -274,6 +276,15 @@ Pairing each spin with one offset undoes the spoiling cancellation (still
 8–16 % off at 2048 spins per voxel), and giving every spin a full line of
 offsets costs 50–100 × the spins.
 
+**3-D.** A 3-D phantom brings every plane the sequence's slab reaches. An
+excitation that is not selective along z (or no selective pulse at all)
+reaches the whole volume, and every plane gets sub-slices. Sub-slices are also
+close enough to resolve the readouts' z encoding. Partition encoding is
+recognised by an axis on which the readouts sit on two or more planes of a
+Cartesian lattice without moving within a readout. The recon then grids
+k-space in 3-D and transforms all three axes. The image and k-space views get
+the third axis as a dimension (a slider, or pick it for X or Y).
+
 **Viewing the data.** Phantom maps, raw data (by the sequence's labels — LIN,
 PAR, SLC, ECO, REP, … — by acquisition, or every sample in time order),
 gridded k-space and images all open in one N-D viewer: pick any dimension for
@@ -306,7 +317,6 @@ multiply the work. When a continuous map such as BrainWeb would take too
 long, the plan takes a coarser tested spacing and says so. **Not yet**:
 - anisotropic diffusion (the ADC is a scalar) and Monte Carlo diffusion in
   restricted geometries;
-- 3-D encoding;
 - dynamic pTx;
 - non-Cartesian gridding (the preview recon snaps samples to the nearest
   Cartesian cell);

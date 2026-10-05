@@ -653,6 +653,8 @@ export class SimulationJob {
                 offResonance: this.largestOffResonance(),
                 planeThickness: this.phantom.voxel[2],
                 maxSlices: MAX_SLICES,
+                volume: volumeExtent(this.phantom) ?? undefined,
+                encodingZ: encodingExtent(this.adcTrajectory(), 2),
             };
             const selective = pulses.some(p => p.axis === 'z' && p.bands.length);
             if (!planSlices(pulses, { ...options, density: 1 })) {
@@ -709,7 +711,9 @@ export class SimulationJob {
         const span = plan.ranges.map(([a, b]) => `${mm(a)}…${mm(b)}`).join(', ');
         notes.push(plan.extent === 'plane'
             ? `An excitation is not selective along z: ${z.length} sub-slices span only the phantom plane's ${mm(this.phantom.voxel[2])} mm.`
-            : `Through-slice: ${z.length} sub-slices over z = ${span} mm (slice ${mm(plan.reference)} mm FWHM).`);
+            : plan.extent === 'volume'
+                ? `The excitation reaches the whole phantom along z: ${z.length} sub-slices over z = ${span} mm.`
+                : `Through-slice: ${z.length} sub-slices over z = ${span} mm (slice ${mm(plan.reference)} mm FWHM).`);
         notes.push(this.phantom.planes?.length
             ? `${planes} phantom planes along z, ${mm(this.phantom.voxel[2])} mm apart.`
             : 'The 2-D phantom is extruded along z: every sub-slice sees the same plane.');
@@ -1013,6 +1017,22 @@ function representativeTissues(physics: PhysicsTable): ProbeTissue[] {
     const byT1 = indices.slice().sort((a, b) => life(physics.t1[b]) - life(physics.t1[a]));
     const chosen = new Set<number>([byT2[0], byT1[0], byT2[Math.floor(byT2.length / 2)], byT2[1]]);
     return [...chosen].slice(0, PROBE_TISSUES).map(i => ({ t1: physics.t1[i], t2: physics.t2[i] }));
+}
+
+/** A 3-D phantom's extent along z [m]: its own plane and its neighbours, each a plane thick; null without planes. */
+export function volumeExtent(phantom: Phantom2D): [number, number] | null {
+    const dz = phantom.voxel[2];
+    if (!phantom.planes?.length || !(dz > 0)) return null;
+    let lo = 0, hi = 0;
+    for (const plane of phantom.planes) { lo = Math.min(lo, plane.offset); hi = Math.max(hi, plane.offset); }
+    return [(lo - 0.5) * dz, (hi + 0.5) * dz];
+}
+
+/** The largest |k| the readouts sample along a physical axis [1/m]. */
+export function encodingExtent(trajectory: AdcTrajectory, axis: number): number {
+    let largest = 0;
+    for (let s = axis; s < trajectory.k.length; s += 3) largest = Math.max(largest, Math.abs(trajectory.k[s]));
+    return largest;
 }
 
 /** Consecutive units into chunks of about `target` spins (never splitting a unit). */

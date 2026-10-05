@@ -8013,6 +8013,7 @@ var SeqEyesSimulation = (function () {
   var MRZERO_BASE = 'https://raw.githubusercontent.com/MRsources/MRzero-Core/' + MRZERO_COMMIT + '/documentation/playground_mr0/';
   var PRESETS = {
     'shepp-logan': { label: 'Shepp–Logan (built-in)' },
+    'shepp-logan-3d': { label: 'Shepp–Logan 3-D (built-in)' },
     'mrzero-brain': {
       label: 'MRzero brain 2D (178 kB)', file: 'numerical_brain_cropped.mat', bytes: 178137,
       sha256: 'f32dcc37838e973caae1fc75deb0a803f4bee2bff29fb12589ae0ef5ec63f381'
@@ -8027,7 +8028,7 @@ var SeqEyesSimulation = (function () {
     },
     'file': { label: 'Your file…' }
   };
-  var PRESET_ORDER = ['shepp-logan', 'mrzero-brain', 'brainweb-05', 'brainweb-04-7t', 'file'];
+  var PRESET_ORDER = ['shepp-logan', 'shepp-logan-3d', 'mrzero-brain', 'brainweb-05', 'brainweb-04-7t', 'file'];
   var SHEPP_SIZES = [32, 64, 128, 256];
   var FILE_MATRICES = [0, 64, 96, 128, 192, 256];
   var SPIN_CHOICES = ['auto', '1x1', '8x1', '32x1', '128x1', '384x1', '768x1'];
@@ -8200,9 +8201,12 @@ var SeqEyesSimulation = (function () {
   function sliceOptions() {
     var options = { plane: slicePlane };
     if (sliceIndex !== null) options.index = sliceIndex;
-    if (fileMatrix > 0) options.matrix = fileMatrix;
+    if (fileMatrix > 0 && !isBuiltIn()) options.matrix = fileMatrix;
     return options;
   }
+
+  /** A built-in phantom: its matrix is chosen, not resampled, and it follows the sequence's FOV. */
+  function isBuiltIn() { return phantomChoice === 'shepp-logan' || phantomChoice === 'shepp-logan-3d'; }
 
   /** Load the chosen phantom (or a new plane of it). */
   function loadPhantom(reason) {
@@ -8229,6 +8233,23 @@ var SeqEyesSimulation = (function () {
     if (reason === 'slice' && phantom.volume) {
       var sliceRequest = { kind: 'slice', fields: fields, slice: sliceOptions() };
       postPhantom(id, sliceRequest, withSequence(sliceRequest));
+      return;
+    }
+    if (phantomChoice === 'shepp-logan-3d') {
+      var volumeRequest = { kind: 'shepp-logan-3d', size: sheppSize, fields: fields, slice: sliceOptions() };
+      var shared = withSequence(volumeRequest);
+      // The FOV comes from the sequence even with through-slice sampling off.
+      if (!volumeRequest.sequence) {
+        var open = host().getSequenceSource();
+        if (open && open.bytes && open.bytes.length) {
+          var own = open.bytes.slice();
+          volumeRequest.sequence = own.buffer;
+          volumeRequest.name = open.name || '';
+          shared = [own.buffer];
+        }
+      }
+      phantom.label = PRESETS['shepp-logan-3d'].label;
+      postPhantom(id, volumeRequest, shared);
       return;
     }
     if (phantomChoice === 'file') {
@@ -8739,6 +8760,21 @@ var SeqEyesSimulation = (function () {
     if (chunkProgress(r).done > (r.liveChunks || 0)) schedulePreview(r);
   }
 
+  /** The planes of a 3-D recon as a dimension (none in 2-D). */
+  function planeDim(recon, isImage, withFft) {
+    if (!(recon.nw > 1)) return null;
+    var name = 'xyz'.charAt(recon.wAxis);
+    var pitch = recon.deltaW ? 1000 / (recon.nw * recon.deltaW) : 0;
+    var dim = isImage
+      ? { name: name, size: recon.nw, scale: pitch ? { start: -recon.nw / 2 * pitch, step: pitch, unit: 'mm' } : undefined }
+      : { name: 'k' + name, size: recon.nw };
+    if (withFft) {
+      dim.fft = isImage ? 'x' : 'k';
+      dim.transformedName = isImage ? 'k' + name : name;
+    }
+    return dim;
+  }
+
   function previewDataset(id, recon, values, isImage) {
     var nu = recon.nu, nv = recon.nv, axes = 'xyz';
     var pixel = recon.delta ? [1000 / (nu * recon.delta[0]), 1000 / (nv * recon.delta[1])] : null;
@@ -8749,6 +8785,8 @@ var SeqEyesSimulation = (function () {
         { name: uy, size: nv, reversed: true, scale: pixel ? { start: (nv / 2 - 1) * pixel[1], step: -pixel[1], unit: 'mm' } : undefined }
       ]
       : [{ name: 'k' + ux, size: nu }, { name: 'k' + uy, size: nv, reversed: true }];
+    var planes = planeDim(recon, isImage, false);
+    if (planes) dims.push(planes);
     if (recon.frames > 1) dims.push({ name: 'frame', size: recon.frames });
     return {
       id: id, title: (isImage ? 'Image' : 'k-space') + ' (live preview)', live: true, square: true,
@@ -8788,6 +8826,7 @@ var SeqEyesSimulation = (function () {
     var t = result.timings;
     return [describePlan(result.plan), 'Done in ' + formatSeconds(t.totalMs) + ' (plan ' + formatSeconds(t.planMs)
       + ', simulate ' + formatSeconds(t.simulateMs) + ') · image ' + result.recon.nu + '×' + result.recon.nv
+      + (result.recon.nw > 1 ? '×' + result.recon.nw : '')
       + (result.recon.frames > 1 ? ' × ' + result.recon.frames + ' frames' : '')
       + ' · raw ' + result.layout.acquisitions + ' acquisitions'];
   }
@@ -9121,7 +9160,7 @@ var SeqEyesSimulation = (function () {
    */
   function gridDataset(id, recon, stack, coilCount, isImage) {
     if (!stack) return null;
-    var nu = recon.nu, nv = recon.nv, frames = recon.frames, cells = nu * nv;
+    var nu = recon.nu, nv = recon.nv, frames = recon.frames, cells = nu * nv * (recon.nw || 1);
     var withRss = isImage && coilCount > 1;
     var slots = coilCount + (withRss ? 1 : 0);
     var re = new Float32Array(cells * slots * frames), im = new Float32Array(cells * slots * frames);
@@ -9145,6 +9184,8 @@ var SeqEyesSimulation = (function () {
         { name: 'k' + ux, size: nu, fft: 'k', transformedName: ux },
         { name: 'k' + uy, size: nv, fft: 'k', reversed: true, transformedName: uy }
       ];
+    var planes = planeDim(recon, isImage, true);
+    if (planes) dims.push(planes);
     if (slots > 1) {
       var labels = (withRss ? ['RSS'] : []).concat(coilLabels(coilCount));
       dims.push({ name: 'coil', size: slots, labels: labels });
@@ -9287,10 +9328,10 @@ var SeqEyesSimulation = (function () {
       return [id, id === 'file' && uploaded ? 'File: ' + uploaded.label : PRESETS[id].label];
     }), phantomChoice);
     var isShepp = phantomChoice === 'shepp-logan';
-    fillSelect(el('simMatrix'), isShepp
-      ? SHEPP_SIZES.map(function (n) { return [String(n), n + '²']; })
+    fillSelect(el('simMatrix'), isBuiltIn()
+      ? SHEPP_SIZES.map(function (n) { return [String(n), n + (isShepp ? '²' : '² × planes')]; })
       : FILE_MATRICES.map(function (n) { return [String(n), n ? 'resample ' + n : 'native']; }),
-      isShepp ? sheppSize : fileMatrix);
+      isBuiltIn() ? sheppSize : fileMatrix);
     var fieldsSelect = el('simFields');
     fillSelect(fieldsSelect, FIELD_CHOICES, fields);
     if (fieldsSelect) fieldsSelect.hidden = isShepp;
@@ -9393,7 +9434,7 @@ var SeqEyesSimulation = (function () {
     if (fileInput) fileInput.onchange = function () { readUploadedFiles(this.files); };
     var matrix = el('simMatrix');
     if (matrix) matrix.onchange = function () {
-      if (phantomChoice === 'shepp-logan') { sheppSize = +this.value; set('seqeyes.simulation.size', String(sheppSize)); loadPhantom('choice'); }
+      if (isBuiltIn()) { sheppSize = +this.value; set('seqeyes.simulation.size', String(sheppSize)); phantom.volume = null; loadPhantom('choice'); }
       else { fileMatrix = +this.value; set('seqeyes.simulation.matrix', String(fileMatrix)); loadPhantom('slice'); }
     };
     var fieldsSelect = el('simFields');
@@ -9505,7 +9546,7 @@ var SeqEyesSimulation = (function () {
     shown = true;
     install();
     wire();
-    if (phantom.status === 'idle' || (phantom.status === 'error' && phantomChoice === 'shepp-logan')) loadPhantom('choice');
+    if (phantom.status === 'idle' || (phantom.status === 'error' && isBuiltIn())) loadPhantom('choice');
     if (pulses.status === 'idle') requestPulses();
     showData(result || dataTab === 'phantom' || dataTab === 'rf' ? dataTab : 'phantom');
     describePhantom();
@@ -9524,7 +9565,7 @@ var SeqEyesSimulation = (function () {
     datasets = { phantom: datasets.phantom };
     setProgress(null);
     // The built-in phantom follows the sequence's FOV; a volume's neighbouring planes follow its slabs.
-    if (phantomChoice === 'shepp-logan' && phantom.status !== 'idle') loadPhantom('choice');
+    if (isBuiltIn() && phantom.status !== 'idle') { phantom.volume = null; loadPhantom('choice'); }
     else if (phantom.volume && sliceMode === 'auto') loadPhantom('slice');
     pulses = { status: 'idle', id: 0, list: null, error: null };
     datasets.rf = null;
@@ -9561,6 +9602,7 @@ var SeqEyesSimulation = (function () {
       done: !!result,
       nu: result ? result.recon.nu : 0,
       nv: result ? result.recon.nv : 0,
+      nw: result ? result.recon.nw || 1 : 0,
       frames: result ? result.recon.frames : 0,
       acquisitions: result ? result.layout.acquisitions : 0,
       labelView: !!datasets.rawLabels,

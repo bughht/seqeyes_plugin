@@ -26,12 +26,13 @@
 
 import { buildExport, type ExportFormat } from '../io/export';
 import { SimulationJob, type JobSettings } from '../job';
-import { sheppLoganPhantom2D } from '../phantom/builtin';
+import { sheppLoganPhantom2D, sheppLoganVolume } from '../phantom/builtin';
 import { loadPhantomFiles, withFieldMode, type FieldMapMode } from '../phantom/files';
 import { sliceVolume, type Phantom2D, type PhantomVolume, type SliceOptions } from '../phantom/model';
 import { measurePulses, planSlices, type PulseResponse } from '../plan/slices';
 import { standardSelfPort } from '../platform/browser';
 import { compileProgram } from '../program/compile';
+import { encodingExtent } from '../job';
 import { reconstructCartesian } from '../recon/cartesian';
 import { adcTrajectory, type AdcTrajectory } from '../recon/trajectory';
 import { parseSequenceBytes } from '../../pulseq/sequenceReader';
@@ -43,6 +44,8 @@ import { parseSequenceBytes } from '../../pulseq/sequenceReader';
 type PhantomRequest =
     /** The built-in phantom in the FOV of the given sequence (0.256 m without one). */
     | { kind: 'shepp-logan'; size: number; sequence?: ArrayBuffer; name?: string }
+    /** The built-in 3-D phantom as a volume (kept for re-slicing), size² in-plane (see sheppLogan3d). */
+    | { kind: 'shepp-logan-3d'; size: number; fields: FieldMapMode; slice: SliceOptions; sequence?: ArrayBuffer; name?: string }
     /** Parse files into a volume (kept for re-slicing) and return one plane. */
     | { kind: 'files'; files: { name: string; bytes: ArrayBuffer }[]; fields: FieldMapMode; slice: SliceOptions; sequence?: ArrayBuffer; name?: string }
     /** Another plane, or other field maps, of the volume loaded last. */
@@ -116,6 +119,8 @@ function loadPhantom(request: PhantomRequest): { volume: ReturnType<typeof volum
     }
     if (request.kind === 'files') {
         volume = loadPhantomFiles(request.files.map(file => ({ name: file.name, bytes: new Uint8Array(file.bytes) })));
+    } else if (request.kind === 'shepp-logan-3d') {
+        volume = sheppLogan3d(request.size, request.sequence ? sequenceFov(request.sequence, request.name ?? '') : null);
     } else if (!volume) {
         throw new Error('Load a phantom file first.');
     }
@@ -129,21 +134,49 @@ function loadPhantom(request: PhantomRequest): { volume: ReturnType<typeof volum
     return { volume: volumeSummary(volume), phantom };
 }
 
+/** The FOV a sequence defines [m], or null. */
+function sequenceFov(bytes: ArrayBuffer, name: string): number[] | null {
+    const definition = parseSequenceBytes(new Uint8Array(bytes), name).definitions.get('FOV');
+    if (!definition || definition.length < 2) return null;
+    const fov = Array.from(definition, Number);
+    return fov.slice(0, 2).every(v => v > 0) ? fov : null;
+}
+
+/**
+ * The built-in 3-D phantom for a sequence: size × size in the sequence's
+ * in-plane FOV. A 3-D sequence (FOV along z at least a quarter of x) sets
+ * the extent along z; a 2-D one's FOV along z is its slice, so the phantom
+ * is then a cube. Voxels are isotropic, at most 64 planes.
+ */
+function sheppLogan3d(size: number, fov: number[] | null): PhantomVolume {
+    const fx = fov ? fov[0] : 0.256, fy = fov ? fov[1] : 0.256;
+    const fz = fov && fov.length > 2 && fov[2] >= 0.25 * fx ? fov[2] : fx;
+    const nz = Math.max(2, Math.min(64, Math.round(size * fz / fx)));
+    return sheppLoganVolume(size, nz, [fx, fy, fz]);
+}
+
 /**
  * Plane offsets along the slice's normal that the sequence's sub-slices can
  * reach (plan/slices.ts), or undefined when one plane is enough: a single
- * plane, or no slab selective along z.
+ * plane, or no slab selective along z. An excitation that is not selective
+ * along z reaches every plane.
  */
 function neighbourRange(v: PhantomVolume, slice: SliceOptions, sequence: Uint8Array, name: string): [number, number] | undefined {
     const plane = slice.plane ?? 'xy';
     const normal = plane === 'xy' ? 2 : plane === 'xz' ? 1 : 0;
-    if (v.shape[normal] < 2) return undefined;
+    const planes = v.shape[normal];
+    if (planes < 2) return undefined;
     const spacing = v.voxel[normal];
+    const index = Math.round(slice.index ?? Math.floor(planes / 2));
     let offResonance = 0;
     if (v.maps.b0) for (let i = 0; i < v.maps.b0.length; i++) if (v.maps.pd[i] > 0) offResonance = Math.max(offResonance, Math.abs(v.maps.b0[i]));
-    const plan = planSlices(measurePulses(compileProgram(parseSequenceBytes(sequence, name))), {
+    const program = compileProgram(parseSequenceBytes(sequence, name));
+    const plan = planSlices(measurePulses(program), {
         density: 1, planeThickness: spacing, offResonance,
+        volume: [(-index - 0.5) * spacing, (planes - 1 - index + 0.5) * spacing],
+        encodingZ: encodingExtent(adcTrajectory(program), normal),
     });
+    if (plan?.extent === 'volume') return [-index, planes - 1 - index];
     if (!plan || plan.extent === 'plane' || !(spacing > 0)) return undefined;
     const lo = Math.min(...plan.ranges.map(r => Math.round(r[0] / spacing)));
     const hi = Math.max(...plan.ranges.map(r => Math.round(r[1] / spacing)));
@@ -202,6 +235,7 @@ function handle(request: Request): void {
                 id: request.id,
                 recon: {
                     axes: recon.axes, nu: recon.nu, nv: recon.nv, delta: recon.delta, frames: recon.frames,
+                    wAxis: recon.wAxis, nw: recon.nw, deltaW: recon.deltaW,
                     images: recon.images, kspace: recon.kspace,
                 },
             }, [recon.images.buffer as ArrayBuffer, recon.kspace.buffer as ArrayBuffer]);
@@ -243,6 +277,9 @@ function handle(request: Request): void {
                     nu: recon.nu,
                     nv: recon.nv,
                     delta: recon.delta,
+                    wAxis: recon.wAxis,
+                    nw: recon.nw,
+                    deltaW: recon.deltaW,
                     frames: recon.frames,
                     images: recon.images,
                     kspace: recon.kspace,

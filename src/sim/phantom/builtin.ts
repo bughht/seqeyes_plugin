@@ -8,7 +8,7 @@
  */
 
 import type { SpinSet } from '../engine/spins';
-import type { Phantom2D } from './model';
+import type { Phantom2D, PhantomVolume } from './model';
 
 /** A 2D voxel grid in the x–y plane, centred on the isocentre. */
 export interface VoxelGrid2D {
@@ -65,6 +65,82 @@ const SHEPP_LOGAN: Ellipse[] = [
     { a: 0.023, b: 0.023, x0: 0, y0: -0.606, deg: 0, tissue: TISSUES.lesion },
     { a: 0.023, b: 0.046, x0: 0.06, y0: -0.605, deg: 0, tissue: TISSUES.lesion },
 ];
+
+/**
+ * The 3-D modified Shepp–Logan (Kak & Slaney's ellipsoids as Toft modified
+ * them): the 2-D layout's ellipses with a third semi-axis c and centre z0.
+ * Rotations stay in-plane, so the 2-D layout is the 3-D one's footprint.
+ */
+interface Ellipsoid extends Ellipse {
+    c: number;
+    z0: number;
+}
+
+const SHEPP_LOGAN_3D: Ellipsoid[] = [
+    { ...SHEPP_LOGAN[0], c: 0.81, z0: 0 },
+    { ...SHEPP_LOGAN[1], c: 0.78, z0: 0 },
+    { ...SHEPP_LOGAN[2], c: 0.22, z0: 0 },
+    { ...SHEPP_LOGAN[3], c: 0.28, z0: 0 },
+    { ...SHEPP_LOGAN[4], c: 0.41, z0: -0.15 },
+    { ...SHEPP_LOGAN[5], c: 0.05, z0: 0.25 },
+    { ...SHEPP_LOGAN[6], c: 0.05, z0: 0.25 },
+    { ...SHEPP_LOGAN[7], c: 0.05, z0: 0 },
+    { ...SHEPP_LOGAN[8], c: 0.02, z0: 0 },
+    { ...SHEPP_LOGAN[9], c: 0.02, z0: 0 },
+];
+
+/**
+ * The 3-D tissue Shepp–Logan on an n × n × nz grid spanning the FOV, painted
+ * like the 2-D one (the last ellipsoid covering a voxel decides its tissue).
+ * Voxel (i, j, k) is centred at ((i − n/2)Δx, (j − n/2)Δy, (k − nz/2)Δz), the
+ * sample points of a centred DFT, with j counting up from the bottom (the
+ * volume layout sliceVolume reads).
+ */
+export function sheppLoganVolume(n: number, nz: number, fov: readonly [number, number, number]): PhantomVolume {
+    if (!(n >= 2) || !Number.isInteger(n) || !(nz >= 1) || !Number.isInteger(nz)) {
+        throw new Error(`phantom size must be integers n ≥ 2 and nz ≥ 1, got ${n} × ${n} × ${nz}`);
+    }
+    const size = n * n * nz;
+    const maps = {
+        pd: new Float32Array(size),
+        t1: new Float32Array(size).fill(Infinity),
+        t2: new Float32Array(size).fill(Infinity),
+        t2prime: new Float32Array(size).fill(Infinity),
+        adc: new Float32Array(size),
+    };
+    const rotations = SHEPP_LOGAN_3D.map(e => [Math.cos(e.deg * Math.PI / 180), Math.sin(e.deg * Math.PI / 180)]);
+    for (let k = 0; k < nz; k++) {
+        const w = 2 * (k - nz / 2) / nz;
+        for (let j = 0; j < n; j++) {
+            const v = 2 * (j - n / 2) / n;
+            for (let i = 0; i < n; i++) {
+                const u = 2 * (i - n / 2) / n;
+                let tissue: Tissue | null = null;
+                SHEPP_LOGAN_3D.forEach((e, index) => {
+                    const [cos, sin] = rotations[index];
+                    const dx = u - e.x0, dy = v - e.y0;
+                    const xr = dx * cos + dy * sin, yr = -dx * sin + dy * cos;
+                    if ((xr / e.a) ** 2 + (yr / e.b) ** 2 + ((w - e.z0) / e.c) ** 2 <= 1) tissue = e.tissue;
+                });
+                if (!tissue) continue;
+                const t: Tissue = tissue;
+                const index = (k * n + j) * n + i;
+                maps.pd[index] = t.pd;
+                maps.t1[index] = t.t1;
+                maps.t2[index] = t.t2;
+                maps.t2prime[index] = t.t2prime;
+                maps.adc[index] = t.adc;
+            }
+        }
+    }
+    return {
+        shape: [n, n, nz],
+        voxel: [fov[0] / n, fov[1] / n, fov[2] / nz],
+        maps,
+        source: `Shepp–Logan 3-D ${n}×${n}×${nz}`,
+        notes: [],
+    };
+}
 
 /**
  * Modified Shepp–Logan tissue phantom on an n×n grid spanning the FOV. The
