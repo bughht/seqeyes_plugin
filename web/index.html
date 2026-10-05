@@ -191,23 +191,42 @@
 </div>
 <div id="simpane">
   <div id="simTools">
-    <span class="ulbl">Phantom</span>
-    <select id="simPhantom" aria-label="Phantom" title="Built-in phantom: tissue-labelled Shepp–Logan (PD, T1, T2 at 3 T) in the sequence's FOV">
-      <option value="shepp-logan" selected>Shepp–Logan</option>
-    </select>
-    <select id="simSize" aria-label="Phantom matrix size" title="Phantom matrix; the field of view comes from the sequence's FOV definition"></select>
+    <select id="simPhantom" aria-label="Phantom" title="Phantom: the built-in Shepp–Logan, MRzero's example phantoms (downloaded from github.com/MRsources/MRzero-Core only when chosen), or your own file"></select>
+    <button id="simPhantomFile" type="button" title="Load your phantom: MRzero .npz or .mat, NumPy .npz/.npy, MATLAB .mat (v5–v7), or NIfTI maps (.nii/.nii.gz, one per map, named like brain_T1.nii.gz)">📂</button>
+    <input type="file" id="simPhantomInput" multiple accept=".npz,.npy,.mat,.nii,.gz" hidden>
+    <span id="simSliceGroup" hidden>
+      <select id="simPlane" aria-label="Phantom plane" title="Which plane of the 3-D phantom lies in the scanner's x–y plane"></select>
+      <input type="range" id="simSlice" min="0" max="0" value="0" aria-label="Slice" title="Slice through the 3-D phantom">
+      <span id="simSliceValue" class="ulbl"></span>
+    </span>
+    <select id="simMatrix" aria-label="Phantom matrix" title="Shepp–Logan matrix, or resampling of a loaded phantom (nearest neighbour; the field of view is kept)"></select>
+    <select id="simFields" aria-label="B0 and B1 maps" title="Field maps: the file's B0/B1, MRzero-style maps where the file has none, or ideal fields"></select>
+    <select id="simCoils" aria-label="Receive coils" title="Synthetic receive coils (smooth complex sensitivities on a ring) for phantoms without coil maps"></select>
     <span class="ulbl">Spins/voxel</span>
     <select id="simSpins" aria-label="Spins per voxel" title="Spins per voxel along x × y. Auto simulates one voxel per tissue to find how many the sequence's spoiling needs."></select>
+    <select id="simAccuracy" aria-label="Accuracy target" title="What Auto aims for: the signal error it accepts from simulating each voxel with a finite number of spins. Long-T2 tissue (CSF) needs the most spins; a looser target is faster."></select>
     <button id="simRun" type="button" title="Simulate the open sequence">▶ Run</button>
-    <button id="simCancel" type="button" disabled title="Stop the simulation">■ Cancel</button>
-    <div class="sep"></div>
-    <select id="simView" aria-label="View" title="Reconstructed image, gridded k-space, or the raw ADC data (readouts × samples)"></select>
-    <select id="simFrame" aria-label="Frame" title="Frame: one per slice or repetition" hidden></select>
-    <button id="simLog" type="button" aria-pressed="false" title="Logarithmic display (60 dB range)">log</button>
-    <select id="simCmap" aria-label="Colormap" title="Colormap"></select>
+    <button id="simCancel" type="button" disabled title="Stop the simulation">■</button>
+    <select id="simExport" aria-label="Export" title="Export the simulated raw data (ISMRMRD, NumPy) or the current view"></select>
   </div>
+  <div id="simViewBar">
+    <span id="simData" role="tablist" aria-label="Data"></span>
+    <select id="simRawOrder" aria-label="Raw data order" title="Index raw data by the sequence's labels (LIN, PAR, SLC, ECO, …) or by acquisition order" hidden></select>
+    <span class="ulbl">X</span><select id="simAxisX" aria-label="Horizontal axis" title="Dimension shown across the image, and along the line plot"></select>
+    <span class="ulbl">Y</span><select id="simAxisY" aria-label="Vertical axis" title="Dimension shown down the image; none shows the line plot only"></select>
+    <span id="simParts" role="group" aria-label="Complex part"><button type="button" data-part="abs" title="Magnitude">|·|</button><button type="button" data-part="phase" title="Phase">∠</button><button type="button" data-part="re" title="Real part">Re</button><button type="button" data-part="im" title="Imaginary part">Im</button></span>
+    <button id="simLog" type="button" aria-pressed="false" title="Magnitude in dB (60 dB range)">dB</button>
+    <select id="simCmap" aria-label="Colormap" title="Colormap"></select>
+    <button id="simReveal" type="button" title="Show the selected readout on the sequence timeline">⇱ Timeline</button>
+  </div>
+  <div id="simDims" aria-label="Dimensions"></div>
   <div id="simProgress" aria-hidden="true"><div id="simProgressFill"></div></div>
-  <div id="simBody"><canvas id="simCanvas" aria-label="Simulation result: wheel to zoom, drag to pan, double-click to fit"></canvas><div id="simEmpty">No simulation yet. Press Run.</div></div>
+  <div id="simBody">
+    <div id="simRunCard" role="status" aria-live="polite" hidden><div class="sim-run-head"><span id="simRunPhase">Planning</span><span id="simRunPercent">0%</span></div><div class="sim-run-bar"><div id="simRunFill"></div></div><div id="simRunStats" class="sim-run-stats"></div><div id="simRunWorkers" class="sim-run-workers" aria-label="Workers"></div></div>
+    <div id="simImagePane"><canvas id="simCanvas" aria-label="Data image: click picks the plotted line, wheel zooms, drag pans, double-click fits"></canvas><div id="simEmpty">No simulation yet. Press Run.</div></div>
+    <div id="simSplit" role="separator" aria-label="Resize the image and the line plot"></div>
+    <div id="simPlotPane"><canvas id="simPlot" aria-label="Line plot along the horizontal axis through the selected row"></canvas></div>
+  </div>
   <div id="simReadout" role="status" aria-live="polite"></div>
 </div>
 </div>
@@ -2879,6 +2898,11 @@ window.SeqEyesPanelHost={
      been checked for workers yet, so it keeps the panel hidden for now. */
   createSimulationWorker:window._SEQEYES_HOST==='matlab'?undefined:function(){return new Worker('sim-worker.js');},
   getSequenceSource:function(){return currentSequenceBytes?{bytes:currentSequenceBytes,name:currentSequenceName}:null;},
+  revealTimeRange:function(startSec,endSec){
+    if(!isFinite(startSec)||!isFinite(endSec)||endSec<=startSec)return false;
+    ox=Math.max(0,startSec);sc=plotWidth()/(endSec-startSec);clampView();draw();drawMinimap();
+    return true;
+  },
   getLayoutMode:function(){return layoutMode;},
   getGradientRaster:function(){return GR;},
   getTrTimeSec:function(){return seqTiming&&seqTiming.trTimeSec>0?seqTiming.trTimeSec:0;},

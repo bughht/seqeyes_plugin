@@ -136,6 +136,7 @@ All the same features as the other versions — interactive waveforms, k‑space
 - **Simulated gradient sound**: play the visible window with a playhead that tracks the audio clock (simulated, not calibrated — see the caveat below)
 - **ADC phase curve** on φ axis — continuous $\phi(t) = \phi_0 + 2\pi \cdot f_{offset} \cdot (t - t_0)$
 - **Analysis panel**: one panel, three states — closed, WebGL‑accelerated 3D k‑space scatter (millions of points @ 60 fps) with camera presets, or the gradient spectrogram
+- **Bloch simulation (preview, web app)**: simulate the sequence on the built-in, MRzero/BrainWeb or your own phantom in the browser, browse raw data, k-space and images in an N-D viewer, export ISMRMRD (`.h5`) or NumPy — see [Simulation](#simulation-preview-standalone-web-app)
 - **Camera presets** (xy / xz / yz) rotate the 3D view; any drag reverts to free 3D
 - **Interactive Canvas**: cursor‑anchored time zoom, per‑row y‑axis zoom, drag‑pan, hover tooltips
 - **6 built‑in themes**: One Light · One Dark · Dracula · Nord · GitHub Light · GitHub Dark (+ system auto)
@@ -205,6 +206,59 @@ interactive budget the viewer asks you to zoom in rather than offering a
 “calculate anyway” override — unlike whole-sequence k-space, zooming always
 solves it. For the same reason the spectrogram stays available on sequences
 where k-space is refused, and the k-space safety dialog offers it as a way out.
+
+## Simulation (preview, standalone web app)
+
+The **Simulation** toggle next to the k-space/spectrogram button runs a Bloch
+simulation of the open sequence on a 2-D phantom, entirely in your browser
+(Web Workers, no server), and shows the raw data and a reconstruction.
+
+**Phantoms**
+
+- the built-in tissue Shepp–Logan (PD, T1, T2 at 3 T) in the sequence's FOV;
+- MRzero's example phantoms: the cropped 2-D brain and the BrainWeb-derived
+  3-D subjects. They are downloaded from
+  [MRsources/MRzero-Core](https://github.com/MRsources/MRzero-Core) (AGPL-3.0)
+  only when you pick them, pinned to a commit and checked against SHA-256;
+  SeqEyes does not bundle them;
+- your own files: MRzero `.npz` (`PD_map`, `T1_map`, … as written by
+  `generate_brainweb_phantoms`) and `.mat` (`load_mat` layout), NumPy
+  `.npz`/`.npy` or MATLAB `.mat` (v5–v7) with maps named PD, T1, T2, T2prime,
+  ADC, B0, B1, or NIfTI maps (`name_T1.nii.gz`, …). 3-D phantoms get a plane
+  and slice selector; B0/B1 come from the file, MRzero-style synthetic maps,
+  or ideal fields; synthetic receive coils give multi-coil data.
+
+**Viewing the data.** Phantom maps, raw data (by the sequence's labels — LIN,
+PAR, SLC, ECO, REP, … — by acquisition, or every sample in time order),
+gridded k-space and images all open in one N-D viewer: pick any dimension for
+X and Y (the others get sliders), show magnitude, phase, real or imaginary
+part, dB, apply a centred FFT along any k or image dimension (e.g. x–ky hybrid
+space), and read the waveform along X in the line plot under the image.
+Hovering raw data marks that sample's time on the sequence timeline;
+**⇱ Timeline** brings the selected readout into view.
+
+**While it runs**, a progress card shows the phase (planning, simulating,
+reconstructing), overall progress with an ETA and throughput, and one bar per
+worker. Workers simulate strips of phantom columns through the whole
+sequence, so the raw data builds up as strips finish and the image fills in
+strip by strip; the result replaces the live preview when the run ends.
+**Accuracy** sets the signal error Auto accepts from simulating each voxel
+with a finite number of spins (2 %, 5 % or 10 %): long-T2 tissue such as CSF
+needs the most spins, so a looser target is faster on long scans.
+
+**Export**: ISMRMRD raw data (`.h5`, readable by ismrmrd-python, h5py, MATLAB
+and Gadgetron), the ISMRMRD stream format, a NumPy `.npz` with data,
+trajectory, labels and times, or the current view as PNG.
+
+**What it simulates**: exact spin-domain RF on the native raster (slice-
+selective pulses), relaxation, gradients, RF/ADC phase and frequency offsets,
+B0 and B1 maps, receive coils. The number of spins per voxel along a spoiled
+axis is measured, not guessed: a one-voxel probe per tissue finds the count
+whose signal stays within 2 % of a reference that cannot alias — long-T2 CSF
+in an RF-spoiled GRE needs a few hundred. **Not yet**: the slice profile
+(the phantom is one plane at z = 0), T2′ and diffusion (maps are shown but
+not simulated), non-Cartesian gridding (the preview recon snaps samples to the
+nearest Cartesian cell), and the VS Code and MATLAB hosts.
 
 ## Usage
 

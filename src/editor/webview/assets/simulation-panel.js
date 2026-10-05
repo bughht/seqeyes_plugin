@@ -7,6 +7,11 @@
    parser or the engine, which the VS Code webview does not even load. A host
    without that hook keeps the Simulation button hidden.
 
+   Phantoms: the built-in Shepp–Logan, MRzero's example phantoms fetched
+   from its GitHub repository on request (pinned commit, SHA-256 checked;
+   nothing is bundled), or the user's own files. A long-lived phantom worker
+   parses files and keeps the volume, so a new slice or plane is cheap.
+
    A run:
      1. the first worker opens the job and returns its plan: spins per voxel
         (probed for spoiled axes), folding, and how many chunks;
@@ -15,41 +20,98 @@
      3. chunks go one at a time to whichever worker is idle, and their
         signals are added in chunk order, so the result does not depend on
         the worker count;
-     4. the first worker reconstructs the image, k-space and raw views.
-   Cancel, a new run or a new sequence terminates every worker.
+     4. the first worker reconstructs and keeps the job for exports.
+   While it runs, a progress card shows the phase, overall progress and each
+   worker's chunk. Chunks are strips of phantom columns simulated through the
+   whole sequence, so the partial signal is the signal of the strips done so
+   far: the raw views show it as it builds up, and the (otherwise idle)
+   phantom worker reconstructs it about twice a second, so the image fills in
+   strip by strip.
+
+   Results are shown with SeqEyesNdView (ndview.js): any two dimensions of
+   the raw data, k-space, images or phantom maps as an image, the waveform
+   along one of them as a line plot, hover marking the sample's time on the
+   sequence timeline.
    ═══════════════════════════════════════════════════════════════════════ */
 
 var SeqEyesSimulation = (function () {
   var get = SeqEyesPrefs.get, set = SeqEyesPrefs.set;
 
-  var SIZES = [32, 64, 128, 256];
+  /* MRzero-Core's example phantoms, fetched from GitHub only when chosen.
+     Pinned to a commit and checked against SHA-256 so a preset is always the
+     same data. MRzero-Core is AGPL-3.0; the brains derive from BrainWeb. */
+  var MRZERO_COMMIT = '5bca8551d1af6dd8eed4ae1ed32eadd9a456310f';
+  var MRZERO_BASE = 'https://raw.githubusercontent.com/MRsources/MRzero-Core/' + MRZERO_COMMIT + '/documentation/playground_mr0/';
+  var PRESETS = {
+    'shepp-logan': { label: 'Shepp–Logan (built-in)' },
+    'mrzero-brain': {
+      label: 'MRzero brain 2D (178 kB)', file: 'numerical_brain_cropped.mat', bytes: 178137,
+      sha256: 'f32dcc37838e973caae1fc75deb0a803f4bee2bff29fb12589ae0ef5ec63f381'
+    },
+    'brainweb-05': {
+      label: 'BrainWeb subject 05, 3 T (19 MB)', file: 'subject05.npz', bytes: 19405412,
+      sha256: '0d59932b8d0cb20fcf603c38402e8afa98bdd95872c88d287e01fa48ac9c62d7'
+    },
+    'brainweb-04-7t': {
+      label: 'BrainWeb subject 04, 7 T (19 MB)', file: 'subject04_7T-noise.npz', bytes: 19003594,
+      sha256: '7f2690be27bd049ec68fead6e6f457c21867871f52c09293ec8947e84d6c0e7a'
+    },
+    'file': { label: 'Your file…' }
+  };
+  var PRESET_ORDER = ['shepp-logan', 'mrzero-brain', 'brainweb-05', 'brainweb-04-7t', 'file'];
+  var SHEPP_SIZES = [32, 64, 128, 256];
+  var FILE_MATRICES = [0, 64, 96, 128, 192, 256];
   var SPIN_CHOICES = ['auto', '1x1', '8x1', '32x1', '128x1', '384x1', '768x1'];
-  var VIEWS = { image: 'Image', kspace: 'k-space', raw: 'Raw' };
-  /* Dynamic range of the log display. */
-  var LOG_RANGE_DB = 60;
+  var COIL_CHOICES = [1, 2, 4, 8, 16];
+  /* What Auto aims for: the signal error it accepts from the spin discretisation (per tissue, relative L2). */
+  var ACCURACY_CHOICES = [['0.02', 'Accurate (2 %)'], ['0.05', 'Fast (5 %)'], ['0.1', 'Draft (10 %)']];
+  var FIELD_CHOICES = [
+    ['file', 'B0/B1: file, else ideal'],
+    ['mrzero', 'B0/B1: file, else MRzero-style'],
+    ['none', 'B0/B1: ideal']
+  ];
+  var DATA_TABS = [['phantom', 'Phantom'], ['raw', 'Raw'], ['kspace', 'k-space'], ['image', 'Image']];
+  var EXPORTS = [
+    ['ismrmrd-h5', 'ISMRMRD raw data (.h5)'],
+    ['ismrmrd-stream', 'ISMRMRD stream (.bin)'],
+    ['npz', 'NumPy raw + labels (.npz)'],
+    ['png', 'Current view (.png)']
+  ];
 
-  var size = SIZES.indexOf(+get('seqeyes.simulation.size')) >= 0 ? +get('seqeyes.simulation.size') : 128;
-  var spins = SPIN_CHOICES.indexOf(get('seqeyes.simulation.spins')) >= 0 ? get('seqeyes.simulation.spins') : 'auto';
-  var view = VIEWS[get('seqeyes.simulation.view')] ? get('seqeyes.simulation.view') : 'image';
-  var colormapName = get('seqeyes.simulation.colormap') || 'grey';
-  if (SG_COLORMAP_NAMES.indexOf(colormapName) < 0) colormapName = 'grey';
-  /* Log display per view: k-space and raw data span decades, images do not. */
-  var logScale = { image: false, kspace: true, raw: true };
-  ['image', 'kspace', 'raw'].forEach(function (key) {
-    var stored = get('seqeyes.simulation.log.' + key);
-    if (stored === '1' || stored === '0') logScale[key] = stored === '1';
-  });
+  function choice(value, allowed, fallback) { return allowed.indexOf(value) >= 0 ? value : fallback; }
+
+  var phantomChoice = choice(get('seqeyes.simulation.phantom'), PRESET_ORDER, 'shepp-logan');
+  if (phantomChoice === 'file') phantomChoice = 'shepp-logan';    // files are not remembered
+  var sheppSize = choice(+get('seqeyes.simulation.size'), SHEPP_SIZES, 128);
+  var fileMatrix = choice(+get('seqeyes.simulation.matrix'), FILE_MATRICES, 0);
+  var fields = choice(get('seqeyes.simulation.fields'), FIELD_CHOICES.map(function (f) { return f[0]; }), 'file');
+  var coils = choice(+get('seqeyes.simulation.coils'), COIL_CHOICES, 1);
+  var spins = choice(get('seqeyes.simulation.spins'), SPIN_CHOICES, 'auto');
+  var accuracy = choice(get('seqeyes.simulation.accuracy'), ACCURACY_CHOICES.map(function (a) { return a[0]; }), '0.02');
+  var dataTab = choice(get('seqeyes.simulation.data'), DATA_TABS.map(function (t) { return t[0]; }), 'image');
+  var rawOrder = choice(get('seqeyes.simulation.rawOrder'), ['labels', 'acquisition', 'time'], 'labels');
+  var slicePlane = choice(get('seqeyes.simulation.plane'), ['xy', 'xz', 'yz'], 'xy');
+  var sliceIndex = null;          // null: the middle of the volume
 
   var shown = false;
   var wired = false;
+  var viewer = null;
+
+  /* Phantom state. */
+  var phantomWorker = null;
+  var phantomRequest = 0;
+  var phantom = { status: 'idle', id: 0, data: null, volume: null, label: '', error: null };
+  var uploaded = null;            // { label, files } of the user's last upload
+  var presetBytes = {};           // preset id → ArrayBuffer (fetched once per session)
+
+  /* Run state. */
   var runCounter = 0;
-  var run = null;          // the active or last run (see startRun)
-  var result = null;       // { recon, raw, plan, timings } of the last finished run
-  var frame = 0;
-  var zoom = { image: null, kspace: null, raw: null };   // { scale, ox, oy } per view, null = fit
-  var offscreen = null;
-  var offscreenKey = '';
-  var hover = null;
+  var run = null;
+  var result = null;              // the last finished run
+  var datasets = {};
+  var exportCounter = 0;
+  /** Live previews of a running simulation are rebuilt at most this often [ms]. */
+  var PREVIEW_SPACING_MS = 500;
 
   function el(id) { return document.getElementById(id); }
   function now() { return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); }
@@ -71,84 +133,242 @@ var SeqEyesSimulation = (function () {
     return String(n);
   }
   function formatSeconds(ms) { return (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + ' s'; }
+  function formatBytes(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.round(n / 1e3) + ' kB'; }
   function escapeHtml(text) {
     return String(text).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
   }
 
+  function describeBands(bands) {
+    return bands.map(function (band) {
+      var upper = isFinite(band.t2Max) ? '≤' + (band.t2Max >= 1 ? band.t2Max + ' s' : Math.round(band.t2Max * 1000) + ' ms') : '>' + band.t2Min + ' s';
+      return upper + ': ' + band.count;
+    }).join(', ');
+  }
+
   function describePlan(plan) {
     var axes = plan.axes.map(function (axis, i) {
       var name = 'xy'.charAt(i);
+      if (i === 0 && plan.bands && plan.bands.length) return 'x by T2 (' + describeBands(plan.bands) + ')';
       if (axis.reason === 'manual') return name + ' ' + axis.count;
-      var why = axis.reason === 'spoiling' ? 'spoiling'
-        : axis.reason === 'resolution' ? 'resolution' : '';
-      var text = name + ' ' + axis.count + (why ? ' (' + why : '');
+      var text = name + ' ' + axis.count;
+      if (axis.reason === 'spoiling' || axis.reason === 'resolution') text += ' (' + axis.reason;
       if (axis.probe) text += ', ' + (100 * axis.probe.error).toFixed(1) + ' % probe error';
-      if (why) text += ')';
+      if (axis.reason === 'spoiling' || axis.reason === 'resolution') text += ')';
       if (axis.folded) text += ' folded';
       return text;
     });
-    return plan.phantom.nx + '² Shepp–Logan · spins/voxel ' + axes.join(', ')
+    return plan.phantom.source + ' · ' + plan.phantom.nx + '×' + plan.phantom.ny
+      + ' · spins/voxel ' + axes.join(', ')
       + ' · ' + formatCount(plan.spins) + ' spins, ' + formatCount(plan.simulated) + ' simulated'
+      + (plan.coils > 1 ? ' · ' + plan.coils + ' coils' : '')
       + ' · ' + plan.rfEvents + ' RF, ' + plan.adcEvents + ' ADC';
   }
 
-  /* ── Status line ──────────────────────────────────────────────────── */
+  /* ── Status line and progress ─────────────────────────────────────── */
 
+  var statusLines = [], statusWarnings = [];
   function setStatus(lines, warnings) {
+    statusLines = lines || [];
+    statusWarnings = warnings || [];
     var node = el('simReadout');
     if (!node) return;
-    var html = (lines || []).map(function (line) { return '<div>' + escapeHtml(line) + '</div>'; }).join('');
-    html += (warnings || []).map(function (line) {
-      return '<div class="sg-warn">' + escapeHtml(line) + '</div>';
-    }).join('');
-    node.innerHTML = html;
+    node.innerHTML = statusLines.map(function (line) { return '<div>' + escapeHtml(line) + '</div>'; }).join('')
+      + statusWarnings.map(function (line) { return '<div class="sg-warn">' + escapeHtml(line) + '</div>'; }).join('');
   }
 
   function setProgress(fraction) {
-    var bar = el('simProgress');
-    var fill = el('simProgressFill');
+    var bar = el('simProgress'), fill = el('simProgressFill');
     if (!bar || !fill) return;
     var active = fraction !== null && fraction !== undefined;
     bar.classList.toggle('on', active);
     fill.style.width = active ? Math.round(100 * Math.max(0, Math.min(1, fraction))) + '%' : '0%';
   }
 
-  function syncButtons() {
-    var running = !!(run && !run.finished);
-    var runButton = el('simRun');
-    var cancel = el('simCancel');
-    if (runButton) {
-      runButton.disabled = running;
-      runButton.textContent = result ? '▶ Run again' : '▶ Run';
-    }
-    if (cancel) cancel.disabled = !running;
-    var frameSelect = el('simFrame');
-    var frames = result && result.recon ? result.recon.frames : 0;
-    if (frameSelect) {
-      frameSelect.hidden = !(frames > 1) || view === 'raw';
-      if (frames > 1 && frameSelect.options.length !== frames) {
-        frameSelect.innerHTML = '';
-        for (var f = 0; f < frames; f++) {
-          var option = document.createElement('option');
-          option.value = String(f);
-          option.textContent = 'Frame ' + (f + 1);
-          frameSelect.appendChild(option);
-        }
+  /* ── Phantom ──────────────────────────────────────────────────────── */
+
+  function ensurePhantomWorker() {
+    if (phantomWorker) return phantomWorker;
+    phantomWorker = host().createSimulationWorker();
+    phantomWorker.onmessage = function (event) { onPhantomMessage(event.data); };
+    phantomWorker.onerror = function (event) {
+      if (event && event.preventDefault) event.preventDefault();
+      phantomWorker = null;
+      phantomFailed(phantom.id, 'The phantom worker failed: ' + (event && event.message || 'unknown error'));
+    };
+    return phantomWorker;
+  }
+
+  function sliceOptions() {
+    var options = { plane: slicePlane };
+    if (sliceIndex !== null) options.index = sliceIndex;
+    if (fileMatrix > 0) options.matrix = fileMatrix;
+    return options;
+  }
+
+  /** Load the chosen phantom (or a new plane of it). */
+  function loadPhantom(reason) {
+    if (!isAvailable()) return;
+    var id = ++phantomRequest;
+    phantom.status = 'loading';
+    phantom.id = id;
+    phantom.error = null;
+    syncControls();
+    if (phantomChoice === 'shepp-logan') {
+      var source = host().getSequenceSource();
+      var request = { kind: 'shepp-logan', size: sheppSize };
+      var transfer = [];
+      if (source && source.bytes) {
+        var copy = source.bytes.slice();
+        request.sequence = copy.buffer;
+        request.name = source.name || '';
+        transfer.push(copy.buffer);
       }
-      frameSelect.value = String(frame);
+      phantom.label = 'Shepp–Logan';
+      postPhantom(id, request, transfer);
+      return;
     }
-    var log = el('simLog');
-    if (log) {
-      log.classList.toggle('on', !!logScale[view]);
-      log.setAttribute('aria-pressed', logScale[view] ? 'true' : 'false');
+    if (reason === 'slice' && phantom.volume) {
+      postPhantom(id, { kind: 'slice', fields: fields, slice: sliceOptions() }, []);
+      return;
     }
-    var empty = el('simEmpty');
-    if (empty) {
-      empty.style.display = currentMatrix() ? 'none' : 'flex';
-      empty.textContent = running ? 'Simulating…' : 'No simulation yet. Press Run.';
+    if (phantomChoice === 'file') {
+      if (!uploaded) { phantom.status = 'idle'; syncControls(); return; }
+      phantom.label = uploaded.label;
+      postFiles(id, uploaded.files);
+      return;
     }
+    var preset = PRESETS[phantomChoice];
+    phantom.label = preset.label;
+    if (presetBytes[phantomChoice]) {
+      postFiles(id, [{ name: preset.file, bytes: presetBytes[phantomChoice] }]);
+      return;
+    }
+    fetchPreset(phantomChoice, id);
+  }
+
+  function postFiles(id, files) {
+    var copies = files.map(function (file) { return { name: file.name, bytes: file.bytes.slice(0) }; });
+    postPhantom(id, { kind: 'files', files: copies, fields: fields, slice: sliceOptions() },
+      copies.map(function (file) { return file.bytes; }));
+  }
+
+  function postPhantom(id, request, transfer) {
+    try {
+      ensurePhantomWorker().postMessage({ type: 'phantom', id: id, request: request }, transfer);
+    } catch (error) {
+      phantomFailed(id, 'Could not start the phantom worker: ' + (error && error.message || error));
+    }
+  }
+
+  function fetchPreset(presetId, id) {
+    var preset = PRESETS[presetId];
+    setStatus(['Downloading ' + preset.file + ' (' + formatBytes(preset.bytes) + ') from MRsources/MRzero-Core on GitHub…']);
+    setProgress(0);
+    fetch(MRZERO_BASE + preset.file).then(function (response) {
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      var total = +response.headers.get('content-length') || preset.bytes;
+      if (!response.body || !response.body.getReader) return response.arrayBuffer();
+      var reader = response.body.getReader(), chunks = [], received = 0;
+      function pump() {
+        return reader.read().then(function (part) {
+          if (part.done) {
+            var all = new Uint8Array(received), offset = 0;
+            chunks.forEach(function (chunk) { all.set(chunk, offset); offset += chunk.length; });
+            return all.buffer;
+          }
+          chunks.push(part.value);
+          received += part.value.length;
+          if (id === phantomRequest) setProgress(received / total);
+          return pump();
+        });
+      }
+      return pump();
+    }).then(function (buffer) {
+      return verifyDigest(buffer, preset.sha256).then(function () { return buffer; });
+    }).then(function (buffer) {
+      presetBytes[presetId] = buffer;
+      if (id !== phantomRequest) return;
+      setProgress(null);
+      setStatus(['Parsing ' + preset.file + '…']);
+      postFiles(id, [{ name: preset.file, bytes: buffer }]);
+    }).catch(function (error) {
+      setProgress(null);
+      phantomFailed(id, 'Could not download ' + preset.file + ': ' + (error && error.message || error)
+        + '. You can download it from github.com/MRsources/MRzero-Core and load it as your file.');
+    });
+  }
+
+  /** SHA-256 check where WebCrypto exists (secure contexts); skipped elsewhere. */
+  function verifyDigest(buffer, expected) {
+    var subtle = typeof crypto !== 'undefined' && crypto.subtle;
+    if (!subtle || !expected) return Promise.resolve();
+    return subtle.digest('SHA-256', buffer).then(function (digest) {
+      var hex = Array.prototype.map.call(new Uint8Array(digest), function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+      if (hex !== expected) throw new Error('the download does not match the pinned SHA-256');
+    });
+  }
+
+  function onPhantomMessage(message) {
+    if (!message) return;
+    if (message.type === 'preview') { onPreview(message); return; }
+    if (message.type === 'error' && run && message.id === run.id && run.previewPending) {
+      // A failed preview is not worth stopping the run for.
+      run.previewPending = false;
+      return;
+    }
+    if (message.type === 'error') { phantomFailed(message.id, message.message); return; }
+    if (message.type !== 'phantom' || message.id !== phantomRequest) return;
+    phantom.status = 'ready';
+    phantom.data = message.phantom;
+    phantom.volume = message.volume;
+    if (message.volume && sliceIndex === null) sliceIndex = Math.floor(sliceAxisSize() / 2);
+    datasets.phantom = phantomDataset(message.phantom);
+    syncControls();
+    describePhantom();
+    if (dataTab === 'phantom' || !result) showData(result ? dataTab : 'phantom');
+  }
+
+  function phantomFailed(id, text) {
+    if (id !== phantomRequest && id !== -1) return;
+    phantom.status = 'error';
+    phantom.error = text;
+    syncControls();
+    setStatus([], ['Phantom: ' + text]);
+  }
+
+  function describePhantom() {
+    if (!phantom.data || (run && !run.finished)) return;
+    var p = phantom.data;
+    var lines = [p.source + ' · ' + p.nx + '×' + p.ny + ' at ' + (p.voxel[0] * 1000).toFixed(2) + '×' + (p.voxel[1] * 1000).toFixed(2) + ' mm'
+      + (phantom.volume ? ' · volume ' + phantom.volume.shape.join('×') : '')];
+    if (!result) lines.push('Press Run to simulate the open sequence on this phantom (2D, z = 0).');
+    setStatus(lines.concat(result ? statusForResultLines() : []), (p.notes || []).concat(result ? resultWarnings() : []));
+  }
+
+  function sliceAxisSize() {
+    if (!phantom.volume) return 1;
+    var axis = slicePlane === 'xy' ? 2 : slicePlane === 'xz' ? 1 : 0;
+    return phantom.volume.shape[axis];
+  }
+
+  function readUploadedFiles(fileList) {
+    var files = Array.prototype.slice.call(fileList || []);
+    if (!files.length) return;
+    var reads = files.map(function (file) {
+      return file.arrayBuffer().then(function (bytes) { return { name: file.name, bytes: bytes }; });
+    });
+    Promise.all(reads).then(function (loaded) {
+      uploaded = { label: loaded.map(function (f) { return f.name; }).join(', '), files: loaded };
+      phantomChoice = 'file';
+      sliceIndex = null;
+      phantom.volume = null;
+      syncControls();
+      loadPhantom('choice');
+    }).catch(function (error) {
+      setStatus([], ['Could not read the file: ' + (error && error.message || error)]);
+    });
   }
 
   /* ── Running ──────────────────────────────────────────────────────── */
@@ -156,49 +376,38 @@ var SeqEyesSimulation = (function () {
   function workerBudget(bytes) {
     var cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
     var count = Math.max(1, Math.min(8, cores - 1));
-    // Every worker parses its own copy of the sequence.
-    if (bytes > 32 * 1024 * 1024) count = Math.min(count, 2);
+    if (bytes > 32 * 1024 * 1024) count = Math.min(count, 2);   // every worker parses its own copy
     return count;
   }
 
   function jobSettings() {
-    var settings = { phantom: 'shepp-logan', size: size, subSpins: 'auto' };
+    var settings = { phantom: { kind: 'phantom', phantom: phantom.data }, coils: coils, subSpins: 'auto', tolerance: +accuracy };
     if (spins !== 'auto') settings.subSpins = spins.split('x').map(Number);
     return settings;
   }
 
   function startRun() {
-    var h = host();
     if (!isAvailable()) return;
-    var source = h.getSequenceSource();
-    if (!source || !source.bytes || !source.bytes.length) {
-      setStatus(['Open a Pulseq sequence first.']);
-      return;
-    }
-    stopWorkers(run);
+    var source = host().getSequenceSource();
+    if (!source || !source.bytes || !source.bytes.length) { setStatus(['Open a Pulseq sequence first.']); return; }
+    if (phantom.status !== 'ready' || !phantom.data) { setStatus(['The phantom is not ready yet.']); return; }
+    stopRun(run);
     var settings = jobSettings();
     run = {
-      id: ++runCounter,
-      source: source,
-      settings: settings,
-      started: now(),
-      planMs: 0,
-      plan: null,
-      workers: [],
-      budget: workerBudget(source.bytes.length),
-      nextChunk: 0,
-      added: 0,
-      pending: {},
-      signal: null,
-      progress: {},
-      finished: false
+      id: ++runCounter, source: source, settings: settings, started: now(), planMs: 0, plan: null,
+      workers: [], budget: workerBudget(source.bytes.length), nextChunk: 0, added: 0, pending: {},
+      signal: null, progress: {}, finished: false, exports: {}
     };
     var leader = spawnWorker(run);
     if (!leader) return;
-    openJob(run, leader, settings);
+    openJob(run, leader, settings, true);
+    run.phase = 'planning';
+    run.planMessage = 'Parsing the sequence';
+    run.planFraction = 0;
     setStatus(['Planning: parsing the sequence and choosing spins per voxel…']);
     setProgress(0);
-    syncButtons();
+    renderRunCard(run);
+    syncControls();
   }
 
   function spawnWorker(r) {
@@ -219,31 +428,45 @@ var SeqEyesSimulation = (function () {
     return slot;
   }
 
-  function openJob(r, slot, settings) {
+  function openJob(r, slot, settings, withLayout) {
     var copy = r.source.bytes.slice();
     slot.worker.postMessage({
-      type: 'open', job: r.id, bytes: copy.buffer, name: r.source.name || 'sequence.seq', settings: settings
+      type: 'open', job: r.id, bytes: copy.buffer, name: r.source.name || 'sequence.seq', settings: settings,
+      layout: !!withLayout
     }, [copy.buffer]);
   }
 
   function onWorkerMessage(r, slot, message) {
-    if (r !== run || r.finished || !message || message.job !== r.id) return;
+    if (!message || message.job !== r.id) return;
+    if (message.type === 'export') { finishExport(r, message); return; }
+    if (message.type === 'error' && message.id >= 0 && r.exports[message.id]) { exportFailed(r, message.id, message.message); return; }
+    if (r !== run || r.finished) return;
     switch (message.type) {
+      case 'planProgress':
+        if (r.plan) break;
+        r.planMessage = message.message;
+        r.planFraction = message.fraction;
+        renderRunCard(r);
+        break;
       case 'plan':
         slot.ready = true;
         if (!r.plan) {
           r.plan = message.plan;
+          r.layout = message.layout || null;
           r.planMs = now() - r.started;
           r.simulateStarted = now();
+          r.phase = 'simulating';
+          openPreview(r);
           // Followers take the leader's spins per voxel: same chunks, no probe.
           var followers = Math.min(r.budget, r.plan.chunks) - 1;
-          var settings = { phantom: r.settings.phantom, size: r.settings.size, subSpins: r.plan.subSpins.slice() };
+          var settings = { phantom: r.settings.phantom, coils: r.settings.coils, subSpins: r.plan.resolved };
           for (var i = 0; i < followers; i++) {
             var follower = spawnWorker(r);
             if (!follower) return;
             openJob(r, follower, settings);
           }
-        } else if (message.plan.chunks !== r.plan.chunks) {
+        } else if (message.plan.chunks !== r.plan.chunks || message.plan.spins !== r.plan.spins
+          || message.plan.simulated !== r.plan.simulated) {
           fail(r, 'Internal error: workers disagree on the job plan.');
           return;
         }
@@ -259,11 +482,14 @@ var SeqEyesSimulation = (function () {
         slot.chunk = -1;
         addChunk(r, message.chunk, message.signal);
         if (r.added === r.plan.chunks) reconstruct(r);
-        else dispatch(r, slot);
+        else {
+          dispatch(r, slot);
+          schedulePreview(r);
+        }
         reportProgress(r);
         break;
       case 'recon':
-        finish(r, message.recon, message.raw);
+        finish(r, message);
         break;
       case 'error':
         fail(r, message.message);
@@ -292,7 +518,9 @@ var SeqEyesSimulation = (function () {
 
   function reconstruct(r) {
     r.simulateMs = now() - r.simulateStarted;
-    // Every chunk is in: free the followers' memory now.
+    r.phase = 'reconstructing';
+    renderRunCard(r);
+    // Every chunk is in: free the followers; the leader keeps the job for exports.
     for (var i = 1; i < r.workers.length; i++) r.workers[i].worker.terminate();
     r.workers.length = Math.min(1, r.workers.length);
     setStatus([describePlan(r.plan), 'Reconstructing…']);
@@ -301,48 +529,208 @@ var SeqEyesSimulation = (function () {
 
   function reportProgress(r) {
     if (!r.plan) return;
-    var done = r.added;
     var partial = 0;
     for (var key in r.progress) if (Object.prototype.hasOwnProperty.call(r.progress, key)) partial += r.progress[key];
-    var fraction = (done + partial) / r.plan.chunks;
+    var fraction = (r.added + partial) / r.plan.chunks;
     setProgress(fraction);
     var elapsed = now() - r.simulateStarted;
-    var line = 'Simulating: ' + done + '/' + r.plan.chunks + ' chunks on ' + r.workers.length
+    var line = 'Simulating: ' + r.added + '/' + r.plan.chunks + ' chunks on ' + r.workers.length
       + (r.workers.length === 1 ? ' worker' : ' workers') + ' · ' + formatSeconds(elapsed);
     if (fraction > 0.05) line += ' · about ' + formatSeconds(elapsed * (1 - fraction) / fraction) + ' left';
     setStatus([describePlan(r.plan), line], r.plan.notes);
+    renderRunCard(r);
   }
 
-  function finish(r, recon, raw) {
+  /* ── Progress card and live previews ──────────────────────────────── */
+
+  function chunkProgress(r) {
+    var partial = 0;
+    for (var key in r.progress) if (Object.prototype.hasOwnProperty.call(r.progress, key)) partial += r.progress[key];
+    var pending = 0;
+    for (key in r.pending) if (Object.prototype.hasOwnProperty.call(r.pending, key)) pending++;
+    return { done: r.added + pending, partial: partial };
+  }
+
+  /** The phase, overall progress, throughput and one bar per worker. */
+  function renderRunCard(r) {
+    var card = el('simRunCard');
+    if (!card) return;
+    var active = !!(r && r === run && !r.finished);
+    card.hidden = !active;
+    if (!active) return;
+    var phase, fraction, stats = '';
+    if (r.phase === 'planning' || !r.plan) {
+      phase = 'Planning · ' + (r.planMessage || '…');
+      fraction = r.planFraction || 0;
+      stats = 'elapsed ' + formatSeconds(now() - r.started);
+    } else if (r.phase === 'reconstructing') {
+      phase = 'Reconstructing';
+      fraction = 1;
+      stats = r.plan.chunks + ' chunks simulated in ' + formatSeconds(r.simulateMs || 0);
+    } else {
+      var progress = chunkProgress(r);
+      fraction = Math.min(1, (progress.done + progress.partial) / r.plan.chunks);
+      var elapsed = now() - r.simulateStarted;
+      phase = 'Simulating';
+      stats = progress.done + '/' + r.plan.chunks + ' chunks · '
+        + formatCount(Math.round(fraction * r.plan.simulated)) + ' of ' + formatCount(r.plan.simulated) + ' spins · '
+        + formatSeconds(elapsed) + (fraction > 0.03 ? ' · ~' + formatSeconds(elapsed * (1 - fraction) / fraction) + ' left' : '')
+        + (elapsed > 500 ? ' · ' + formatCount(Math.round(fraction * r.plan.simulated / (elapsed / 1000))) + ' spins/s' : '');
+    }
+    el('simRunPhase').textContent = phase;
+    el('simRunPercent').textContent = Math.round(100 * fraction) + '%';
+    el('simRunFill').style.width = (100 * fraction).toFixed(1) + '%';
+    el('simRunStats').textContent = stats;
+    var workers = el('simRunWorkers');
+    var count = r.phase === 'simulating' ? r.workers.length : 0;
+    while (workers.children.length > count) workers.removeChild(workers.lastChild);
+    while (workers.children.length < count) {
+      var bar = document.createElement('div');
+      bar.className = 'sim-run-worker';
+      bar.appendChild(document.createElement('div'));
+      workers.appendChild(bar);
+    }
+    for (var i = 0; i < count; i++) {
+      var slot = r.workers[i];
+      var own = slot.chunk >= 0 ? (r.progress[slot.chunk] || 0) : 0;
+      workers.children[i].firstChild.style.width = (100 * own).toFixed(0) + '%';
+      workers.children[i].title = 'Worker ' + (i + 1) + (slot.chunk >= 0 ? ': chunk ' + (slot.chunk + 1) : ': idle');
+    }
+  }
+
+  /** The phantom worker reconstructs partial signals while the run's workers simulate. */
+  function openPreview(r) {
+    if (!phantomWorker || !r.layout) return;
+    var copy = r.source.bytes.slice();
+    phantomWorker.postMessage({ type: 'previewOpen', id: r.id, bytes: copy.buffer, name: r.source.name || 'sequence.seq' }, [copy.buffer]);
+  }
+
+  function schedulePreview(r) {
+    if (r.previewTimer || !r.layout) return;
+    var wait = Math.max(0, PREVIEW_SPACING_MS - (now() - (r.lastPreview || 0)));
+    r.previewTimer = setTimeout(function () { r.previewTimer = 0; livePreview(r); }, wait);
+  }
+
+  /** Every chunk that has arrived, summed (in order, then the ones still waiting their turn). */
+  function partialSignal(r) {
+    var length = r.signal ? r.signal.length : 0;
+    var key;
+    for (key in r.pending) if (Object.prototype.hasOwnProperty.call(r.pending, key)) { length = r.pending[key].length; break; }
+    if (!length) return null;
+    var out = r.signal ? r.signal.slice() : new Float64Array(length);
+    for (key in r.pending) {
+      if (!Object.prototype.hasOwnProperty.call(r.pending, key)) continue;
+      var chunk = r.pending[key];
+      for (var i = 0; i < out.length; i++) out[i] += chunk[i];
+    }
+    return out;
+  }
+
+  function livePreview(r) {
+    if (r !== run || r.finished || !r.layout) return;
+    r.lastPreview = now();
+    var partial = partialSignal(r);
+    if (!partial) return;
+    var coilCount = r.layout.coils;
+    r.liveChunks = chunkProgress(r).done;
+    datasets.rawAcquisition = rawAcquisitionDataset(r.layout, partial, coilCount);
+    datasets.rawLabels = rawLabelDataset(r.layout, partial, coilCount);
+    datasets.rawTime = rawTimeDataset(r.layout, partial, coilCount);
+    if (dataTab === 'raw') refreshView();
+    if (phantomWorker && !r.previewPending) {
+      r.previewPending = true;
+      phantomWorker.postMessage({ type: 'preview', id: r.id, signal: partial, coils: coilCount }, [partial.buffer]);
+    }
+    syncControls();
+  }
+
+  /** A reconstructed partial signal: magnitude images and k-space for the live views. */
+  function onPreview(message) {
+    var r = run;
+    if (!r || r.id !== message.id || r.finished) return;
+    r.previewPending = false;
+    var recon = message.recon;
+    datasets.image = previewDataset('image', recon, recon.images, true);
+    datasets.kspace = previewDataset('kspace', recon, recon.kspace, false);
+    r.livePreviews = (r.livePreviews || 0) + 1;
+    if (dataTab === 'image' || dataTab === 'kspace' || dataTab === 'phantom' && r.livePreviews === 1) {
+      if (dataTab === 'phantom') dataTab = 'image';
+      refreshView();
+    }
+    syncControls();
+    if (chunkProgress(r).done > (r.liveChunks || 0)) schedulePreview(r);
+  }
+
+  function previewDataset(id, recon, values, isImage) {
+    var nu = recon.nu, nv = recon.nv, axes = 'xyz';
+    var pixel = recon.delta ? [1000 / (nu * recon.delta[0]), 1000 / (nv * recon.delta[1])] : null;
+    var ux = axes.charAt(recon.axes[0]), uy = axes.charAt(recon.axes[1]);
+    var dims = isImage
+      ? [
+        { name: ux, size: nu, scale: pixel ? { start: -nu / 2 * pixel[0], step: pixel[0], unit: 'mm' } : undefined },
+        { name: uy, size: nv, reversed: true, scale: pixel ? { start: (nv / 2 - 1) * pixel[1], step: -pixel[1], unit: 'mm' } : undefined }
+      ]
+      : [{ name: 'k' + ux, size: nu }, { name: 'k' + uy, size: nv, reversed: true }];
+    if (recon.frames > 1) dims.push({ name: 'frame', size: recon.frames });
+    return {
+      id: id, title: (isImage ? 'Image' : 'k-space') + ' (live preview)', live: true, square: true,
+      pixelAspect: pixel ? pixel[1] / pixel[0] : 1, dims: dims, re: values, im: null,
+      defaultX: 0, defaultY: 1, defaultLog: !isImage, defaultColormap: 'grey'
+    };
+  }
+
+  /** Show the current tab's dataset again (after it was rebuilt), keeping the view choices. */
+  function refreshView() {
+    if (!viewer) return;
+    var dataset = currentDataset(dataTab);
+    viewer.setDataset(dataset);
+    var empty = el('simEmpty');
+    if (empty) empty.style.display = dataset ? 'none' : 'flex';
+  }
+
+  function finish(r, message) {
     r.finished = true;
-    var totalMs = now() - r.started;
-    stopWorkers(r);
-    result = { recon: recon, raw: raw, plan: r.plan, signal: r.signal, name: r.source.name || '',
-      timings: { totalMs: totalMs, planMs: r.planMs, simulateMs: r.simulateMs } };
-    frame = Math.min(frame, Math.max(0, recon.frames - 1));
-    offscreenKey = '';
+    renderRunCard(r);
+    var leader = r.workers[0];
+    r.workers.length = 0;
+    if (result && result.leader && result.leader !== leader) result.leader.worker.terminate();
+    result = {
+      run: r, leader: leader, plan: r.plan, signal: r.signal, recon: message.recon, layout: message.layout,
+      phantom: message.phantom, name: r.source.name || '',
+      timings: { totalMs: now() - r.started, planMs: r.planMs, simulateMs: r.simulateMs }
+    };
+    buildResultDatasets();
     setProgress(null);
     statusForResult();
-    syncButtons();
-    render();
+    syncControls();
+    showData(dataTab === 'phantom' ? 'image' : dataTab);
+  }
+
+  function statusForResultLines() {
+    var t = result.timings;
+    return [describePlan(result.plan), 'Done in ' + formatSeconds(t.totalMs) + ' (plan ' + formatSeconds(t.planMs)
+      + ', simulate ' + formatSeconds(t.simulateMs) + ') · image ' + result.recon.nu + '×' + result.recon.nv
+      + (result.recon.frames > 1 ? ' × ' + result.recon.frames + ' frames' : '')
+      + ' · raw ' + result.layout.acquisitions + ' acquisitions'];
+  }
+
+  function resultWarnings() {
+    return result.plan.notes.concat(result.recon.warnings || []).concat(datasets.rawLabels && datasets.rawLabels.notes || []);
   }
 
   function statusForResult() {
     if (!result) return;
-    var t = result.timings;
-    var line = 'Done in ' + formatSeconds(t.totalMs) + ' (plan ' + formatSeconds(t.planMs)
-      + ', simulate ' + formatSeconds(t.simulateMs) + ') · ' + result.recon.nu + '×' + result.recon.nv
-      + (result.recon.frames > 1 ? ' × ' + result.recon.frames + ' frames' : '');
-    setStatus([describePlan(result.plan), line], result.plan.notes.concat(result.recon.warnings || []));
+    setStatus(statusForResultLines(), resultWarnings());
   }
 
-  function fail(r, message) {
+  function fail(r, text) {
     if (!r || r !== run || r.finished) return;
     r.finished = true;
+    renderRunCard(r);
     stopWorkers(r);
     setProgress(null);
-    setStatus([], ['Simulation failed: ' + message]);
-    syncButtons();
+    setStatus([], ['Simulation failed: ' + text]);
+    syncControls();
   }
 
   function stopWorkers(r) {
@@ -351,267 +739,577 @@ var SeqEyesSimulation = (function () {
     r.workers.length = 0;
   }
 
+  function stopRun(r) {
+    if (r && !r.finished) { r.finished = true; stopWorkers(r); }
+  }
+
   function cancelRun() {
     if (!run || run.finished) return;
-    run.finished = true;
-    stopWorkers(run);
+    stopRun(run);
+    renderRunCard(run);
+    // Live previews belonged to the cancelled run; the last finished result is shown again.
+    if (result) buildResultDatasets();
+    else datasets = { phantom: datasets.phantom };
+    refreshView();
     setProgress(null);
-    if (result) statusForResult();
     setStatus(['Cancelled.'].concat(result ? ['Showing the previous result.'] : []));
-    syncButtons();
+    syncControls();
   }
 
-  /* ── Rendering ────────────────────────────────────────────────────── */
+  /* ── Datasets for the viewer ──────────────────────────────────────── */
+
+  function coilLabels(count) {
+    var labels = [];
+    for (var c = 0; c < count; c++) labels.push('coil ' + (c + 1));
+    return labels;
+  }
+
+  function phantomDataset(p) {
+    var names = [['pd', 'PD', ''], ['t1', 'T1', 's'], ['t2', 'T2', 's'], ['t2prime', 'T2′', 's'],
+      ['adc', 'ADC', 'm²/s'], ['b0', 'B0', 'Hz'], ['b1', 'B1+', '']];
+    var present = names.filter(function (entry) { return p.maps[entry[0]]; });
+    var cells = p.nx * p.ny;
+    var coilCount = p.coils ? p.coils.count : 0;
+    var count = present.length + (coilCount > 1 ? coilCount : 0);
+    var re = new Float32Array(cells * count), im = coilCount > 1 ? new Float32Array(cells * count) : null;
+    present.forEach(function (entry, m) { re.set(p.maps[entry[0]], m * cells); });
+    var labels = present.map(function (entry) { return entry[1]; });
+    var units = present.map(function (entry) { return entry[2]; });
+    if (coilCount > 1) {
+      for (var c = 0; c < coilCount; c++) {
+        var slot = (present.length + c) * cells;
+        re.set(p.coils.re.subarray(c * cells, (c + 1) * cells), slot);
+        im.set(p.coils.im.subarray(c * cells, (c + 1) * cells), slot);
+        labels.push('coil ' + (c + 1));
+        units.push('');
+      }
+    }
+    var dx = p.voxel[0] * 1000, dy = p.voxel[1] * 1000;
+    return {
+      id: 'phantom', title: 'Phantom maps', square: true, pixelAspect: dy / dx,
+      dims: [
+        { name: 'x', size: p.nx, fft: 'x', scale: { start: -p.nx / 2 * dx, step: dx, unit: 'mm' } },
+        { name: 'y', size: p.ny, fft: 'x', reversed: true, scale: { start: (p.ny / 2 - 1) * dy, step: -dy, unit: 'mm' } },
+        { name: 'map', size: count, labels: labels, units: units }
+      ],
+      re: re, im: im, defaultX: 0, defaultY: 1, defaultColormap: 'viridis'
+    };
+  }
+
+  function buildResultDatasets() {
+    var layout = result.layout, signal = result.signal, recon = result.recon;
+    var coilCount = layout.coils;
+    datasets.rawAcquisition = rawAcquisitionDataset(layout, signal, coilCount);
+    datasets.rawLabels = rawLabelDataset(layout, signal, coilCount);
+    datasets.rawTime = rawTimeDataset(layout, signal, coilCount);
+    datasets.kspace = gridDataset('kspace', recon, recon.coilKspace, coilCount, false);
+    datasets.image = gridDataset('image', recon, recon.coilImages, coilCount, true);
+    if (result.phantom) datasets.phantom = phantomDataset(result.phantom);
+  }
+
+  function sampleTime(layout, acquisition, sample) {
+    if (acquisition < 0 || sample >= layout.samples[acquisition]) return NaN;
+    return layout.t0[acquisition] + (sample + 0.5) * layout.dwell[acquisition];
+  }
+
+  function sampleDim(layout, maxSamples) {
+    var dwell = layout.dwell[0];
+    var uniform = true;
+    for (var a = 1; a < layout.acquisitions; a++) if (Math.abs(layout.dwell[a] - dwell) > 1e-12) { uniform = false; break; }
+    var dim = { name: 'sample', size: maxSamples, fft: 'k', transformedName: 'readout position' };
+    if (uniform) dim.scale = { start: 0.5 * dwell * 1e6, step: dwell * 1e6, unit: 'µs' };
+    return dim;
+  }
+
+  /** Readout samples × acquisitions × coils, in acquisition order. */
+  function rawAcquisitionDataset(layout, signal, coilCount) {
+    var maxSamples = 0;
+    for (var a = 0; a < layout.acquisitions; a++) maxSamples = Math.max(maxSamples, layout.samples[a]);
+    var size = maxSamples * layout.acquisitions * coilCount;
+    var re = new Float32Array(size), im = new Float32Array(size);
+    for (a = 0; a < layout.acquisitions; a++) {
+      for (var s = 0; s < layout.samples[a]; s++) {
+        for (var c = 0; c < coilCount; c++) {
+          var src = ((layout.offsets[a] + s) * coilCount + c) * 2;
+          var dst = s + maxSamples * (a + layout.acquisitions * c);
+          re[dst] = signal[src];
+          im[dst] = signal[src + 1];
+        }
+      }
+    }
+    var dims = [sampleDim(layout, maxSamples), { name: 'acquisition', size: layout.acquisitions }];
+    if (coilCount > 1) dims.push({ name: 'coil', size: coilCount, labels: coilLabels(coilCount) });
+    return {
+      id: 'raw-acquisition', title: 'Raw data (acquisition order)', square: false, dims: dims, re: re, im: im,
+      defaultX: 0, defaultY: 1, defaultLog: true, defaultColormap: 'grey',
+      timeOf: function (indices) { return sampleTime(layout, indices[1], indices[0]); },
+      acquisitionOf: function (indices) { return indices[1]; }
+    };
+  }
 
   /**
-   * The matrix the current view shows: { width, height, values, square,
-   * xLabel, yLabel, yUp }. Image and k-space rows run top-down from the
-   * largest y (recon/cartesian.ts); raw rows are readouts in order.
+   * Every ADC sample of the scan in time order (× coils): the received signal
+   * as one waveform, shown as a line by default. Gaps between readouts are not
+   * drawn; hovering gives each sample's time.
    */
-  function currentMatrix() {
-    if (!result) return null;
-    var recon = result.recon;
-    if (view === 'raw') {
-      var raw = result.raw;
-      if (!raw || !raw.rows || !raw.columns) return null;
-      return { width: raw.columns, height: raw.rows, values: raw.magnitude, square: false,
-        xLabel: 'sample', yLabel: 'readout', yUp: false };
+  function rawTimeDataset(layout, signal, coilCount) {
+    var total = signal.length / (2 * coilCount);
+    var re = new Float32Array(total * coilCount), im = new Float32Array(total * coilCount);
+    for (var i = 0; i < total; i++) {
+      for (var c = 0; c < coilCount; c++) {
+        re[i + total * c] = signal[(i * coilCount + c) * 2];
+        im[i + total * c] = signal[(i * coilCount + c) * 2 + 1];
+      }
     }
-    if (!recon || !recon.frames) return null;
-    var cells = recon.nu * recon.nv;
-    var source = view === 'kspace' ? recon.kspace : recon.images;
+    var acquisitionOfSample = function (i) {
+      var lo = 0, hi = layout.acquisitions - 1;
+      while (lo < hi) {
+        var mid = (lo + hi + 1) >> 1;
+        if (layout.offsets[mid] <= i) lo = mid; else hi = mid - 1;
+      }
+      return lo;
+    };
+    var dims = [{ name: 'ADC sample', size: total }];
+    if (coilCount > 1) dims.push({ name: 'coil', size: coilCount, labels: coilLabels(coilCount) });
+    return {
+      id: 'raw-time', title: 'Received signal over the scan', square: false, dims: dims, re: re, im: im,
+      defaultX: 0, defaultY: -1, defaultColormap: 'grey',
+      timeOf: function (indices) {
+        var a = acquisitionOfSample(indices[0]);
+        return sampleTime(layout, a, indices[0] - layout.offsets[a]);
+      },
+      acquisitionOf: function (indices) { return acquisitionOfSample(indices[0]); }
+    };
+  }
+
+  var LABEL_DIM_ORDER = ['LIN', 'PAR', 'SLC', 'ECO', 'PHS', 'REP', 'SET', 'SEG', 'AVG'];
+  var LABEL_DIM_SKIP = ['ACQ', 'TRID', 'ONCE'];
+  var MAX_LABEL_CELLS = 64e6;
+
+  /**
+   * Readout samples × the sequence's counters (LIN, PAR, SLC, ECO, …) ×
+   * coils: the raw data as the labels index it. Null when the sequence has
+   * no varying counter, or the grid would be too large.
+   */
+  function rawLabelDataset(layout, signal, coilCount) {
+    var names = layout.labels.names, kinds = layout.labels.kinds, width = names.length;
+    var used = [];
+    for (var l = 0; l < width; l++) {
+      if (kinds[l] !== 'counter' || LABEL_DIM_SKIP.indexOf(names[l]) >= 0) continue;
+      var lo = Infinity, hi = -Infinity;
+      for (var a = 0; a < layout.acquisitions; a++) {
+        var v = layout.labels.values[a * width + l];
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+      if (hi > lo) used.push({ column: l, name: names[l], min: lo, size: hi - lo + 1 });
+    }
+    if (!used.length) return null;
+    used.sort(function (p, q) {
+      var rp = LABEL_DIM_ORDER.indexOf(p.name), rq = LABEL_DIM_ORDER.indexOf(q.name);
+      return (rp < 0 ? 99 : rp) - (rq < 0 ? 99 : rq) || (p.name < q.name ? -1 : 1);
+    });
+    var maxSamples = 0;
+    for (a = 0; a < layout.acquisitions; a++) maxSamples = Math.max(maxSamples, layout.samples[a]);
+    var cellsPerSample = 1;
+    used.forEach(function (dim) { cellsPerSample *= dim.size; });
+    if (maxSamples * cellsPerSample * coilCount > MAX_LABEL_CELLS) return null;
+    var acquisitionAt = new Int32Array(cellsPerSample).fill(-1);
+    var collisions = 0;
+    for (a = 0; a < layout.acquisitions; a++) {
+      var cell = 0, stride = 1;
+      for (var d = 0; d < used.length; d++) {
+        cell += (layout.labels.values[a * width + used[d].column] - used[d].min) * stride;
+        stride *= used[d].size;
+      }
+      if (acquisitionAt[cell] >= 0) collisions++;
+      acquisitionAt[cell] = a;
+    }
+    var size = maxSamples * cellsPerSample * coilCount;
+    var re = new Float32Array(size), im = new Float32Array(size);
+    for (cell = 0; cell < cellsPerSample; cell++) {
+      a = acquisitionAt[cell];
+      if (a < 0) continue;
+      for (var s = 0; s < layout.samples[a]; s++) {
+        for (var c = 0; c < coilCount; c++) {
+          var src = ((layout.offsets[a] + s) * coilCount + c) * 2;
+          var dst = s + maxSamples * (cell + cellsPerSample * c);
+          re[dst] = signal[src];
+          im[dst] = signal[src + 1];
+        }
+      }
+    }
+    var dims = [sampleDim(layout, maxSamples)];
+    used.forEach(function (dim) {
+      var labels = [];
+      for (var i = 0; i < dim.size; i++) labels.push(String(dim.min + i));
+      dims.push({ name: dim.name, size: dim.size, labels: labels, fft: dim.name === 'LIN' || dim.name === 'PAR' ? 'k' : null });
+    });
+    if (coilCount > 1) dims.push({ name: 'coil', size: coilCount, labels: coilLabels(coilCount) });
+    var notes = collisions ? [collisions + ' acquisitions share their label coordinates with another (navigators, references, averages); the label view shows the last of each.'] : [];
+    var cellOf = function (indices) {
+      var cellIndex = 0, cellStride = 1;
+      for (var k = 0; k < used.length; k++) { cellIndex += indices[1 + k] * cellStride; cellStride *= used[k].size; }
+      return cellIndex;
+    };
+    return {
+      id: 'raw-labels', title: 'Raw data by labels', square: false, dims: dims, re: re, im: im, notes: notes,
+      defaultX: 0, defaultY: 1, defaultLog: true, defaultColormap: 'grey',
+      timeOf: function (indices) { return sampleTime(layout, acquisitionAt[cellOf(indices)], indices[0]); },
+      acquisitionOf: function (indices) { return acquisitionAt[cellOf(indices)]; }
+    };
+  }
+
+  /**
+   * Gridded k-space or images, frames × coils × rows × columns from the
+   * recon, rows top-down. Images get a root-sum-of-squares entry first when
+   * there are several coils.
+   */
+  function gridDataset(id, recon, stack, coilCount, isImage) {
+    if (!stack) return null;
+    var nu = recon.nu, nv = recon.nv, frames = recon.frames, cells = nu * nv;
+    var withRss = isImage && coilCount > 1;
+    var slots = coilCount + (withRss ? 1 : 0);
+    var re = new Float32Array(cells * slots * frames), im = new Float32Array(cells * slots * frames);
+    for (var f = 0; f < frames; f++) {
+      var outBase = f * slots * cells;
+      if (withRss) re.set(recon.images.subarray(f * cells, (f + 1) * cells), outBase);
+      var inBase = f * coilCount * cells;
+      var offset = outBase + (withRss ? cells : 0);
+      re.set(stack.re.subarray(inBase, inBase + coilCount * cells), offset);
+      im.set(stack.im.subarray(inBase, inBase + coilCount * cells), offset);
+    }
     var axes = 'xyz';
-    return { width: recon.nu, height: recon.nv, values: source.subarray(frame * cells, (frame + 1) * cells),
-      square: true, xLabel: (view === 'kspace' ? 'k' : '') + axes.charAt(recon.axes[0]),
-      yLabel: (view === 'kspace' ? 'k' : '') + axes.charAt(recon.axes[1]), yUp: true };
-  }
-
-  function matrixImage(matrix) {
-    var key = [view, frame, colormapName, logScale[view] ? 1 : 0, result && result.timings.totalMs,
-      document.body.className].join('|');
-    if (offscreen && offscreenKey === key) return offscreen;
-    var w = matrix.width, h = matrix.height, values = matrix.values;
-    var max = 0;
-    for (var i = 0; i < values.length; i++) if (values[i] > max) max = values[i];
-    var lut = sgColormapLut(colormapName, getComputedStyle(document.body));
-    var canvas = offscreen || document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    var context = canvas.getContext('2d');
-    var image = context.createImageData(w, h);
-    var data = image.data;
-    var log = !!logScale[view];
-    for (var p = 0; p < w * h; p++) {
-      var v = max > 0 ? values[p] / max : 0;
-      if (log) v = v > 0 ? Math.max(0, 1 + 20 * Math.log10(v) / LOG_RANGE_DB) : 0;
-      var index = Math.max(0, Math.min(255, Math.round(v * 255))) * 3;
-      data[4 * p] = lut[index];
-      data[4 * p + 1] = lut[index + 1];
-      data[4 * p + 2] = lut[index + 2];
-      data[4 * p + 3] = 255;
+    var pixel = recon.delta ? [1000 / (nu * recon.delta[0]), 1000 / (nv * recon.delta[1])] : null;
+    var ux = axes.charAt(recon.axes[0]), uy = axes.charAt(recon.axes[1]);
+    var dims = isImage
+      ? [
+        { name: ux, size: nu, fft: 'x', transformedName: 'k' + ux, scale: pixel ? { start: -nu / 2 * pixel[0], step: pixel[0], unit: 'mm' } : undefined },
+        { name: uy, size: nv, fft: 'x', reversed: true, transformedName: 'k' + uy, scale: pixel ? { start: (nv / 2 - 1) * pixel[1], step: -pixel[1], unit: 'mm' } : undefined }
+      ]
+      : [
+        { name: 'k' + ux, size: nu, fft: 'k', transformedName: ux },
+        { name: 'k' + uy, size: nv, fft: 'k', reversed: true, transformedName: uy }
+      ];
+    if (slots > 1) {
+      var labels = (withRss ? ['RSS'] : []).concat(coilLabels(coilCount));
+      dims.push({ name: 'coil', size: slots, labels: labels });
     }
-    context.putImageData(image, 0, 0);
-    offscreen = canvas;
-    offscreenKey = key;
-    return canvas;
+    if (frames > 1) dims.push({ name: 'frame', size: frames });
+    return {
+      id: id, title: isImage ? 'Reconstructed image' : 'Gridded k-space', square: true,
+      pixelAspect: pixel ? pixel[1] / pixel[0] : 1,
+      dims: dims, re: re, im: im, defaultX: 0, defaultY: 1,
+      defaultLog: !isImage, defaultColormap: 'grey'
+    };
   }
 
-  /** Fitted placement of the matrix in a w × h box, before zoom. */
-  function fitRect(matrix, w, h) {
-    if (!matrix.square) return { x: 0, y: 0, w: w, h: h };
-    var scale = Math.min(w / matrix.width, h / matrix.height);
-    var dw = matrix.width * scale, dh = matrix.height * scale;
-    return { x: (w - dw) / 2, y: (h - dh) / 2, w: dw, h: dh };
-  }
-
-  function placement(matrix, w, h) {
-    var fit = fitRect(matrix, w, h);
-    var z = zoom[view];
-    if (!z) return fit;
-    return { x: fit.x * z.scale + z.ox, y: fit.y * z.scale + z.oy, w: fit.w * z.scale, h: fit.h * z.scale };
-  }
-
-  function resize() {
-    if (!shown) return;
-    var body = el('simBody');
-    var canvas = el('simCanvas');
-    if (!body || !canvas) return;
-    var rect = body.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return;
-    var dpr = window.devicePixelRatio || 1;
-    var width = Math.max(1, Math.round(rect.width * dpr));
-    var height = Math.max(1, Math.round(rect.height * dpr));
-    if (canvas.width !== width || canvas.height !== height) {
-      canvas.width = width;
-      canvas.height = height;
-      canvas.style.width = rect.width + 'px';
-      canvas.style.height = rect.height + 'px';
+  function currentDataset(tab) {
+    if (tab === 'raw') {
+      if (rawOrder === 'time' && datasets.rawTime) return datasets.rawTime;
+      if (rawOrder === 'labels' && datasets.rawLabels) return datasets.rawLabels;
+      return datasets.rawAcquisition || null;
     }
-    render();
+    return datasets[tab] || null;
   }
 
-  function render() {
-    if (!shown) return;
-    var canvas = el('simCanvas');
-    if (!canvas) return;
-    var context = canvas.getContext('2d');
-    var dpr = window.devicePixelRatio || 1;
-    var w = canvas.width / dpr, h = canvas.height / dpr;
-    context.setTransform(dpr, 0, 0, dpr, 0, 0);
-    var style = getComputedStyle(document.body);
-    context.fillStyle = style.getPropertyValue('--bg') || '#fff';
-    context.fillRect(0, 0, w, h);
-    var matrix = currentMatrix();
-    syncButtons();
-    if (!matrix) return;
-    var image = matrixImage(matrix);
-    var place = placement(matrix, w, h);
-    context.imageSmoothingEnabled = false;
-    context.drawImage(image, place.x, place.y, place.w, place.h);
-    // Matrix size and axis directions, on a backing so it reads over data.
-    context.font = '10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
-    var caption = matrix.width + ' × ' + matrix.height + '  (' + matrix.xLabel + ' →, '
-      + matrix.yLabel + (matrix.yUp ? ' ↑' : ' ↓') + ')';
-    context.fillStyle = style.getPropertyValue('--trbg') || '#f8f8f8';
-    context.fillRect(2, h - 18, context.measureText(caption).width + 8, 16);
-    context.fillStyle = style.getPropertyValue('--lb') || '#888';
-    context.fillText(caption, 6, h - 6);
-    if (hover) {
-      var text = hover.label;
-      var tw = context.measureText(text).width + 8;
-      context.fillStyle = style.getPropertyValue('--trbg') || '#f8f8f8';
-      context.fillRect(w - tw - 4, 4, tw, 16);
-      context.fillStyle = style.getPropertyValue('--fg') || '#222';
-      context.fillText(text, w - tw, 15);
+  function showData(tab) {
+    dataTab = tab;
+    set('seqeyes.simulation.data', tab);
+    syncControls();
+    if (!viewer) return;
+    var dataset = currentDataset(tab);
+    viewer.setDataset(dataset);
+    var empty = el('simEmpty');
+    if (empty) {
+      empty.style.display = dataset ? 'none' : 'flex';
+      empty.textContent = tab === 'phantom'
+        ? (phantom.status === 'loading' ? 'Loading phantom…' : phantom.status === 'error' ? 'The phantom could not be loaded.' : 'No phantom loaded.')
+        : (run && !run.finished ? 'Simulating…' : 'No simulation yet. Press Run.');
     }
   }
 
-  /* ── Interaction: wheel zoom, drag pan, double-click fit, hover value ── */
+  /* ── Timeline link ────────────────────────────────────────────────── */
 
-  function localPoint(event) {
-    var canvas = el('simCanvas');
-    var rect = canvas.getBoundingClientRect();
-    return { x: event.clientX - rect.left, y: event.clientY - rect.top, w: rect.width, h: rect.height };
+  var lastMarker = NaN;
+  function onViewerHover(info) {
+    var h = host();
+    if (!h || !h.setWaveformMarker) return;
+    var time = info && isFinite(info.time) ? info.time : NaN;
+    if (time === lastMarker || (isNaN(time) && isNaN(lastMarker))) return;
+    lastMarker = time;
+    h.setWaveformMarker(isFinite(time) ? time : null);
   }
 
-  function wireCanvas() {
-    var canvas = el('simCanvas');
-    if (!canvas) return;
-    var drag = null;
-    canvas.addEventListener('wheel', function (event) {
-      var matrix = currentMatrix();
-      if (!matrix) return;
-      event.preventDefault();
-      var p = localPoint(event);
-      var z = zoom[view] || { scale: 1, ox: 0, oy: 0 };
-      var factor = Math.exp(-event.deltaY * 0.0015);
-      var scale = Math.max(1, Math.min(64, z.scale * factor));
-      var applied = scale / z.scale;
-      // Keep the point under the cursor fixed.
-      zoom[view] = { scale: scale, ox: p.x - (p.x - z.ox) * applied, oy: p.y - (p.y - z.oy) * applied };
-      if (scale === 1) zoom[view] = null;
-      render();
-    }, { passive: false });
-    canvas.addEventListener('mousedown', function (event) {
-      if (event.button !== 0 || !zoom[view]) return;
-      drag = { x: event.clientX, y: event.clientY };
-      event.preventDefault();
-    });
-    window.addEventListener('mousemove', function (event) {
-      if (drag && zoom[view]) {
-        zoom[view].ox += event.clientX - drag.x;
-        zoom[view].oy += event.clientY - drag.y;
-        drag = { x: event.clientX, y: event.clientY };
-        render();
-      }
-    });
-    window.addEventListener('mouseup', function () { drag = null; });
-    canvas.addEventListener('dblclick', function () { zoom[view] = null; render(); });
-    canvas.addEventListener('mousemove', function (event) {
-      var matrix = currentMatrix();
-      if (!matrix) { hover = null; return; }
-      var p = localPoint(event);
-      var place = placement(matrix, p.w, p.h);
-      var column = Math.floor((p.x - place.x) / place.w * matrix.width);
-      var row = Math.floor((p.y - place.y) / place.h * matrix.height);
-      if (column < 0 || row < 0 || column >= matrix.width || row >= matrix.height) {
-        hover = null;
-      } else {
-        var value = matrix.values[row * matrix.width + column];
-        var y = matrix.yUp ? matrix.height - 1 - row : row;
-        hover = { label: matrix.xLabel + ' ' + column + ', ' + matrix.yLabel + ' ' + y + ': ' + value.toPrecision(4) };
-      }
-      render();
-    });
-    canvas.addEventListener('mouseleave', function () { hover = null; render(); });
+  /** Bring the selected readout into the waveform view. */
+  function revealSelected() {
+    var h = host();
+    var dataset = viewer && viewer.dataset();
+    if (!h || !h.revealTimeRange || !dataset || !dataset.acquisitionOf || !result) return;
+    var snap = viewer.state();
+    var indices = snap.indices.slice();
+    if (snap.y >= 0) indices[snap.y] = snap.selected.y;
+    var a = dataset.acquisitionOf(indices);
+    if (!(a >= 0)) return;
+    var layout = result.layout;
+    var start = layout.t0[a], end = start + layout.samples[a] * layout.dwell[a];
+    var pad = Math.max(end - start, 1e-4);
+    h.revealTimeRange(Math.max(0, start - pad), end + pad);
+    h.setWaveformMarker(start + 0.5 * (end - start));
+  }
+
+  /* ── Export ───────────────────────────────────────────────────────── */
+
+  function exportAs(format) {
+    if (format === 'png') {
+      if (!viewer) return;
+      viewer.exportPng(function (blob) {
+        if (blob) blob.arrayBuffer().then(function (bytes) { saveBytes(fileStem() + '_' + dataTab + '.png', new Uint8Array(bytes), 'image/png'); });
+      });
+      return;
+    }
+    if (!result || !result.leader) { setStatus(['Run a simulation first.']); return; }
+    var id = ++exportCounter;
+    result.run.exports[id] = format;
+    setStatus(statusForResultLines().concat(['Preparing ' + format + ' export…']), resultWarnings());
+    result.leader.worker.postMessage({ type: 'export', job: result.run.id, id: id, format: format, signal: result.signal.slice() });
+  }
+
+  function finishExport(r, message) {
+    if (!r.exports[message.id]) return;
+    delete r.exports[message.id];
+    saveBytes(fileStem() + message.name, message.bytes, message.mime);
+    statusForResult();
+  }
+
+  function exportFailed(r, id, text) {
+    delete r.exports[id];
+    setStatus(statusForResultLines(), resultWarnings().concat(['Export failed: ' + text]));
+  }
+
+  function fileStem() {
+    var name = (result && result.name) || (host() && host().getSequenceSource() && host().getSequenceSource().name) || 'sequence';
+    return name.replace(/\.(seq|bseq)$/i, '').replace(/[^A-Za-z0-9._-]+/g, '_') + '_sim';
+  }
+
+  function saveBytes(name, bytes, mime) {
+    var h = host();
+    if (h && typeof h.saveBytes === 'function') { h.saveBytes(name, bytes, mime); return; }
+    var url = URL.createObjectURL(new Blob([bytes], { type: mime || 'application/octet-stream' }));
+    var link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
   }
 
   /* ── Controls ─────────────────────────────────────────────────────── */
 
   function fillSelect(select, entries, value) {
     if (!select) return;
-    select.innerHTML = '';
-    entries.forEach(function (entry) {
-      var option = document.createElement('option');
-      option.value = entry[0];
-      option.textContent = entry[1];
-      select.appendChild(option);
-    });
-    select.value = value;
+    var signature = entries.map(function (e) { return e[0] + ':' + e[1] + (e[2] ? ':off' : ''); }).join('|');
+    if (select.getAttribute('data-signature') !== signature) {
+      select.innerHTML = '';
+      entries.forEach(function (entry) {
+        var option = document.createElement('option');
+        option.value = entry[0];
+        option.textContent = entry[1];
+        if (entry[2]) option.disabled = true;
+        select.appendChild(option);
+      });
+      select.setAttribute('data-signature', signature);
+    }
+    select.value = String(value);
+  }
+
+  function syncControls() {
+    var running = !!(run && !run.finished);
+    fillSelect(el('simPhantom'), PRESET_ORDER.map(function (id) {
+      return [id, id === 'file' && uploaded ? 'File: ' + uploaded.label : PRESETS[id].label];
+    }), phantomChoice);
+    var isShepp = phantomChoice === 'shepp-logan';
+    fillSelect(el('simMatrix'), isShepp
+      ? SHEPP_SIZES.map(function (n) { return [String(n), n + '²']; })
+      : FILE_MATRICES.map(function (n) { return [String(n), n ? 'resample ' + n : 'native']; }),
+      isShepp ? sheppSize : fileMatrix);
+    var fieldsSelect = el('simFields');
+    fillSelect(fieldsSelect, FIELD_CHOICES, fields);
+    if (fieldsSelect) fieldsSelect.hidden = isShepp;
+    fillSelect(el('simCoils'), COIL_CHOICES.map(function (n) { return [String(n), n === 1 ? '1 coil' : n + ' coils']; }), coils);
+    fillSelect(el('simSpins'), SPIN_CHOICES.map(function (c) { return [c, c === 'auto' ? 'Auto' : c.replace('x', ' × ')]; }), spins);
+    var accuracySelect = el('simAccuracy');
+    fillSelect(accuracySelect, ACCURACY_CHOICES, accuracy);
+    if (accuracySelect) accuracySelect.hidden = spins !== 'auto';
+
+    var volume3d = !isShepp && phantom.volume && Math.max(phantom.volume.shape[0], phantom.volume.shape[1], phantom.volume.shape[2]) > 1
+      && Math.min(phantom.volume.shape[0], phantom.volume.shape[1], phantom.volume.shape[2]) > 1;
+    var group = el('simSliceGroup');
+    if (group) group.hidden = !volume3d;
+    if (volume3d) {
+      fillSelect(el('simPlane'), [['xy', 'xy plane'], ['xz', 'xz plane'], ['yz', 'yz plane']], slicePlane);
+      var slider = el('simSlice');
+      var max = sliceAxisSize() - 1;
+      if (slider) {
+        slider.max = String(max);
+        slider.value = String(sliceIndex === null ? Math.floor(max / 2) : sliceIndex);
+      }
+      var value = el('simSliceValue');
+      if (value) value.textContent = (sliceIndex === null ? Math.floor(max / 2) : sliceIndex) + '/' + max;
+    }
+
+    var runButton = el('simRun');
+    if (runButton) {
+      runButton.disabled = running || phantom.status !== 'ready';
+      runButton.textContent = result ? '▶ Run again' : '▶ Run';
+    }
+    var cancel = el('simCancel');
+    if (cancel) cancel.disabled = !running;
+    fillSelect(el('simExport'), [['', 'Export…']].concat(EXPORTS.map(function (entry) {
+      return [entry[0], entry[1], entry[0] !== 'png' && !result];
+    })), '');
+
+    var tabs = el('simData');
+    if (tabs) {
+      Array.prototype.forEach.call(tabs.querySelectorAll('button[data-tab]'), function (button) {
+        var tab = button.getAttribute('data-tab');
+        button.classList.toggle('on', tab === dataTab);
+        button.setAttribute('aria-selected', tab === dataTab ? 'true' : 'false');
+        button.disabled = tab !== 'phantom' && !currentDataset(tab);
+      });
+    }
+    var order = el('simRawOrder');
+    if (order) {
+      order.hidden = !(dataTab === 'raw' && datasets.rawAcquisition);
+      var orders = [['acquisition', 'samples × acquisitions'], ['time', 'all samples in time order']];
+      if (datasets.rawLabels) orders.unshift(['labels', 'samples × labels']);
+      fillSelect(order, orders, rawOrder === 'labels' && !datasets.rawLabels ? 'acquisition' : rawOrder);
+    }
+    var reveal = el('simReveal');
+    if (reveal) reveal.disabled = !(dataTab === 'raw' && result && host() && host().revealTimeRange);
   }
 
   function wire() {
     if (wired) return;
     wired = true;
-    fillSelect(el('simSize'), SIZES.map(function (n) { return [String(n), n + '²']; }), String(size));
-    fillSelect(el('simSpins'), SPIN_CHOICES.map(function (choice) {
-      return [choice, choice === 'auto' ? 'Auto' : choice.replace('x', ' × ')];
-    }), spins);
-    fillSelect(el('simView'), Object.keys(VIEWS).map(function (key) { return [key, VIEWS[key]]; }), view);
-    fillSelect(el('simCmap'), SG_COLORMAP_NAMES.map(function (name) {
-      return [name, SG_COLORMAP_LABELS[name] || name];
-    }), colormapName);
+    viewer = SeqEyesNdView.create({
+      imageCanvas: el('simCanvas'),
+      plotCanvas: el('simPlot'),
+      controls: {
+        x: el('simAxisX'), y: el('simAxisY'), parts: el('simParts'), log: el('simLog'),
+        colormap: el('simCmap'), dims: el('simDims'), plotPane: el('simBody')
+      },
+      onHover: onViewerHover,
+      onChange: function () { syncControls(); }
+    });
 
-    var sizeSelect = el('simSize');
-    if (sizeSelect) sizeSelect.onchange = function () { size = +this.value; set('seqeyes.simulation.size', String(size)); };
+    var phantomSelect = el('simPhantom');
+    if (phantomSelect) phantomSelect.onchange = function () {
+      if (this.value === 'file' && !uploaded) {
+        this.value = phantomChoice;
+        var input = el('simPhantomInput');
+        if (input) input.click();
+        return;
+      }
+      phantomChoice = this.value;
+      if (phantomChoice !== 'file') set('seqeyes.simulation.phantom', phantomChoice);
+      sliceIndex = null;
+      phantom.volume = null;
+      loadPhantom('choice');
+    };
+    var fileButton = el('simPhantomFile');
+    var fileInput = el('simPhantomInput');
+    if (fileButton && fileInput) fileButton.onclick = function () { fileInput.value = ''; fileInput.click(); };
+    if (fileInput) fileInput.onchange = function () { readUploadedFiles(this.files); };
+    var matrix = el('simMatrix');
+    if (matrix) matrix.onchange = function () {
+      if (phantomChoice === 'shepp-logan') { sheppSize = +this.value; set('seqeyes.simulation.size', String(sheppSize)); loadPhantom('choice'); }
+      else { fileMatrix = +this.value; set('seqeyes.simulation.matrix', String(fileMatrix)); loadPhantom('slice'); }
+    };
+    var fieldsSelect = el('simFields');
+    if (fieldsSelect) fieldsSelect.onchange = function () { fields = this.value; set('seqeyes.simulation.fields', fields); loadPhantom('slice'); };
+    var plane = el('simPlane');
+    if (plane) plane.onchange = function () {
+      slicePlane = this.value;
+      set('seqeyes.simulation.plane', slicePlane);
+      sliceIndex = Math.floor(sliceAxisSize() / 2);     // the middle of the new normal axis
+      loadPhantom('slice');
+    };
+    var slider = el('simSlice');
+    var sliceTimer = 0;
+    if (slider) slider.oninput = function () {
+      sliceIndex = +this.value;
+      var value = el('simSliceValue');
+      if (value) value.textContent = sliceIndex + '/' + this.max;
+      clearTimeout(sliceTimer);
+      sliceTimer = setTimeout(function () { loadPhantom('slice'); }, 120);
+    };
+    var coilSelect = el('simCoils');
+    if (coilSelect) coilSelect.onchange = function () { coils = +this.value; set('seqeyes.simulation.coils', String(coils)); };
     var spinSelect = el('simSpins');
-    if (spinSelect) spinSelect.onchange = function () { spins = this.value; set('seqeyes.simulation.spins', spins); };
-    var viewSelect = el('simView');
-    if (viewSelect) viewSelect.onchange = function () {
-      view = this.value;
-      set('seqeyes.simulation.view', view);
-      hover = null;
-      render();
-    };
-    var cmap = el('simCmap');
-    if (cmap) cmap.onchange = function () {
-      colormapName = this.value;
-      set('seqeyes.simulation.colormap', colormapName);
-      render();
-    };
-    var log = el('simLog');
-    if (log) log.onclick = function () {
-      logScale[view] = !logScale[view];
-      set('seqeyes.simulation.log.' + view, logScale[view] ? '1' : '0');
-      render();
-    };
-    var frameSelect = el('simFrame');
-    if (frameSelect) frameSelect.onchange = function () { frame = +this.value || 0; render(); };
+    if (spinSelect) spinSelect.onchange = function () { spins = this.value; set('seqeyes.simulation.spins', spins); syncControls(); };
+    var accuracySelect = el('simAccuracy');
+    if (accuracySelect) accuracySelect.onchange = function () { accuracy = this.value; set('seqeyes.simulation.accuracy', accuracy); };
     var runButton = el('simRun');
     if (runButton) runButton.onclick = startRun;
     var cancel = el('simCancel');
     if (cancel) cancel.onclick = cancelRun;
+    var exportSelect = el('simExport');
+    if (exportSelect) exportSelect.onchange = function () { var format = this.value; this.value = ''; if (format) exportAs(format); };
+    var tabs = el('simData');
+    if (tabs) {
+      tabs.innerHTML = '';
+      DATA_TABS.forEach(function (entry) {
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.setAttribute('role', 'tab');
+        button.setAttribute('data-tab', entry[0]);
+        button.textContent = entry[1];
+        button.onclick = function () { showData(entry[0]); };
+        tabs.appendChild(button);
+      });
+    }
+    var order = el('simRawOrder');
+    if (order) order.onchange = function () { rawOrder = this.value; set('seqeyes.simulation.rawOrder', rawOrder); showData('raw'); };
+    var reveal = el('simReveal');
+    if (reveal) reveal.onclick = revealSelected;
 
-    wireCanvas();
     var body = el('simBody');
-    if (body && typeof ResizeObserver !== 'undefined') new ResizeObserver(function () { resize(); }).observe(body);
-    syncButtons();
+    if (body && typeof ResizeObserver !== 'undefined') new ResizeObserver(function () { if (shown && viewer) viewer.render(); }).observe(body);
+    wireSplit();
+    syncControls();
+  }
+
+  /** Drag the bar between the image and the plot. */
+  function wireSplit() {
+    var split = el('simSplit'), imagePane = el('simImagePane'), plotPane = el('simPlotPane'), body = el('simBody');
+    if (!split || !imagePane || !plotPane || !body) return;
+    var ratio = +get('seqeyes.simulation.split') || 0.68;
+    function apply() {
+      imagePane.style.flex = ratio + ' 1 0%';
+      plotPane.style.flex = (1 - ratio) + ' 1 0%';
+    }
+    apply();
+    var dragging = false;
+    split.addEventListener('mousedown', function (event) { dragging = true; event.preventDefault(); });
+    window.addEventListener('mousemove', function (event) {
+      if (!dragging) return;
+      var rect = body.getBoundingClientRect();
+      ratio = Math.max(0.15, Math.min(0.9, (event.clientY - rect.top) / Math.max(1, rect.height)));
+      apply();
+      if (viewer) viewer.render();
+    });
+    window.addEventListener('mouseup', function () {
+      if (!dragging) return;
+      dragging = false;
+      set('seqeyes.simulation.split', ratio.toFixed(3));
+    });
   }
 
   /* ── Lifecycle hooks (called by panel.js) ─────────────────────────── */
 
   function install() {
-    wire();
     var button = el('simBtn');
     if (button) button.hidden = !isAvailable();
   }
@@ -619,65 +1317,61 @@ var SeqEyesSimulation = (function () {
   function onShown() {
     shown = true;
     install();
-    if (!result && !(run && !run.finished)) {
-      var source = isAvailable() ? host().getSequenceSource() : null;
-      setStatus([source ? 'Press Run to simulate ' + (source.name || 'the open sequence')
-        + ' on a Shepp–Logan phantom (2D, z = 0).' : 'Open a Pulseq sequence first.']);
-    }
-    requestAnimationFrame(resize);
+    wire();
+    if (phantom.status === 'idle' || (phantom.status === 'error' && phantomChoice === 'shepp-logan')) loadPhantom('choice');
+    showData(result || dataTab === 'phantom' ? dataTab : 'phantom');
+    describePhantom();
   }
 
   function onHidden() {
     shown = false;
-    hover = null;
+    onViewerHover(null);
   }
 
   function onSequenceLoaded() {
-    if (run && !run.finished) {
-      run.finished = true;
-      stopWorkers(run);
-    }
+    stopRun(run);
     run = null;
+    if (result && result.leader) result.leader.worker.terminate();
     result = null;
-    frame = 0;
-    zoom = { image: null, kspace: null, raw: null };
-    offscreenKey = '';
+    datasets = { phantom: datasets.phantom };
     setProgress(null);
-    if (shown) onShown();
-    syncButtons();
-    render();
+    // The built-in phantom follows the sequence's FOV.
+    if (phantomChoice === 'shepp-logan' && phantom.status !== 'idle') loadPhantom('choice');
+    if (shown) {
+      showData(dataTab === 'phantom' ? 'phantom' : dataTab);
+      describePhantom();
+    }
+    syncControls();
   }
 
   function state() {
+    var snap = viewer ? viewer.state() : null;
     return {
       available: isAvailable(),
       shown: shown,
       running: !!(run && !run.finished),
       runs: runCounter,
       workers: run ? run.workers.length : 0,
-      view: view,
-      size: size,
+      phantom: { choice: phantomChoice, status: phantom.status, error: phantom.error,
+        nx: phantom.data ? phantom.data.nx : 0, ny: phantom.data ? phantom.data.ny : 0,
+        volume: phantom.volume ? phantom.volume.shape.slice() : null, plane: slicePlane, index: sliceIndex,
+        source: phantom.data ? phantom.data.source : '' },
+      coils: coils,
       spins: spins,
+      tab: dataTab,
+      view: snap,
       plan: result ? result.plan : (run ? run.plan : null),
       done: !!result,
       nu: result ? result.recon.nu : 0,
       nv: result ? result.recon.nv : 0,
       frames: result ? result.recon.frames : 0,
+      acquisitions: result ? result.layout.acquisitions : 0,
+      labelView: !!datasets.rawLabels,
+      live: run && !run.finished ? { phase: run.phase || 'planning', chunks: run.liveChunks || 0, previews: run.livePreviews || 0,
+        cardVisible: !!(el('simRunCard') && !el('simRunCard').hidden) } : null,
       timings: result ? result.timings : null,
       status: el('simReadout') ? el('simReadout').textContent : ''
     };
-  }
-
-  /** Image statistics for tests: mean of the displayed matrix and its peak. */
-  function matrixSummary() {
-    var matrix = currentMatrix();
-    if (!matrix) return null;
-    var sum = 0, max = 0;
-    for (var i = 0; i < matrix.values.length; i++) {
-      sum += matrix.values[i];
-      if (matrix.values[i] > max) max = matrix.values[i];
-    }
-    return { width: matrix.width, height: matrix.height, mean: sum / matrix.values.length, max: max };
   }
 
   return {
@@ -686,16 +1380,22 @@ var SeqEyesSimulation = (function () {
     onShown: onShown,
     onHidden: onHidden,
     onSequenceLoaded: onSequenceLoaded,
-    onThemeChanged: function () { offscreenKey = ''; render(); },
-    resize: resize,
+    onThemeChanged: function () { if (viewer) viewer.render(); },
+    resize: function () { if (shown && viewer) viewer.render(); },
     run: startRun,
     cancel: cancelRun,
-    setView: function (name) { if (VIEWS[name]) { view = name; fillSelect(el('simView'), Object.keys(VIEWS).map(function (key) { return [key, VIEWS[key]]; }), view); render(); } },
+    exportAs: exportAs,
+    showData: showData,
+    viewer: function () { return viewer; },
+    loadFiles: function (files) { readUploadedFiles(files); },
     setSettings: function (options) {
-      if (options && SIZES.indexOf(options.size) >= 0) { size = options.size; if (el('simSize')) el('simSize').value = String(size); }
-      if (options && SPIN_CHOICES.indexOf(options.spins) >= 0) { spins = options.spins; if (el('simSpins')) el('simSpins').value = spins; }
+      if (!options) return;
+      if (SHEPP_SIZES.indexOf(options.size) >= 0) sheppSize = options.size;
+      if (SPIN_CHOICES.indexOf(options.spins) >= 0) spins = options.spins;
+      if (COIL_CHOICES.indexOf(options.coils) >= 0) coils = options.coils;
+      syncControls();
     },
     state: state,
-    matrixSummary: matrixSummary
+    matrixSummary: function () { return viewer ? viewer.summary() : null; }
   };
 })();

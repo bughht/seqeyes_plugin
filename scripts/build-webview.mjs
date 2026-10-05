@@ -3,7 +3,8 @@
  *
  * Concatenates the webview JS files (prefs, block-transport, labels, state,
  * derived-series, drawing, kspace, colormaps, spectrogram, audio, panel,
- * simulation-panel, prefs-ui, interaction) into a single self-contained script.  The files
+ * ndview, simulation-panel, prefs-ui, interaction) into a single
+ * self-contained script.  The files
  * communicate via shared globals so they are concatenated without IIFE
  * wrapping — they run in the global scope.  The VS Code extension wraps
  * them in an IIFE when inlining into the webview; the standalone web app
@@ -36,7 +37,8 @@ const files = [
     'spectrogram.js',
     'audio.js',
     'panel.js',
-    // After panel.js, which calls into it only at run time; reads colormaps.js.
+    // After panel.js, which calls into them only at run time; both read colormaps.js.
+    'ndview.js',
     'simulation-panel.js',
     'prefs-ui.js',
     'interaction.js',

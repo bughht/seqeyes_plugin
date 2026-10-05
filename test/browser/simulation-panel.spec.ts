@@ -1,6 +1,19 @@
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { expect, test, type Locator, type Page } from '@playwright/test';
+
+interface ViewState {
+  dataset: string;
+  x: number;
+  y: number;
+  xName: string;
+  yName: string | null;
+  indices: number[];
+  part: string;
+  fft: boolean[];
+  dims: { name: string; size: number }[];
+}
 
 interface SimulationState {
   available: boolean;
@@ -8,22 +21,29 @@ interface SimulationState {
   running: boolean;
   runs: number;
   workers: number;
-  view: string;
-  size: number;
-  spins: string;
+  phantom: { choice: string; status: string; error: string | null; nx: number; ny: number; volume: number[] | null; plane: string; index: number | null; source: string };
+  coils: number;
+  tab: string;
+  view: ViewState | null;
   plan: null | {
     subSpins: [number, number];
     spins: number;
     simulated: number;
     chunks: number;
+    coils: number;
     axes: { count: number; reason: string; folded: boolean }[];
   };
   done: boolean;
   nu: number;
   nv: number;
   frames: number;
+  acquisitions: number;
+  labelView: boolean;
+  live: null | { phase: string; chunks: number; previews: number; cardVisible: boolean };
   status: string;
 }
+
+interface Summary { width: number; height: number; mean: number; max: number; lineLength: number; lineMax: number }
 
 /** The test hooks panel.js installs (other specs declare their own subsets). */
 interface DevWindow {
@@ -35,7 +55,9 @@ interface DevWindow {
 }
 
 const gre = resolve('test/kspace_baselines/v151_gre/seq/writeGradientEcho.seq');
+const greLabel = resolve('test/seqeyes_demo_seq_files/writeGradientEcho_label.seq');
 const epi = resolve('test/seqeyes_demo_seq_files/writeEpi.seq');
+const mrzeroLike = resolve('test/fixtures/sim/mrzero_like_small.npz');
 
 const consoleFailures = new WeakMap<Page, string[]>();
 
@@ -52,52 +74,146 @@ test.afterEach(async ({ page }) => {
   expect(consoleFailures.get(page) ?? []).toEqual([]);
 });
 
-test('simulates a GRE in workers and shows image, k-space and raw data', async ({ page }) => {
-  await loadViewer(page, gre);
+test('simulates a labelled GRE and browses its raw data, k-space and image', async ({ page }) => {
+  await loadViewer(page, greLabel);
   await openSimulation(page);
+  await expect.poll(async () => (await simulationState(page)).phantom.status).toBe('ready');
+  // The phantom maps show before any run.
+  expect((await simulationState(page)).tab).toBe('phantom');
+  expect((await viewSummary(page)).max).toBeGreaterThan(0);
 
+  await page.locator('#simMatrix').selectOption('32');
+  await expect.poll(async () => (await simulationState(page)).phantom.nx).toBe(32);
+  await page.locator('#simCoils').selectOption('4');
   // Manual spins per voxel skip the probe, which keeps this run short.
-  await page.locator('#simSize').selectOption('32');
   await page.locator('#simSpins').selectOption('8x1');
   await page.locator('#simRun').click();
   await expect.poll(async () => (await simulationState(page)).done, { timeout: 60_000 }).toBe(true);
 
   const state = await simulationState(page);
   expect(state.running).toBe(false);
-  expect([state.nu, state.nv]).toEqual([128, 128]);
-  expect(state.frames).toBe(1);
+  // This demo is 256² with two repetitions (REP), so two image frames.
+  expect([state.nu, state.nv]).toEqual([256, 256]);
+  expect(state.frames).toBe(2);
   expect(state.plan?.subSpins).toEqual([8, 1]);
-  // y is the rewound phase encode: its spins fold into shared classes.
+  expect(state.plan?.coils).toBe(4);
   expect(state.plan?.axes[1].folded).toBe(true);
-  expect(state.plan!.simulated).toBeLessThan(state.plan!.spins);
-  expect(state.status).toContain('Done in');
+  expect(state.tab).toBe('image');
+  // Image: x, y, a coil dimension led by the root-sum-of-squares, and frames.
+  expect(state.view?.dims.map(d => d.name)).toEqual(['x', 'y', 'coil', 'frame']);
+  expect(state.view?.dims[2].size).toBe(5);
+  await expectCanvasVaried(page.locator('#simCanvas'));
+  await expectCanvasVaried(page.locator('#simPlot'));
+
+  // Raw data by labels: samples × LIN × REP × coils for this sequence.
+  await page.locator('#simData button[data-tab="raw"]').click();
+  let view = (await simulationState(page)).view!;
+  expect(state.labelView).toBe(true);
+  expect(view.dataset).toBe('raw-labels');
+  expect(view.dims.map(d => d.name)).toEqual(['sample', 'LIN', 'REP', 'coil']);
+  // Swap the axes: coils across, LIN down.
+  await page.locator('#simAxisX').selectOption({ label: 'coil (4)' });
+  view = (await simulationState(page)).view!;
+  expect([view.xName, view.yName]).toEqual(['coil', 'LIN']);
+  // Line plot only, along the samples: the readout waveform.
+  await page.locator('#simAxisX').selectOption({ label: 'sample (256)' });
+  await page.locator('#simAxisY').selectOption({ label: 'none (line only)' });
+  view = (await simulationState(page)).view!;
+  expect(view.yName).toBeNull();
+  await expect(page.locator('#simBody')).toHaveClass(/full/);
+  const line = await viewSummary(page);
+  expect(line.lineLength).toBe(256);
+  expect(line.lineMax).toBeGreaterThan(0);
+  // Real part and an FFT along the readout (hybrid x-ky space).
+  await page.locator('#simAxisY').selectOption({ label: 'LIN (256)' });
+  await page.locator('#simParts button[data-part="re"]').click();
+  await page.locator('#simDims .nd-dim[data-dim="0"] .nd-fft').click();
+  view = (await simulationState(page)).view!;
+  expect(view.part).toBe('re');
+  expect(view.fft[0]).toBe(true);
   await expectCanvasVaried(page.locator('#simCanvas'));
 
-  for (const view of ['kspace', 'raw', 'image']) {
-    await page.locator('#simView').selectOption(view);
-    const summary = await simulationMatrix(page);
-    expect(summary.max).toBeGreaterThan(0);
-    expect(summary.mean).toBeGreaterThan(0);
-    if (view === 'raw') expect([summary.width, summary.height]).toEqual([128, 128]);
-    await expectCanvasVaried(page.locator('#simCanvas'));
-  }
+  // Acquisition order is the other raw view.
+  await page.locator('#simRawOrder').selectOption('acquisition');
+  view = (await simulationState(page)).view!;
+  expect(view.dims.map(d => d.name)).toEqual(['sample', 'acquisition', 'coil']);
 
-  // The image is brighter in the phantom than outside it.
-  const contrast = await page.locator('#simCanvas').evaluate((element) => {
-    const canvas = element as HTMLCanvasElement;
-    const context = canvas.getContext('2d')!;
-    const centre = context.getImageData(Math.floor(canvas.width / 2) - 4, Math.floor(canvas.height / 2) - 4, 8, 8).data;
-    const corner = context.getImageData(Math.floor(canvas.width / 2) - Math.floor(Math.min(canvas.width, canvas.height) * 0.45), Math.floor(canvas.height / 2) - Math.floor(Math.min(canvas.width, canvas.height) * 0.45), 8, 8).data;
-    const mean = (data: Uint8ClampedArray) => { let s = 0; for (let i = 0; i < data.length; i += 4) s += data[i]; return s / (data.length / 4); };
-    return { centre: mean(centre), corner: mean(corner) };
-  });
-  expect(contrast.centre).toBeGreaterThan(contrast.corner + 20);
+  // k-space: an inverse FFT along both axes gives the image back.
+  await page.locator('#simData button[data-tab="kspace"]').click();
+  view = (await simulationState(page)).view!;
+  expect(view.dims.map(d => d.name)).toEqual(['kx', 'ky', 'coil', 'frame']);
+  await page.locator('#simDims .nd-dim[data-dim="0"] .nd-fft').click();
+  await page.locator('#simDims .nd-dim[data-dim="1"] .nd-fft').click();
+  // k-space opens in dB; compare linear magnitudes.
+  await page.locator('#simLog').click();
+  expect((await simulationState(page)).view?.part).toBe('abs');
+  const transformed = await viewSummary(page);
+  await page.locator('#simData button[data-tab="image"]').click();
+  await page.locator('#simDims .nd-dim[data-dim="2"] input[type=range]').fill('1');   // coil 1, not RSS
+  const image = await viewSummary(page);
+  expect(transformed.max).toBeCloseTo(image.max, 1);
+});
+
+test('loads an MRzero-format 3-D phantom, slices it and simulates it', async ({ page }) => {
+  await loadViewer(page, gre);
+  await openSimulation(page);
+  await page.locator('#simPhantomInput').setInputFiles(mrzeroLike);
+  await expect.poll(async () => (await simulationState(page)).phantom.status).toBe('ready');
+  let state = await simulationState(page);
+  expect(state.phantom.choice).toBe('file');
+  expect(state.phantom.volume).toEqual([20, 24, 6]);
+  expect([state.phantom.nx, state.phantom.ny]).toEqual([20, 24]);
+  expect(state.phantom.source).toContain('MRzero');
+  await expect(page.locator('#simSliceGroup')).toBeVisible();
+  // The maps: PD, T1, T2, T2′, ADC.
+  expect(state.view?.dims.map(d => d.name)).toEqual(['x', 'y', 'map']);
+  expect(state.view?.dims[2].size).toBe(5);
+
+  // Another plane of the volume.
+  await page.locator('#simPlane').selectOption('xz');
+  await expect.poll(async () => (await simulationState(page)).phantom.ny).toBe(6);
+  await page.locator('#simPlane').selectOption('xy');
+  await expect.poll(async () => (await simulationState(page)).phantom.ny).toBe(24);
+
+  await page.locator('#simSpins').selectOption('8x1');
+  await page.locator('#simRun').click();
+  await expect.poll(async () => (await simulationState(page)).done, { timeout: 60_000 }).toBe(true);
+  state = await simulationState(page);
+  expect(state.status).toContain('MRzero');
+  expect(state.status).toContain('T2′ map is loaded but not simulated');
+  await expectCanvasVaried(page.locator('#simCanvas'));
+});
+
+test('exports ISMRMRD and NumPy raw data', async ({ page }) => {
+  await loadViewer(page, greLabel);
+  await openSimulation(page);
+  await expect.poll(async () => (await simulationState(page)).phantom.status).toBe('ready');
+  await page.locator('#simMatrix').selectOption('32');
+  await page.locator('#simCoils').selectOption('2');
+  await page.locator('#simSpins').selectOption('1x1');
+  await page.locator('#simRun').click();
+  await expect.poll(async () => (await simulationState(page)).done, { timeout: 60_000 }).toBe(true);
+
+  const h5 = await download(page, 'ismrmrd-h5');
+  expect(h5.name).toMatch(/_sim\.h5$/);
+  expect(Array.from(h5.bytes.subarray(0, 8))).toEqual([0x89, 0x48, 0x44, 0x46, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+  const stream = await download(page, 'ismrmrd-stream');
+  expect(stream.name).toMatch(/_sim\.bin$/);
+  expect(stream.bytes.length).toBeGreaterThan(128 * 128 * 2 * 8);
+
+  const npz = await download(page, 'npz');
+  expect(npz.name).toMatch(/_sim\.npz$/);
+  expect(Array.from(npz.bytes.subarray(0, 2))).toEqual([0x50, 0x4b]);   // a zip archive
 });
 
 test('plans spins per voxel automatically and can be cancelled', async ({ page }) => {
   await loadViewer(page, gre);
   await openSimulation(page);
-  await page.locator('#simSize').selectOption('128');
+  await expect.poll(async () => (await simulationState(page)).phantom.status).toBe('ready');
+  await page.locator('#simMatrix').selectOption('128');
+  await expect.poll(async () => (await simulationState(page)).phantom.nx).toBe(128);
+  await page.locator('#simCoils').selectOption('1');
   await page.locator('#simSpins').selectOption('auto');
   await page.locator('#simRun').click();
 
@@ -110,7 +226,18 @@ test('plans spins per voxel automatically and can be cancelled', async ({ page }
   expect(planned.running).toBe(true);
   await expect(page.locator('#simCancel')).toBeEnabled();
 
+  // While it runs: the progress card, and live previews of the partial result.
+  await expect(page.locator('#simRunCard')).toBeVisible();
+  await expect(page.locator('#simRunPhase')).toContainText('Simulating');
+  await expect(page.locator('#simRunStats')).toContainText('chunks');
+  await expect.poll(async () => (await simulationState(page)).live?.previews ?? 0, { timeout: 60_000 }).toBeGreaterThan(0);
+  expect((await simulationState(page)).tab).toBe('image');
+  await expect(page.locator('#simData button[data-tab="raw"]')).toBeEnabled();
+  await expectCanvasVaried(page.locator('#simCanvas'));
+
   await page.locator('#simCancel').click();
+  await expect(page.locator('#simRunCard')).toBeHidden();
+  await expect(page.locator('#simData button[data-tab="image"]')).toBeDisabled();
   const cancelled = await simulationState(page);
   expect(cancelled.running).toBe(false);
   expect(cancelled.workers).toBe(0);
@@ -141,15 +268,15 @@ test('leaves the k-space and spectrogram cycle intact', async ({ page }) => {
 test('a new sequence clears the previous result', async ({ page }) => {
   await loadViewer(page, gre);
   await openSimulation(page);
-  await page.locator('#simSize').selectOption('32');
+  await expect.poll(async () => (await simulationState(page)).phantom.status).toBe('ready');
+  await page.locator('#simMatrix').selectOption('32');
   await page.locator('#simSpins').selectOption('1x1');
   await page.locator('#simRun').click();
   await expect.poll(async () => (await simulationState(page)).done, { timeout: 60_000 }).toBe(true);
 
   await page.locator('#fileInput').setInputFiles(epi);
   await expect.poll(async () => (await simulationState(page)).done, { timeout: 30_000 }).toBe(false);
-  await expect(page.locator('#simEmpty')).toBeVisible();
-  await expect(page.locator('#simReadout')).toContainText('writeEpi.seq');
+  await expect(page.locator('#simData button[data-tab="image"]')).toBeDisabled();
 });
 
 async function loadViewer(page: Page, sequencePath: string): Promise<void> {
@@ -168,14 +295,22 @@ async function openSimulation(page: Page): Promise<void> {
   await expect.poll(async () => (await simulationState(page)).shown).toBe(true);
 }
 
+async function download(page: Page, format: string): Promise<{ name: string; bytes: Uint8Array }> {
+  const pending = page.waitForEvent('download');
+  await page.locator('#simExport').selectOption(format);
+  const file = await pending;
+  const path = await file.path();
+  return { name: file.suggestedFilename(), bytes: new Uint8Array(readFileSync(path)) };
+}
+
 async function simulationState(page: Page): Promise<SimulationState> {
   return await page.evaluate(() => (window as unknown as DevWindow).SeqEyesDev.simulationState()) as SimulationState;
 }
 
-async function simulationMatrix(page: Page): Promise<{ width: number; height: number; mean: number; max: number }> {
+async function viewSummary(page: Page): Promise<Summary> {
   const summary = await page.evaluate(() => (window as unknown as DevWindow).SeqEyesDev.simulationMatrix());
-  if (!summary) throw new Error('No simulation matrix on display.');
-  return summary as { width: number; height: number; mean: number; max: number };
+  if (!summary) throw new Error('No simulation data on display.');
+  return summary as Summary;
 }
 
 async function panelMode(page: Page): Promise<string> {

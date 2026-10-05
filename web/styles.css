@@ -169,29 +169,65 @@ body.layout-vertical.sg-split-drag{cursor:col-resize}
   body.layout-vertical #spane.mobile-spectrum #spPane{display:block;flex:1 1 auto}
   #viewerNotice .viewer-notice-item{align-items:flex-start;padding:5px 7px}
 }
-/* ── Simulation pane (simulation-panel.js) ───────────────────────── */
+/* ── Simulation pane (simulation-panel.js, ndview.js) ──────────────── */
 #simBtn[hidden]{display:none}
 #simpane{position:absolute;inset:0;display:none;flex-direction:column;overflow:hidden}
 #simpane.on{display:flex}
-#simTools{flex:0 0 auto;display:flex;align-items:center;flex-wrap:wrap;gap:3px;padding:3px 5px 3px 8px;border-bottom:1px solid var(--gr);background:var(--trbg)}
-#simTools button{background:var(--gr);border:1px solid var(--ax);color:var(--fg);padding:1px 5px;border-radius:3px;cursor:pointer;font-size:10px;line-height:1.5}
-#simTools button:hover{opacity:.75}
-#simTools button:disabled{opacity:.4;cursor:not-allowed}
-#simTools button.on{background:var(--adc);border-color:var(--adc);color:#fff}
-#simTools select{background:var(--gr);border:1px solid var(--ax);color:var(--fg);padding:1px 2px;border-radius:3px;font-size:10px;cursor:pointer;max-width:96px}
-#simTools .sep{width:1px;height:14px;background:var(--ax);margin:0 2px;flex-shrink:0}
-#simTools .ulbl{font-size:10px;color:var(--lb)}
+#simTools,#simViewBar{flex:0 0 auto;display:flex;align-items:center;flex-wrap:wrap;gap:3px;padding:3px 5px 3px 8px;border-bottom:1px solid var(--gr)}
+#simTools{background:var(--trbg)}
+#simTools button,#simViewBar button,#simDims button{background:var(--gr);border:1px solid var(--ax);color:var(--fg);padding:1px 5px;border-radius:3px;cursor:pointer;font-size:10px;line-height:1.5}
+#simTools button:hover,#simViewBar button:hover,#simDims button:hover{opacity:.75}
+#simTools button:disabled,#simViewBar button:disabled{opacity:.4;cursor:not-allowed}
+#simViewBar button.on,#simDims button.on{background:var(--adc);border-color:var(--adc);color:#fff}
+#simTools select,#simViewBar select{background:var(--gr);border:1px solid var(--ax);color:var(--fg);padding:1px 2px;border-radius:3px;font-size:10px;cursor:pointer;max-width:150px}
+#simTools .ulbl,#simViewBar .ulbl{font-size:10px;color:var(--lb)}
+#simSliceGroup{display:inline-flex;align-items:center;gap:3px}
+#simSliceGroup[hidden]{display:none}
+#simSlice{width:90px;accent-color:var(--adc)}
+#simData{display:inline-flex;gap:0;margin-right:4px}
+#simData button{border-radius:0;margin-left:-1px}
+#simData button:first-child{border-radius:3px 0 0 3px;margin-left:0}
+#simData button:last-child{border-radius:0 3px 3px 0}
+#simParts{display:inline-flex}
+#simParts button{border-radius:0;margin-left:-1px;min-width:22px}
+#simParts button:first-child{border-radius:3px 0 0 3px;margin-left:0}
+#simParts button:last-child{border-radius:0 3px 3px 0}
+#simDims{flex:0 0 auto;display:flex;flex-wrap:wrap;align-items:center;gap:3px 10px;padding:3px 8px;border-bottom:1px solid var(--gr);font-size:10px;color:var(--lb)}
+#simDims:empty{display:none}
+.nd-dim{display:inline-flex;align-items:center;gap:4px}
+.nd-dim.axis .nd-name{color:var(--fg);font-weight:600}
+.nd-dim input[type=range]{width:84px;accent-color:var(--adc)}
+.nd-value{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;min-width:36px}
+#simDims .nd-fft{font-size:9px;padding:0 4px}
 #simProgress{flex:0 0 3px;visibility:hidden}
 #simProgress.on{visibility:visible;background:var(--gr)}
 #simProgressFill{height:100%;width:0;background:var(--adc);transition:width .2s}
-#simBody{position:relative;flex:1 1 auto;min-height:0;min-width:0;overflow:hidden}
-#simCanvas{position:absolute;top:0;left:0;display:block;width:100%;height:100%;cursor:crosshair}
+#simBody{position:relative;flex:1 1 auto;display:flex;flex-direction:column;min-height:0;min-width:0}
+#simImagePane{position:relative;flex:.68 1 0%;min-height:0;overflow:hidden}
+#simPlotPane{position:relative;flex:.32 1 0%;min-height:0;overflow:hidden;border-top:1px solid var(--gr)}
+#simBody.full #simImagePane,#simBody.full #simSplit{display:none}
+#simBody.full #simPlotPane{flex:1 1 auto!important;border-top:none}
+#simSplit{flex:0 0 5px;cursor:row-resize;z-index:5}
+#simSplit:hover{background:var(--adc);opacity:.3}
+#simImagePane canvas,#simPlotPane canvas{position:absolute;top:0;left:0;display:block;width:100%;height:100%}
+#simCanvas{cursor:crosshair}
 #simEmpty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:12px;color:var(--lb);font-size:12px;text-align:center;pointer-events:none}
+#simRunCard{position:absolute;top:8px;left:50%;transform:translateX(-50%);width:min(440px,calc(100% - 16px));z-index:8;background:var(--bg);border:1px solid var(--gr);border-radius:6px;box-shadow:0 2px 12px rgba(0,0,0,.18);padding:7px 10px;font-size:11px;color:var(--fg);pointer-events:none}
+#simRunCard[hidden]{display:none}
+.sim-run-head{display:flex;justify-content:space-between;gap:10px;font-weight:600;margin-bottom:5px;white-space:nowrap;overflow:hidden}
+.sim-run-head span:first-child{overflow:hidden;text-overflow:ellipsis}
+.sim-run-bar{height:8px;border-radius:4px;background:var(--gr);overflow:hidden}
+#simRunFill{height:100%;width:0;background:var(--adc);transition:width .25s}
+.sim-run-stats{margin-top:5px;font:10px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--lb)}
+.sim-run-workers{display:flex;gap:3px;margin-top:5px}
+.sim-run-workers:empty{display:none}
+.sim-run-worker{flex:1 1 0;height:4px;border-radius:2px;background:var(--gr);overflow:hidden}
+.sim-run-worker>div{height:100%;width:0;background:var(--gx);transition:width .2s}
 #simReadout{flex:0 0 auto;font:10px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--lb);padding:2px 6px;border-top:1px solid var(--gr);line-height:1.35;max-height:84px;overflow-y:auto;white-space:normal;user-select:text}
 #simReadout .sg-warn{color:#b8860b}
 @media(max-width:768px),(pointer:coarse){
-  #simTools{gap:4px;padding:4px 5px}
-  #simTools button{min-height:24px;padding:2px 7px}
+  #simTools,#simViewBar{gap:4px;padding:4px 5px}
+  #simTools button,#simViewBar button{min-height:24px;padding:2px 7px}
   #simBtn{order:1}
 }
 /* ── Label row: ⚙ chip and marker controls (labels.js) ─────────────── */

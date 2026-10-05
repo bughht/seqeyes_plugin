@@ -4,6 +4,4085 @@
   var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
   var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 
+  // src/pulseq/types.ts
+  var VER_PRE_14 = 1004e3;
+  var VER_V15 = 1005e3;
+  var VER_V15001 = 1005001;
+  function makeVersionCombined(major, minor, revision) {
+    return major * 1e6 + minor * 1e3 + revision;
+  }
+
+  // src/pulseq/rfClassification.ts
+  var GAMMA_HZ_T = 42576e3;
+  var DEFAULT_B0_T = 3;
+  var sequenceUseCache = /* @__PURE__ */ new WeakMap();
+  function classifyRfUse(rf, seq) {
+    if (seq.versionCombined >= VER_V15 && rf.use && rf.use.toLowerCase() !== "u") {
+      return rf.use.toLowerCase();
+    }
+    const flipAngleDeg = estimateRfFlipAngleDeg(rf, seq);
+    if (isLegacyFatSaturation(rf, seq)) return "s";
+    return flipAngleDeg >= 120 ? "r" : "e";
+  }
+  function classifyRfUses(seq) {
+    const cachedUses = sequenceUseCache.get(seq);
+    if (cachedUses) return cachedUses;
+    const libraryUses = /* @__PURE__ */ new Map();
+    const uses = seq.blocks.map((block) => {
+      if (block.rfId <= 0) return "";
+      const cached = libraryUses.get(block.rfId);
+      if (cached !== void 0) return cached;
+      const rf = seq.rfs.get(block.rfId);
+      const use = rf ? classifyRfUse(rf, seq) : "";
+      libraryUses.set(block.rfId, use);
+      return use;
+    });
+    if (seq.versionCombined >= VER_V15 || uses.includes("e")) {
+      sequenceUseCache.set(seq, uses);
+      return uses;
+    }
+    const saturationBlocks = uses.map((use, index) => use === "s" ? index : -1).filter((index) => index >= 0);
+    if (saturationBlocks.length < 2) {
+      sequenceUseCache.set(seq, uses);
+      return uses;
+    }
+    for (let anchor = 0; anchor < saturationBlocks.length; anchor++) {
+      const start = saturationBlocks[anchor] + 1;
+      const end = saturationBlocks[anchor + 1] ?? uses.length;
+      for (let index = start; index < end; index++) {
+        if (!uses[index] || uses[index] === "s") continue;
+        uses[index] = "e";
+        break;
+      }
+    }
+    sequenceUseCache.set(seq, uses);
+    return uses;
+  }
+  function estimateRfFlipAngleDeg(rf, seq) {
+    const magShape = seq.shapes.get(rf.magShapeId);
+    if (magShape && magShape.numSamples > 0) {
+      const raster = seq.rasterTimes.rfRaster;
+      const timeShape = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples : void 0;
+      let area = 0;
+      let previousTime = timeShape ? timeShape[0] * raster : 0.5 * raster;
+      let previousAmplitude = Math.abs(rf.amplitude * magShape.samples[0]);
+      for (let index = 1; index < magShape.numSamples; index++) {
+        const time = timeShape ? timeShape[index] * raster : (index + 0.5) * raster;
+        const amplitude = Math.abs(rf.amplitude * magShape.samples[index]);
+        const duration = time - previousTime;
+        if (duration > 0) area += 0.5 * (previousAmplitude + amplitude) * duration;
+        previousTime = time;
+        previousAmplitude = amplitude;
+      }
+      return 360 * area;
+    }
+    const absoluteAmplitude = Math.abs(rf.amplitude);
+    if (absoluteAmplitude > 3e3) return 180;
+    if (absoluteAmplitude > 1500) return 120;
+    return 90;
+  }
+  function isLegacyFatSaturation(rf, seq) {
+    const b0Tesla = getB0(seq);
+    const frequencyPpm = rf.freqPPM !== 0 ? rf.freqPPM : b0Tesla > 0 ? 1e6 * rf.freqOffset / (GAMMA_HZ_T * b0Tesla) : 0;
+    const durationSec = estimateRfDuration(rf, seq);
+    return durationSec > 6e-3 && frequencyPpm >= -4.5 && frequencyPpm <= -3;
+  }
+  function estimateRfDuration(rf, seq) {
+    const magShape = seq.shapes.get(rf.magShapeId);
+    if (!magShape || magShape.numSamples <= 0) return 0;
+    const raster = seq.rasterTimes.rfRaster;
+    const timeShape = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples : void 0;
+    if (timeShape && timeShape.length > 0) {
+      return timeShape[timeShape.length - 1] * raster;
+    }
+    return magShape.numSamples * raster;
+  }
+  function getB0(seq) {
+    const raw = seq.definitions.get("B0") ?? seq.definitions.get("b0") ?? seq.definitions.get("b_0");
+    if (raw && raw.length > 0) return +raw[0];
+    return DEFAULT_B0_T;
+  }
+
+  // src/pulseq/trdetect.ts
+  function detectSequenceTiming(seq) {
+    const supportsRfUse = seq.versionCombined >= 1005e3;
+    const classifiedRfUses = classifyRfUses(seq);
+    let teTimeSec = 0;
+    let hasExplicitTE = false;
+    const teDef = seq.definitions.get("EchoTime") ?? seq.definitions.get("TE");
+    if (teDef && teDef.length > 0) {
+      teTimeSec = teDef[0];
+      hasExplicitTE = true;
+    }
+    let trTimeSec = 0;
+    let hasExplicitTR = false;
+    const trDef = seq.definitions.get("RepetitionTime") ?? seq.definitions.get("TR");
+    if (trDef && trDef.length > 0) {
+      trTimeSec = trDef[0];
+      hasExplicitTR = true;
+    }
+    const rfUsePerBlock = [];
+    const excitationTimesSec = [];
+    let rfUseGuessed = false;
+    const blockStartTimes = computeCumulativeTimes(seq);
+    for (let i2 = 0; i2 < seq.blocks.length; i2++) {
+      const blk = seq.blocks[i2];
+      if (blk.rfId <= 0) {
+        rfUsePerBlock.push(0);
+        continue;
+      }
+      const rf = seq.rfs.get(blk.rfId);
+      if (!rf) {
+        rfUsePerBlock.push(0);
+        continue;
+      }
+      const useChar = classifiedRfUses[i2] || "u";
+      const useCode = useChar.charCodeAt(0);
+      rfUsePerBlock.push(useCode);
+      if (useChar === "e") {
+        const center = rf.center >= 0 ? rf.center * 1e-6 : estimateRfCenter(rf, seq);
+        const excTime = blockStartTimes[i2] + rf.delay * 1e-6 + center;
+        excitationTimesSec.push(excTime);
+      }
+      if (!supportsRfUse && useChar !== "u") rfUseGuessed = true;
+    }
+    let trCount = 0;
+    const trStartBlocks = [];
+    if (!hasExplicitTR && excitationTimesSec.length >= 2) {
+      trTimeSec = estimateTRFromExcitations(excitationTimesSec);
+      hasExplicitTR = false;
+    }
+    if (trTimeSec > 0) {
+      const totalDuration = blockStartTimes.length > 0 ? blockStartTimes[blockStartTimes.length - 1] + blockDurationSeconds(seq, seq.blocks[seq.blocks.length - 1]) : 0;
+      trCount = Math.max(1, Math.ceil(totalDuration / trTimeSec));
+      const tol = trTimeSec * 0.3;
+      let trIdx = 0;
+      for (let i2 = 0; i2 < seq.blocks.length; i2++) {
+        const blkStart = blockStartTimes[i2];
+        const expected = trIdx * trTimeSec;
+        if (blkStart >= expected - tol && trIdx < trCount) {
+          trStartBlocks.push(i2);
+          trIdx++;
+        }
+      }
+      trStartBlocks.push(seq.blocks.length);
+      trCount = trStartBlocks.length - 1;
+    } else {
+      trCount = 0;
+      for (let i2 = 0; i2 < seq.blocks.length; i2++) {
+        if (seq.blocks[i2].adcId > 0) {
+          trStartBlocks.push(i2);
+          trCount++;
+        }
+      }
+      trStartBlocks.push(seq.blocks.length);
+    }
+    return {
+      teTimeSec,
+      hasExplicitTE,
+      trTimeSec,
+      hasExplicitTR,
+      trCount,
+      trStartBlocks,
+      excitationTimesSec,
+      rfUseGuessed,
+      rfUsePerBlock
+    };
+  }
+  function computeCumulativeTimes(seq) {
+    const times = [];
+    let cum = 0;
+    for (const blk of seq.blocks) {
+      times.push(cum);
+      cum += blockDurationSeconds(seq, blk);
+    }
+    return times;
+  }
+  function blockDurationSeconds(seq, block) {
+    if (seq.versionCombined < VER_PRE_14) return block.dur * 1e-6;
+    return block.dur * seq.rasterTimes.blockDurationRaster;
+  }
+  function estimateRfCenter(rf, _seq) {
+    const magShape = _seq.shapes.get(rf.magShapeId);
+    if (!magShape || magShape.numSamples <= 0) return 0;
+    let peakIdx = 0;
+    let peak = Math.abs(magShape.samples[0]);
+    for (let i2 = 1; i2 < magShape.numSamples; i2++) {
+      const v = Math.abs(magShape.samples[i2]);
+      if (v > peak) {
+        peak = v;
+        peakIdx = i2;
+      }
+    }
+    const raster = _seq.rasterTimes.rfRaster;
+    const timeShape = rf.timeShapeId > 0 ? _seq.shapes.get(rf.timeShapeId)?.samples : void 0;
+    return timeShape ? (timeShape[peakIdx] ?? 0) * raster : (peakIdx + 0.5) * raster;
+  }
+  function estimateTRFromExcitations(excTimesSec) {
+    if (excTimesSec.length < 2) return 0;
+    const intervals = [];
+    for (let i2 = 1; i2 < excTimesSec.length; i2++) {
+      const dt = excTimesSec[i2] - excTimesSec[i2 - 1];
+      if (dt > 1e-9) intervals.push(dt);
+    }
+    if (intervals.length === 0) return 0;
+    intervals.sort((a, b) => a - b);
+    const median = intervals[Math.floor(intervals.length / 2)];
+    return Math.round(median * 1e6) / 1e6;
+  }
+
+  // src/sim/io/hdf5.ts
+  function integer(size, signed) {
+    return Object.freeze({ kind: "int", size, signed });
+  }
+  function float(size) {
+    return Object.freeze({ kind: "float", size });
+  }
+  var h5t = Object.freeze({
+    i8: integer(1, true),
+    u8: integer(1, false),
+    i16: integer(2, true),
+    u16: integer(2, false),
+    i32: integer(4, true),
+    u32: integer(4, false),
+    i64: integer(8, true),
+    u64: integer(8, false),
+    f32: float(4),
+    f64: float(8),
+    array(base, dims) {
+      return Object.freeze({ kind: "array", base, dims: Object.freeze([...dims]) });
+    },
+    /**
+     * A compound with its members packed in order, without padding — numpy's
+     * default layout, and the layout of the #pragma pack(2) ISMRMRD structs.
+     */
+    compound(members) {
+      let offset = 0;
+      const placed = members.map(([name, type]) => {
+        const member = Object.freeze({ name, offset, type });
+        offset += typeInfo(type).size;
+        return member;
+      });
+      return Object.freeze({ kind: "compound", size: offset, members: Object.freeze(placed) });
+    },
+    vlen(base) {
+      return Object.freeze({ kind: "vlen", base });
+    },
+    string(charset = "utf-8") {
+      return Object.freeze({ kind: "string", charset });
+    }
+  });
+  var VLEN_REFERENCE_SIZE = 16;
+  var MAX_U32 = 4294967295;
+  var typeInfoCache = /* @__PURE__ */ new WeakMap();
+  function typeInfo(type) {
+    const cached = typeInfoCache.get(type);
+    if (cached) return cached;
+    let info;
+    switch (type.kind) {
+      case "int":
+        if (![1, 2, 4, 8].includes(type.size)) throw new Error(`Integer size must be 1, 2, 4 or 8 bytes, got ${type.size}.`);
+        info = { size: type.size, vlen: false, version: 1 };
+        break;
+      case "float":
+        if (type.size !== 4 && type.size !== 8) throw new Error(`Float size must be 4 or 8 bytes, got ${type.size}.`);
+        info = { size: type.size, vlen: false, version: 1 };
+        break;
+      case "string":
+        if (type.charset !== "ascii" && type.charset !== "utf-8") throw new Error(`Unknown string charset '${type.charset}'.`);
+        info = { size: VLEN_REFERENCE_SIZE, vlen: true, version: 1 };
+        break;
+      case "vlen": {
+        const base = typeInfo(type.base);
+        if (base.vlen) throw new Error("Variable-length data nested in variable-length data is not supported.");
+        info = { size: VLEN_REFERENCE_SIZE, vlen: true, version: base.version };
+        break;
+      }
+      case "array": {
+        const base = typeInfo(type.base);
+        if (type.dims.length < 1 || type.dims.length > 32) throw new Error(`An array type needs 1 to 32 dimensions, got ${type.dims.length}.`);
+        let count = 1;
+        for (const dim of type.dims) {
+          if (!Number.isInteger(dim) || dim < 1 || dim > MAX_U32) throw new Error(`Array dimensions must be positive integers, got ${dim}.`);
+          count *= dim;
+        }
+        info = { size: checkedSize(count * base.size), vlen: base.vlen, version: 3 };
+        break;
+      }
+      case "compound": {
+        const { members, size } = type;
+        if (!Number.isInteger(size) || size < 1 || size > MAX_U32) throw new Error(`Compound size must be a positive integer, got ${size}.`);
+        if (members.length < 1 || members.length > 65535) throw new Error(`A compound needs 1 to 65535 members, got ${members.length}.`);
+        const names = /* @__PURE__ */ new Set();
+        const spans = [];
+        let vlen = false;
+        for (const member of members) {
+          if (!member.name || member.name.includes("\0")) throw new Error(`Invalid compound member name '${member.name}'.`);
+          if (names.has(member.name)) throw new Error(`Duplicate compound member '${member.name}'.`);
+          names.add(member.name);
+          const memberInfo = typeInfo(member.type);
+          if (!Number.isInteger(member.offset) || member.offset < 0 || member.offset + memberInfo.size > size) {
+            throw new Error(`Member '${member.name}' (offset ${member.offset}, ${memberInfo.size} bytes) does not fit a ${size}-byte compound.`);
+          }
+          spans.push([member.offset, member.offset + memberInfo.size]);
+          vlen || (vlen = memberInfo.vlen);
+        }
+        spans.sort((a, b) => a[0] - b[0]);
+        for (let i2 = 1; i2 < spans.length; i2++) {
+          if (spans[i2][0] < spans[i2 - 1][1]) throw new Error("Compound members overlap.");
+        }
+        info = { size, vlen, version: 3 };
+        break;
+      }
+      default:
+        throw new Error(`Unknown HDF5 type kind '${type.kind}'.`);
+    }
+    typeInfoCache.set(type, info);
+    return info;
+  }
+  function checkedSize(size) {
+    if (size > MAX_U32) throw new Error(`A ${size}-byte datatype is larger than HDF5 allows.`);
+    return size;
+  }
+  var rotate = (x2, k) => (x2 << k | x2 >>> 32 - k) >>> 0;
+  function lookup3(data, initval = 0) {
+    let length = data.length;
+    let a = 3735928559 + length + initval >>> 0;
+    let b = a;
+    let c = a;
+    let k = 0;
+    const word = (i2) => (data[i2] | data[i2 + 1] << 8 | data[i2 + 2] << 16 | data[i2 + 3] << 24) >>> 0;
+    while (length > 12) {
+      a = a + word(k) >>> 0;
+      b = b + word(k + 4) >>> 0;
+      c = c + word(k + 8) >>> 0;
+      a = (a - c ^ rotate(c, 4)) >>> 0;
+      c = c + b >>> 0;
+      b = (b - a ^ rotate(a, 6)) >>> 0;
+      a = a + c >>> 0;
+      c = (c - b ^ rotate(b, 8)) >>> 0;
+      b = b + a >>> 0;
+      a = (a - c ^ rotate(c, 16)) >>> 0;
+      c = c + b >>> 0;
+      b = (b - a ^ rotate(a, 19)) >>> 0;
+      a = a + c >>> 0;
+      c = (c - b ^ rotate(b, 4)) >>> 0;
+      b = b + a >>> 0;
+      length -= 12;
+      k += 12;
+    }
+    if (length === 0) return c;
+    const tail = new Uint8Array(12);
+    tail.set(data.subarray(k, k + length));
+    a = a + (tail[0] | tail[1] << 8 | tail[2] << 16 | tail[3] << 24) >>> 0;
+    b = b + (tail[4] | tail[5] << 8 | tail[6] << 16 | tail[7] << 24) >>> 0;
+    c = c + (tail[8] | tail[9] << 8 | tail[10] << 16 | tail[11] << 24) >>> 0;
+    c = (c ^ b) - rotate(b, 14) >>> 0;
+    a = (a ^ c) - rotate(c, 11) >>> 0;
+    b = (b ^ a) - rotate(a, 25) >>> 0;
+    c = (c ^ b) - rotate(b, 16) >>> 0;
+    a = (a ^ c) - rotate(c, 4) >>> 0;
+    b = (b ^ a) - rotate(a, 14) >>> 0;
+    c = (c ^ b) - rotate(b, 24) >>> 0;
+    return c;
+  }
+  var UNDEFINED_ADDRESS = -1;
+  var TWO_POW_32 = 4294967296;
+  var LITTLE_ENDIAN_HOST = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+  var utf8 = new TextEncoder();
+  function setU64(view, at, value) {
+    if (value === UNDEFINED_ADDRESS) {
+      view.setUint32(at, MAX_U32, true);
+      view.setUint32(at + 4, MAX_U32, true);
+      return;
+    }
+    view.setUint32(at, value % TWO_POW_32, true);
+    view.setUint32(at + 4, Math.floor(value / TWO_POW_32), true);
+  }
+  var ByteList = class {
+    constructor() {
+      __publicField(this, "buffer", new Uint8Array(64));
+      __publicField(this, "view", new DataView(this.buffer.buffer));
+      __publicField(this, "length", 0);
+    }
+    /** Reserves `count` bytes and returns their offset; may replace buffer and view, so call it first. */
+    take(count) {
+      const at = this.length;
+      if (at + count > this.buffer.length) {
+        const grown = new Uint8Array(Math.max(2 * this.buffer.length, at + count));
+        grown.set(this.buffer);
+        this.buffer = grown;
+        this.view = new DataView(grown.buffer);
+      }
+      this.length += count;
+      return at;
+    }
+    u8(value) {
+      const at = this.take(1);
+      this.buffer[at] = value;
+      return this;
+    }
+    u16(value) {
+      const at = this.take(2);
+      this.view.setUint16(at, value, true);
+      return this;
+    }
+    u32(value) {
+      const at = this.take(4);
+      this.view.setUint32(at, value, true);
+      return this;
+    }
+    /** A non-negative safe integer, or UNDEFINED_ADDRESS. */
+    u64(value) {
+      const at = this.take(8);
+      setU64(this.view, at, value);
+      return this;
+    }
+    /** Unsigned little-endian integer in `width` bytes. */
+    uint(value, width) {
+      const at = this.take(width);
+      for (let i2 = 0; i2 < width; i2++) this.buffer[at + i2] = Math.floor(value / 2 ** (8 * i2)) & 255;
+      return this;
+    }
+    bytes(values) {
+      const at = this.take(values.length);
+      this.buffer.set(values, at);
+      return this;
+    }
+    result() {
+      return this.buffer.slice(0, this.length);
+    }
+  };
+  function offsetWidth(size) {
+    let bits2 = 0;
+    for (let v = size; v >= 1; v = Math.floor(v / 2)) bits2++;
+    return Math.floor((bits2 - 1) / 8) + 1;
+  }
+  function encodeDatatype(type, out) {
+    const info = typeInfo(type);
+    switch (type.kind) {
+      case "int":
+        out.u8(16).u8(type.signed ? 8 : 0).u8(0).u8(0).u32(type.size);
+        out.u16(0).u16(8 * type.size);
+        break;
+      case "float": {
+        const single = type.size === 4;
+        out.u8(17).u8(32).u8(single ? 31 : 63).u8(0).u32(type.size);
+        out.u16(0).u16(8 * type.size);
+        out.u8(single ? 23 : 52).u8(single ? 8 : 11).u8(0).u8(single ? 23 : 52).u32(single ? 127 : 1023);
+        break;
+      }
+      case "string":
+        out.u8(25).u8(1).u8(type.charset === "utf-8" ? 1 : 0).u8(0).u32(VLEN_REFERENCE_SIZE);
+        encodeDatatype(h5t.u8, out);
+        break;
+      case "vlen":
+        out.u8(info.version << 4 | 9).u8(0).u8(0).u8(0).u32(VLEN_REFERENCE_SIZE);
+        encodeDatatype(type.base, out);
+        break;
+      case "array":
+        out.u8(58).u8(0).u8(0).u8(0).u32(info.size).u8(type.dims.length);
+        for (const dim of type.dims) out.u32(dim);
+        encodeDatatype(type.base, out);
+        break;
+      case "compound": {
+        const count = type.members.length;
+        const width = offsetWidth(type.size);
+        out.u8(54).u8(count & 255).u8(count >>> 8).u8(0).u32(type.size);
+        for (const member of type.members) {
+          out.bytes(utf8.encode(member.name)).u8(0).uint(member.offset, width);
+          encodeDatatype(member.type, out);
+        }
+        break;
+      }
+    }
+  }
+  var COLLECTION_HEADER_SIZE = 16;
+  var HEAP_OBJECT_HEADER_SIZE = 16;
+  var MIN_COLLECTION_SIZE = 4096;
+  var TARGET_COLLECTION_SIZE = 4 * 1024 * 1024;
+  var MAX_COLLECTION_OBJECTS = 8192;
+  var align8 = (n) => Math.ceil(n / 8) * 8;
+  var HeapPacker = class {
+    constructor() {
+      /** Bytes in use (header and objects) in each collection so far. */
+      __publicField(this, "used", []);
+      __publicField(this, "objects", 0);
+      /** Of the last placement. */
+      __publicField(this, "collection", -1);
+      __publicField(this, "index", 0);
+      /** Offset of the object's header within its collection. */
+      __publicField(this, "offset", 0);
+    }
+    place(size) {
+      const need = HEAP_OBJECT_HEADER_SIZE + align8(size);
+      let last = this.used.length - 1;
+      if (last < 0 || this.objects === MAX_COLLECTION_OBJECTS || this.used[last] + need > TARGET_COLLECTION_SIZE) {
+        this.used.push(COLLECTION_HEADER_SIZE);
+        this.objects = 0;
+        last++;
+      }
+      this.collection = last;
+      this.index = ++this.objects;
+      this.offset = this.used[last];
+      this.used[last] += need;
+    }
+  };
+  var collectionSize = (used) => Math.max(MIN_COLLECTION_SIZE, used);
+  function fail(where, expected, value) {
+    const shown = typeof value === "bigint" ? `${value}n` : typeof value === "string" ? JSON.stringify(value.length > 40 ? `${value.slice(0, 40)}\u2026` : value) : value !== null && typeof value === "object" ? value.constructor?.name ?? "object" : String(value);
+    throw new Error(`${where}: expected ${expected}, got ${shown}.`);
+  }
+  function asArrayLike(value, where) {
+    if (value === null || typeof value !== "object" || typeof value.length !== "number") {
+      fail(where, "an array", value);
+    }
+    return value;
+  }
+  function asString(value, where) {
+    if (typeof value !== "string") fail(where, "a string", value);
+    return value;
+  }
+  function memberValue(value, name, where) {
+    if (value === null || typeof value !== "object") fail(where, "an object", value);
+    const member = value[name];
+    if (member === void 0) throw new Error(`${where}: member '${name}' is missing.`);
+    return member;
+  }
+  function rawElements(type, value) {
+    if (!LITTLE_ENDIAN_HOST || !ArrayBuffer.isView(value) || value instanceof DataView) return null;
+    let match = false;
+    if (type.kind === "float") {
+      match = type.size === 4 ? value instanceof Float32Array : value instanceof Float64Array;
+    } else if (type.kind === "int") {
+      switch (type.size) {
+        case 1:
+          match = type.signed ? value instanceof Int8Array : value instanceof Uint8Array;
+          break;
+        case 2:
+          match = type.signed ? value instanceof Int16Array : value instanceof Uint16Array;
+          break;
+        case 4:
+          match = type.signed ? value instanceof Int32Array : value instanceof Uint32Array;
+          break;
+        case 8:
+          match = type.signed ? value instanceof BigInt64Array : value instanceof BigUint64Array;
+          break;
+      }
+    }
+    return match ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength) : null;
+  }
+  function compileMeasure(type, packer, where) {
+    switch (type.kind) {
+      case "int":
+      case "float":
+        return null;
+      case "string":
+        return (value) => packer.place(utf8.encode(asString(value, where)).length);
+      case "vlen": {
+        const baseSize = typeInfo(type.base).size;
+        return (value) => {
+          const count = asArrayLike(value, where).length;
+          if (count > 0) packer.place(count * baseSize);
+        };
+      }
+      case "array": {
+        const inner = compileMeasure(type.base, packer, `${where}[]`);
+        if (!inner) return null;
+        return (value) => {
+          const items = asArrayLike(value, where);
+          for (let i2 = 0; i2 < items.length; i2++) inner(items[i2]);
+        };
+      }
+      case "compound": {
+        const parts = [];
+        for (const member of type.members) {
+          const inner = compileMeasure(member.type, packer, `${where}.${member.name}`);
+          if (inner) parts.push([member.name, inner]);
+        }
+        if (parts.length === 0) return null;
+        return (value) => {
+          for (const [name, inner] of parts) inner(memberValue(value, name, where));
+        };
+      }
+    }
+  }
+  function compileEncoder(type, sink, put, where) {
+    const { bytes, view } = sink;
+    switch (type.kind) {
+      case "int": {
+        const { size, signed } = type;
+        if (size === 8) {
+          const min2 = signed ? -(2n ** 63n) : 0n;
+          const max3 = signed ? 2n ** 63n - 1n : 2n ** 64n - 1n;
+          return (value, at) => {
+            const v = typeof value === "bigint" ? value : Number.isSafeInteger(value) ? BigInt(value) : fail(where, "an integer", value);
+            if (v < min2 || v > max3) fail(where, `an integer in [${min2}, ${max3}]`, value);
+            if (signed) view.setBigInt64(at, v, true);
+            else view.setBigUint64(at, v, true);
+          };
+        }
+        const bits2 = 8 * size;
+        const min = signed ? -(2 ** (bits2 - 1)) : 0;
+        const max2 = signed ? 2 ** (bits2 - 1) - 1 : 2 ** bits2 - 1;
+        return (value, at) => {
+          if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max2) {
+            fail(where, `an integer in [${min}, ${max2}]`, value);
+          }
+          if (size === 1) view.setUint8(at, value & 255);
+          else if (size === 2) view.setUint16(at, value & 65535, true);
+          else view.setUint32(at, value >>> 0, true);
+        };
+      }
+      case "float":
+        return (value, at) => {
+          if (typeof value !== "number") fail(where, "a number", value);
+          if (type.size === 4) view.setFloat32(at, value, true);
+          else view.setFloat64(at, value, true);
+        };
+      case "string":
+        return (value, at) => {
+          const encoded = utf8.encode(asString(value, where));
+          const slot = put(encoded.length);
+          writeVlenReference(view, at, encoded.length, slot.collectionAddress, slot.index);
+          bytes.set(encoded, slot.dataAddress);
+        };
+      case "vlen": {
+        const baseSize = typeInfo(type.base).size;
+        const writeItems = compileItems(type.base, sink, put, `${where}[]`);
+        return (value, at) => {
+          const items = asArrayLike(value, where);
+          const count = items.length;
+          if (count === 0) return;
+          const slot = put(count * baseSize);
+          writeVlenReference(view, at, count, slot.collectionAddress, slot.index);
+          writeItems(items, slot.dataAddress);
+        };
+      }
+      case "array": {
+        const count = type.dims.reduce((product, dim) => product * dim, 1);
+        const writeItems = compileItems(type.base, sink, put, `${where}[]`);
+        return (value, at) => {
+          const items = asArrayLike(value, where);
+          if (items.length !== count) fail(where, `${count} values`, `${items.length} values`);
+          writeItems(items, at);
+        };
+      }
+      case "compound": {
+        const { size } = type;
+        const vlen = typeInfo(type).vlen;
+        const members = type.members.map((member) => [member.name, member.offset, compileEncoder(member.type, sink, put, `${where}.${member.name}`)]);
+        return (value, at) => {
+          if (value instanceof Uint8Array && !vlen) {
+            if (value.length !== size) fail(where, `${size} pre-encoded bytes`, `${value.length} bytes`);
+            bytes.set(value, at);
+            return;
+          }
+          for (const [name, offset, encode] of members) encode(memberValue(value, name, where), at + offset);
+        };
+      }
+    }
+  }
+  function compileItems(base, sink, put, where) {
+    const encode = compileEncoder(base, sink, put, where);
+    const step = typeInfo(base).size;
+    return (items, at) => {
+      const raw = rawElements(base, items);
+      if (raw) {
+        sink.bytes.set(raw, at);
+        return;
+      }
+      for (let i2 = 0; i2 < items.length; i2++) encode(items[i2], at + i2 * step);
+    };
+  }
+  function writeVlenReference(view, at, count, collectionAddress, index) {
+    view.setUint32(at, count, true);
+    setU64(view, at + 4, collectionAddress);
+    view.setUint32(at + 12, index, true);
+  }
+  var MSG_DATASPACE = 1;
+  var MSG_LINK_INFO = 2;
+  var MSG_DATATYPE = 3;
+  var MSG_FILL_VALUE = 5;
+  var MSG_LINK = 6;
+  var MSG_LAYOUT = 8;
+  var MSG_GROUP_INFO = 10;
+  var MSG_FLAG_CONSTANT = 1;
+  function chunkSize(messages) {
+    let size = 0;
+    for (const message of messages) {
+      if (message.body.length > 65535) throw new Error(`A ${message.body.length}-byte header message is too large for HDF5.`);
+      size += 4 + message.body.length;
+    }
+    return size;
+  }
+  var chunkWidthCode = (size) => size <= 255 ? 0 : size <= 65535 ? 1 : 2;
+  function objectHeaderSize(messages) {
+    const size = chunkSize(messages);
+    return 4 + 1 + 1 + (1 << chunkWidthCode(size)) + size + 4;
+  }
+  function writeObjectHeader(sink, at, messages) {
+    const { bytes, view } = sink;
+    const size = chunkSize(messages);
+    const code = chunkWidthCode(size);
+    let p = at;
+    bytes.set([79, 72, 68, 82], p);
+    bytes[p + 4] = 2;
+    bytes[p + 5] = code;
+    p += 6;
+    if (code === 0) view.setUint8(p, size);
+    else if (code === 1) view.setUint16(p, size, true);
+    else view.setUint32(p, size, true);
+    p += 1 << code;
+    for (const message of messages) {
+      bytes[p] = message.type;
+      view.setUint16(p + 1, message.body.length, true);
+      bytes[p + 3] = message.flags;
+      bytes.set(message.body, p + 4);
+      p += 4 + message.body.length;
+    }
+    view.setUint32(p, lookup3(bytes.subarray(at, p)), true);
+  }
+  function groupMessages(group) {
+    const linkInfo = new ByteList().u8(0).u8(0).u64(UNDEFINED_ADDRESS).u64(UNDEFINED_ADDRESS).result();
+    const messages = [
+      { type: MSG_LINK_INFO, flags: 0, body: linkInfo },
+      { type: MSG_GROUP_INFO, flags: MSG_FLAG_CONSTANT, body: Uint8Array.of(0, 0) }
+    ];
+    for (const [name, child] of group.children) {
+      const encoded = utf8.encode(name);
+      const ascii = encoded.every((byte) => byte < 128);
+      const code = encoded.length <= 255 ? 0 : encoded.length <= 65535 ? 1 : 2;
+      const link = new ByteList().u8(1).u8(code | (ascii ? 0 : 16));
+      if (!ascii) link.u8(1);
+      link.uint(encoded.length, 1 << code).bytes(encoded).u64(child.address);
+      messages.push({ type: MSG_LINK, flags: 0, body: link.result() });
+    }
+    return messages;
+  }
+  function datasetMessages(dataset) {
+    const space = new ByteList().u8(2).u8(dataset.dims.length).u8(0).u8(dataset.dims.length === 0 ? 0 : 1);
+    for (const dim of dataset.dims) space.u64(dim);
+    const datatype = new ByteList();
+    encodeDatatype(dataset.type, datatype);
+    const fill = Uint8Array.of(3, dataset.vlen ? 2 : 10);
+    const layout = new ByteList().u8(3).u8(1).u64(dataset.dataAddress).u64(dataset.count * dataset.elementSize);
+    return [
+      { type: MSG_DATASPACE, flags: 0, body: space.result() },
+      { type: MSG_DATATYPE, flags: MSG_FLAG_CONSTANT, body: datatype.result() },
+      { type: MSG_FILL_VALUE, flags: MSG_FLAG_CONSTANT, body: fill },
+      { type: MSG_LAYOUT, flags: 0, body: layout.result() }
+    ];
+  }
+  var messagesOf = (node) => node.kind === "group" ? groupMessages(node) : datasetMessages(node);
+  var SUPERBLOCK_SIZE = 48;
+  function splitPath(path) {
+    const parts = path.split("/").filter((part) => part.length > 0);
+    for (const part of parts) {
+      if (part === "." || part.includes("\0")) throw new Error(`Invalid HDF5 path '${path}'.`);
+    }
+    return parts;
+  }
+  var Hdf5Writer = class {
+    constructor() {
+      __publicField(this, "root", { kind: "group", children: /* @__PURE__ */ new Map(), address: 0 });
+      __publicField(this, "finished", false);
+    }
+    /** Creates a group and any missing parents; an existing group is left as it is. */
+    group(path) {
+      this.checkOpen();
+      this.groupAt(splitPath(path), path);
+      return this;
+    }
+    /**
+     * Adds a dataset (and any missing parent groups). `elements` holds the
+     * product of `dims` values in row-major order (one value when `dims` is
+     * empty, a scalar). The writer keeps the reference and encodes at
+     * finish(), so `elements` must not change before then.
+     */
+    dataset(path, type, dims, elements) {
+      this.checkOpen();
+      const parts = splitPath(path);
+      if (parts.length === 0) throw new Error("A dataset needs a name.");
+      const name = parts[parts.length - 1];
+      const parent = this.groupAt(parts.slice(0, -1), path);
+      if (parent.children.has(name)) throw new Error(`'${path}' already exists.`);
+      const info = typeInfo(type);
+      let count = 1;
+      for (const dim of dims) {
+        if (!Number.isSafeInteger(dim) || dim < 0) throw new Error(`Dataset dimensions must be non-negative integers, got ${dim}.`);
+        count *= dim;
+      }
+      if (!Number.isSafeInteger(count * info.size)) throw new Error(`Dataset '${path}' is too large.`);
+      if (elements.length !== count) throw new Error(`Dataset '${path}' has ${elements.length} elements for dimensions [${dims.join(", ")}].`);
+      parent.children.set(name, {
+        kind: "dataset",
+        path: `/${parts.join("/")}`,
+        type,
+        dims: [...dims],
+        elements,
+        count,
+        elementSize: info.size,
+        vlen: info.vlen,
+        address: 0,
+        dataAddress: UNDEFINED_ADDRESS
+      });
+      return this;
+    }
+    /** Lays out and encodes the file. The writer cannot be used afterwards. */
+    finish() {
+      this.checkOpen();
+      this.finished = true;
+      const nodes = [];
+      const visit = (node) => {
+        nodes.push(node);
+        if (node.kind === "group") for (const child of node.children.values()) visit(child);
+      };
+      visit(this.root);
+      const datasets = nodes.filter((node) => node.kind === "dataset");
+      const measured = new HeapPacker();
+      for (const dataset of datasets) {
+        const measure = dataset.vlen ? compileMeasure(dataset.type, measured, dataset.path) : null;
+        if (measure) forEachElement(dataset, measure);
+      }
+      let end = SUPERBLOCK_SIZE;
+      for (const node of nodes) {
+        node.address = end;
+        end += objectHeaderSize(messagesOf(node));
+      }
+      for (const dataset of datasets) {
+        const size = dataset.count * dataset.elementSize;
+        dataset.dataAddress = size > 0 ? end : UNDEFINED_ADDRESS;
+        end += size;
+      }
+      const collections = measured.used.map((used) => {
+        const address = end;
+        end += collectionSize(used);
+        return address;
+      });
+      if (!Number.isSafeInteger(end)) throw new Error("The HDF5 file would be too large.");
+      const bytes = new Uint8Array(end);
+      const sink = { bytes, view: new DataView(bytes.buffer) };
+      const packer = new HeapPacker();
+      const slot = { collectionAddress: 0, index: 0, dataAddress: 0 };
+      const put = (size) => {
+        packer.place(size);
+        const collectionAddress = collections[packer.collection];
+        if (collectionAddress === void 0 || packer.used[packer.collection] > measured.used[packer.collection]) {
+          throw new Error("Variable-length data changed while the HDF5 file was being written.");
+        }
+        const at = collectionAddress + packer.offset;
+        sink.view.setUint16(at, packer.index, true);
+        setU64(sink.view, at + 8, size);
+        slot.collectionAddress = collectionAddress;
+        slot.index = packer.index;
+        slot.dataAddress = at + HEAP_OBJECT_HEADER_SIZE;
+        return slot;
+      };
+      for (const dataset of datasets) {
+        if (dataset.count === 0) continue;
+        const raw = rawElements(dataset.type, dataset.elements);
+        if (raw) {
+          bytes.set(raw, dataset.dataAddress);
+          continue;
+        }
+        const encode = compileEncoder(dataset.type, sink, put, dataset.path);
+        const { dataAddress, elementSize } = dataset;
+        forEachElement(dataset, (value, i2) => encode(value, dataAddress + i2 * elementSize));
+      }
+      if (packer.used.length !== measured.used.length || packer.used.some((used, k) => used !== measured.used[k])) {
+        throw new Error("Variable-length data changed while the HDF5 file was being written.");
+      }
+      for (const [k, address] of collections.entries()) writeCollectionHeader(sink, address, measured.used[k]);
+      for (const node of nodes) writeObjectHeader(sink, node.address, messagesOf(node));
+      writeSuperblock(sink, this.root.address, end);
+      return bytes;
+    }
+    checkOpen() {
+      if (this.finished) throw new Error("This HDF5 writer has already finished.");
+    }
+    groupAt(parts, path) {
+      let group = this.root;
+      for (const part of parts) {
+        let child = group.children.get(part);
+        if (!child) {
+          child = { kind: "group", children: /* @__PURE__ */ new Map(), address: 0 };
+          group.children.set(part, child);
+        }
+        if (child.kind !== "group") throw new Error(`'${part}' in '${path}' is a dataset, not a group.`);
+        group = child;
+      }
+      return group;
+    }
+  };
+  function forEachElement(dataset, visit) {
+    const { elements, count } = dataset;
+    let i2 = 0;
+    try {
+      for (; i2 < count; i2++) visit(elements[i2], i2);
+    } catch (error) {
+      throw new Error(`Dataset ${dataset.path}, element ${i2}: ${error.message}`);
+    }
+  }
+  function writeCollectionHeader(sink, at, used) {
+    const { bytes, view } = sink;
+    const size = collectionSize(used);
+    bytes.set([71, 67, 79, 76], at);
+    bytes[at + 4] = 1;
+    setU64(view, at + 8, size);
+    const free = size - used;
+    if (free >= HEAP_OBJECT_HEADER_SIZE) setU64(view, at + used + 8, free);
+  }
+  function writeSuperblock(sink, rootAddress, endOfFile) {
+    const { bytes, view } = sink;
+    bytes.set([137, 72, 68, 70, 13, 10, 26, 10], 0);
+    bytes[8] = 2;
+    bytes[9] = 8;
+    bytes[10] = 8;
+    bytes[11] = 0;
+    setU64(view, 12, 0);
+    setU64(view, 20, UNDEFINED_ADDRESS);
+    setU64(view, 28, endOfFile);
+    setU64(view, 36, rootAddress);
+    view.setUint32(44, lookup3(bytes.subarray(0, 44)), true);
+  }
+
+  // src/sim/io/ismrmrd.ts
+  var ACQUISITION_HEADER_SIZE = 340;
+  var IsmrmrdAcqFlag = Object.freeze({
+    FIRST_IN_ENCODE_STEP1: 1,
+    LAST_IN_ENCODE_STEP1: 2,
+    FIRST_IN_ENCODE_STEP2: 3,
+    LAST_IN_ENCODE_STEP2: 4,
+    FIRST_IN_AVERAGE: 5,
+    LAST_IN_AVERAGE: 6,
+    FIRST_IN_SLICE: 7,
+    LAST_IN_SLICE: 8,
+    FIRST_IN_CONTRAST: 9,
+    LAST_IN_CONTRAST: 10,
+    FIRST_IN_PHASE: 11,
+    LAST_IN_PHASE: 12,
+    FIRST_IN_REPETITION: 13,
+    LAST_IN_REPETITION: 14,
+    FIRST_IN_SET: 15,
+    LAST_IN_SET: 16,
+    FIRST_IN_SEGMENT: 17,
+    LAST_IN_SEGMENT: 18,
+    IS_NOISE_MEASUREMENT: 19,
+    IS_PARALLEL_CALIBRATION: 20,
+    IS_PARALLEL_CALIBRATION_AND_IMAGING: 21,
+    IS_REVERSE: 22,
+    IS_NAVIGATION_DATA: 23,
+    IS_PHASECORR_DATA: 24,
+    LAST_IN_MEASUREMENT: 25,
+    IS_HPFEEDBACK_DATA: 26,
+    IS_DUMMYSCAN_DATA: 27,
+    IS_RTFEEDBACK_DATA: 28,
+    IS_SURFACECOILCORRECTIONSCAN_DATA: 29,
+    IS_PHASE_STABILIZATION_REFERENCE: 30,
+    IS_PHASE_STABILIZATION: 31,
+    COMPRESSION1: 53,
+    COMPRESSION2: 54,
+    COMPRESSION3: 55,
+    COMPRESSION4: 56,
+    USER1: 57,
+    USER2: 58,
+    USER3: 59,
+    USER4: 60,
+    USER5: 61,
+    USER6: 62,
+    USER7: 63,
+    USER8: 64
+  });
+  function flagBit(bit) {
+    if (!Number.isInteger(bit) || bit < 1 || bit > 64) throw new RangeError(`Acquisition flag bits are 1 to 64, got ${bit}.`);
+    return 1n << BigInt(bit - 1);
+  }
+  function acquisitionFlags(...bits2) {
+    let flags = 0n;
+    for (const bit of bits2) flags |= flagBit(bit);
+    return flags;
+  }
+  function channelMask(channels) {
+    if (!Number.isInteger(channels) || channels < 0 || channels > 1024) throw new RangeError(`ISMRMRD supports 0 to 1024 channels, got ${channels}.`);
+    const mask = new Array(16).fill(0n);
+    for (let c = 0; c < channels; c++) mask[c >> 6] |= 1n << BigInt(c & 63);
+    return mask;
+  }
+  function acquisitionHeader(init = {}) {
+    const active = init.active_channels ?? 1;
+    const zeros = (n) => new Array(n).fill(0);
+    const head = {
+      version: 1,
+      flags: 0n,
+      measurement_uid: 0,
+      scan_counter: 0,
+      acquisition_time_stamp: 0,
+      physiology_time_stamp: zeros(3),
+      number_of_samples: 0,
+      available_channels: active,
+      active_channels: active,
+      channel_mask: channelMask(active),
+      discard_pre: 0,
+      discard_post: 0,
+      center_sample: 0,
+      encoding_space_ref: 0,
+      trajectory_dimensions: 0,
+      sample_time_us: 0,
+      position: zeros(3),
+      read_dir: zeros(3),
+      phase_dir: zeros(3),
+      slice_dir: zeros(3),
+      patient_table_position: zeros(3),
+      idx: {
+        kspace_encode_step_1: 0,
+        kspace_encode_step_2: 0,
+        average: 0,
+        slice: 0,
+        contrast: 0,
+        phase: 0,
+        repetition: 0,
+        set: 0,
+        segment: 0,
+        user: zeros(8)
+      },
+      user_int: zeros(8),
+      user_float: zeros(8)
+    };
+    const assign = (target, values, where) => {
+      for (const [key, value] of Object.entries(values)) {
+        if (value === void 0) continue;
+        if (!(key in target)) throw new Error(`Unknown acquisition header field '${where}${key}'.`);
+        target[key] = value;
+      }
+    };
+    const { idx, ...fields } = init;
+    assign(head, fields, "");
+    assign(head.idx, idx ?? {}, "idx.");
+    return head;
+  }
+  var StructWriter = class {
+    constructor(view, start) {
+      __publicField(this, "view", view);
+      __publicField(this, "start", start);
+      __publicField(this, "offset");
+      __publicField(this, "u16", (name, value) => {
+        this.view.setUint16(this.offset, this.integer(name, value, 0, 65535), true);
+        this.offset += 2;
+      });
+      __publicField(this, "u32", (name, value) => {
+        this.view.setUint32(this.offset, this.integer(name, value, 0, 4294967295), true);
+        this.offset += 4;
+      });
+      __publicField(this, "i32", (name, value) => {
+        this.view.setInt32(this.offset, this.integer(name, value, -2147483648, 2147483647), true);
+        this.offset += 4;
+      });
+      __publicField(this, "u64", (name, value) => {
+        if (typeof value !== "bigint" || value < 0n || value >= 1n << 64n) {
+          throw new RangeError(`${name} must be a bigint in [0, 2^64), got ${String(value)}.`);
+        }
+        this.view.setBigUint64(this.offset, value, true);
+        this.offset += 8;
+      });
+      __publicField(this, "f32", (name, value) => {
+        if (typeof value !== "number") throw new RangeError(`${name} must be a number, got ${String(value)}.`);
+        this.view.setFloat32(this.offset, value, true);
+        this.offset += 4;
+      });
+      this.offset = start;
+    }
+    integer(name, value, min, max2) {
+      if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max2) {
+        throw new RangeError(`${name} must be an integer in [${min}, ${max2}], got ${String(value)}.`);
+      }
+      return value;
+    }
+    each(name, values, count, write) {
+      if (!values || values.length !== count) throw new RangeError(`${name} must have ${count} values, got ${values?.length}.`);
+      for (let i2 = 0; i2 < count; i2++) write(`${name}[${i2}]`, values[i2]);
+    }
+    end(size) {
+      if (this.offset - this.start !== size) throw new Error(`Wrote ${this.offset - this.start} bytes of a ${size}-byte struct.`);
+    }
+  };
+  function writeAcquisitionHeader(head, view, at) {
+    const w = new StructWriter(view, at);
+    w.u16("version", head.version);
+    w.u64("flags", head.flags);
+    w.u32("measurement_uid", head.measurement_uid);
+    w.u32("scan_counter", head.scan_counter);
+    w.u32("acquisition_time_stamp", head.acquisition_time_stamp);
+    w.each("physiology_time_stamp", head.physiology_time_stamp, 3, w.u32);
+    w.u16("number_of_samples", head.number_of_samples);
+    w.u16("available_channels", head.available_channels);
+    w.u16("active_channels", head.active_channels);
+    w.each("channel_mask", head.channel_mask, 16, w.u64);
+    w.u16("discard_pre", head.discard_pre);
+    w.u16("discard_post", head.discard_post);
+    w.u16("center_sample", head.center_sample);
+    w.u16("encoding_space_ref", head.encoding_space_ref);
+    w.u16("trajectory_dimensions", head.trajectory_dimensions);
+    w.f32("sample_time_us", head.sample_time_us);
+    w.each("position", head.position, 3, w.f32);
+    w.each("read_dir", head.read_dir, 3, w.f32);
+    w.each("phase_dir", head.phase_dir, 3, w.f32);
+    w.each("slice_dir", head.slice_dir, 3, w.f32);
+    w.each("patient_table_position", head.patient_table_position, 3, w.f32);
+    const idx = head.idx;
+    w.u16("idx.kspace_encode_step_1", idx.kspace_encode_step_1);
+    w.u16("idx.kspace_encode_step_2", idx.kspace_encode_step_2);
+    w.u16("idx.average", idx.average);
+    w.u16("idx.slice", idx.slice);
+    w.u16("idx.contrast", idx.contrast);
+    w.u16("idx.phase", idx.phase);
+    w.u16("idx.repetition", idx.repetition);
+    w.u16("idx.set", idx.set);
+    w.u16("idx.segment", idx.segment);
+    w.each("idx.user", idx.user, 8, w.u16);
+    w.each("user_int", head.user_int, 8, w.i32);
+    w.each("user_float", head.user_float, 8, w.f32);
+    w.end(ACQUISITION_HEADER_SIZE);
+  }
+  function checkShapes(acquisition, index) {
+    const { head, traj, data } = acquisition;
+    const samples = head.number_of_samples;
+    if (traj.length !== samples * head.trajectory_dimensions) {
+      throw new RangeError(`Acquisition ${index}: traj has ${traj.length} values, but number_of_samples \xD7 trajectory_dimensions is ${samples} \xD7 ${head.trajectory_dimensions}.`);
+    }
+    if (data.length !== 2 * samples * head.active_channels) {
+      throw new RangeError(`Acquisition ${index}: data has ${data.length} values, but 2 \xD7 active_channels \xD7 number_of_samples is 2 \xD7 ${head.active_channels} \xD7 ${samples}.`);
+    }
+  }
+  function withIndex(index, run) {
+    try {
+      return run();
+    } catch (error) {
+      throw new RangeError(`Acquisition ${index}: ${error.message}`);
+    }
+  }
+  var ENCODING_COUNTERS_HDF5_TYPE = h5t.compound([
+    ["kspace_encode_step_1", h5t.u16],
+    ["kspace_encode_step_2", h5t.u16],
+    ["average", h5t.u16],
+    ["slice", h5t.u16],
+    ["contrast", h5t.u16],
+    ["phase", h5t.u16],
+    ["repetition", h5t.u16],
+    ["set", h5t.u16],
+    ["segment", h5t.u16],
+    ["user", h5t.array(h5t.u16, [8])]
+  ]);
+  var ACQUISITION_HEADER_HDF5_TYPE = h5t.compound([
+    ["version", h5t.u16],
+    ["flags", h5t.u64],
+    ["measurement_uid", h5t.u32],
+    ["scan_counter", h5t.u32],
+    ["acquisition_time_stamp", h5t.u32],
+    ["physiology_time_stamp", h5t.array(h5t.u32, [3])],
+    ["number_of_samples", h5t.u16],
+    ["available_channels", h5t.u16],
+    ["active_channels", h5t.u16],
+    ["channel_mask", h5t.array(h5t.u64, [16])],
+    ["discard_pre", h5t.u16],
+    ["discard_post", h5t.u16],
+    ["center_sample", h5t.u16],
+    ["encoding_space_ref", h5t.u16],
+    ["trajectory_dimensions", h5t.u16],
+    ["sample_time_us", h5t.f32],
+    ["position", h5t.array(h5t.f32, [3])],
+    ["read_dir", h5t.array(h5t.f32, [3])],
+    ["phase_dir", h5t.array(h5t.f32, [3])],
+    ["slice_dir", h5t.array(h5t.f32, [3])],
+    ["patient_table_position", h5t.array(h5t.f32, [3])],
+    ["idx", ENCODING_COUNTERS_HDF5_TYPE],
+    ["user_int", h5t.array(h5t.i32, [8])],
+    ["user_float", h5t.array(h5t.f32, [8])]
+  ]);
+  var ACQUISITION_HDF5_TYPE = h5t.compound([
+    ["head", ACQUISITION_HEADER_HDF5_TYPE],
+    ["traj", h5t.vlen(h5t.f32)],
+    ["data", h5t.vlen(h5t.f32)]
+  ]);
+  function writeIsmrmrdHdf5(xmlHeader, acquisitions, options = {}) {
+    const group = options.datasetName ?? "dataset";
+    if (!group || group === "." || group.includes("/") || group.includes("\0")) {
+      throw new Error(`Invalid ISMRMRD dataset name '${group}'.`);
+    }
+    const heads = new Uint8Array(acquisitions.length * ACQUISITION_HEADER_SIZE);
+    const view = new DataView(heads.buffer);
+    const rows = acquisitions.map((acquisition, i2) => {
+      checkShapes(acquisition, i2);
+      const at = i2 * ACQUISITION_HEADER_SIZE;
+      withIndex(i2, () => writeAcquisitionHeader(acquisition.head, view, at));
+      return { head: heads.subarray(at, at + ACQUISITION_HEADER_SIZE), traj: acquisition.traj, data: acquisition.data };
+    });
+    return new Hdf5Writer().dataset(`/${group}/xml`, h5t.string("ascii"), [1], [xmlHeader]).dataset(`/${group}/data`, ACQUISITION_HDF5_TYPE, [rows.length], rows).finish();
+  }
+  var IsmrmrdMessageId = Object.freeze({
+    CONFIG_FILE: 1,
+    CONFIG_TEXT: 2,
+    HEADER: 3,
+    CLOSE: 4,
+    TEXT: 5,
+    ACQUISITION: 1008,
+    IMAGE: 1022,
+    WAVEFORM: 1026,
+    NDARRAY: 1030
+  });
+  var LITTLE_ENDIAN_HOST2 = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+  var utf82 = new TextEncoder();
+  function writeFloat32s(bytes, view, at, values) {
+    if (LITTLE_ENDIAN_HOST2 && values instanceof Float32Array) {
+      bytes.set(new Uint8Array(values.buffer, values.byteOffset, values.byteLength), at);
+    } else {
+      for (let i2 = 0; i2 < values.length; i2++) view.setFloat32(at + 4 * i2, values[i2], true);
+    }
+    return at + 4 * values.length;
+  }
+  function writeIsmrmrdStream(xmlHeader, acquisitions) {
+    const xml = utf82.encode(xmlHeader);
+    let size = 2 + 4 + xml.length + 2;
+    for (const [i2, acquisition] of acquisitions.entries()) {
+      checkShapes(acquisition, i2);
+      size += 2 + ACQUISITION_HEADER_SIZE + 4 * (acquisition.traj.length + acquisition.data.length);
+    }
+    const bytes = new Uint8Array(size);
+    const view = new DataView(bytes.buffer);
+    view.setUint16(0, IsmrmrdMessageId.HEADER, true);
+    view.setUint32(2, xml.length, true);
+    bytes.set(xml, 6);
+    let at = 6 + xml.length;
+    for (const [i2, acquisition] of acquisitions.entries()) {
+      view.setUint16(at, IsmrmrdMessageId.ACQUISITION, true);
+      withIndex(i2, () => writeAcquisitionHeader(acquisition.head, view, at + 2));
+      at = writeFloat32s(bytes, view, at + 2 + ACQUISITION_HEADER_SIZE, acquisition.traj);
+      at = writeFloat32s(bytes, view, at, acquisition.data);
+    }
+    view.setUint16(at, IsmrmrdMessageId.CLOSE, true);
+    return bytes;
+  }
+  var ISMRMRD_NAMESPACE = "http://www.ismrm.org/ISMRMRD";
+  var TRAJECTORIES = ["cartesian", "epi", "radial", "goldenangle", "spiral", "other"];
+  var PATIENT_POSITIONS = ["HFP", "HFS", "HFDR", "HFDL", "FFP", "FFS", "FFDR", "FFDL"];
+  var LIMIT_NAMES = [
+    "kspace_encoding_step_0",
+    "kspace_encoding_step_1",
+    "kspace_encoding_step_2",
+    "average",
+    "slice",
+    "contrast",
+    "phase",
+    "repetition",
+    "set",
+    "segment",
+    "user_0",
+    "user_1",
+    "user_2",
+    "user_3",
+    "user_4",
+    "user_5",
+    "user_6",
+    "user_7"
+  ];
+  var XML_ENTITIES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" };
+  function escapeXml(text2) {
+    let out = "";
+    for (const char of text2) {
+      const code = char.codePointAt(0);
+      if (XML_ENTITIES[char]) out += XML_ENTITIES[char];
+      else if (code >= 32 && code < 127) out += char;
+      else if (code === 9 || code === 10 || code === 13) out += char;
+      else if (code < 32 || code >= 55296 && code <= 57343 || code === 65534 || code === 65535) out += "&#xFFFD;";
+      else out += `&#x${code.toString(16).toUpperCase()};`;
+    }
+    return out;
+  }
+  function xsFloat(value, name) {
+    if (typeof value !== "number") throw new RangeError(`${name} must be a number, got ${String(value)}.`);
+    if (Number.isNaN(value)) return "NaN";
+    if (!Number.isFinite(value)) return value > 0 ? "INF" : "-INF";
+    return String(value);
+  }
+  function xsLong(value, name) {
+    if (typeof value === "bigint") {
+      if (value < -(2n ** 63n) || value >= 2n ** 63n) throw new RangeError(`${name} does not fit xs:long: ${value}.`);
+      return String(value);
+    }
+    if (!Number.isSafeInteger(value)) throw new RangeError(`${name} must be an integer, got ${String(value)}.`);
+    return String(value);
+  }
+  function unsignedShort(value, name) {
+    if (!Number.isInteger(value) || value < 0 || value > 65535) throw new RangeError(`${name} must be an integer in [0, 65535], got ${String(value)}.`);
+    return String(value);
+  }
+  function oneOf(value, allowed, name) {
+    if (!allowed.includes(value)) throw new RangeError(`${name} must be one of ${allowed.join(", ")}, got '${value}'.`);
+    return value;
+  }
+  var XmlWriter = class {
+    constructor() {
+      __publicField(this, "lines", ['<?xml version="1.0" encoding="UTF-8"?>']);
+      __publicField(this, "open", []);
+    }
+    start(name, attributes = "") {
+      this.lines.push(`${"  ".repeat(this.open.length)}<${name}${attributes}>`);
+      this.open.push(name);
+    }
+    end() {
+      const name = this.open.pop();
+      this.lines.push(`${"  ".repeat(this.open.length)}</${name}>`);
+    }
+    leaf(name, text2) {
+      this.lines.push(`${"  ".repeat(this.open.length)}<${name}>${escapeXml(text2)}</${name}>`);
+    }
+    xyz(name, value, format) {
+      this.start(name);
+      for (const axis of ["x", "y", "z"]) this.leaf(axis, format(value[axis], `${name}.${axis}`));
+      this.end();
+    }
+    toString() {
+      return `${this.lines.join("\n")}
+`;
+    }
+  };
+  function buildIsmrmrdHeaderXml(info) {
+    const xml = new XmlWriter();
+    xml.start("ismrmrdHeader", ` xmlns="${ISMRMRD_NAMESPACE}" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xs="http://www.w3.org/2001/XMLSchema" xsi:schemaLocation="${ISMRMRD_NAMESPACE} ismrmrd.xsd"`);
+    const measurement = info.measurementInformation;
+    if (measurement) {
+      xml.start("measurementInformation");
+      xml.leaf("patientPosition", oneOf(measurement.patientPosition ?? "HFS", PATIENT_POSITIONS, "patientPosition"));
+      if (measurement.protocolName !== void 0) xml.leaf("protocolName", measurement.protocolName);
+      xml.end();
+    }
+    const system = info.acquisitionSystemInformation ?? {};
+    xml.start("acquisitionSystemInformation");
+    if (system.systemVendor !== void 0) xml.leaf("systemVendor", system.systemVendor);
+    if (system.systemModel !== void 0) xml.leaf("systemModel", system.systemModel);
+    if (info.systemFieldStrength_T !== void 0) xml.leaf("systemFieldStrength_T", xsFloat(info.systemFieldStrength_T, "systemFieldStrength_T"));
+    xml.leaf("receiverChannels", unsignedShort(info.receiverChannels, "receiverChannels"));
+    xml.end();
+    if (!Number.isFinite(info.H1resonanceFrequency_Hz)) {
+      throw new RangeError(`H1resonanceFrequency_Hz must be finite, got ${info.H1resonanceFrequency_Hz}.`);
+    }
+    xml.start("experimentalConditions");
+    xml.leaf("H1resonanceFrequency_Hz", xsLong(Math.round(info.H1resonanceFrequency_Hz), "H1resonanceFrequency_Hz"));
+    xml.end();
+    xml.start("encoding");
+    for (const [name, space] of [["encodedSpace", info.encodedSpace], ["reconSpace", info.reconSpace ?? info.encodedSpace]]) {
+      xml.start(name);
+      xml.xyz("matrixSize", space.matrixSize, unsignedShort);
+      xml.xyz("fieldOfView_mm", space.fieldOfView_mm, xsFloat);
+      xml.end();
+    }
+    xml.start("encodingLimits");
+    for (const name of LIMIT_NAMES) {
+      const limit = info.encodingLimits[name];
+      if (!limit) continue;
+      xml.start(name);
+      xml.leaf("minimum", unsignedShort(limit.minimum, `${name}.minimum`));
+      xml.leaf("maximum", unsignedShort(limit.maximum, `${name}.maximum`));
+      xml.leaf("center", unsignedShort(limit.center, `${name}.center`));
+      xml.end();
+    }
+    xml.end();
+    xml.leaf("trajectory", oneOf(info.trajectory, TRAJECTORIES, "trajectory"));
+    xml.end();
+    const sequence = info.sequenceParameters;
+    if (sequence && Object.values(sequence).some((value) => value !== void 0 && !(Array.isArray(value) && value.length === 0))) {
+      xml.start("sequenceParameters");
+      for (const name of ["TR", "TE", "TI", "flipAngle_deg"]) {
+        for (const value of sequence[name] ?? []) xml.leaf(name, xsFloat(value, name));
+      }
+      if (sequence.sequence_type !== void 0) xml.leaf("sequence_type", sequence.sequence_type);
+      for (const value of sequence.echo_spacing ?? []) xml.leaf("echo_spacing", xsFloat(value, "echo_spacing"));
+      xml.end();
+    }
+    const user = info.userParameters;
+    const longs = user?.userParameterLong ?? [];
+    const doubles = user?.userParameterDouble ?? [];
+    const strings = user?.userParameterString ?? [];
+    if (longs.length + doubles.length + strings.length > 0) {
+      xml.start("userParameters");
+      const parameter = (element, name, value) => {
+        xml.start(element);
+        xml.leaf("name", name);
+        xml.leaf("value", value);
+        xml.end();
+      };
+      for (const p of longs) parameter("userParameterLong", p.name, xsLong(p.value, `userParameterLong '${p.name}'`));
+      for (const p of doubles) parameter("userParameterDouble", p.name, xsFloat(p.value, `userParameterDouble '${p.name}'`));
+      for (const p of strings) parameter("userParameterString", p.name, p.value);
+      xml.end();
+    }
+    xml.end();
+    return xml.toString();
+  }
+
+  // src/sim/io/exportPlan.ts
+  var ACQ_FLAG_BITS = IsmrmrdAcqFlag;
+  var COUNTERS = [
+    "kspace_encode_step_1",
+    "kspace_encode_step_2",
+    "average",
+    "slice",
+    "contrast",
+    "phase",
+    "repetition",
+    "set",
+    "segment"
+  ];
+  var LABEL_OF = {
+    kspace_encode_step_1: "LIN",
+    kspace_encode_step_2: "PAR",
+    average: "AVG",
+    slice: "SLC",
+    contrast: "ECO",
+    phase: "PHS",
+    repetition: "REP",
+    set: "SET",
+    segment: "SEG"
+  };
+  function planExport(layout, grid) {
+    const names = layout.labels.names;
+    const width = names.length;
+    const column = (name) => names.indexOf(name);
+    const label = (a, name) => {
+      const c = column(name);
+      return c >= 0 ? layout.labels.values[a * width + c] : 0;
+    };
+    const has = (name) => column(name) >= 0;
+    const raw = [];
+    const labelled = COUNTERS.filter((counter) => has(LABEL_OF[counter]));
+    for (let a = 0; a < layout.acquisitions; a++) {
+      const values = {};
+      for (const counter of COUNTERS) values[counter] = label(a, LABEL_OF[counter]);
+      if (!has("LIN") && grid.delta) values.kspace_encode_step_1 = gridLine(layout, a, grid);
+      raw.push(values);
+    }
+    const counterOffsets = {};
+    const limits = {};
+    for (const counter of COUNTERS) {
+      let min = Infinity, max2 = -Infinity;
+      for (const values of raw) {
+        min = Math.min(min, values[counter]);
+        max2 = Math.max(max2, values[counter]);
+      }
+      if (!raw.length) min = max2 = 0;
+      counterOffsets[counter] = min;
+      const span = max2 - min;
+      if (span > 65535) throw new Error(`The ${counter} counter spans ${span + 1} values, more than ISMRMRD's 16 bits hold.`);
+      const center = counter === "kspace_encode_step_1" && !has("LIN") && grid.delta ? Math.round(grid.nv / 2) - min : Math.floor(span / 2);
+      limits[counter] = { minimum: 0, maximum: span, center: Math.max(0, Math.min(span, center)) };
+    }
+    const acquisitions = raw.map((values, a) => {
+      const idx = {};
+      for (const counter of COUNTERS) idx[counter] = values[counter] - counterOffsets[counter];
+      const flags = [];
+      if (label(a, "NAV")) flags.push(ACQ_FLAG_BITS.IS_NAVIGATION_DATA);
+      if (label(a, "NOISE")) flags.push(ACQ_FLAG_BITS.IS_NOISE_MEASUREMENT);
+      if (label(a, "REF")) flags.push(label(a, "IMA") ? ACQ_FLAG_BITS.IS_PARALLEL_CALIBRATION_AND_IMAGING : ACQ_FLAG_BITS.IS_PARALLEL_CALIBRATION);
+      if (label(a, "REV") || grid.delta && reversedReadout(layout, a)) flags.push(ACQ_FLAG_BITS.IS_REVERSE);
+      return { idx, flags, centerSample: centerSample(layout, a) };
+    });
+    markBoundaries(acquisitions);
+    if (acquisitions.length) acquisitions[acquisitions.length - 1].flags.push(ACQ_FLAG_BITS.LAST_IN_MEASUREMENT);
+    return { acquisitions, counterOffsets, limits, labelled };
+  }
+  function markBoundaries(acquisitions) {
+    const groups = [
+      [ACQ_FLAG_BITS.FIRST_IN_SLICE, (p) => `${p.idx.slice}|${p.idx.repetition}|${p.idx.contrast}|${p.idx.set}`],
+      [ACQ_FLAG_BITS.FIRST_IN_REPETITION, (p) => `${p.idx.repetition}`]
+    ];
+    for (const [firstBit, key] of groups) {
+      const first = /* @__PURE__ */ new Map(), last = /* @__PURE__ */ new Map();
+      acquisitions.forEach((p, a) => {
+        const k = key(p);
+        if (!first.has(k)) first.set(k, a);
+        last.set(k, a);
+      });
+      for (const a of first.values()) acquisitions[a].flags.push(firstBit);
+      for (const a of last.values()) acquisitions[a].flags.push(firstBit + 1);
+    }
+    const byGroup = /* @__PURE__ */ new Map();
+    acquisitions.forEach((p, a) => {
+      const k = `${p.idx.slice}|${p.idx.repetition}|${p.idx.contrast}|${p.idx.set}|${p.idx.kspace_encode_step_2}`;
+      const line = p.idx.kspace_encode_step_1;
+      let g = byGroup.get(k);
+      if (!g) byGroup.set(k, g = { min: line, max: line, first: [], last: [] });
+      if (line < g.min) {
+        g.min = line;
+        g.first = [];
+      }
+      if (line > g.max) {
+        g.max = line;
+        g.last = [];
+      }
+      if (line === g.min) g.first.push(a);
+      if (line === g.max) g.last.push(a);
+    });
+    for (const g of byGroup.values()) {
+      if (g.first.length) acquisitions[g.first[0]].flags.push(ACQ_FLAG_BITS.FIRST_IN_ENCODE_STEP1);
+      if (g.last.length) acquisitions[g.last[g.last.length - 1]].flags.push(ACQ_FLAG_BITS.LAST_IN_ENCODE_STEP1);
+    }
+  }
+  function centerSample(layout, a) {
+    const offset = layout.offsets[a], n = layout.samples[a];
+    let best = Math.floor(n / 2), bestNorm = Infinity;
+    for (let s = 0; s < n; s++) {
+      const i2 = 3 * (offset + s);
+      const norm2 = layout.k[i2] ** 2 + layout.k[i2 + 1] ** 2 + layout.k[i2 + 2] ** 2;
+      if (norm2 < bestNorm - 1e-12) {
+        bestNorm = norm2;
+        best = s;
+      }
+    }
+    return best;
+  }
+  function reversedReadout(layout, a) {
+    const n = layout.samples[a];
+    if (n < 2) return false;
+    const first = 3 * layout.offsets[a], last = 3 * (layout.offsets[a] + n - 1);
+    let span = 0;
+    for (let d = 0; d < 3; d++) {
+      const delta = layout.k[last + d] - layout.k[first + d];
+      if (Math.abs(delta) > Math.abs(span)) span = delta;
+    }
+    return span < 0;
+  }
+  function gridLine(layout, a, grid) {
+    const centre = 3 * (layout.offsets[a] + (layout.samples[a] >> 1));
+    const kv = layout.k[centre + grid.axes[1]];
+    return Math.round(kv / grid.delta[1] - grid.offset[1]) + (grid.nv >> 1);
+  }
+  function normalisedTrajectory(layout, a, kmax, axes) {
+    const n = layout.samples[a];
+    const out = new Float32Array(n * axes.length);
+    for (let s = 0; s < n; s++) {
+      for (let d = 0; d < axes.length; d++) {
+        const axis = axes[d];
+        const k = layout.k[3 * (layout.offsets[a] + s) + axis];
+        out[s * axes.length + d] = kmax[axis] > 0 ? 0.5 * k / kmax[axis] : 0;
+      }
+    }
+    return out;
+  }
+
+  // node_modules/fflate/esm/browser.js
+  var u8 = Uint8Array;
+  var u16 = Uint16Array;
+  var i32 = Int32Array;
+  var fleb = new u8([
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    1,
+    1,
+    1,
+    2,
+    2,
+    2,
+    2,
+    3,
+    3,
+    3,
+    3,
+    4,
+    4,
+    4,
+    4,
+    5,
+    5,
+    5,
+    5,
+    0,
+    /* unused */
+    0,
+    0,
+    /* impossible */
+    0
+  ]);
+  var fdeb = new u8([
+    0,
+    0,
+    0,
+    0,
+    1,
+    1,
+    2,
+    2,
+    3,
+    3,
+    4,
+    4,
+    5,
+    5,
+    6,
+    6,
+    7,
+    7,
+    8,
+    8,
+    9,
+    9,
+    10,
+    10,
+    11,
+    11,
+    12,
+    12,
+    13,
+    13,
+    /* unused */
+    0,
+    0
+  ]);
+  var clim = new u8([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]);
+  var freb = function(eb, start) {
+    var b = new u16(31);
+    for (var i2 = 0; i2 < 31; ++i2) {
+      b[i2] = start += 1 << eb[i2 - 1];
+    }
+    var r = new i32(b[30]);
+    for (var i2 = 1; i2 < 30; ++i2) {
+      for (var j = b[i2]; j < b[i2 + 1]; ++j) {
+        r[j] = j - b[i2] << 5 | i2;
+      }
+    }
+    return { b, r };
+  };
+  var _a = freb(fleb, 2);
+  var fl = _a.b;
+  var revfl = _a.r;
+  fl[28] = 258, revfl[258] = 28;
+  var _b = freb(fdeb, 0);
+  var fd = _b.b;
+  var revfd = _b.r;
+  var rev = new u16(32768);
+  for (i = 0; i < 32768; ++i) {
+    x = (i & 43690) >> 1 | (i & 21845) << 1;
+    x = (x & 52428) >> 2 | (x & 13107) << 2;
+    x = (x & 61680) >> 4 | (x & 3855) << 4;
+    rev[i] = ((x & 65280) >> 8 | (x & 255) << 8) >> 1;
+  }
+  var x;
+  var i;
+  var hMap = (function(cd, mb, r) {
+    var s = cd.length;
+    var i2 = 0;
+    var l = new u16(mb);
+    for (; i2 < s; ++i2) {
+      if (cd[i2])
+        ++l[cd[i2] - 1];
+    }
+    var le = new u16(mb);
+    for (i2 = 1; i2 < mb; ++i2) {
+      le[i2] = le[i2 - 1] + l[i2 - 1] << 1;
+    }
+    var co;
+    if (r) {
+      co = new u16(1 << mb);
+      var rvb = 15 - mb;
+      for (i2 = 0; i2 < s; ++i2) {
+        if (cd[i2]) {
+          var sv = i2 << 4 | cd[i2];
+          var r_1 = mb - cd[i2];
+          var v = le[cd[i2] - 1]++ << r_1;
+          for (var m = v | (1 << r_1) - 1; v <= m; ++v) {
+            co[rev[v] >> rvb] = sv;
+          }
+        }
+      }
+    } else {
+      co = new u16(s);
+      for (i2 = 0; i2 < s; ++i2) {
+        if (cd[i2]) {
+          co[i2] = rev[le[cd[i2] - 1]++] >> 15 - cd[i2];
+        }
+      }
+    }
+    return co;
+  });
+  var flt = new u8(288);
+  for (i = 0; i < 144; ++i)
+    flt[i] = 8;
+  var i;
+  for (i = 144; i < 256; ++i)
+    flt[i] = 9;
+  var i;
+  for (i = 256; i < 280; ++i)
+    flt[i] = 7;
+  var i;
+  for (i = 280; i < 288; ++i)
+    flt[i] = 8;
+  var i;
+  var fdt = new u8(32);
+  for (i = 0; i < 32; ++i)
+    fdt[i] = 5;
+  var i;
+  var flm = /* @__PURE__ */ hMap(flt, 9, 0);
+  var flrm = /* @__PURE__ */ hMap(flt, 9, 1);
+  var fdm = /* @__PURE__ */ hMap(fdt, 5, 0);
+  var fdrm = /* @__PURE__ */ hMap(fdt, 5, 1);
+  var max = function(a) {
+    var m = a[0];
+    for (var i2 = 1; i2 < a.length; ++i2) {
+      if (a[i2] > m)
+        m = a[i2];
+    }
+    return m;
+  };
+  var bits = function(d, p, m) {
+    var o = p / 8 | 0;
+    return (d[o] | d[o + 1] << 8) >> (p & 7) & m;
+  };
+  var bits16 = function(d, p) {
+    var o = p / 8 | 0;
+    return (d[o] | d[o + 1] << 8 | d[o + 2] << 16) >> (p & 7);
+  };
+  var shft = function(p) {
+    return (p + 7) / 8 | 0;
+  };
+  var slc = function(v, s, e) {
+    if (s == null || s < 0)
+      s = 0;
+    if (e == null || e > v.length)
+      e = v.length;
+    return new u8(v.subarray(s, e));
+  };
+  var ec = [
+    "unexpected EOF",
+    "invalid block type",
+    "invalid length/literal",
+    "invalid distance",
+    "stream finished",
+    "no stream handler",
+    ,
+    // determined by compression function
+    "no callback",
+    "invalid UTF-8 data",
+    "extra field too long",
+    "date not in range 1980-2099",
+    "filename too long",
+    "stream finishing",
+    "invalid zip data"
+    // determined by unknown compression method
+  ];
+  var err = function(ind, msg, nt) {
+    var e = new Error(msg || ec[ind]);
+    e.code = ind;
+    if (Error.captureStackTrace)
+      Error.captureStackTrace(e, err);
+    if (!nt)
+      throw e;
+    return e;
+  };
+  var inflt = function(dat, st, buf, dict) {
+    var sl = dat.length, dl = dict ? dict.length : 0;
+    if (!sl || st.f && !st.l)
+      return buf || new u8(0);
+    var noBuf = !buf;
+    var resize = noBuf || st.i != 2;
+    var noSt = st.i;
+    if (noBuf)
+      buf = new u8(sl * 3);
+    var cbuf = function(l2) {
+      var bl = buf.length;
+      if (l2 > bl) {
+        var nbuf = new u8(Math.max(bl * 2, l2));
+        nbuf.set(buf);
+        buf = nbuf;
+      }
+    };
+    var final = st.f || 0, pos = st.p || 0, bt = st.b || 0, lm = st.l, dm = st.d, lbt = st.m, dbt = st.n;
+    var tbts = sl * 8;
+    do {
+      if (!lm) {
+        final = bits(dat, pos, 1);
+        var type = bits(dat, pos + 1, 3);
+        pos += 3;
+        if (!type) {
+          var s = shft(pos) + 4, l = dat[s - 4] | dat[s - 3] << 8, t = s + l;
+          if (t > sl) {
+            if (noSt)
+              err(0);
+            break;
+          }
+          if (resize)
+            cbuf(bt + l);
+          buf.set(dat.subarray(s, t), bt);
+          st.b = bt += l, st.p = pos = t * 8, st.f = final;
+          continue;
+        } else if (type == 1)
+          lm = flrm, dm = fdrm, lbt = 9, dbt = 5;
+        else if (type == 2) {
+          var hLit = bits(dat, pos, 31) + 257, hcLen = bits(dat, pos + 10, 15) + 4;
+          var tl = hLit + bits(dat, pos + 5, 31) + 1;
+          pos += 14;
+          var ldt = new u8(tl);
+          var clt = new u8(19);
+          for (var i2 = 0; i2 < hcLen; ++i2) {
+            clt[clim[i2]] = bits(dat, pos + i2 * 3, 7);
+          }
+          pos += hcLen * 3;
+          var clb = max(clt), clbmsk = (1 << clb) - 1;
+          var clm = hMap(clt, clb, 1);
+          for (var i2 = 0; i2 < tl; ) {
+            var r = clm[bits(dat, pos, clbmsk)];
+            pos += r & 15;
+            var s = r >> 4;
+            if (s < 16) {
+              ldt[i2++] = s;
+            } else {
+              var c = 0, n = 0;
+              if (s == 16)
+                n = 3 + bits(dat, pos, 3), pos += 2, c = ldt[i2 - 1];
+              else if (s == 17)
+                n = 3 + bits(dat, pos, 7), pos += 3;
+              else if (s == 18)
+                n = 11 + bits(dat, pos, 127), pos += 7;
+              while (n--)
+                ldt[i2++] = c;
+            }
+          }
+          var lt = ldt.subarray(0, hLit), dt = ldt.subarray(hLit);
+          lbt = max(lt);
+          dbt = max(dt);
+          lm = hMap(lt, lbt, 1);
+          dm = hMap(dt, dbt, 1);
+        } else
+          err(1);
+        if (pos > tbts) {
+          if (noSt)
+            err(0);
+          break;
+        }
+      }
+      if (resize)
+        cbuf(bt + 131072);
+      var lms = (1 << lbt) - 1, dms = (1 << dbt) - 1;
+      var lpos = pos;
+      for (; ; lpos = pos) {
+        var c = lm[bits16(dat, pos) & lms], sym = c >> 4;
+        pos += c & 15;
+        if (pos > tbts) {
+          if (noSt)
+            err(0);
+          break;
+        }
+        if (!c)
+          err(2);
+        if (sym < 256)
+          buf[bt++] = sym;
+        else if (sym == 256) {
+          lpos = pos, lm = null;
+          break;
+        } else {
+          var add = sym - 254;
+          if (sym > 264) {
+            var i2 = sym - 257, b = fleb[i2];
+            add = bits(dat, pos, (1 << b) - 1) + fl[i2];
+            pos += b;
+          }
+          var d = dm[bits16(dat, pos) & dms], dsym = d >> 4;
+          if (!d)
+            err(3);
+          pos += d & 15;
+          var dt = fd[dsym];
+          if (dsym > 3) {
+            var b = fdeb[dsym];
+            dt += bits16(dat, pos) & (1 << b) - 1, pos += b;
+          }
+          if (pos > tbts) {
+            if (noSt)
+              err(0);
+            break;
+          }
+          if (resize)
+            cbuf(bt + 131072);
+          var end = bt + add;
+          if (bt < dt) {
+            var shift = dl - dt, dend = Math.min(dt, end);
+            if (shift + bt < 0)
+              err(3);
+            for (; bt < dend; ++bt)
+              buf[bt] = dict[shift + bt];
+          }
+          for (; bt < end; ++bt)
+            buf[bt] = buf[bt - dt];
+        }
+      }
+      st.l = lm, st.p = lpos, st.b = bt, st.f = final;
+      if (lm)
+        final = 1, st.m = lbt, st.d = dm, st.n = dbt;
+    } while (!final);
+    return bt != buf.length && noBuf ? slc(buf, 0, bt) : buf.subarray(0, bt);
+  };
+  var wbits = function(d, p, v) {
+    v <<= p & 7;
+    var o = p / 8 | 0;
+    d[o] |= v;
+    d[o + 1] |= v >> 8;
+  };
+  var wbits16 = function(d, p, v) {
+    v <<= p & 7;
+    var o = p / 8 | 0;
+    d[o] |= v;
+    d[o + 1] |= v >> 8;
+    d[o + 2] |= v >> 16;
+  };
+  var hTree = function(d, mb) {
+    var t = [];
+    for (var i2 = 0; i2 < d.length; ++i2) {
+      if (d[i2])
+        t.push({ s: i2, f: d[i2] });
+    }
+    var s = t.length;
+    var t2 = t.slice();
+    if (!s)
+      return { t: et, l: 0 };
+    if (s == 1) {
+      var v = new u8(t[0].s + 1);
+      v[t[0].s] = 1;
+      return { t: v, l: 1 };
+    }
+    t.sort(function(a, b) {
+      return a.f - b.f;
+    });
+    t.push({ s: -1, f: 25001 });
+    var l = t[0], r = t[1], i0 = 0, i1 = 1, i22 = 2;
+    t[0] = { s: -1, f: l.f + r.f, l, r };
+    while (i1 != s - 1) {
+      l = t[t[i0].f < t[i22].f ? i0++ : i22++];
+      r = t[i0 != i1 && t[i0].f < t[i22].f ? i0++ : i22++];
+      t[i1++] = { s: -1, f: l.f + r.f, l, r };
+    }
+    var maxSym = t2[0].s;
+    for (var i2 = 1; i2 < s; ++i2) {
+      if (t2[i2].s > maxSym)
+        maxSym = t2[i2].s;
+    }
+    var tr = new u16(maxSym + 1);
+    var mbt = ln(t[i1 - 1], tr, 0);
+    if (mbt > mb) {
+      var i2 = 0, dt = 0;
+      var lft = mbt - mb, cst = 1 << lft;
+      t2.sort(function(a, b) {
+        return tr[b.s] - tr[a.s] || a.f - b.f;
+      });
+      for (; i2 < s; ++i2) {
+        var i2_1 = t2[i2].s;
+        if (tr[i2_1] > mb) {
+          dt += cst - (1 << mbt - tr[i2_1]);
+          tr[i2_1] = mb;
+        } else
+          break;
+      }
+      dt >>= lft;
+      while (dt > 0) {
+        var i2_2 = t2[i2].s;
+        if (tr[i2_2] < mb)
+          dt -= 1 << mb - tr[i2_2]++ - 1;
+        else
+          ++i2;
+      }
+      for (; i2 >= 0 && dt; --i2) {
+        var i2_3 = t2[i2].s;
+        if (tr[i2_3] == mb) {
+          --tr[i2_3];
+          ++dt;
+        }
+      }
+      mbt = mb;
+    }
+    return { t: new u8(tr), l: mbt };
+  };
+  var ln = function(n, l, d) {
+    return n.s == -1 ? Math.max(ln(n.l, l, d + 1), ln(n.r, l, d + 1)) : l[n.s] = d;
+  };
+  var lc = function(c) {
+    var s = c.length;
+    while (s && !c[--s])
+      ;
+    var cl = new u16(++s);
+    var cli = 0, cln = c[0], cls = 1;
+    var w = function(v) {
+      cl[cli++] = v;
+    };
+    for (var i2 = 1; i2 <= s; ++i2) {
+      if (c[i2] == cln && i2 != s)
+        ++cls;
+      else {
+        if (!cln && cls > 2) {
+          for (; cls > 138; cls -= 138)
+            w(32754);
+          if (cls > 2) {
+            w(cls > 10 ? cls - 11 << 5 | 28690 : cls - 3 << 5 | 12305);
+            cls = 0;
+          }
+        } else if (cls > 3) {
+          w(cln), --cls;
+          for (; cls > 6; cls -= 6)
+            w(8304);
+          if (cls > 2)
+            w(cls - 3 << 5 | 8208), cls = 0;
+        }
+        while (cls--)
+          w(cln);
+        cls = 1;
+        cln = c[i2];
+      }
+    }
+    return { c: cl.subarray(0, cli), n: s };
+  };
+  var clen = function(cf, cl) {
+    var l = 0;
+    for (var i2 = 0; i2 < cl.length; ++i2)
+      l += cf[i2] * cl[i2];
+    return l;
+  };
+  var wfblk = function(out, pos, dat) {
+    var s = dat.length;
+    var o = shft(pos + 2);
+    out[o] = s & 255;
+    out[o + 1] = s >> 8;
+    out[o + 2] = out[o] ^ 255;
+    out[o + 3] = out[o + 1] ^ 255;
+    for (var i2 = 0; i2 < s; ++i2)
+      out[o + i2 + 4] = dat[i2];
+    return (o + 4 + s) * 8;
+  };
+  var wblk = function(dat, out, final, syms, lf, df, eb, li, bs, bl, p) {
+    wbits(out, p++, final);
+    ++lf[256];
+    var _a2 = hTree(lf, 15), dlt = _a2.t, mlb = _a2.l;
+    var _b2 = hTree(df, 15), ddt = _b2.t, mdb = _b2.l;
+    var _c = lc(dlt), lclt = _c.c, nlc = _c.n;
+    var _d = lc(ddt), lcdt = _d.c, ndc = _d.n;
+    var lcfreq = new u16(19);
+    for (var i2 = 0; i2 < lclt.length; ++i2)
+      ++lcfreq[lclt[i2] & 31];
+    for (var i2 = 0; i2 < lcdt.length; ++i2)
+      ++lcfreq[lcdt[i2] & 31];
+    var _e = hTree(lcfreq, 7), lct = _e.t, mlcb = _e.l;
+    var nlcc = 19;
+    for (; nlcc > 4 && !lct[clim[nlcc - 1]]; --nlcc)
+      ;
+    var flen = bl + 5 << 3;
+    var ftlen = clen(lf, flt) + clen(df, fdt) + eb;
+    var dtlen = clen(lf, dlt) + clen(df, ddt) + eb + 14 + 3 * nlcc + clen(lcfreq, lct) + 2 * lcfreq[16] + 3 * lcfreq[17] + 7 * lcfreq[18];
+    if (bs >= 0 && flen <= ftlen && flen <= dtlen)
+      return wfblk(out, p, dat.subarray(bs, bs + bl));
+    var lm, ll, dm, dl;
+    wbits(out, p, 1 + (dtlen < ftlen)), p += 2;
+    if (dtlen < ftlen) {
+      lm = hMap(dlt, mlb, 0), ll = dlt, dm = hMap(ddt, mdb, 0), dl = ddt;
+      var llm = hMap(lct, mlcb, 0);
+      wbits(out, p, nlc - 257);
+      wbits(out, p + 5, ndc - 1);
+      wbits(out, p + 10, nlcc - 4);
+      p += 14;
+      for (var i2 = 0; i2 < nlcc; ++i2)
+        wbits(out, p + 3 * i2, lct[clim[i2]]);
+      p += 3 * nlcc;
+      var lcts = [lclt, lcdt];
+      for (var it = 0; it < 2; ++it) {
+        var clct = lcts[it];
+        for (var i2 = 0; i2 < clct.length; ++i2) {
+          var len = clct[i2] & 31;
+          wbits(out, p, llm[len]), p += lct[len];
+          if (len > 15)
+            wbits(out, p, clct[i2] >> 5 & 127), p += clct[i2] >> 12;
+        }
+      }
+    } else {
+      lm = flm, ll = flt, dm = fdm, dl = fdt;
+    }
+    for (var i2 = 0; i2 < li; ++i2) {
+      var sym = syms[i2];
+      if (sym > 255) {
+        var len = sym >> 18 & 31;
+        wbits16(out, p, lm[len + 257]), p += ll[len + 257];
+        if (len > 7)
+          wbits(out, p, sym >> 23 & 31), p += fleb[len];
+        var dst = sym & 31;
+        wbits16(out, p, dm[dst]), p += dl[dst];
+        if (dst > 3)
+          wbits16(out, p, sym >> 5 & 8191), p += fdeb[dst];
+      } else {
+        wbits16(out, p, lm[sym]), p += ll[sym];
+      }
+    }
+    wbits16(out, p, lm[256]);
+    return p + ll[256];
+  };
+  var deo = /* @__PURE__ */ new i32([65540, 131080, 131088, 131104, 262176, 1048704, 1048832, 2114560, 2117632]);
+  var et = /* @__PURE__ */ new u8(0);
+  var dflt = function(dat, lvl, plvl, pre, post, st) {
+    var s = st.z || dat.length;
+    var o = new u8(pre + s + 5 * (1 + Math.ceil(s / 7e3)) + post);
+    var w = o.subarray(pre, o.length - post);
+    var lst = st.l;
+    var pos = (st.r || 0) & 7;
+    if (lvl) {
+      if (pos)
+        w[0] = st.r >> 3;
+      var opt = deo[lvl - 1];
+      var n = opt >> 13, c = opt & 8191;
+      var msk_1 = (1 << plvl) - 1;
+      var prev = st.p || new u16(32768), head = st.h || new u16(msk_1 + 1);
+      var bs1_1 = Math.ceil(plvl / 3), bs2_1 = 2 * bs1_1;
+      var hsh = function(i3) {
+        return (dat[i3] ^ dat[i3 + 1] << bs1_1 ^ dat[i3 + 2] << bs2_1) & msk_1;
+      };
+      var syms = new i32(25e3);
+      var lf = new u16(288), df = new u16(32);
+      var lc_1 = 0, eb = 0, i2 = st.i || 0, li = 0, wi = st.w || 0, bs = 0;
+      for (; i2 + 2 < s; ++i2) {
+        var hv = hsh(i2);
+        var imod = i2 & 32767, pimod = head[hv];
+        prev[imod] = pimod;
+        head[hv] = imod;
+        if (wi <= i2) {
+          var rem = s - i2;
+          if ((lc_1 > 7e3 || li > 24576) && (rem > 423 || !lst)) {
+            pos = wblk(dat, w, 0, syms, lf, df, eb, li, bs, i2 - bs, pos);
+            li = lc_1 = eb = 0, bs = i2;
+            for (var j = 0; j < 286; ++j)
+              lf[j] = 0;
+            for (var j = 0; j < 30; ++j)
+              df[j] = 0;
+          }
+          var l = 2, d = 0, ch_1 = c, dif = imod - pimod & 32767;
+          if (rem > 2 && hv == hsh(i2 - dif)) {
+            var maxn = Math.min(n, rem) - 1;
+            var maxd = Math.min(32767, i2);
+            var ml = Math.min(258, rem);
+            while (dif <= maxd && --ch_1 && imod != pimod) {
+              if (dat[i2 + l] == dat[i2 + l - dif]) {
+                var nl = 0;
+                for (; nl < ml && dat[i2 + nl] == dat[i2 + nl - dif]; ++nl)
+                  ;
+                if (nl > l) {
+                  l = nl, d = dif;
+                  if (nl > maxn)
+                    break;
+                  var mmd = Math.min(dif, nl - 2);
+                  var md = 0;
+                  for (var j = 0; j < mmd; ++j) {
+                    var ti = i2 - dif + j & 32767;
+                    var pti = prev[ti];
+                    var cd = ti - pti & 32767;
+                    if (cd > md)
+                      md = cd, pimod = ti;
+                  }
+                }
+              }
+              imod = pimod, pimod = prev[imod];
+              dif += imod - pimod & 32767;
+            }
+          }
+          if (d) {
+            syms[li++] = 268435456 | revfl[l] << 18 | revfd[d];
+            var lin = revfl[l] & 31, din = revfd[d] & 31;
+            eb += fleb[lin] + fdeb[din];
+            ++lf[257 + lin];
+            ++df[din];
+            wi = i2 + l;
+            ++lc_1;
+          } else {
+            syms[li++] = dat[i2];
+            ++lf[dat[i2]];
+          }
+        }
+      }
+      for (i2 = Math.max(i2, wi); i2 < s; ++i2) {
+        syms[li++] = dat[i2];
+        ++lf[dat[i2]];
+      }
+      pos = wblk(dat, w, lst, syms, lf, df, eb, li, bs, i2 - bs, pos);
+      if (!lst) {
+        st.r = pos & 7 | w[pos / 8 | 0] << 3;
+        pos -= 7;
+        st.h = head, st.p = prev, st.i = i2, st.w = wi;
+      }
+    } else {
+      for (var i2 = st.w || 0; i2 < s + lst; i2 += 65535) {
+        var e = i2 + 65535;
+        if (e >= s) {
+          w[pos / 8 | 0] = lst;
+          e = s;
+        }
+        pos = wfblk(w, pos + 1, dat.subarray(i2, e));
+      }
+      st.i = s;
+    }
+    return slc(o, 0, pre + shft(pos) + post);
+  };
+  var dopt = function(dat, opt, pre, post, st) {
+    if (!st) {
+      st = { l: 1 };
+      if (opt.dictionary) {
+        var dict = opt.dictionary.subarray(-32768);
+        var newDat = new u8(dict.length + dat.length);
+        newDat.set(dict);
+        newDat.set(dat, dict.length);
+        dat = newDat;
+        st.w = dict.length;
+      }
+    }
+    return dflt(dat, opt.level == null ? 6 : opt.level, opt.mem == null ? st.l ? Math.ceil(Math.max(8, Math.min(13, Math.log(dat.length))) * 1.5) : 20 : 12 + opt.mem, pre, post, st);
+  };
+  function deflateSync(data, opts) {
+    return dopt(data, opts || {}, 0, 0);
+  }
+  var Inflate = /* @__PURE__ */ (function() {
+    function Inflate2(opts, cb) {
+      if (typeof opts == "function")
+        cb = opts, opts = {};
+      this.ondata = cb;
+      var dict = opts && opts.dictionary && opts.dictionary.subarray(-32768);
+      this.s = { i: 0, b: dict ? dict.length : 0 };
+      this.o = new u8(32768);
+      this.p = new u8(0);
+      if (dict)
+        this.o.set(dict);
+    }
+    Inflate2.prototype.e = function(c) {
+      if (!this.ondata)
+        err(5);
+      if (this.d)
+        err(4);
+      if (!this.p.length)
+        this.p = c;
+      else if (c.length) {
+        var n = new u8(this.p.length + c.length);
+        n.set(this.p), n.set(c, this.p.length), this.p = n;
+      }
+    };
+    Inflate2.prototype.c = function(final) {
+      this.s.i = +(this.d = final || false);
+      var bts = this.s.b;
+      var dt = inflt(this.p, this.s, this.o);
+      this.ondata(slc(dt, bts, this.s.b), this.d);
+      this.o = slc(dt, this.s.b - 32768), this.s.b = this.o.length;
+      this.p = slc(this.p, this.s.p / 8 | 0), this.s.p &= 7;
+    };
+    Inflate2.prototype.push = function(chunk, final) {
+      this.e(chunk), this.c(final);
+    };
+    return Inflate2;
+  })();
+  function inflateSync(data, opts) {
+    return inflt(data, { i: 2 }, opts && opts.out, opts && opts.dictionary);
+  }
+  var td = typeof TextDecoder != "undefined" && /* @__PURE__ */ new TextDecoder();
+  var tds = 0;
+  try {
+    td.decode(et, { stream: true });
+    tds = 1;
+  } catch (e) {
+  }
+
+  // src/sim/io/compression.ts
+  function messageOf(error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  function inflateExact(deflated, size, what) {
+    let out;
+    try {
+      out = new Uint8Array(size);
+    } catch {
+      throw new Error(`${what}: cannot allocate ${size} bytes for the decompressed data.`);
+    }
+    let result;
+    try {
+      result = inflateSync(deflated, { out });
+    } catch (error) {
+      throw new Error(`${what}: the compressed data is corrupt or truncated (${messageOf(error)}).`);
+    }
+    if (result.length !== size) {
+      throw new Error(`${what}: the compressed data expands to ${result.length} bytes, expected ${size}; the file is corrupt.`);
+    }
+    return out;
+  }
+  function inflatePrefix(deflated, length, what) {
+    const parts = [];
+    let have = 0;
+    const stream = new Inflate((chunk) => {
+      if (chunk.length) {
+        parts.push(chunk);
+        have += chunk.length;
+      }
+    });
+    try {
+      for (let p = 0, chunk = 1024; p < deflated.length && have < length; chunk *= 2) {
+        const end = Math.min(p + chunk, deflated.length);
+        stream.push(deflated.subarray(p, end), end === deflated.length);
+        p = end;
+      }
+    } catch (error) {
+      throw new Error(`${what}: the compressed data is corrupt or truncated (${messageOf(error)}).`);
+    }
+    const prefix = new Uint8Array(have);
+    let offset = 0;
+    for (const part of parts) {
+      prefix.set(part, offset);
+      offset += part.length;
+    }
+    return prefix;
+  }
+  function isGzip(bytes) {
+    return bytes.length >= 2 && bytes[0] === 31 && bytes[1] === 139;
+  }
+  function gunzip(bytes, prefixLength, sizeOf, what) {
+    const start = gzipDataStart(bytes, what);
+    const trailer = bytes.length - 8;
+    const deflated = bytes.subarray(start, trailer);
+    const expectedCrc = readUint32LE(bytes, trailer);
+    const storedSize = readUint32LE(bytes, trailer + 4);
+    const needed = sizeOf(inflatePrefix(deflated, prefixLength, what));
+    const extra = storedSize - needed % 4294967296;
+    if (extra < 0 || extra > Math.max(needed, 1 << 20)) {
+      throw new Error(`${what}: the gzip data is truncated or corrupt (the content needs ${needed} bytes, the gzip trailer records ${storedSize}).`);
+    }
+    const out = inflateExact(deflated, needed + extra, what);
+    if (crc32(out) !== expectedCrc) throw new Error(`${what}: gzip checksum mismatch; the file is corrupt.`);
+    return out;
+  }
+  function gzipDataStart(bytes, what) {
+    if (!isGzip(bytes)) throw new Error(`${what}: not gzip data.`);
+    if (bytes.length < 18) throw new Error(`${what}: the gzip file is truncated.`);
+    if (bytes[2] !== 8) throw new Error(`${what}: unsupported gzip compression method ${bytes[2]}.`);
+    const flags = bytes[3];
+    if (flags & 224) throw new Error(`${what}: invalid gzip header flags.`);
+    let p = 10;
+    if (flags & 4) p += 2 + (bytes[p] | bytes[p + 1] << 8);
+    if (flags & 8) {
+      while (p < bytes.length && bytes[p] !== 0) p++;
+      p++;
+    }
+    if (flags & 16) {
+      while (p < bytes.length && bytes[p] !== 0) p++;
+      p++;
+    }
+    if (flags & 2) p += 2;
+    if (p > bytes.length - 8) throw new Error(`${what}: the gzip file is truncated.`);
+    return p;
+  }
+  function unzlib(bytes, prefixLength, sizeOf, what) {
+    if (bytes.length < 6) throw new Error(`${what}: the zlib stream is truncated.`);
+    const cmf = bytes[0], flg = bytes[1];
+    if ((cmf & 15) !== 8 || cmf >> 4 > 7 || (cmf << 8 | flg) % 31 !== 0) throw new Error(`${what}: not a zlib stream.`);
+    if (flg & 32) throw new Error(`${what}: zlib streams with a preset dictionary are not supported.`);
+    const deflated = bytes.subarray(2, bytes.length - 4);
+    const out = inflateExact(deflated, sizeOf(inflatePrefix(deflated, prefixLength, what)), what);
+    const end = bytes.length - 4;
+    const expected = (bytes[end] << 24 | bytes[end + 1] << 16 | bytes[end + 2] << 8 | bytes[end + 3]) >>> 0;
+    if (adler32(out) !== expected) throw new Error(`${what}: zlib checksum mismatch; the data is corrupt.`);
+    return out;
+  }
+  function readUint32LE(bytes, offset) {
+    return (bytes[offset] | bytes[offset + 1] << 8 | bytes[offset + 2] << 16 | bytes[offset + 3] << 24) >>> 0;
+  }
+  var crcTables = null;
+  function crcTable() {
+    if (crcTables) return crcTables;
+    const table = new Int32Array(8 * 256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+      table[n] = c;
+    }
+    for (let n = 0; n < 256; n++) {
+      let c = table[n];
+      for (let k = 1; k < 8; k++) {
+        c = table[c & 255] ^ c >>> 8;
+        table[k * 256 + n] = c;
+      }
+    }
+    crcTables = table;
+    return table;
+  }
+  function crc32(bytes, crc = 0) {
+    const t = crcTable();
+    let c = ~crc;
+    const n = bytes.length;
+    const blocks = n - (n & 7);
+    let i2 = 0;
+    for (; i2 < blocks; i2 += 8) {
+      const a = c ^ (bytes[i2] | bytes[i2 + 1] << 8 | bytes[i2 + 2] << 16 | bytes[i2 + 3] << 24);
+      c = t[1792 + (a & 255)] ^ t[1536 + (a >>> 8 & 255)] ^ t[1280 + (a >>> 16 & 255)] ^ t[1024 + (a >>> 24)] ^ t[768 + bytes[i2 + 4]] ^ t[512 + bytes[i2 + 5]] ^ t[256 + bytes[i2 + 6]] ^ t[bytes[i2 + 7]];
+    }
+    for (; i2 < n; i2++) c = t[(c ^ bytes[i2]) & 255] ^ c >>> 8;
+    return ~c >>> 0;
+  }
+  function adler32(bytes) {
+    let a = 1, b = 0;
+    const n = bytes.length;
+    for (let i2 = 0; i2 < n; ) {
+      const end = Math.min(i2 + 5552, n);
+      for (; i2 < end; i2++) {
+        a += bytes[i2];
+        b += a;
+      }
+      a %= 65521;
+      b %= 65521;
+    }
+    return b * 65536 + a >>> 0;
+  }
+
+  // src/sim/io/elements.ts
+  var ELEMENT_SIZE = {
+    b1: 1,
+    i1: 1,
+    u1: 1,
+    i2: 2,
+    u2: 2,
+    i4: 4,
+    u4: 4,
+    i8: 8,
+    u8: 8,
+    f2: 2,
+    f4: 4,
+    f8: 8
+  };
+  var HOST_LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+  function outputPrecision(type) {
+    return type === "f8" || type === "i4" || type === "u4" || type === "i8" || type === "u8" ? "f8" : "f4";
+  }
+  function decodeElements(bytes, offset, count, type, littleEndian, precision, step = 1) {
+    const out = precision === "f8" ? new Float64Array(count) : new Float32Array(count);
+    if (count === 0) return out;
+    const size = ELEMENT_SIZE[type];
+    const span = (count - 1) * step + 1;
+    if (!(offset >= 0 && offset + span * size <= bytes.length)) {
+      throw new RangeError(`Element data [${offset}, ${offset + span * size}) lies outside the ${bytes.length}-byte buffer.`);
+    }
+    if (type === "i8" || type === "u8") {
+      decodeInt64(bytes, offset, count, type === "i8", littleEndian, step, out);
+    } else if (size === 1 || littleEndian === HOST_LITTLE_ENDIAN) {
+      const view = nativeView(bytes, offset, span, type);
+      if (type === "f2") {
+        for (let i2 = 0; i2 < count; i2++) out[i2] = halfToNumber(view[i2 * step]);
+      } else if (type === "b1") {
+        for (let i2 = 0; i2 < count; i2++) out[i2] = view[i2 * step] === 0 ? 0 : 1;
+      } else if (step === 1) {
+        out.set(view);
+      } else {
+        for (let i2 = 0; i2 < count; i2++) out[i2] = view[i2 * step];
+      }
+    } else {
+      decodeSwapped(bytes, offset, count, type, littleEndian, step, out);
+    }
+    return out;
+  }
+  function nativeView(bytes, offset, length, type) {
+    const size = ELEMENT_SIZE[type];
+    let buffer = bytes.buffer;
+    let start = bytes.byteOffset + offset;
+    if (start % size !== 0) {
+      buffer = bytes.slice(offset, offset + length * size).buffer;
+      start = 0;
+    }
+    switch (type) {
+      case "i1":
+        return new Int8Array(buffer, start, length);
+      case "u1":
+      case "b1":
+        return new Uint8Array(buffer, start, length);
+      case "i2":
+        return new Int16Array(buffer, start, length);
+      case "u2":
+      case "f2":
+        return new Uint16Array(buffer, start, length);
+      case "i4":
+        return new Int32Array(buffer, start, length);
+      case "u4":
+        return new Uint32Array(buffer, start, length);
+      case "f4":
+        return new Float32Array(buffer, start, length);
+      case "f8":
+        return new Float64Array(buffer, start, length);
+    }
+  }
+  function decodeSwapped(bytes, offset, count, type, littleEndian, step, out) {
+    const size = ELEMENT_SIZE[type];
+    const view = new DataView(bytes.buffer, bytes.byteOffset + offset, ((count - 1) * step + 1) * size);
+    const stride = step * size;
+    let p = 0;
+    switch (type) {
+      case "i2":
+        for (let i2 = 0; i2 < count; i2++, p += stride) out[i2] = view.getInt16(p, littleEndian);
+        break;
+      case "u2":
+        for (let i2 = 0; i2 < count; i2++, p += stride) out[i2] = view.getUint16(p, littleEndian);
+        break;
+      case "f2":
+        for (let i2 = 0; i2 < count; i2++, p += stride) out[i2] = halfToNumber(view.getUint16(p, littleEndian));
+        break;
+      case "i4":
+        for (let i2 = 0; i2 < count; i2++, p += stride) out[i2] = view.getInt32(p, littleEndian);
+        break;
+      case "u4":
+        for (let i2 = 0; i2 < count; i2++, p += stride) out[i2] = view.getUint32(p, littleEndian);
+        break;
+      case "f4":
+        for (let i2 = 0; i2 < count; i2++, p += stride) out[i2] = view.getFloat32(p, littleEndian);
+        break;
+      case "f8":
+        for (let i2 = 0; i2 < count; i2++, p += stride) out[i2] = view.getFloat64(p, littleEndian);
+        break;
+      default:
+        throw new Error(`No byte-swapped decoder for ${type}.`);
+    }
+  }
+  function decodeInt64(bytes, offset, count, signed, littleEndian, step, out) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset + offset, ((count - 1) * step + 1) * 8);
+    const low = littleEndian ? 0 : 4, high = 4 - low;
+    const stride = step * 8;
+    for (let i2 = 0, p = 0; i2 < count; i2++, p += stride) {
+      const hi = signed ? view.getInt32(p + high, littleEndian) : view.getUint32(p + high, littleEndian);
+      out[i2] = hi * 4294967296 + view.getUint32(p + low, littleEndian);
+    }
+  }
+  function halfToNumber(bits2) {
+    const exponent = bits2 >> 10 & 31;
+    const fraction = bits2 & 1023;
+    const sign = bits2 & 32768 ? -1 : 1;
+    if (exponent === 0) return sign * fraction * 2 ** -24;
+    if (exponent === 31) return fraction ? NaN : sign * Infinity;
+    return sign * (1024 + fraction) * 2 ** (exponent - 25);
+  }
+
+  // src/sim/io/ndarray.ts
+  function elementCount(shape) {
+    let count = 1;
+    for (const size of shape) {
+      if (!(Number.isInteger(size) && size >= 0)) throw new RangeError(`Invalid array shape [${shape.join(", ")}].`);
+      count *= size;
+    }
+    if (!Number.isSafeInteger(count)) throw new RangeError(`Array shape [${shape.join(", ")}] has too many elements.`);
+    return count;
+  }
+
+  // src/sim/io/npy.ts
+  var MAGIC = [147, 78, 85, 77, 80, 89];
+  var ARRAY_ALIGN = 64;
+  var GROWTH_AXIS_MAX_DIGITS = 21;
+  function readNpyHeader(bytes) {
+    if (MAGIC.some((byte, i2) => bytes[i2] !== byte)) throw new Error("Not an NPY file: the \\x93NUMPY magic string is missing.");
+    if (bytes.length < 10) throw new Error("NPY file is truncated inside its header.");
+    const major = bytes[6], minor = bytes[7];
+    if (!(major >= 1 && major <= 3) || minor !== 0) {
+      throw new Error(`NPY format version ${major}.${minor} is not supported (1.0, 2.0 and 3.0 are).`);
+    }
+    const start = major === 1 ? 10 : 12;
+    if (bytes.length < start) throw new Error("NPY file is truncated inside its header.");
+    const headerLength = major === 1 ? bytes[8] | bytes[9] << 8 : (bytes[8] | bytes[9] << 8 | bytes[10] << 16 | bytes[11] << 24) >>> 0;
+    if (start + headerLength > bytes.length) {
+      throw new Error(`NPY file is truncated: the header needs ${headerLength} bytes, ${bytes.length - start} remain.`);
+    }
+    const raw = bytes.subarray(start, start + headerLength);
+    const text2 = major === 3 ? new TextDecoder("utf-8").decode(raw) : latin1(raw);
+    let header;
+    try {
+      header = new LiteralParser(text2).parse();
+    } catch (error) {
+      throw new Error(`NPY header is not a valid Python literal: ${error instanceof Error ? error.message : error}`);
+    }
+    if (!isDict(header)) throw new Error("NPY header is not a dict.");
+    const { descr, fortran_order: fortranOrder, shape } = header;
+    if (Array.isArray(descr)) {
+      throw new Error("NPY structured (record) dtypes are not supported; save each field as its own array.");
+    }
+    if (typeof descr !== "string") throw new Error("NPY header has no valid 'descr' entry.");
+    if (typeof fortranOrder !== "boolean") throw new Error("NPY header has no valid 'fortran_order' entry.");
+    if (!Array.isArray(shape) || !shape.every((size) => typeof size === "number" && Number.isInteger(size) && size >= 0)) {
+      throw new Error("NPY header has no valid 'shape' entry.");
+    }
+    return { version: [major, minor], descr, fortranOrder, shape, dataOffset: start + headerLength };
+  }
+  function readNpy(bytes) {
+    const header = readNpyHeader(bytes);
+    const type = parseDescr(header.descr);
+    const count = elementCount(header.shape);
+    const needed = count * type.itemSize;
+    const available = bytes.length - header.dataOffset;
+    if (needed > available) {
+      throw new Error(`NPY data is truncated: shape (${header.shape.join(", ")}) of ${header.descr} needs ${needed} bytes, ${available} remain after the header.`);
+    }
+    const precision = outputPrecision(type.element);
+    const array = {
+      dtype: header.descr,
+      shape: header.shape,
+      order: header.fortranOrder ? "F" : "C",
+      data: decodeElements(bytes, header.dataOffset, count, type.element, type.littleEndian, precision, type.complex ? 2 : 1)
+    };
+    if (type.complex) {
+      const half = ELEMENT_SIZE[type.element];
+      array.imag = decodeElements(bytes, header.dataOffset + half, count, type.element, type.littleEndian, precision, 2);
+    }
+    return array;
+  }
+  var UNSUPPORTED_KINDS = {
+    U: "Unicode strings",
+    S: "byte strings",
+    a: "byte strings",
+    O: "Python objects",
+    V: "raw or structured records",
+    M: "datetimes",
+    m: "timedeltas"
+  };
+  function parseDescr(descr) {
+    const match = /^([<>|=]?)([a-zA-Z?])(\d*)$/.exec(descr);
+    const kind = match ? match[2] : descr.replace(/^[<>|=]/, "").charAt(0);
+    const size = match && match[3] ? Number(match[3]) : kind === "?" ? 1 : 0;
+    let element;
+    let complex = false;
+    switch (kind) {
+      case "f":
+        element = size === 2 ? "f2" : size === 4 ? "f4" : size === 8 ? "f8" : void 0;
+        break;
+      case "i":
+        element = size === 1 ? "i1" : size === 2 ? "i2" : size === 4 ? "i4" : size === 8 ? "i8" : void 0;
+        break;
+      case "u":
+        element = size === 1 ? "u1" : size === 2 ? "u2" : size === 4 ? "u4" : size === 8 ? "u8" : void 0;
+        break;
+      case "b":
+      case "?":
+        element = size === 1 ? "b1" : void 0;
+        break;
+      case "c":
+        complex = true;
+        element = size === 8 ? "f4" : size === 16 ? "f8" : void 0;
+        break;
+    }
+    if (!element || !match) {
+      const what = UNSUPPORTED_KINDS[kind] ?? (kind === "f" || kind === "c" ? "extended-precision numbers" : "an unknown type");
+      throw new Error(`NPY dtype '${descr}' (${what}) is not supported; save numeric arrays (float16/32/64, integers, bool or complex64/128).`);
+    }
+    const order = match[1];
+    const littleEndian = order === "<" ? true : order === ">" ? false : HOST_LITTLE_ENDIAN;
+    return { element, complex, littleEndian, itemSize: (complex ? 2 : 1) * ELEMENT_SIZE[element] };
+  }
+  function writeNpy(array) {
+    const count = elementCount(array.shape);
+    if (array.data.length !== count) {
+      throw new Error(`Array data has ${array.data.length} elements but shape (${array.shape.join(", ")}) needs ${count}.`);
+    }
+    if (array.imag && array.imag.length !== count) {
+      throw new Error(`Imaginary part has ${array.imag.length} elements but shape (${array.shape.join(", ")}) needs ${count}.`);
+    }
+    const fortranOrder = (array.order ?? "C") === "F";
+    let descr;
+    let body;
+    if (array.imag) {
+      const wide = array.data instanceof Float64Array || array.imag instanceof Float64Array || array.data instanceof Int32Array || array.data instanceof Uint32Array;
+      descr = wide ? "<c16" : "<c8";
+      const interleaved = wide ? new Float64Array(2 * count) : new Float32Array(2 * count);
+      for (let i2 = 0; i2 < count; i2++) {
+        interleaved[2 * i2] = array.data[i2];
+        interleaved[2 * i2 + 1] = array.imag[i2];
+      }
+      body = interleaved;
+    } else {
+      descr = descrOf(array.data);
+      body = array.data;
+    }
+    const header = npyHeader(descr, fortranOrder, array.shape);
+    const out = new Uint8Array(header.length + body.byteLength);
+    out.set(header);
+    writeLittleEndian(body, out, header.length);
+    return out;
+  }
+  function descrOf(data) {
+    if (data instanceof Float64Array) return "<f8";
+    if (data instanceof Float32Array) return "<f4";
+    if (data instanceof Int32Array) return "<i4";
+    if (data instanceof Uint32Array) return "<u4";
+    if (data instanceof Int16Array) return "<i2";
+    if (data instanceof Uint16Array) return "<u2";
+    if (data instanceof Int8Array) return "|i1";
+    return "|u1";
+  }
+  function npyHeader(descr, fortranOrder, shape) {
+    const shapeText = shape.length === 1 ? `(${shape[0]},)` : `(${shape.join(", ")})`;
+    let dict = `{'descr': '${descr}', 'fortran_order': ${fortranOrder ? "True" : "False"}, 'shape': ${shapeText}, }`;
+    if (shape.length > 0) {
+      dict += " ".repeat(Math.max(0, GROWTH_AXIS_MAX_DIGITS - String(shape[fortranOrder ? shape.length - 1 : 0]).length));
+    }
+    let lengthField = 2;
+    let padding = ARRAY_ALIGN - (8 + lengthField + dict.length + 1) % ARRAY_ALIGN;
+    if (dict.length + 1 + padding > 65535) {
+      lengthField = 4;
+      padding = ARRAY_ALIGN - (8 + lengthField + dict.length + 1) % ARRAY_ALIGN;
+    }
+    const headerLength = dict.length + padding + 1;
+    const out = new Uint8Array(8 + lengthField + headerLength);
+    out.set(MAGIC);
+    out[6] = lengthField === 2 ? 1 : 2;
+    out[7] = 0;
+    for (let k = 0; k < lengthField; k++) out[8 + k] = headerLength >>> 8 * k & 255;
+    const text2 = dict + " ".repeat(padding) + "\n";
+    for (let i2 = 0; i2 < text2.length; i2++) out[8 + lengthField + i2] = text2.charCodeAt(i2);
+    return out;
+  }
+  function writeLittleEndian(data, out, offset) {
+    out.set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength), offset);
+    if (HOST_LITTLE_ENDIAN) return;
+    const size = data.BYTES_PER_ELEMENT;
+    for (let p = offset; size > 1 && p < offset + data.byteLength; p += size) out.subarray(p, p + size).reverse();
+  }
+  function isDict(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function latin1(bytes) {
+    let text2 = "";
+    for (let i2 = 0; i2 < bytes.length; i2 += 8192) {
+      text2 += String.fromCharCode(...bytes.subarray(i2, Math.min(i2 + 8192, bytes.length)));
+    }
+    return text2;
+  }
+  var ESCAPES = { n: "\n", t: "	", r: "\r", "0": "\0", "\\": "\\", "'": "'", '"': '"', a: "\x07", b: "\b", f: "\f", v: "\v" };
+  var LiteralParser = class {
+    constructor(text2) {
+      __publicField(this, "text", text2);
+      __publicField(this, "pos", 0);
+    }
+    parse() {
+      const value = this.value();
+      this.skipSpace();
+      if (this.pos < this.text.length) this.fail("unexpected trailing text");
+      return value;
+    }
+    value() {
+      this.skipSpace();
+      const c = this.text[this.pos];
+      if (c === "{") return this.dict();
+      if (c === "(") return this.sequence(")");
+      if (c === "[") return this.sequence("]");
+      if (c === "'" || c === '"') return this.string();
+      if ((c === "u" || c === "b") && (this.text[this.pos + 1] === "'" || this.text[this.pos + 1] === '"')) {
+        this.pos++;
+        return this.string();
+      }
+      const number = /^[+-]?(\d+\.?\d*(e[+-]?\d+)?|\.\d+(e[+-]?\d+)?)[lL]?/i.exec(this.text.slice(this.pos));
+      if (number) {
+        this.pos += number[0].length;
+        return Number(number[0].replace(/[lL]$/, ""));
+      }
+      const word = /^[A-Za-z_]\w*/.exec(this.text.slice(this.pos));
+      if (word) {
+        this.pos += word[0].length;
+        if (word[0] === "True") return true;
+        if (word[0] === "False") return false;
+        if (word[0] === "None") return null;
+        this.fail(`unexpected name '${word[0]}'`);
+      }
+      return this.fail("expected a value");
+    }
+    dict() {
+      const result = {};
+      this.pos++;
+      for (; ; ) {
+        this.skipSpace();
+        if (this.text[this.pos] === "}") {
+          this.pos++;
+          return result;
+        }
+        const key = this.value();
+        if (typeof key !== "string") this.fail("dict keys must be strings");
+        this.expect(":");
+        result[key] = this.value();
+        this.skipSpace();
+        if (this.text[this.pos] === ",") this.pos++;
+        else if (this.text[this.pos] !== "}") this.fail("expected ',' or '}'");
+      }
+    }
+    /** Tuples and lists both become arrays; a shape like (5) is read as a tuple too. */
+    sequence(close) {
+      const items = [];
+      this.pos++;
+      for (; ; ) {
+        this.skipSpace();
+        if (this.text[this.pos] === close) {
+          this.pos++;
+          return items;
+        }
+        items.push(this.value());
+        this.skipSpace();
+        if (this.text[this.pos] === ",") this.pos++;
+        else if (this.text[this.pos] !== close) this.fail(`expected ',' or '${close}'`);
+      }
+    }
+    string() {
+      const quote = this.text[this.pos++];
+      let result = "";
+      for (; ; ) {
+        if (this.pos >= this.text.length) this.fail("unterminated string");
+        const c = this.text[this.pos++];
+        if (c === quote) return result;
+        if (c !== "\\") {
+          result += c;
+          continue;
+        }
+        const e = this.text[this.pos++];
+        const hex = e === "x" ? 2 : e === "u" ? 4 : e === "U" ? 8 : 0;
+        if (hex) {
+          const digits = this.text.slice(this.pos, this.pos + hex);
+          if (!/^[0-9a-fA-F]+$/.test(digits) || digits.length !== hex) this.fail("invalid escape");
+          result += String.fromCodePoint(parseInt(digits, 16));
+          this.pos += hex;
+        } else {
+          result += ESCAPES[e] ?? `\\${e}`;
+        }
+      }
+    }
+    expect(char) {
+      this.skipSpace();
+      if (this.text[this.pos] !== char) this.fail(`expected '${char}'`);
+      this.pos++;
+    }
+    skipSpace() {
+      while (this.pos < this.text.length && /\s/.test(this.text[this.pos])) this.pos++;
+    }
+    fail(message) {
+      throw new Error(`${message} at position ${this.pos}`);
+    }
+  };
+
+  // src/sim/io/zip.ts
+  var EOCD = 101010256;
+  var ZIP64_LOCATOR = 117853008;
+  var ZIP64_EOCD = 101075792;
+  var CENTRAL_HEADER = 33639248;
+  var LOCAL_HEADER = 67324752;
+  var MAX32 = 4294967295;
+  function readZipDirectory(bytes) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const eocd = findEndOfCentralDirectory(view);
+    let count = view.getUint16(eocd + 10, true);
+    let directorySize = view.getUint32(eocd + 12, true);
+    let directoryOffset = view.getUint32(eocd + 16, true);
+    let directoryEnd = eocd;
+    if (eocd >= 20 && view.getUint32(eocd - 20, true) === ZIP64_LOCATOR) {
+      let record = eocd - 20 - 56;
+      if (record < 0 || view.getUint32(record, true) !== ZIP64_EOCD) record = readUint64(view, eocd - 12);
+      if (!(record >= 0 && record + 56 <= eocd - 20) || view.getUint32(record, true) !== ZIP64_EOCD) {
+        throw new Error("Corrupt zip archive: the ZIP64 end-of-central-directory record is missing.");
+      }
+      count = readUint64(view, record + 32);
+      directorySize = readUint64(view, record + 40);
+      directoryOffset = readUint64(view, record + 48);
+      directoryEnd = record;
+    }
+    const shift = directoryEnd - directorySize - directoryOffset;
+    if (shift < 0) throw new Error("Corrupt zip archive: the central directory lies outside the file.");
+    const entries = [];
+    let p = directoryOffset + shift;
+    for (let i2 = 0; i2 < count; i2++) {
+      if (p + 46 > directoryEnd || view.getUint32(p, true) !== CENTRAL_HEADER) {
+        throw new Error(`Corrupt zip archive: central directory entry ${i2 + 1} of ${count} is damaged.`);
+      }
+      const flags = view.getUint16(p + 8, true);
+      const nameLength = view.getUint16(p + 28, true);
+      const extraLength = view.getUint16(p + 30, true);
+      const commentLength = view.getUint16(p + 32, true);
+      const nameStart = p + 46;
+      if (nameStart + nameLength + extraLength > directoryEnd) {
+        throw new Error(`Corrupt zip archive: central directory entry ${i2 + 1} of ${count} is truncated.`);
+      }
+      const entry = {
+        name: decodeName(bytes.subarray(nameStart, nameStart + nameLength), (flags & 2048) !== 0),
+        method: view.getUint16(p + 10, true),
+        crc32: view.getUint32(p + 16, true),
+        compressedSize: view.getUint32(p + 20, true),
+        size: view.getUint32(p + 24, true),
+        headerOffset: view.getUint32(p + 42, true),
+        encrypted: (flags & 1) !== 0
+      };
+      applyZip64Extra(view, nameStart + nameLength, extraLength, entry);
+      entry.headerOffset += shift;
+      entries.push(entry);
+      p = nameStart + nameLength + extraLength + commentLength;
+    }
+    return entries;
+  }
+  function readZipEntry(bytes, entry) {
+    const what = `zip member '${entry.name}'`;
+    if (entry.encrypted) throw new Error(`${what} is encrypted, which is not supported.`);
+    if (entry.method !== 0 && entry.method !== 8) {
+      throw new Error(`${what} uses compression method ${entry.method}; only stored and DEFLATE members are supported.`);
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const header = entry.headerOffset;
+    if (header + 30 > bytes.length || view.getUint32(header, true) !== LOCAL_HEADER) {
+      throw new Error(`Corrupt zip archive: the local header of ${what} is missing.`);
+    }
+    const start = header + 30 + view.getUint16(header + 26, true) + view.getUint16(header + 28, true);
+    const end = start + entry.compressedSize;
+    if (end > bytes.length) throw new Error(`Zip archive is truncated: ${what} extends past the end of the file.`);
+    const raw = bytes.subarray(start, end);
+    let data;
+    if (entry.method === 0) {
+      if (entry.compressedSize !== entry.size) throw new Error(`Corrupt zip archive: stored ${what} has inconsistent sizes.`);
+      data = raw;
+    } else {
+      data = inflateExact(raw, entry.size, what);
+    }
+    if (crc32(data) !== entry.crc32) throw new Error(`${what} fails its CRC-32 check; the archive is corrupt.`);
+    return data;
+  }
+  function writeZip(files, compress) {
+    if (files.length > 65535) throw new Error(`A zip archive holds at most 65535 members (got ${files.length}).`);
+    const members = files.map((file) => {
+      const name = encodeUtf8(file.name);
+      if (name.length > 65535) throw new Error(`Zip member name '${file.name.slice(0, 40)}\u2026' is too long.`);
+      const data = compress ? deflateSync(file.data, { level: 6 }) : file.data;
+      if (file.data.length >= MAX32 || data.length >= MAX32) {
+        throw new Error(`Zip member '${file.name}' is ${file.data.length} bytes; members of 4 GB and more are not supported.`);
+      }
+      const flags = name.length !== file.name.length ? 2048 : 0;
+      return { name, data, flags, size: file.data.length, crc: crc32(file.data), offset: 0 };
+    });
+    const method = compress ? 8 : 0;
+    let size = 22;
+    for (const member of members) size += 30 + 46 + 2 * member.name.length + member.data.length;
+    if (size >= MAX32) throw new Error("The zip archive would reach 4 GB, which is not supported.");
+    const out = new Uint8Array(size);
+    const view = new DataView(out.buffer);
+    let p = 0;
+    for (const member of members) {
+      member.offset = p;
+      view.setUint32(p, LOCAL_HEADER, true);
+      writeCommonFields(view, p + 4, member.flags, method, member.crc, member.data.length, member.size, member.name.length);
+      view.setUint16(p + 28, 0, true);
+      out.set(member.name, p + 30);
+      out.set(member.data, p + 30 + member.name.length);
+      p += 30 + member.name.length + member.data.length;
+    }
+    const directoryOffset = p;
+    for (const member of members) {
+      view.setUint32(p, CENTRAL_HEADER, true);
+      view.setUint16(p + 4, 20, true);
+      writeCommonFields(view, p + 6, member.flags, method, member.crc, member.data.length, member.size, member.name.length);
+      view.setUint32(p + 42, member.offset, true);
+      out.set(member.name, p + 46);
+      p += 46 + member.name.length;
+    }
+    view.setUint32(p, EOCD, true);
+    view.setUint16(p + 8, members.length, true);
+    view.setUint16(p + 10, members.length, true);
+    view.setUint32(p + 12, p - directoryOffset, true);
+    view.setUint32(p + 16, directoryOffset, true);
+    return out;
+  }
+  function writeCommonFields(view, p, flags, method, crc, compressedSize2, size, nameLength) {
+    view.setUint16(p, 20, true);
+    view.setUint16(p + 2, flags, true);
+    view.setUint16(p + 4, method, true);
+    view.setUint16(p + 6, 0, true);
+    view.setUint16(p + 8, 1 << 5 | 1, true);
+    view.setUint32(p + 10, crc, true);
+    view.setUint32(p + 14, compressedSize2, true);
+    view.setUint32(p + 18, size, true);
+    view.setUint16(p + 22, nameLength, true);
+  }
+  function findEndOfCentralDirectory(view) {
+    const last = view.byteLength - 22;
+    for (let p = last; p >= 0 && p >= last - 65535; p--) {
+      if (view.getUint32(p, true) === EOCD && p + 22 + view.getUint16(p + 20, true) <= view.byteLength) return p;
+    }
+    throw new Error("Not a zip archive, or a truncated one: the end-of-central-directory record is missing.");
+  }
+  function applyZip64Extra(view, start, length, entry) {
+    const end = start + length;
+    for (let p = start; p + 4 <= end; ) {
+      const id = view.getUint16(p, true);
+      const fieldLength = view.getUint16(p + 2, true);
+      if (id === 1) {
+        let q = p + 4;
+        const fieldEnd = Math.min(q + fieldLength, end);
+        const next = () => {
+          if (q + 8 > fieldEnd) throw new Error(`Corrupt zip archive: the ZIP64 field of '${entry.name}' is too short.`);
+          const value = readUint64(view, q);
+          q += 8;
+          return value;
+        };
+        if (entry.size === MAX32) entry.size = next();
+        if (entry.compressedSize === MAX32) entry.compressedSize = next();
+        if (entry.headerOffset === MAX32) entry.headerOffset = next();
+        return;
+      }
+      p += 4 + fieldLength;
+    }
+  }
+  function readUint64(view, p) {
+    return view.getUint32(p + 4, true) * 4294967296 + view.getUint32(p, true);
+  }
+  function decodeName(bytes, utf84) {
+    if (utf84) return new TextDecoder("utf-8").decode(bytes);
+    let name = "";
+    for (const byte of bytes) name += String.fromCharCode(byte);
+    return name;
+  }
+  function encodeUtf8(text2) {
+    const out = [];
+    for (const char of text2) {
+      const c = char.codePointAt(0);
+      if (c < 128) out.push(c);
+      else if (c < 2048) out.push(192 | c >> 6, 128 | c & 63);
+      else if (c < 65536) out.push(224 | c >> 12, 128 | c >> 6 & 63, 128 | c & 63);
+      else out.push(240 | c >> 18, 128 | c >> 12 & 63, 128 | c >> 6 & 63, 128 | c & 63);
+    }
+    return Uint8Array.from(out);
+  }
+
+  // src/sim/io/npz.ts
+  function readNpz(bytes) {
+    const arrays = /* @__PURE__ */ new Map();
+    for (const entry of readZipDirectory(bytes)) {
+      if (!entry.name.endsWith(".npy")) continue;
+      try {
+        arrays.set(entry.name.slice(0, -4), readNpy(readZipEntry(bytes, entry)));
+      } catch (error) {
+        throw new Error(`NPZ member '${entry.name}': ${messageOf(error)}`);
+      }
+    }
+    return arrays;
+  }
+  function writeNpz(entries, options = {}) {
+    const files = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const [key, array] of entries) {
+      if (seen.has(key)) throw new Error(`Duplicate NPZ key '${key}'.`);
+      seen.add(key);
+      files.push({ name: `${key}.npy`, data: writeNpy(array) });
+    }
+    return writeZip(files, options.compress ?? false);
+  }
+
+  // src/sim/io/export.ts
+  var NON_CARTESIAN = 0.05;
+  function buildExport(job, signal, format) {
+    const coils = job.plan.coils;
+    if (signal.length !== 2 * coils * job.plan.adcSamples) throw new Error("The signal does not match the job.");
+    if (format === "npz") return { name: ".npz", mime: "application/zip", bytes: numpyExport(job, signal) };
+    const recon = job.reconstruct(new Float64Array(signal.length));
+    const cartesian = recon.offGridFraction <= NON_CARTESIAN;
+    const grid = {
+      delta: cartesian ? recon.delta : null,
+      axes: recon.axes,
+      nu: recon.nu,
+      nv: recon.nv,
+      offset: recon.offset
+    };
+    const plan = planExport(job.rawLayout(), grid);
+    const xml = buildIsmrmrdHeaderXml(headerInfo(job, plan, grid, cartesian));
+    const acquisitions = ismrmrdAcquisitions(job, signal, plan, cartesian);
+    if (format === "ismrmrd-h5") return { name: ".h5", mime: "application/x-hdf5", bytes: writeIsmrmrdHdf5(xml, acquisitions) };
+    return { name: ".bin", mime: "application/octet-stream", bytes: writeIsmrmrdStream(xml, acquisitions) };
+  }
+  var LIMIT_OF = {
+    kspace_encode_step_1: "kspace_encoding_step_1",
+    kspace_encode_step_2: "kspace_encoding_step_2",
+    average: "average",
+    slice: "slice",
+    contrast: "contrast",
+    phase: "phase",
+    repetition: "repetition",
+    set: "set",
+    segment: "segment"
+  };
+  function headerInfo(job, plan, grid, cartesian) {
+    const timing = detectSequenceTiming(job.program.sequence);
+    const fov = job.fieldOfView;
+    const p = job.plan;
+    const fieldOfView_mm = fov ? { x: fov[0] * 1e3, y: fov[1] * 1e3, z: Math.max(fov[2], 0) * 1e3 } : grid.delta ? { x: 1e3 / grid.delta[0], y: 1e3 / grid.delta[1], z: 1 } : { x: p.phantom.fov[0] * 1e3, y: p.phantom.fov[1] * 1e3, z: 1 };
+    const matrixSize = { x: grid.nu, y: grid.nv, z: 1 };
+    const encodingLimits = {
+      kspace_encoding_step_0: { minimum: 0, maximum: Math.max(0, grid.nu - 1), center: grid.nu >> 1 }
+    };
+    for (const counter of COUNTERS) encodingLimits[LIMIT_OF[counter]] = plan.limits[counter];
+    const userParameterString = [
+      { name: "seqeyes_simulation", value: "SeqEyes Bloch simulation (reference engine, cpu-f64)" },
+      { name: "seqeyes_phantom", value: p.phantom.source },
+      { name: "seqeyes_signal_convention", value: "delivered signal proportional to exp(-i omega t): inverse FFT reconstructs" },
+      { name: "seqeyes_counters_from_labels", value: plan.labelled.join(",") || "none (kspace_encode_step_1 from the k-space grid)" }
+    ];
+    const userParameterLong = [
+      { name: "seqeyes_spins", value: p.spins },
+      { name: "seqeyes_simulated_spins", value: p.simulated },
+      { name: "seqeyes_spins_per_voxel_x", value: p.subSpins[0] },
+      { name: "seqeyes_spins_per_voxel_y", value: p.subSpins[1] }
+    ];
+    for (const counter of COUNTERS) {
+      if (plan.counterOffsets[counter] !== 0) userParameterLong.push({ name: `seqeyes_label_offset_${counter}`, value: plan.counterOffsets[counter] });
+    }
+    const protocolName = job.program.sequence.definitionsRaw.get("Name");
+    return {
+      H1resonanceFrequency_Hz: Math.round(p.gamma * p.b0),
+      receiverChannels: p.coils,
+      systemFieldStrength_T: p.b0,
+      encodedSpace: { matrixSize, fieldOfView_mm },
+      reconSpace: { matrixSize, fieldOfView_mm },
+      trajectory: cartesian ? "cartesian" : "other",
+      encodingLimits,
+      sequenceParameters: {
+        TR: timing.trTimeSec > 0 ? [timing.trTimeSec * 1e3] : void 0,
+        TE: timing.hasExplicitTE && timing.teTimeSec > 0 ? [timing.teTimeSec * 1e3] : void 0
+      },
+      measurementInformation: { protocolName: protocolName ? String(protocolName).trim() : "pulseq", patientPosition: "HFS" },
+      acquisitionSystemInformation: { systemVendor: "SeqEyes", systemModel: "Bloch simulator" },
+      userParameters: { userParameterLong, userParameterString }
+    };
+  }
+  function ismrmrdAcquisitions(job, signal, plan, cartesian) {
+    const layout = job.rawLayout();
+    const coils = layout.coils;
+    const kmax = [0, 0, 0];
+    for (let i2 = 0; i2 < layout.k.length; i2++) kmax[i2 % 3] = Math.max(kmax[i2 % 3], Math.abs(layout.k[i2]));
+    const peak = Math.max(...kmax);
+    const trajectoryAxes = cartesian ? [] : [0, 1, 2].filter((axis) => kmax[axis] > 1e-9 * peak);
+    const out = [];
+    for (let a = 0; a < layout.acquisitions; a++) {
+      const n = layout.samples[a];
+      const data = new Float32Array(coils * n * 2);
+      for (let s = 0; s < n; s++) {
+        for (let c = 0; c < coils; c++) {
+          const src = ((layout.offsets[a] + s) * coils + c) * 2;
+          const dst = (c * n + s) * 2;
+          data[dst] = signal[src];
+          data[dst + 1] = signal[src + 1];
+        }
+      }
+      const acquisition = plan.acquisitions[a];
+      out.push({
+        head: acquisitionHeader({
+          flags: acquisitionFlags(...acquisition.flags),
+          scan_counter: a,
+          // ISMRMRD time stamps count 2.5 ms ticks, as the scanners' do.
+          acquisition_time_stamp: Math.round(layout.t0[a] / 25e-4),
+          number_of_samples: n,
+          active_channels: coils,
+          center_sample: acquisition.centerSample,
+          trajectory_dimensions: trajectoryAxes.length,
+          sample_time_us: layout.dwell[a] * 1e6,
+          read_dir: [1, 0, 0],
+          phase_dir: [0, 1, 0],
+          slice_dir: [0, 0, 1],
+          idx: acquisition.idx
+        }),
+        traj: trajectoryAxes.length ? normalisedTrajectory(layout, a, kmax, trajectoryAxes) : new Float32Array(0),
+        data
+      });
+    }
+    return out;
+  }
+  function numpyExport(job, signal) {
+    const layout = job.rawLayout();
+    const coils = layout.coils;
+    const total = signal.length / (2 * coils);
+    const uniform = layout.samples.every((n) => n === layout.samples[0]);
+    const re = new Float32Array(total * coils), im = new Float32Array(total * coils);
+    let shape;
+    if (uniform) {
+      const n = layout.samples[0];
+      shape = [layout.acquisitions, coils, n];
+      for (let a = 0; a < layout.acquisitions; a++) {
+        for (let c = 0; c < coils; c++) {
+          for (let s = 0; s < n; s++) {
+            const src = ((layout.offsets[a] + s) * coils + c) * 2;
+            const dst = (a * coils + c) * n + s;
+            re[dst] = signal[src];
+            im[dst] = signal[src + 1];
+          }
+        }
+      }
+    } else {
+      shape = [total, coils];
+      for (let i2 = 0; i2 < total * coils; i2++) {
+        re[i2] = signal[2 * i2];
+        im[i2] = signal[2 * i2 + 1];
+      }
+    }
+    const entries = /* @__PURE__ */ new Map();
+    entries.set("data", { shape, data: re, imag: im });
+    entries.set("traj", { shape: [total, 3], data: layout.k });
+    entries.set("offsets", { shape: [layout.acquisitions], data: layout.offsets });
+    entries.set("t0", { shape: [layout.acquisitions], data: layout.t0 });
+    entries.set("dwell", { shape: [layout.acquisitions], data: layout.dwell });
+    const width = layout.labels.names.length;
+    layout.labels.names.forEach((name, l) => {
+      const column = new Int32Array(layout.acquisitions);
+      for (let a = 0; a < layout.acquisitions; a++) column[a] = layout.labels.values[a * width + l];
+      entries.set(`label_${name}`, { shape: [layout.acquisitions], data: column });
+    });
+    const description = {
+      format: "SeqEyes simulated raw data",
+      signal: "complex64, delivered proportional to exp(-i omega t): an inverse FFT reconstructs",
+      data: uniform ? "data[acquisition, coil, sample]" : "data[sample, coil]; readout a is data[offsets[a]:offsets[a] + n_a]",
+      traj: "k [1/m] per sample (x, y, z), reset at each excitation",
+      times: "sample s of readout a is at t0[a] + (s + 0.5) * dwell[a] seconds",
+      labels: layout.labels.names,
+      phantom: job.plan.phantom.source,
+      spinsPerVoxel: job.plan.subSpins,
+      coils,
+      b0T: job.plan.b0
+    };
+    const json = utf83(JSON.stringify(description, null, 1));
+    entries.set("metadata_json", { shape: [json.length], data: json });
+    return writeNpz(entries);
+  }
+  function utf83(text2) {
+    const out = [];
+    for (const char of text2) {
+      const code = char.codePointAt(0);
+      if (code < 128) out.push(code);
+      else if (code < 2048) out.push(192 | code >> 6, 128 | code & 63);
+      else if (code < 65536) out.push(224 | code >> 12, 128 | code >> 6 & 63, 128 | code & 63);
+      else out.push(240 | code >> 18, 128 | code >> 12 & 63, 128 | code >> 6 & 63, 128 | code & 63);
+    }
+    return Uint8Array.from(out);
+  }
+
+  // src/pulseq/fft.ts
+  var twiddleCache = /* @__PURE__ */ new Map();
+  function isPowerOfTwo(n) {
+    return n > 0 && (n & n - 1) === 0;
+  }
+  function nextPowerOfTwo(n) {
+    if (n <= 1) return 1;
+    let p = 1;
+    while (p < n) p *= 2;
+    return p;
+  }
+  function getTwiddles(n) {
+    const cached = twiddleCache.get(n);
+    if (cached) return cached;
+    if (!isPowerOfTwo(n)) throw new Error(`FFT size must be a power of two, got ${n}`);
+    const cos = new Float64Array(n / 2);
+    const sin = new Float64Array(n / 2);
+    for (let i2 = 0; i2 < n / 2; i2++) {
+      const angle = -2 * Math.PI * i2 / n;
+      cos[i2] = Math.cos(angle);
+      sin[i2] = Math.sin(angle);
+    }
+    const bits2 = Math.round(Math.log2(n));
+    const reverse = new Uint32Array(n);
+    for (let i2 = 0; i2 < n; i2++) {
+      let r = 0;
+      for (let b = 0; b < bits2; b++) if (i2 & 1 << b) r |= 1 << bits2 - 1 - b;
+      reverse[i2] = r;
+    }
+    const table = { cos, sin, reverse };
+    twiddleCache.set(n, table);
+    return table;
+  }
+  function fftInPlace(re, im, n) {
+    const { cos, sin, reverse } = getTwiddles(n);
+    for (let i2 = 0; i2 < n; i2++) {
+      const j = reverse[i2];
+      if (j > i2) {
+        let tmp = re[i2];
+        re[i2] = re[j];
+        re[j] = tmp;
+        tmp = im[i2];
+        im[i2] = im[j];
+        im[j] = tmp;
+      }
+    }
+    for (let size = 2; size <= n; size *= 2) {
+      const half = size / 2;
+      const step = n / size;
+      for (let start = 0; start < n; start += size) {
+        for (let k = 0; k < half; k++) {
+          const twiddleIndex = k * step;
+          const wr = cos[twiddleIndex];
+          const wi = sin[twiddleIndex];
+          const a = start + k;
+          const b = a + half;
+          const xr = re[b] * wr - im[b] * wi;
+          const xi = re[b] * wi + im[b] * wr;
+          re[b] = re[a] - xr;
+          im[b] = im[a] - xi;
+          re[a] += xr;
+          im[a] += xi;
+        }
+      }
+    }
+  }
+
+  // src/pulseq/rfWaveform.ts
+  function rasterCellCount(shapes) {
+    if (!shapes.timeShape) {
+      return Math.min(shapes.magnitude.length, shapes.phaseCycles?.length ?? shapes.magnitude.length);
+    }
+    const count = breakpointCount(shapes);
+    if (count < 2) return count;
+    const span = (shapes.timeShape[count - 1] - shapes.timeShape[0]) * shapes.raster;
+    return Math.max(1, Math.round(span / shapes.raster));
+  }
+  function forEachRasterCell(shapes, visit) {
+    const { raster, magnitude, phaseCycles, timeShape } = shapes;
+    if (!timeShape) {
+      const count2 = rasterCellCount(shapes);
+      for (let i2 = 0; i2 < count2; i2++) visit(i2 * raster, raster, magnitude[i2], phaseCycles ? phaseCycles[i2] : 0);
+      return;
+    }
+    const points = breakpointCount(shapes);
+    if (points < 2) return;
+    const first = timeShape[0] * raster;
+    const last = timeShape[points - 1] * raster;
+    const count = Math.max(1, Math.round((last - first) / raster));
+    const width = (last - first) / count;
+    let k = 0;
+    for (let i2 = 0; i2 < count; i2++) {
+      const start = first + i2 * width;
+      const mid = start + 0.5 * width;
+      while (k + 1 < points - 1 && timeShape[k + 1] * raster <= mid) k++;
+      const t0 = timeShape[k] * raster;
+      const t1 = timeShape[k + 1] * raster;
+      const u = t1 > t0 ? (mid - t0) / (t1 - t0) : 0;
+      const p0 = phaseCycles ? phaseCycles[k] : 0;
+      const p1 = phaseCycles ? phaseCycles[k + 1] : 0;
+      visit(start, width, magnitude[k] + u * (magnitude[k + 1] - magnitude[k]), p0 + u * (p1 - p0));
+    }
+  }
+  function rasterCellsFromShapes(shapes) {
+    const cells = allocate(rasterCellCount(shapes), !shapes.timeShape);
+    let i2 = 0;
+    forEachRasterCell(shapes, (start, width, magnitude, phase) => {
+      cells.start[i2] = start;
+      cells.width[i2] = width;
+      cells.magnitude[i2] = magnitude;
+      cells.phaseCycles[i2] = phase;
+      i2++;
+    });
+    return cells;
+  }
+  function detectPtxTimeShapeChannels(timeShape) {
+    const n = timeShape.length;
+    if (n < 2) return 0;
+    const first = timeShape[0];
+    let repeats = 0;
+    for (let i2 = 0; i2 < n; i2++) {
+      if (timeShape[i2] === first) repeats++;
+    }
+    if (repeats < 2 || n % repeats !== 0) return 0;
+    const perChannel = n / repeats;
+    for (let channel = 1; channel < repeats; channel++) {
+      const offset = channel * perChannel;
+      for (let i2 = 0; i2 < perChannel; i2++) {
+        if (timeShape[offset + i2] !== timeShape[i2]) return 0;
+      }
+    }
+    return repeats;
+  }
+  function rfShapeArrays(rf, seq) {
+    const magnitude = seq.shapes.get(rf.magShapeId)?.samples;
+    if (!magnitude || magnitude.length < 1) return null;
+    const phase = rf.phaseShapeId > 0 ? seq.shapes.get(rf.phaseShapeId)?.samples ?? null : null;
+    let time = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples ?? null : null;
+    if (time) {
+      const channels = detectPtxTimeShapeChannels(time);
+      if (channels > 1) time = time.subarray(0, time.length / channels);
+    }
+    return { raster: seq.rasterTimes.rfRaster, magnitude, phaseCycles: phase, timeShape: time };
+  }
+  function rfShapeDuration(shapes) {
+    if (!shapes.timeShape) return rasterCellCount(shapes) * shapes.raster;
+    const points = breakpointCount(shapes);
+    return points > 0 ? shapes.timeShape[points - 1] * shapes.raster : 0;
+  }
+  function breakpointCount(shapes) {
+    return Math.min(
+      shapes.magnitude.length,
+      shapes.phaseCycles?.length ?? shapes.magnitude.length,
+      shapes.timeShape?.length ?? shapes.magnitude.length
+    );
+  }
+  function allocate(count, uniform) {
+    return {
+      count,
+      start: new Float64Array(count),
+      width: new Float64Array(count),
+      magnitude: new Float64Array(count),
+      phaseCycles: new Float64Array(count),
+      uniform
+    };
+  }
+
+  // src/pulseq/rfResponse.ts
+  var MAX_RF_RESPONSE_FFT_POINTS = 131072;
+  var MAX_RF_RESPONSE_SAMPLES = 131072;
+  var MAX_RF_RESPONSE_BANDS = 8;
+  var MIN_FFT_POINTS = 64;
+  var ZERO_PAD_FACTOR = 4;
+  var DOMINANT_BAND_FRACTION = 0.5;
+  var MIN_DOMINANT_AREA_DEG = 0.01;
+  var DEG_PER_CYCLE = 360;
+  var TAU = 2 * Math.PI;
+  function analyzeRfResponse(rf, seq, classifiedUse = rf.use) {
+    if (rfSampleCount(rf, seq) > MAX_RF_RESPONSE_SAMPLES) {
+      return {
+        carrierAreaDeg: estimateRfCarrierAreaDeg(rf, seq),
+        bands: [],
+        spectrumAnalyzed: false,
+        limited: true
+      };
+    }
+    const samples = buildComplexRfSamples(rf, seq);
+    const carrierAreaDeg = frequencyResolvedAreaDeg(samples, 0);
+    const normalizedUse = classifiedUse.toLowerCase();
+    const inversion = normalizedUse === "i" || normalizedUse === "inversion";
+    let offsets;
+    let spectrumAnalyzed = false;
+    let limited = false;
+    if (inversion) {
+      offsets = [0];
+    } else if (samples.uniform && samples.real.length <= MAX_RF_RESPONSE_FFT_POINTS) {
+      offsets = dominantBandOffsets(samples);
+      spectrumAnalyzed = true;
+    } else {
+      offsets = [0];
+      limited = true;
+    }
+    const bands = offsets.map((frequencyOffsetHz) => {
+      const spectralAreaDeg = frequencyResolvedAreaDeg(samples, frequencyOffsetHz);
+      const spinor = propagateSpinor(samples, frequencyOffsetHz);
+      return {
+        frequencyOffsetHz,
+        spectralAreaDeg,
+        polarFlipDeg: spinor.polarFlipDeg,
+        mz: spinor.mz
+      };
+    });
+    return { carrierAreaDeg, bands, spectrumAnalyzed, limited };
+  }
+  function estimateRfCarrierAreaDeg(rf, seq) {
+    const shapes = rfShapeArrays(rf, seq);
+    if (!shapes) return 0;
+    let realArea = 0;
+    let imaginaryArea = 0;
+    forEachRasterCell(shapes, (_start, width, magnitude, phaseCycles) => {
+      const amplitude = rf.amplitude * magnitude;
+      const phaseRad = TAU * phaseCycles;
+      if (!Number.isFinite(amplitude) || !Number.isFinite(phaseRad)) return;
+      realArea += amplitude * Math.cos(phaseRad) * width;
+      imaginaryArea += amplitude * Math.sin(phaseRad) * width;
+    });
+    return DEG_PER_CYCLE * Math.hypot(realArea, imaginaryArea);
+  }
+  function rfSampleCount(rf, seq) {
+    const shapes = rfShapeArrays(rf, seq);
+    return shapes ? rasterCellCount(shapes) : 0;
+  }
+  function buildComplexRfSamples(rf, seq) {
+    const raster = seq.rasterTimes.rfRaster;
+    const shapes = rfShapeArrays(rf, seq);
+    if (!shapes) return emptySamples(raster);
+    const cells = rasterCellsFromShapes(shapes);
+    if (cells.count < 1) return emptySamples(raster);
+    const real = new Float64Array(cells.count);
+    const imaginary = new Float64Array(cells.count);
+    const times = new Float64Array(cells.count);
+    const widths = new Float64Array(cells.count);
+    let uniform = true;
+    for (let index = 0; index < cells.count; index++) {
+      const amplitude = rf.amplitude * cells.magnitude[index];
+      const phaseRad = TAU * cells.phaseCycles[index];
+      const width = cells.width[index];
+      times[index] = cells.start[index] + 0.5 * width;
+      widths[index] = Number.isFinite(width) && width > 0 ? width : 0;
+      const finite = Number.isFinite(amplitude) && Number.isFinite(phaseRad);
+      real[index] = finite ? amplitude * Math.cos(phaseRad) : 0;
+      imaginary[index] = finite ? amplitude * Math.sin(phaseRad) : 0;
+      if (Math.abs(widths[index] - raster) > Math.max(1e-12, raster * 1e-6)) uniform = false;
+    }
+    return { real, imaginary, times, widths, uniform, dwell: uniform ? raster : widths[0] };
+  }
+  function emptySamples(raster) {
+    return {
+      real: new Float64Array(0),
+      imaginary: new Float64Array(0),
+      times: new Float64Array(0),
+      widths: new Float64Array(0),
+      uniform: true,
+      dwell: raster
+    };
+  }
+  function frequencyResolvedAreaDeg(samples, frequencyOffsetHz) {
+    let realArea = 0;
+    let imaginaryArea = 0;
+    for (let index = 0; index < samples.real.length; index++) {
+      const angle = -TAU * frequencyOffsetHz * samples.times[index];
+      const cosine = Math.cos(angle);
+      const sine = Math.sin(angle);
+      const width = samples.widths[index];
+      realArea += (samples.real[index] * cosine - samples.imaginary[index] * sine) * width;
+      imaginaryArea += (samples.real[index] * sine + samples.imaginary[index] * cosine) * width;
+    }
+    return DEG_PER_CYCLE * Math.hypot(realArea, imaginaryArea);
+  }
+  function dominantBandOffsets(samples) {
+    const sampleCount = samples.real.length;
+    if (sampleCount === 0 || !Number.isFinite(samples.dwell) || samples.dwell <= 0) return [0];
+    const paddedTarget = sampleCount <= Math.floor(MAX_RF_RESPONSE_FFT_POINTS / ZERO_PAD_FACTOR) ? sampleCount * ZERO_PAD_FACTOR : sampleCount;
+    const fftPoints = nextPowerOfTwo(Math.max(MIN_FFT_POINTS, paddedTarget));
+    if (fftPoints > MAX_RF_RESPONSE_FFT_POINTS) return [0];
+    const real = new Float64Array(fftPoints);
+    const imaginary = new Float64Array(fftPoints);
+    real.set(samples.real);
+    imaginary.set(samples.imaginary);
+    fftInPlace(real, imaginary, fftPoints);
+    let peakAreaDeg = 0;
+    for (let bin = 0; bin < fftPoints; bin++) {
+      peakAreaDeg = Math.max(
+        peakAreaDeg,
+        DEG_PER_CYCLE * samples.dwell * Math.hypot(real[bin], imaginary[bin])
+      );
+    }
+    if (!Number.isFinite(peakAreaDeg) || peakAreaDeg < MIN_DOMINANT_AREA_DEG) return [0];
+    const threshold = Math.max(MIN_DOMINANT_AREA_DEG, peakAreaDeg * DOMINANT_BAND_FRACTION);
+    const clusters = [];
+    let active = null;
+    const half = fftPoints / 2;
+    const frequencyStep = 1 / (fftPoints * samples.dwell);
+    for (let signedBin = -half; signedBin < half; signedBin++) {
+      const bin = signedBin < 0 ? signedBin + fftPoints : signedBin;
+      const areaDeg = DEG_PER_CYCLE * samples.dwell * Math.hypot(real[bin], imaginary[bin]);
+      if (areaDeg >= threshold) {
+        const weight = areaDeg * areaDeg;
+        if (!active) active = { frequencySum: 0, weightSum: 0, peakAreaDeg: 0 };
+        active.frequencySum += signedBin * frequencyStep * weight;
+        active.weightSum += weight;
+        active.peakAreaDeg = Math.max(active.peakAreaDeg, areaDeg);
+      } else if (active) {
+        clusters.push(active);
+        active = null;
+      }
+    }
+    if (active) clusters.push(active);
+    const offsets = clusters.filter((cluster) => cluster.weightSum > 0).sort((left, right) => right.peakAreaDeg - left.peakAreaDeg).slice(0, MAX_RF_RESPONSE_BANDS).map((cluster) => cluster.frequencySum / cluster.weightSum).sort((left, right) => left - right);
+    return offsets.length > 0 ? offsets : [0];
+  }
+  function propagateSpinor(samples, frequencyOffsetHz) {
+    let stateAReal = 1;
+    let stateAImaginary = 0;
+    let stateBReal = 0;
+    let stateBImaginary = 0;
+    for (let index = 0; index < samples.real.length; index++) {
+      const bx = samples.real[index];
+      const by = samples.imaginary[index];
+      const norm2 = Math.hypot(bx, by, frequencyOffsetHz);
+      const width = samples.widths[index];
+      if (!(norm2 > 0) || !(width > 0)) continue;
+      const sine = Math.sin(Math.PI * norm2 * width);
+      const localAReal = Math.cos(Math.PI * norm2 * width);
+      const localAImaginary = -frequencyOffsetHz / norm2 * sine;
+      const localBReal = by / norm2 * sine;
+      const localBImaginary = -bx / norm2 * sine;
+      const nextAReal = localAReal * stateAReal - localAImaginary * stateAImaginary - localBReal * stateBReal - localBImaginary * stateBImaginary;
+      const nextAImaginary = localAReal * stateAImaginary + localAImaginary * stateAReal - localBReal * stateBImaginary + localBImaginary * stateBReal;
+      const nextBReal = localBReal * stateAReal - localBImaginary * stateAImaginary + localAReal * stateBReal + localAImaginary * stateBImaginary;
+      const nextBImaginary = localBReal * stateAImaginary + localBImaginary * stateAReal + localAReal * stateBImaginary - localAImaginary * stateBReal;
+      stateAReal = nextAReal;
+      stateAImaginary = nextAImaginary;
+      stateBReal = nextBReal;
+      stateBImaginary = nextBImaginary;
+    }
+    const aMagnitudeSquared = stateAReal * stateAReal + stateAImaginary * stateAImaginary;
+    const bMagnitudeSquared = stateBReal * stateBReal + stateBImaginary * stateBImaginary;
+    const normalization = aMagnitudeSquared + bMagnitudeSquared;
+    const mz = normalization > 0 ? clamp((aMagnitudeSquared - bMagnitudeSquared) / normalization, -1, 1) : 1;
+    return { mz, polarFlipDeg: Math.acos(mz) * 180 / Math.PI };
+  }
+  function clamp(value, minimum, maximum) {
+    return Math.max(minimum, Math.min(maximum, value));
+  }
+
+  // src/pulseq/decoder.ts
+  var GAMMA_HZ_T2 = 42576e3;
+  var DEFAULT_B0_T2 = 3;
+  function getB02(seq) {
+    const raw = seq.definitions.get("B0");
+    if (raw && Array.isArray(raw) && raw.length > 0) return +raw[0];
+    const raw2 = seq.definitions.get("b0") ?? seq.definitions.get("b_0");
+    if (raw2 && Array.isArray(raw2) && raw2.length > 0) return +raw2[0];
+    return DEFAULT_B0_T2;
+  }
+  function effFreqOff(freqOffset, freqPPM, b0) {
+    return freqOffset + freqPPM * 1e-6 * GAMMA_HZ_T2 * b0;
+  }
+  function effPhaseOff(phaseOffset, phasePPM, b0) {
+    return phaseOffset + phasePPM * 1e-6 * GAMMA_HZ_T2 * b0;
+  }
+  function createSequenceDecodeContext(seq) {
+    const blockStartTimes = new Float64Array(seq.blocks.length + 1);
+    for (let index = 0; index < seq.blocks.length; index++) {
+      blockStartTimes[index + 1] = blockStartTimes[index] + blockDurationSeconds2(seq, seq.blocks[index]);
+    }
+    return {
+      sequence: seq,
+      blockStartTimes,
+      classifiedRfUses: classifyRfUses(seq),
+      rfResponseCache: /* @__PURE__ */ new Map(),
+      triggerCache: /* @__PURE__ */ new Map(),
+      ncoCache: /* @__PURE__ */ new Map()
+    };
+  }
+  function decodeBlockRange(seq, startBlockIdx, endBlockIdx, context = createSequenceDecodeContext(seq)) {
+    if (context.sequence !== seq) throw new Error("The decode context belongs to a different sequence.");
+    const totalBlocks = seq.blocks.length;
+    const s = Math.max(0, Math.min(startBlockIdx, totalBlocks));
+    const e = Math.max(s, Math.min(endBlockIdx, totalBlocks));
+    if (s >= e) return [];
+    let cumulative = context.blockStartTimes[s];
+    const decoded = [];
+    for (let i2 = s; i2 < e; i2++) {
+      const block = seq.blocks[i2];
+      const dur = blockDurationSeconds2(seq, block);
+      const db = { index: block.num, duration: dur, startTime: cumulative };
+      if (block.rfId > 0) {
+        const rf = seq.rfs.get(block.rfId);
+        if (rf) {
+          const use = context.classifiedRfUses[i2];
+          let response = context.rfResponseCache.get(rf.id);
+          if (!response) {
+            response = analyzeRfResponse(rf, seq, use);
+            context.rfResponseCache.set(rf.id, response);
+          }
+          db.rf = decodeRF(seq, rf, cumulative, dur, use, response);
+        }
+      }
+      db.gx = decodeGradient(seq, block.gxId, cumulative, dur, "gx");
+      db.gy = decodeGradient(seq, block.gyId, cumulative, dur, "gy");
+      db.gz = decodeGradient(seq, block.gzId, cumulative, dur, "gz");
+      if (block.adcId > 0) {
+        const adc = seq.adcs.get(block.adcId);
+        if (adc) db.adc = decodeADC(adc, cumulative, seq);
+      }
+      if (block.extId > 0) {
+        const ext = seq.extensions.get(block.extId);
+        if (ext) decodeExtensions(seq, ext, db, cumulative, context);
+      }
+      decoded.push(db);
+      cumulative += dur;
+    }
+    return decoded;
+  }
+  function blockDurationSeconds2(seq, block) {
+    if (seq.versionCombined < VER_PRE_14) return block.dur * 1e-6;
+    return block.dur * seq.rasterTimes.blockDurationRaster;
+  }
+  function decodeRF(seq, rf, blockStart, _blockDur, classifiedUse, response) {
+    const raster = seq.rasterTimes.rfRaster;
+    const rfDelay = rf.delay * 1e-6;
+    const rfStart = blockStart + rfDelay;
+    const b0 = getB02(seq);
+    const freqFull = effFreqOff(rf.freqOffset, rf.freqPPM, b0);
+    const phaseFull = effPhaseOff(rf.phaseOffset, rf.phasePPM, b0);
+    const magShape = seq.shapes.get(rf.magShapeId);
+    const nSamples = magShape?.numSamples ?? Math.max(2, Math.round(_blockDur / raster));
+    const mag = magShape ? new Float64Array(magShape.samples) : makeConstant(nSamples, 1);
+    const phShape = seq.shapes.get(rf.phaseShapeId);
+    const ph = phShape ? new Float64Array(phShape.samples) : new Float64Array(mag.length);
+    const timeShape = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples ?? null : null;
+    const n = Math.min(mag.length, ph.length);
+    const t = new Float64Array(n);
+    const amp = new Float64Array(n);
+    const phase = new Float64Array(n);
+    for (let i2 = 0; i2 < n; i2++) {
+      t[i2] = timeShape ? rfStart + timeShape[i2] * raster : rfStart + (i2 + 0.5) * raster;
+      amp[i2] = rf.amplitude * mag[i2];
+      const dt = t[i2] - rfStart;
+      phase[i2] = 2 * Math.PI * ph[i2] + phaseFull + 2 * Math.PI * freqFull * dt;
+    }
+    const duration = n > 0 ? timeShape ? t[n - 1] - rfStart : n * raster : 0;
+    const centerTime = rf.center >= 0 ? blockStart + rfDelay + rf.center * 1e-6 : estimateRfPeakTime(t, amp, rfStart, duration);
+    const use = classifiedUse || "u";
+    const ptxChannels = timeShape ? detectPtxTimeShapeChannels(timeShape) : 0;
+    return {
+      ...ptxChannels > 1 ? { ptxChannels } : {},
+      blockIndex: rf.id,
+      startTime: rfStart,
+      centerTime,
+      duration,
+      timePoints: t,
+      magnitude: amp,
+      phase,
+      amplitude: rf.amplitude,
+      response,
+      freqOffset: freqFull,
+      phaseOffset: phaseFull,
+      use
+    };
+  }
+  function decodeGradient(seq, gradId, blockStart, blockDur, channel) {
+    if (gradId <= 0) return zeroGradient(blockStart, blockDur, channel);
+    const trap = seq.trapGrads.get(gradId);
+    if (trap) return decodeTrap(trap, blockStart, channel);
+    const arb = seq.arbitraryGrads.get(gradId);
+    if (arb) return decodeArb(seq, arb, blockStart, channel);
+    return zeroGradient(blockStart, blockDur, channel);
+  }
+  function zeroGradient(t0, dur, ch) {
+    return {
+      blockIndex: 0,
+      startTime: t0,
+      duration: dur,
+      timePoints: new Float64Array([t0, t0 + dur]),
+      waveform: new Float64Array([0, 0]),
+      amplitude: 0,
+      type: "none",
+      channel: ch
+    };
+  }
+  function decodeTrap(trap, blockStart, ch) {
+    const rise = trap.rise * 1e-6;
+    const flat = trap.flat * 1e-6;
+    const fall = trap.fall * 1e-6;
+    const delay = trap.delay * 1e-6;
+    const gradStart = blockStart + delay;
+    const tRel = [0, rise, rise + flat, rise + flat + fall];
+    const wfRel = [0, trap.amplitude, trap.amplitude, 0];
+    if (delay > 0) {
+      const tp2 = new Float64Array(5);
+      const wf2 = new Float64Array(5);
+      tp2[0] = blockStart;
+      wf2[0] = 0;
+      for (let i2 = 0; i2 < 4; i2++) {
+        tp2[i2 + 1] = gradStart + tRel[i2];
+        wf2[i2 + 1] = wfRel[i2];
+      }
+      return {
+        blockIndex: trap.id,
+        startTime: blockStart,
+        duration: delay + rise + flat + fall,
+        timePoints: tp2,
+        waveform: wf2,
+        amplitude: trap.amplitude,
+        type: "trap",
+        channel: ch
+      };
+    }
+    const tp = new Float64Array(4);
+    const wf = new Float64Array(4);
+    for (let i2 = 0; i2 < 4; i2++) {
+      tp[i2] = gradStart + tRel[i2];
+      wf[i2] = wfRel[i2];
+    }
+    return {
+      blockIndex: trap.id,
+      startTime: blockStart,
+      duration: rise + flat + fall,
+      timePoints: tp,
+      waveform: wf,
+      amplitude: trap.amplitude,
+      type: "trap",
+      channel: ch
+    };
+  }
+  function decodeArb(seq, arb, blockStart, ch) {
+    const shape = seq.shapes.get(arb.shapeId);
+    if (!shape) return zeroGradient(blockStart, 0, ch);
+    const raster = seq.rasterTimes.gradientRaster;
+    const delay = arb.delay * 1e-6;
+    const gradStart = blockStart + delay;
+    const n = shape.numSamples;
+    const oversampled = arb.timeId === -1;
+    const timeShape = arb.timeId > 0 ? seq.shapes.get(arb.timeId)?.samples ?? null : null;
+    if (timeShape) {
+      const tp2 = new Float64Array(n);
+      const wf2 = new Float64Array(n);
+      for (let i2 = 0; i2 < n; i2++) {
+        tp2[i2] = gradStart + timeShape[i2] * raster;
+        wf2[i2] = arb.amplitude * shape.samples[i2];
+      }
+      const dur2 = n > 0 ? tp2[n - 1] - blockStart + raster : delay;
+      return {
+        blockIndex: arb.id,
+        startTime: blockStart,
+        duration: dur2,
+        timePoints: tp2,
+        waveform: wf2,
+        amplitude: arb.amplitude,
+        type: "arb",
+        channel: ch
+      };
+    }
+    const tp = new Float64Array(n + 2);
+    const wf = new Float64Array(n + 2);
+    tp[0] = gradStart;
+    wf[0] = edgeAmplitude(arb.first, arb.amplitude, shape.samples, true);
+    if (oversampled) {
+      const dt = raster * 0.5;
+      for (let i2 = 0; i2 < n; i2++) {
+        tp[i2 + 1] = gradStart + (i2 + 1) * dt;
+        wf[i2 + 1] = arb.amplitude * shape.samples[i2];
+      }
+      tp[n + 1] = gradStart + (n + 1) * dt;
+    } else {
+      for (let i2 = 0; i2 < n; i2++) {
+        tp[i2 + 1] = gradStart + (i2 + 0.5) * raster;
+        wf[i2 + 1] = arb.amplitude * shape.samples[i2];
+      }
+      tp[n + 1] = gradStart + n * raster;
+    }
+    wf[wf.length - 1] = edgeAmplitude(arb.last, arb.amplitude, shape.samples, false);
+    const dur = tp[tp.length - 1] - blockStart;
+    return {
+      blockIndex: arb.id,
+      startTime: blockStart,
+      duration: dur,
+      timePoints: tp,
+      waveform: wf,
+      amplitude: arb.amplitude,
+      type: "arb",
+      channel: ch
+    };
+  }
+  function edgeAmplitude(stored, amplitude, samples, first) {
+    let value;
+    if (Number.isFinite(stored)) {
+      value = stored;
+      if (Math.abs(value) > 1 + 1e-6 && Math.abs(amplitude) > 0) value /= amplitude;
+    } else if (samples.length === 0) {
+      value = 0;
+    } else if (samples.length === 1) {
+      value = samples[0];
+    } else if (first) {
+      value = 0.5 * (3 * samples[0] - samples[1]);
+    } else {
+      value = 0.5 * (3 * samples[samples.length - 1] - samples[samples.length - 2]);
+    }
+    return value * amplitude;
+  }
+  function decodeADC(adc, blockStart, seq) {
+    const b0 = getB02(seq);
+    const freqFull = effFreqOff(adc.freqOffset, adc.freqPPM, b0);
+    const phaseFull = effPhaseOff(adc.phaseOffset, adc.phasePPM, b0);
+    const decoded = {
+      blockIndex: adc.id,
+      startTime: blockStart,
+      numSamples: adc.numSamples,
+      dwell: adc.dwell * 1e-9,
+      // ns → s
+      delay: adc.delay * 1e-6,
+      // µs → s
+      freqOffset: freqFull,
+      phaseOffset: phaseFull
+    };
+    const modulation = adc.phaseModShapeId > 0 ? seq.shapes.get(adc.phaseModShapeId) : void 0;
+    if (modulation) decoded.phaseModulation = modulation.samples;
+    return decoded;
+  }
+  function decodeExtensions(seq, ext, db, blockStart, context) {
+    const visited = /* @__PURE__ */ new Set();
+    let cur = ext;
+    while (cur && !visited.has(cur.id)) {
+      visited.add(cur.id);
+      const type = seq.extensionTypes.get(cur.type) ?? 999 /* EXT_UNKNOWN */;
+      if (type === 1 /* EXT_TRIGGER */) {
+        let cached = context.triggerCache.get(cur.id);
+        if (!cached) {
+          const trigger = findById(seq.triggers, cur.ref);
+          if (trigger) {
+            cached = {
+              blockIndex: trigger.id,
+              startTime: 0,
+              triggerType: trigger.triggerType,
+              channel: trigger.channel,
+              delay: trigger.delay * 1e-6,
+              duration: trigger.duration * 1e-6
+            };
+            context.triggerCache.set(cur.id, cached);
+          }
+        }
+        if (cached) {
+          if (!db.triggers) db.triggers = [];
+          db.triggers.push({ ...cached, startTime: blockStart });
+        }
+      } else if (type === 100 /* EXT_NCO */) {
+        let cached = context.ncoCache.get(cur.id);
+        if (!cached) {
+          const nco = findById(seq.ncos, cur.ref);
+          if (nco) {
+            cached = {
+              blockIndex: nco.id,
+              startTime: 0,
+              channel: nco.channel,
+              frequency: nco.frequency,
+              phase: nco.phase,
+              delay: nco.delay * 1e-6,
+              duration: nco.duration * 1e-6
+            };
+            context.ncoCache.set(cur.id, cached);
+          }
+        }
+        if (cached) {
+          if (!db.nco) db.nco = [];
+          db.nco.push({ ...cached, startTime: blockStart });
+        }
+      } else if (type === 2 /* EXT_ROTATION */) {
+        const rotation = findById(seq.rotations, cur.ref);
+        if (rotation) db.rotation = { id: rotation.id, values: [...rotation.values] };
+      } else if (type === 3 /* EXT_LABELSET */) {
+        const label = findById(seq.labelSets, cur.ref);
+        if (label) {
+          if (!db.labelSets) db.labelSets = [];
+          db.labelSets.push({ ...label });
+        }
+      } else if (type === 4 /* EXT_LABELINC */) {
+        const label = findById(seq.labelIncs, cur.ref);
+        if (label) {
+          if (!db.labelIncs) db.labelIncs = [];
+          db.labelIncs.push({ ...label });
+        }
+      } else if (type === 5 /* EXT_DELAY */) {
+        const delay = findById(seq.softDelays, cur.ref);
+        if (delay) db.softDelay = { ...delay };
+      } else if (type === 6 /* EXT_RF_SHIM */) {
+        const shim = findById(seq.rfShims, cur.ref);
+        if (shim) {
+          db.rfShim = {
+            id: shim.id,
+            nChannels: shim.nChannels,
+            amplitudes: [...shim.amplitudes],
+            phases: [...shim.phases]
+          };
+        }
+      }
+      cur = cur.nextId > 0 ? seq.extensions.get(cur.nextId) : void 0;
+    }
+  }
+  function makeConstant(n, value) {
+    const a = new Float64Array(Math.max(n, 2));
+    a.fill(value);
+    return a;
+  }
+  function estimateRfPeakTime(timePoints, magnitude, startTime, duration) {
+    if (!timePoints.length || !magnitude.length) return startTime + duration * 0.5;
+    let peak = Math.abs(magnitude[0]);
+    for (let i2 = 1; i2 < magnitude.length; i2++) {
+      const v = Math.abs(magnitude[i2]);
+      if (v > peak) peak = v;
+    }
+    const threshold = Math.abs(peak) * 0.99999;
+    let firstPeak = -1;
+    let lastPeak = -1;
+    for (let i2 = 0; i2 < magnitude.length; i2++) {
+      if (Math.abs(magnitude[i2]) >= threshold) {
+        if (firstPeak < 0) firstPeak = i2;
+        lastPeak = i2;
+      }
+    }
+    if (firstPeak < 0 || lastPeak < 0) return startTime + duration * 0.5;
+    return 0.5 * (timePoints[Math.min(firstPeak, timePoints.length - 1)] + timePoints[Math.min(lastPeak, timePoints.length - 1)]);
+  }
+  function findById(items, id) {
+    return items.find((item) => item.id === id);
+  }
+
+  // src/pulseq/labels.ts
+  var COUNTER_ORDER = ["SLC", "SEG", "REP", "AVG", "SET", "ECO", "PHS", "LIN", "PAR", "ACQ", "TRID", "ONCE"];
+  var FLAG_ORDER = ["NAV", "REV", "SMS", "REF", "IMA", "OFF", "NOISE", "PMC", "NOROT", "NOPOS", "NOSCL"];
+  function labelRank(name) {
+    const counter = COUNTER_ORDER.indexOf(name);
+    if (counter >= 0) return counter;
+    const flag = FLAG_ORDER.indexOf(name);
+    return flag >= 0 ? 2e3 + flag : 1e3;
+  }
+  function labelKind(name) {
+    return FLAG_ORDER.includes(name) ? "flag" : "counter";
+  }
+  function listSequenceLabels(seq) {
+    const seen = /* @__PURE__ */ new Set();
+    for (const spec of seq.labelSets) seen.add(spec.name);
+    for (const spec of seq.labelIncs) seen.add(spec.name);
+    const names = [...seen].sort((a, b) => labelRank(a) - labelRank(b) || (a < b ? -1 : a > b ? 1 : 0));
+    return { names, kinds: names.map(labelKind) };
+  }
+  function labelOpsForChain(seq, headId, column, sets, incs) {
+    const ops = [];
+    const visited = /* @__PURE__ */ new Set();
+    let cur = seq.extensions.get(headId);
+    while (cur && !visited.has(cur.id)) {
+      visited.add(cur.id);
+      const type = seq.extensionTypes.get(cur.type) ?? 999 /* EXT_UNKNOWN */;
+      if (type === 3 /* EXT_LABELSET */ || type === 4 /* EXT_LABELINC */) {
+        const increment = type === 4 /* EXT_LABELINC */;
+        const spec = increment ? incs.get(cur.ref) : sets.get(cur.ref);
+        const index = spec ? column.get(spec.name) : void 0;
+        if (spec && index !== void 0) ops.push({ column: index, value: spec.value, increment });
+      }
+      cur = cur.nextId > 0 ? seq.extensions.get(cur.nextId) : void 0;
+    }
+    return ops;
+  }
+  function evaluateAdcLabels(seq) {
+    const { names, kinds } = listSequenceLabels(seq);
+    const width = names.length;
+    const column = new Map(names.map((name, index) => [name, index]));
+    const sets = new Map(seq.labelSets.map((spec) => [spec.id, spec]));
+    const incs = new Map(seq.labelIncs.map((spec) => [spec.id, spec]));
+    let count = 0;
+    for (const block of seq.blocks) {
+      if (block.adcId > 0 && seq.adcs.has(block.adcId)) count++;
+    }
+    const timeSec = new Float64Array(count);
+    const blockNumbers = new Uint32Array(count);
+    const values = new Int32Array(count * width);
+    const state = new Int32Array(width);
+    const chains = /* @__PURE__ */ new Map();
+    let start = 0;
+    let row = 0;
+    for (const block of seq.blocks) {
+      if (width > 0 && block.extId > 0) {
+        let ops = chains.get(block.extId);
+        if (!ops) {
+          ops = labelOpsForChain(seq, block.extId, column, sets, incs);
+          chains.set(block.extId, ops);
+        }
+        for (const op of ops) state[op.column] = op.increment ? state[op.column] + op.value : op.value;
+      }
+      const adc = block.adcId > 0 ? seq.adcs.get(block.adcId) : void 0;
+      if (adc) {
+        timeSec[row] = start + adc.delay * 1e-6 + adc.numSamples * adc.dwell * 1e-9 / 2;
+        blockNumbers[row] = block.num;
+        values.set(state, row * width);
+        row++;
+      }
+      start += blockDurationSeconds2(seq, block);
+    }
+    const min = new Array(width).fill(0);
+    const max2 = new Array(width).fill(0);
+    for (let label = 0; label < width; label++) {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let adc = 0; adc < count; adc++) {
+        const value = values[adc * width + label];
+        if (value < lo) lo = value;
+        if (value > hi) hi = value;
+      }
+      if (count > 0) {
+        min[label] = lo;
+        max2[label] = hi;
+      }
+    }
+    return { names, kinds, count, timeSec, block: blockNumbers, values, min, max: max2 };
+  }
+
   // src/pulseq/decompressor.ts
   function decompressShape(compressed, numSamples) {
     const packedLen = compressed.length;
@@ -52,19 +4131,11 @@
       throw new Error(`Malformed compressed shape: expected ${numSamples} samples, decoded ${iUnpacked}`);
     }
     let cumSum = 0;
-    for (let i = 0; i < numSamples; i++) {
-      cumSum += result[i];
-      result[i] = cumSum;
+    for (let i2 = 0; i2 < numSamples; i2++) {
+      cumSum += result[i2];
+      result[i2] = cumSum;
     }
     return result;
-  }
-
-  // src/pulseq/types.ts
-  var VER_PRE_14 = 1004e3;
-  var VER_V15 = 1005e3;
-  var VER_V15001 = 1005001;
-  function makeVersionCombined(major, minor, revision) {
-    return major * 1e6 + minor * 1e3 + revision;
   }
 
   // src/pulseq/readerShared.ts
@@ -245,7 +4316,7 @@
 
   // src/pulseq/binaryReader.ts
   var PULSEQ_BINARY_VERSION = Object.freeze({ major: 1, minor: 5, revision: 2 });
-  var MAGIC = new Uint8Array([1, 112, 117, 108, 115, 101, 113, 2]);
+  var MAGIC2 = new Uint8Array([1, 112, 117, 108, 115, 101, 113, 2]);
   var SECTION_PREFIX = 0xffffffff00000000n;
   var SECTION = Object.freeze({
     definitions: SECTION_PREFIX | 1n,
@@ -294,15 +4365,15 @@
     "ONCE"
   ]);
   function hasPulseqBinaryMagic(bytes) {
-    if (bytes.byteLength < MAGIC.byteLength) return false;
-    for (let i = 0; i < MAGIC.byteLength; i++) {
-      if (bytes[i] !== MAGIC[i]) return false;
+    if (bytes.byteLength < MAGIC2.byteLength) return false;
+    for (let i2 = 0; i2 < MAGIC2.byteLength; i2++) {
+      if (bytes[i2] !== MAGIC2[i2]) return false;
     }
     return true;
   }
   function parseSequenceBinary(bytes) {
     const reader = new BinaryReader(bytes);
-    const magic = reader.bytes(MAGIC.byteLength, "file header");
+    const magic = reader.bytes(MAGIC2.byteLength, "file header");
     if (!hasPulseqBinaryMagic(magic)) {
       reader.fail("not a Pulseq binary file", 0);
     }
@@ -391,13 +4462,13 @@
     if (seq.version.major !== expected.major || seq.version.minor !== expected.minor || seq.version.revision !== expected.revision) {
       reader.fail(
         `unsupported Pulseq binary version ${seq.version.major}.${seq.version.minor}.${seq.version.revision}; expected ${expected.major}.${expected.minor}.${expected.revision}`,
-        MAGIC.byteLength
+        MAGIC2.byteLength
       );
     }
   }
   function readDefinitions(reader, seq) {
     const count = reader.count64("DEFINITIONS count", 9);
-    for (let i = 0; i < count; i++) {
+    for (let i2 = 0; i2 < count; i2++) {
       const keyLength = reader.length32("DEFINITIONS key length");
       const key = reader.string(keyLength, "DEFINITIONS key");
       const valueCount = reader.length32("DEFINITIONS value count", MAX_RECORDS);
@@ -427,9 +4498,9 @@
   function readBlocks(reader, seq) {
     const count = reader.count64("BLOCKS count", 32);
     seq.blocks.length = 0;
-    for (let i = 0; i < count; i++) {
+    for (let i2 = 0; i2 < count; i2++) {
       seq.blocks.push({
-        num: i + 1,
+        num: i2 + 1,
         dur: reader.nonNegativeSafeInt64("BLOCKS duration"),
         rfId: reader.int32("BLOCKS RF id"),
         gxId: reader.int32("BLOCKS Gx id"),
@@ -443,7 +4514,7 @@
   function readRf(reader, seq) {
     const count = reader.count64("RF count", 73);
     seq.rfs.clear();
-    for (let i = 0; i < count; i++) {
+    for (let i2 = 0; i2 < count; i2++) {
       const id = reader.int32("RF id");
       const amplitude = reader.float64("RF amplitude");
       const magShapeId = reader.int32("RF magnitude shape id");
@@ -476,7 +4547,7 @@
   }
   function readGradients(reader, seq) {
     const count = reader.count64("GRADIENTS count", 44);
-    for (let i = 0; i < count; i++) {
+    for (let i2 = 0; i2 < count; i2++) {
       const id = reader.int32("GRADIENTS id");
       seq.arbitraryGrads.set(id, {
         id,
@@ -491,7 +4562,7 @@
   }
   function readTrapezoids(reader, seq) {
     const count = reader.count64("TRAP count", 44);
-    for (let i = 0; i < count; i++) {
+    for (let i2 = 0; i2 < count; i2++) {
       const id = reader.int32("TRAP id");
       seq.trapGrads.set(id, {
         id,
@@ -506,7 +4577,7 @@
   function readAdc(reader, seq) {
     const count = reader.count64("ADC count", 64);
     seq.adcs.clear();
-    for (let i = 0; i < count; i++) {
+    for (let i2 = 0; i2 < count; i2++) {
       const id = reader.int32("ADC id");
       seq.adcs.set(id, {
         id,
@@ -526,7 +4597,7 @@
   }
   function readLegacyDelays(reader) {
     const count = reader.count64("legacy DELAYS count", 12);
-    for (let i = 0; i < count; i++) {
+    for (let i2 = 0; i2 < count; i2++) {
       reader.int32("legacy DELAYS id");
       reader.safeInt64("legacy DELAYS duration");
     }
@@ -534,7 +4605,7 @@
   function readShapes(reader, seq) {
     const count = reader.count64("SHAPES count", 20);
     seq.shapes.clear();
-    for (let i = 0; i < count; i++) {
+    for (let i2 = 0; i2 < count; i2++) {
       const id = reader.int32("SHAPES id");
       const numSamples = reader.positiveSafeInt64("SHAPES uncompressed count", MAX_SHAPE_SAMPLES);
       const packedCount = reader.positiveSafeInt64("SHAPES compressed count", MAX_SHAPE_SAMPLES);
@@ -547,7 +4618,7 @@
   function readExtensions(reader, seq) {
     const count = reader.count64("EXTENSIONS count", 16);
     seq.extensions.clear();
-    for (let i = 0; i < count; i++) {
+    for (let i2 = 0; i2 < count; i2++) {
       const id = reader.int32("EXTENSIONS id");
       seq.extensions.set(id, {
         id,
@@ -566,7 +4637,7 @@
     registerExtension(seq, extensionId, "TRIGGERS");
     const count = reader.count64("TRIGGERS count", 28);
     seq.triggers.length = 0;
-    for (let i = 0; i < count; i++) {
+    for (let i2 = 0; i2 < count; i2++) {
       seq.triggers.push({
         id: reader.int32("TRIGGERS id"),
         triggerType: reader.int32("TRIGGERS type"),
@@ -583,7 +4654,7 @@
     const count = reader.count64(`${section} count`, 12);
     const library = isSet ? seq.labelSets : seq.labelIncs;
     library.length = 0;
-    for (let i = 0; i < count; i++) {
+    for (let i2 = 0; i2 < count; i2++) {
       const id = reader.int32(`${section} id`);
       const value = reader.int32(`${section} value`);
       const labelIndex = reader.int32(`${section} label index`);
@@ -601,7 +4672,7 @@
     registerExtension(seq, extensionId, "DELAYS");
     const count = reader.count64("DELAYS count", 28);
     seq.softDelays.length = 0;
-    for (let i = 0; i < count; i++) {
+    for (let i2 = 0; i2 < count; i2++) {
       const id = reader.int32("DELAYS id");
       const numId = reader.int32("DELAYS numeric id");
       const offset = psToUsRounded(reader.safeInt64("DELAYS offset"));
@@ -615,7 +4686,7 @@
     registerExtension(seq, extensionId, "RF_SHIMS");
     const count = reader.count64("RF_SHIMS count", 8);
     seq.rfShims.length = 0;
-    for (let i = 0; i < count; i++) {
+    for (let i2 = 0; i2 < count; i2++) {
       const id = reader.int32("RF_SHIMS id");
       const nChannels = reader.length32("RF_SHIMS channel count", MAX_RECORDS / 2);
       reader.requireArray(nChannels * 2, 8, "RF_SHIMS channel data");
@@ -633,7 +4704,7 @@
     registerExtension(seq, extensionId, "ROTATIONS");
     const count = reader.count64("ROTATIONS count", 36);
     seq.rotations.length = 0;
-    for (let i = 0; i < count; i++) {
+    for (let i2 = 0; i2 < count; i2++) {
       const id = reader.int32("ROTATIONS id");
       const values = [
         reader.float64("ROTATIONS q0"),
@@ -761,9 +4832,9 @@
     string(length, context) {
       const data = this.bytes(length, context);
       let result = "";
-      const chunkSize = 8192;
-      for (let start = 0; start < data.length; start += chunkSize) {
-        const end = Math.min(data.length, start + chunkSize);
+      const chunkSize2 = 8192;
+      for (let start = 0; start < data.length; start += chunkSize2) {
+        const end = Math.min(data.length, start + chunkSize2);
         result += String.fromCharCode(...data.subarray(start, end));
       }
       return result;
@@ -788,13 +4859,13 @@
   };
 
   // src/pulseq/reader.ts
-  function parseSequenceText(text) {
+  function parseSequenceText(text2) {
     const seq = createEmptySequence();
     const seenSections = /* @__PURE__ */ new Set();
     const shapeParser = new ShapeSectionParser(seq);
     let sectionName = null;
     let sectionLines = [];
-    forEachLine(text, (line) => {
+    forEachLine(text2, (line) => {
       const m = line.match(/^\[(\w+)\]$/);
       if (m) {
         if (sectionName === "SHAPES") shapeParser.finish();
@@ -819,14 +4890,14 @@
     validateSequence(seq, seenSections);
     return seq;
   }
-  function forEachLine(text, visit) {
+  function forEachLine(text2, visit) {
     let start = 0;
-    while (start <= text.length) {
-      let end = text.indexOf("\n", start);
-      if (end < 0) end = text.length;
-      const contentEnd = end > start && text.charCodeAt(end - 1) === 13 ? end - 1 : end;
-      visit(text.slice(start, contentEnd));
-      if (end === text.length) break;
+    while (start <= text2.length) {
+      let end = text2.indexOf("\n", start);
+      if (end < 0) end = text2.length;
+      const contentEnd = end > start && text2.charCodeAt(end - 1) === 13 ? end - 1 : end;
+      visit(text2.slice(start, contentEnd));
+      if (end === text2.length) break;
       start = end + 1;
     }
   }
@@ -1114,9 +5185,9 @@
   function parseExtensions(seq, valid) {
     const vc = ver(seq);
     resetUnknownLabels();
-    let i = 0;
-    while (i < valid.length) {
-      const line = valid[i].trim();
+    let i2 = 0;
+    while (i2 < valid.length) {
+      const line = valid[i2].trim();
       if (line.startsWith("extension ")) break;
       const p = splitFields(line);
       requireFieldCount("EXTENSIONS", line, p.length, 4);
@@ -1127,24 +5198,24 @@
         ref: toInt(p[2], "EXTENSIONS", line),
         nextId: toInt(p[3], "EXTENSIONS", line)
       });
-      i++;
+      i2++;
     }
-    while (i < valid.length) {
-      const line = valid[i].trim();
+    while (i2 < valid.length) {
+      const line = valid[i2].trim();
       const extM = line.match(/^extension\s+(\w+)\s+(\d+)/i);
       if (!extM) {
-        i++;
+        i2++;
         continue;
       }
       const extName = extM[1].toUpperCase();
       const extId = +extM[2];
       seq.extensionNames.set(extId, extName);
       seq.extensionTypes.set(extId, extensionNameToType(extName));
-      i++;
+      i2++;
       const dataLines = [];
-      while (i < valid.length && !valid[i].trim().startsWith("extension ")) {
-        dataLines.push(valid[i].trim());
-        i++;
+      while (i2 < valid.length && !valid[i2].trim().startsWith("extension ")) {
+        dataLines.push(valid[i2].trim());
+        i2++;
       }
       switch (extName) {
         case "TRIGGERS":
@@ -1346,851 +5417,21 @@
     if (/\.bseq$/i.test(fileName)) {
       throw new Error("Pulseq binary parse error: .bseq file is missing the Pulseq binary header");
     }
-    let text;
+    let text2;
     try {
-      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      text2 = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     } catch {
       throw new Error("Pulseq parse error: sequence text is not valid UTF-8");
     }
-    return parseSequenceText(text);
-  }
-
-  // src/pulseq/rfWaveform.ts
-  function rasterCellCount(shapes) {
-    if (!shapes.timeShape) {
-      return Math.min(shapes.magnitude.length, shapes.phaseCycles?.length ?? shapes.magnitude.length);
-    }
-    const count = breakpointCount(shapes);
-    if (count < 2) return count;
-    const span = (shapes.timeShape[count - 1] - shapes.timeShape[0]) * shapes.raster;
-    return Math.max(1, Math.round(span / shapes.raster));
-  }
-  function forEachRasterCell(shapes, visit) {
-    const { raster, magnitude, phaseCycles, timeShape } = shapes;
-    if (!timeShape) {
-      const count2 = rasterCellCount(shapes);
-      for (let i = 0; i < count2; i++) visit(i * raster, raster, magnitude[i], phaseCycles ? phaseCycles[i] : 0);
-      return;
-    }
-    const points = breakpointCount(shapes);
-    if (points < 2) return;
-    const first = timeShape[0] * raster;
-    const last = timeShape[points - 1] * raster;
-    const count = Math.max(1, Math.round((last - first) / raster));
-    const width = (last - first) / count;
-    let k = 0;
-    for (let i = 0; i < count; i++) {
-      const start = first + i * width;
-      const mid = start + 0.5 * width;
-      while (k + 1 < points - 1 && timeShape[k + 1] * raster <= mid) k++;
-      const t0 = timeShape[k] * raster;
-      const t1 = timeShape[k + 1] * raster;
-      const u = t1 > t0 ? (mid - t0) / (t1 - t0) : 0;
-      const p0 = phaseCycles ? phaseCycles[k] : 0;
-      const p1 = phaseCycles ? phaseCycles[k + 1] : 0;
-      visit(start, width, magnitude[k] + u * (magnitude[k + 1] - magnitude[k]), p0 + u * (p1 - p0));
-    }
-  }
-  function rasterCellsFromShapes(shapes) {
-    const cells = allocate(rasterCellCount(shapes), !shapes.timeShape);
-    let i = 0;
-    forEachRasterCell(shapes, (start, width, magnitude, phase) => {
-      cells.start[i] = start;
-      cells.width[i] = width;
-      cells.magnitude[i] = magnitude;
-      cells.phaseCycles[i] = phase;
-      i++;
-    });
-    return cells;
-  }
-  function detectPtxTimeShapeChannels(timeShape) {
-    const n = timeShape.length;
-    if (n < 2) return 0;
-    const first = timeShape[0];
-    let repeats = 0;
-    for (let i = 0; i < n; i++) {
-      if (timeShape[i] === first) repeats++;
-    }
-    if (repeats < 2 || n % repeats !== 0) return 0;
-    const perChannel = n / repeats;
-    for (let channel = 1; channel < repeats; channel++) {
-      const offset = channel * perChannel;
-      for (let i = 0; i < perChannel; i++) {
-        if (timeShape[offset + i] !== timeShape[i]) return 0;
-      }
-    }
-    return repeats;
-  }
-  function rfShapeArrays(rf, seq) {
-    const magnitude = seq.shapes.get(rf.magShapeId)?.samples;
-    if (!magnitude || magnitude.length < 1) return null;
-    const phase = rf.phaseShapeId > 0 ? seq.shapes.get(rf.phaseShapeId)?.samples ?? null : null;
-    let time = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples ?? null : null;
-    if (time) {
-      const channels = detectPtxTimeShapeChannels(time);
-      if (channels > 1) time = time.subarray(0, time.length / channels);
-    }
-    return { raster: seq.rasterTimes.rfRaster, magnitude, phaseCycles: phase, timeShape: time };
-  }
-  function rfShapeDuration(shapes) {
-    if (!shapes.timeShape) return rasterCellCount(shapes) * shapes.raster;
-    const points = breakpointCount(shapes);
-    return points > 0 ? shapes.timeShape[points - 1] * shapes.raster : 0;
-  }
-  function breakpointCount(shapes) {
-    return Math.min(
-      shapes.magnitude.length,
-      shapes.phaseCycles?.length ?? shapes.magnitude.length,
-      shapes.timeShape?.length ?? shapes.magnitude.length
-    );
-  }
-  function allocate(count, uniform) {
-    return {
-      count,
-      start: new Float64Array(count),
-      width: new Float64Array(count),
-      magnitude: new Float64Array(count),
-      phaseCycles: new Float64Array(count),
-      uniform
-    };
+    return parseSequenceText(text2);
   }
 
   // src/sim/conventions.ts
   var PULSEQ_GAMMA_HZ_PER_T = 42576e3;
-  var DEFAULT_B0_T = 3;
+  var DEFAULT_B0_T3 = 3;
   function demodulationPhase(phaseOffset, freqOffset, dwell, s, phaseModulation) {
     const t = (s + 0.5) * dwell;
     return phaseOffset + 2 * Math.PI * freqOffset * t + (phaseModulation ? phaseModulation[s] : 0);
-  }
-
-  // src/pulseq/rfClassification.ts
-  var GAMMA_HZ_T = 42576e3;
-  var DEFAULT_B0_T2 = 3;
-  var sequenceUseCache = /* @__PURE__ */ new WeakMap();
-  function classifyRfUse(rf, seq) {
-    if (seq.versionCombined >= VER_V15 && rf.use && rf.use.toLowerCase() !== "u") {
-      return rf.use.toLowerCase();
-    }
-    const flipAngleDeg = estimateRfFlipAngleDeg(rf, seq);
-    if (isLegacyFatSaturation(rf, seq)) return "s";
-    return flipAngleDeg >= 120 ? "r" : "e";
-  }
-  function classifyRfUses(seq) {
-    const cachedUses = sequenceUseCache.get(seq);
-    if (cachedUses) return cachedUses;
-    const libraryUses = /* @__PURE__ */ new Map();
-    const uses = seq.blocks.map((block) => {
-      if (block.rfId <= 0) return "";
-      const cached = libraryUses.get(block.rfId);
-      if (cached !== void 0) return cached;
-      const rf = seq.rfs.get(block.rfId);
-      const use = rf ? classifyRfUse(rf, seq) : "";
-      libraryUses.set(block.rfId, use);
-      return use;
-    });
-    if (seq.versionCombined >= VER_V15 || uses.includes("e")) {
-      sequenceUseCache.set(seq, uses);
-      return uses;
-    }
-    const saturationBlocks = uses.map((use, index) => use === "s" ? index : -1).filter((index) => index >= 0);
-    if (saturationBlocks.length < 2) {
-      sequenceUseCache.set(seq, uses);
-      return uses;
-    }
-    for (let anchor = 0; anchor < saturationBlocks.length; anchor++) {
-      const start = saturationBlocks[anchor] + 1;
-      const end = saturationBlocks[anchor + 1] ?? uses.length;
-      for (let index = start; index < end; index++) {
-        if (!uses[index] || uses[index] === "s") continue;
-        uses[index] = "e";
-        break;
-      }
-    }
-    sequenceUseCache.set(seq, uses);
-    return uses;
-  }
-  function estimateRfFlipAngleDeg(rf, seq) {
-    const magShape = seq.shapes.get(rf.magShapeId);
-    if (magShape && magShape.numSamples > 0) {
-      const raster = seq.rasterTimes.rfRaster;
-      const timeShape = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples : void 0;
-      let area = 0;
-      let previousTime = timeShape ? timeShape[0] * raster : 0.5 * raster;
-      let previousAmplitude = Math.abs(rf.amplitude * magShape.samples[0]);
-      for (let index = 1; index < magShape.numSamples; index++) {
-        const time = timeShape ? timeShape[index] * raster : (index + 0.5) * raster;
-        const amplitude = Math.abs(rf.amplitude * magShape.samples[index]);
-        const duration = time - previousTime;
-        if (duration > 0) area += 0.5 * (previousAmplitude + amplitude) * duration;
-        previousTime = time;
-        previousAmplitude = amplitude;
-      }
-      return 360 * area;
-    }
-    const absoluteAmplitude = Math.abs(rf.amplitude);
-    if (absoluteAmplitude > 3e3) return 180;
-    if (absoluteAmplitude > 1500) return 120;
-    return 90;
-  }
-  function isLegacyFatSaturation(rf, seq) {
-    const b0Tesla = getB0(seq);
-    const frequencyPpm = rf.freqPPM !== 0 ? rf.freqPPM : b0Tesla > 0 ? 1e6 * rf.freqOffset / (GAMMA_HZ_T * b0Tesla) : 0;
-    const durationSec = estimateRfDuration(rf, seq);
-    return durationSec > 6e-3 && frequencyPpm >= -4.5 && frequencyPpm <= -3;
-  }
-  function estimateRfDuration(rf, seq) {
-    const magShape = seq.shapes.get(rf.magShapeId);
-    if (!magShape || magShape.numSamples <= 0) return 0;
-    const raster = seq.rasterTimes.rfRaster;
-    const timeShape = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples : void 0;
-    if (timeShape && timeShape.length > 0) {
-      return timeShape[timeShape.length - 1] * raster;
-    }
-    return magShape.numSamples * raster;
-  }
-  function getB0(seq) {
-    const raw = seq.definitions.get("B0") ?? seq.definitions.get("b0") ?? seq.definitions.get("b_0");
-    if (raw && raw.length > 0) return +raw[0];
-    return DEFAULT_B0_T2;
-  }
-
-  // src/pulseq/fft.ts
-  var twiddleCache = /* @__PURE__ */ new Map();
-  function isPowerOfTwo(n) {
-    return n > 0 && (n & n - 1) === 0;
-  }
-  function nextPowerOfTwo(n) {
-    if (n <= 1) return 1;
-    let p = 1;
-    while (p < n) p *= 2;
-    return p;
-  }
-  function getTwiddles(n) {
-    const cached = twiddleCache.get(n);
-    if (cached) return cached;
-    if (!isPowerOfTwo(n)) throw new Error(`FFT size must be a power of two, got ${n}`);
-    const cos = new Float64Array(n / 2);
-    const sin = new Float64Array(n / 2);
-    for (let i = 0; i < n / 2; i++) {
-      const angle = -2 * Math.PI * i / n;
-      cos[i] = Math.cos(angle);
-      sin[i] = Math.sin(angle);
-    }
-    const bits = Math.round(Math.log2(n));
-    const reverse = new Uint32Array(n);
-    for (let i = 0; i < n; i++) {
-      let r = 0;
-      for (let b = 0; b < bits; b++) if (i & 1 << b) r |= 1 << bits - 1 - b;
-      reverse[i] = r;
-    }
-    const table = { cos, sin, reverse };
-    twiddleCache.set(n, table);
-    return table;
-  }
-  function fftInPlace(re, im, n) {
-    const { cos, sin, reverse } = getTwiddles(n);
-    for (let i = 0; i < n; i++) {
-      const j = reverse[i];
-      if (j > i) {
-        let tmp = re[i];
-        re[i] = re[j];
-        re[j] = tmp;
-        tmp = im[i];
-        im[i] = im[j];
-        im[j] = tmp;
-      }
-    }
-    for (let size = 2; size <= n; size *= 2) {
-      const half = size / 2;
-      const step = n / size;
-      for (let start = 0; start < n; start += size) {
-        for (let k = 0; k < half; k++) {
-          const twiddleIndex = k * step;
-          const wr = cos[twiddleIndex];
-          const wi = sin[twiddleIndex];
-          const a = start + k;
-          const b = a + half;
-          const xr = re[b] * wr - im[b] * wi;
-          const xi = re[b] * wi + im[b] * wr;
-          re[b] = re[a] - xr;
-          im[b] = im[a] - xi;
-          re[a] += xr;
-          im[a] += xi;
-        }
-      }
-    }
-  }
-
-  // src/pulseq/rfResponse.ts
-  var MAX_RF_RESPONSE_FFT_POINTS = 131072;
-  var MAX_RF_RESPONSE_SAMPLES = 131072;
-  var MAX_RF_RESPONSE_BANDS = 8;
-  var MIN_FFT_POINTS = 64;
-  var ZERO_PAD_FACTOR = 4;
-  var DOMINANT_BAND_FRACTION = 0.5;
-  var MIN_DOMINANT_AREA_DEG = 0.01;
-  var DEG_PER_CYCLE = 360;
-  var TAU = 2 * Math.PI;
-  function analyzeRfResponse(rf, seq, classifiedUse = rf.use) {
-    if (rfSampleCount(rf, seq) > MAX_RF_RESPONSE_SAMPLES) {
-      return {
-        carrierAreaDeg: estimateRfCarrierAreaDeg(rf, seq),
-        bands: [],
-        spectrumAnalyzed: false,
-        limited: true
-      };
-    }
-    const samples = buildComplexRfSamples(rf, seq);
-    const carrierAreaDeg = frequencyResolvedAreaDeg(samples, 0);
-    const normalizedUse = classifiedUse.toLowerCase();
-    const inversion = normalizedUse === "i" || normalizedUse === "inversion";
-    let offsets;
-    let spectrumAnalyzed = false;
-    let limited = false;
-    if (inversion) {
-      offsets = [0];
-    } else if (samples.uniform && samples.real.length <= MAX_RF_RESPONSE_FFT_POINTS) {
-      offsets = dominantBandOffsets(samples);
-      spectrumAnalyzed = true;
-    } else {
-      offsets = [0];
-      limited = true;
-    }
-    const bands = offsets.map((frequencyOffsetHz) => {
-      const spectralAreaDeg = frequencyResolvedAreaDeg(samples, frequencyOffsetHz);
-      const spinor = propagateSpinor(samples, frequencyOffsetHz);
-      return {
-        frequencyOffsetHz,
-        spectralAreaDeg,
-        polarFlipDeg: spinor.polarFlipDeg,
-        mz: spinor.mz
-      };
-    });
-    return { carrierAreaDeg, bands, spectrumAnalyzed, limited };
-  }
-  function estimateRfCarrierAreaDeg(rf, seq) {
-    const shapes = rfShapeArrays(rf, seq);
-    if (!shapes) return 0;
-    let realArea = 0;
-    let imaginaryArea = 0;
-    forEachRasterCell(shapes, (_start, width, magnitude, phaseCycles) => {
-      const amplitude = rf.amplitude * magnitude;
-      const phaseRad = TAU * phaseCycles;
-      if (!Number.isFinite(amplitude) || !Number.isFinite(phaseRad)) return;
-      realArea += amplitude * Math.cos(phaseRad) * width;
-      imaginaryArea += amplitude * Math.sin(phaseRad) * width;
-    });
-    return DEG_PER_CYCLE * Math.hypot(realArea, imaginaryArea);
-  }
-  function rfSampleCount(rf, seq) {
-    const shapes = rfShapeArrays(rf, seq);
-    return shapes ? rasterCellCount(shapes) : 0;
-  }
-  function buildComplexRfSamples(rf, seq) {
-    const raster = seq.rasterTimes.rfRaster;
-    const shapes = rfShapeArrays(rf, seq);
-    if (!shapes) return emptySamples(raster);
-    const cells = rasterCellsFromShapes(shapes);
-    if (cells.count < 1) return emptySamples(raster);
-    const real = new Float64Array(cells.count);
-    const imaginary = new Float64Array(cells.count);
-    const times = new Float64Array(cells.count);
-    const widths = new Float64Array(cells.count);
-    let uniform = true;
-    for (let index = 0; index < cells.count; index++) {
-      const amplitude = rf.amplitude * cells.magnitude[index];
-      const phaseRad = TAU * cells.phaseCycles[index];
-      const width = cells.width[index];
-      times[index] = cells.start[index] + 0.5 * width;
-      widths[index] = Number.isFinite(width) && width > 0 ? width : 0;
-      const finite = Number.isFinite(amplitude) && Number.isFinite(phaseRad);
-      real[index] = finite ? amplitude * Math.cos(phaseRad) : 0;
-      imaginary[index] = finite ? amplitude * Math.sin(phaseRad) : 0;
-      if (Math.abs(widths[index] - raster) > Math.max(1e-12, raster * 1e-6)) uniform = false;
-    }
-    return { real, imaginary, times, widths, uniform, dwell: uniform ? raster : widths[0] };
-  }
-  function emptySamples(raster) {
-    return {
-      real: new Float64Array(0),
-      imaginary: new Float64Array(0),
-      times: new Float64Array(0),
-      widths: new Float64Array(0),
-      uniform: true,
-      dwell: raster
-    };
-  }
-  function frequencyResolvedAreaDeg(samples, frequencyOffsetHz) {
-    let realArea = 0;
-    let imaginaryArea = 0;
-    for (let index = 0; index < samples.real.length; index++) {
-      const angle = -TAU * frequencyOffsetHz * samples.times[index];
-      const cosine = Math.cos(angle);
-      const sine = Math.sin(angle);
-      const width = samples.widths[index];
-      realArea += (samples.real[index] * cosine - samples.imaginary[index] * sine) * width;
-      imaginaryArea += (samples.real[index] * sine + samples.imaginary[index] * cosine) * width;
-    }
-    return DEG_PER_CYCLE * Math.hypot(realArea, imaginaryArea);
-  }
-  function dominantBandOffsets(samples) {
-    const sampleCount = samples.real.length;
-    if (sampleCount === 0 || !Number.isFinite(samples.dwell) || samples.dwell <= 0) return [0];
-    const paddedTarget = sampleCount <= Math.floor(MAX_RF_RESPONSE_FFT_POINTS / ZERO_PAD_FACTOR) ? sampleCount * ZERO_PAD_FACTOR : sampleCount;
-    const fftPoints = nextPowerOfTwo(Math.max(MIN_FFT_POINTS, paddedTarget));
-    if (fftPoints > MAX_RF_RESPONSE_FFT_POINTS) return [0];
-    const real = new Float64Array(fftPoints);
-    const imaginary = new Float64Array(fftPoints);
-    real.set(samples.real);
-    imaginary.set(samples.imaginary);
-    fftInPlace(real, imaginary, fftPoints);
-    let peakAreaDeg = 0;
-    for (let bin = 0; bin < fftPoints; bin++) {
-      peakAreaDeg = Math.max(
-        peakAreaDeg,
-        DEG_PER_CYCLE * samples.dwell * Math.hypot(real[bin], imaginary[bin])
-      );
-    }
-    if (!Number.isFinite(peakAreaDeg) || peakAreaDeg < MIN_DOMINANT_AREA_DEG) return [0];
-    const threshold = Math.max(MIN_DOMINANT_AREA_DEG, peakAreaDeg * DOMINANT_BAND_FRACTION);
-    const clusters = [];
-    let active = null;
-    const half = fftPoints / 2;
-    const frequencyStep = 1 / (fftPoints * samples.dwell);
-    for (let signedBin = -half; signedBin < half; signedBin++) {
-      const bin = signedBin < 0 ? signedBin + fftPoints : signedBin;
-      const areaDeg = DEG_PER_CYCLE * samples.dwell * Math.hypot(real[bin], imaginary[bin]);
-      if (areaDeg >= threshold) {
-        const weight = areaDeg * areaDeg;
-        if (!active) active = { frequencySum: 0, weightSum: 0, peakAreaDeg: 0 };
-        active.frequencySum += signedBin * frequencyStep * weight;
-        active.weightSum += weight;
-        active.peakAreaDeg = Math.max(active.peakAreaDeg, areaDeg);
-      } else if (active) {
-        clusters.push(active);
-        active = null;
-      }
-    }
-    if (active) clusters.push(active);
-    const offsets = clusters.filter((cluster) => cluster.weightSum > 0).sort((left, right) => right.peakAreaDeg - left.peakAreaDeg).slice(0, MAX_RF_RESPONSE_BANDS).map((cluster) => cluster.frequencySum / cluster.weightSum).sort((left, right) => left - right);
-    return offsets.length > 0 ? offsets : [0];
-  }
-  function propagateSpinor(samples, frequencyOffsetHz) {
-    let stateAReal = 1;
-    let stateAImaginary = 0;
-    let stateBReal = 0;
-    let stateBImaginary = 0;
-    for (let index = 0; index < samples.real.length; index++) {
-      const bx = samples.real[index];
-      const by = samples.imaginary[index];
-      const norm2 = Math.hypot(bx, by, frequencyOffsetHz);
-      const width = samples.widths[index];
-      if (!(norm2 > 0) || !(width > 0)) continue;
-      const sine = Math.sin(Math.PI * norm2 * width);
-      const localAReal = Math.cos(Math.PI * norm2 * width);
-      const localAImaginary = -frequencyOffsetHz / norm2 * sine;
-      const localBReal = by / norm2 * sine;
-      const localBImaginary = -bx / norm2 * sine;
-      const nextAReal = localAReal * stateAReal - localAImaginary * stateAImaginary - localBReal * stateBReal - localBImaginary * stateBImaginary;
-      const nextAImaginary = localAReal * stateAImaginary + localAImaginary * stateAReal - localBReal * stateBImaginary + localBImaginary * stateBReal;
-      const nextBReal = localBReal * stateAReal - localBImaginary * stateAImaginary + localAReal * stateBReal + localAImaginary * stateBImaginary;
-      const nextBImaginary = localBReal * stateAImaginary + localBImaginary * stateAReal + localAReal * stateBImaginary - localAImaginary * stateBReal;
-      stateAReal = nextAReal;
-      stateAImaginary = nextAImaginary;
-      stateBReal = nextBReal;
-      stateBImaginary = nextBImaginary;
-    }
-    const aMagnitudeSquared = stateAReal * stateAReal + stateAImaginary * stateAImaginary;
-    const bMagnitudeSquared = stateBReal * stateBReal + stateBImaginary * stateBImaginary;
-    const normalization = aMagnitudeSquared + bMagnitudeSquared;
-    const mz = normalization > 0 ? clamp((aMagnitudeSquared - bMagnitudeSquared) / normalization, -1, 1) : 1;
-    return { mz, polarFlipDeg: Math.acos(mz) * 180 / Math.PI };
-  }
-  function clamp(value, minimum, maximum) {
-    return Math.max(minimum, Math.min(maximum, value));
-  }
-
-  // src/pulseq/decoder.ts
-  var GAMMA_HZ_T2 = 42576e3;
-  var DEFAULT_B0_T3 = 3;
-  function getB02(seq) {
-    const raw = seq.definitions.get("B0");
-    if (raw && Array.isArray(raw) && raw.length > 0) return +raw[0];
-    const raw2 = seq.definitions.get("b0") ?? seq.definitions.get("b_0");
-    if (raw2 && Array.isArray(raw2) && raw2.length > 0) return +raw2[0];
-    return DEFAULT_B0_T3;
-  }
-  function effFreqOff(freqOffset, freqPPM, b0) {
-    return freqOffset + freqPPM * 1e-6 * GAMMA_HZ_T2 * b0;
-  }
-  function effPhaseOff(phaseOffset, phasePPM, b0) {
-    return phaseOffset + phasePPM * 1e-6 * GAMMA_HZ_T2 * b0;
-  }
-  function createSequenceDecodeContext(seq) {
-    const blockStartTimes = new Float64Array(seq.blocks.length + 1);
-    for (let index = 0; index < seq.blocks.length; index++) {
-      blockStartTimes[index + 1] = blockStartTimes[index] + blockDurationSeconds(seq, seq.blocks[index]);
-    }
-    return {
-      sequence: seq,
-      blockStartTimes,
-      classifiedRfUses: classifyRfUses(seq),
-      rfResponseCache: /* @__PURE__ */ new Map(),
-      triggerCache: /* @__PURE__ */ new Map(),
-      ncoCache: /* @__PURE__ */ new Map()
-    };
-  }
-  function decodeBlockRange(seq, startBlockIdx, endBlockIdx, context = createSequenceDecodeContext(seq)) {
-    if (context.sequence !== seq) throw new Error("The decode context belongs to a different sequence.");
-    const totalBlocks = seq.blocks.length;
-    const s = Math.max(0, Math.min(startBlockIdx, totalBlocks));
-    const e = Math.max(s, Math.min(endBlockIdx, totalBlocks));
-    if (s >= e) return [];
-    let cumulative = context.blockStartTimes[s];
-    const decoded = [];
-    for (let i = s; i < e; i++) {
-      const block = seq.blocks[i];
-      const dur = blockDurationSeconds(seq, block);
-      const db = { index: block.num, duration: dur, startTime: cumulative };
-      if (block.rfId > 0) {
-        const rf = seq.rfs.get(block.rfId);
-        if (rf) {
-          const use = context.classifiedRfUses[i];
-          let response = context.rfResponseCache.get(rf.id);
-          if (!response) {
-            response = analyzeRfResponse(rf, seq, use);
-            context.rfResponseCache.set(rf.id, response);
-          }
-          db.rf = decodeRF(seq, rf, cumulative, dur, use, response);
-        }
-      }
-      db.gx = decodeGradient(seq, block.gxId, cumulative, dur, "gx");
-      db.gy = decodeGradient(seq, block.gyId, cumulative, dur, "gy");
-      db.gz = decodeGradient(seq, block.gzId, cumulative, dur, "gz");
-      if (block.adcId > 0) {
-        const adc = seq.adcs.get(block.adcId);
-        if (adc) db.adc = decodeADC(adc, cumulative, seq);
-      }
-      if (block.extId > 0) {
-        const ext = seq.extensions.get(block.extId);
-        if (ext) decodeExtensions(seq, ext, db, cumulative, context);
-      }
-      decoded.push(db);
-      cumulative += dur;
-    }
-    return decoded;
-  }
-  function blockDurationSeconds(seq, block) {
-    if (seq.versionCombined < VER_PRE_14) return block.dur * 1e-6;
-    return block.dur * seq.rasterTimes.blockDurationRaster;
-  }
-  function decodeRF(seq, rf, blockStart, _blockDur, classifiedUse, response) {
-    const raster = seq.rasterTimes.rfRaster;
-    const rfDelay = rf.delay * 1e-6;
-    const rfStart = blockStart + rfDelay;
-    const b0 = getB02(seq);
-    const freqFull = effFreqOff(rf.freqOffset, rf.freqPPM, b0);
-    const phaseFull = effPhaseOff(rf.phaseOffset, rf.phasePPM, b0);
-    const magShape = seq.shapes.get(rf.magShapeId);
-    const nSamples = magShape?.numSamples ?? Math.max(2, Math.round(_blockDur / raster));
-    const mag = magShape ? new Float64Array(magShape.samples) : makeConstant(nSamples, 1);
-    const phShape = seq.shapes.get(rf.phaseShapeId);
-    const ph = phShape ? new Float64Array(phShape.samples) : new Float64Array(mag.length);
-    const timeShape = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples ?? null : null;
-    const n = Math.min(mag.length, ph.length);
-    const t = new Float64Array(n);
-    const amp = new Float64Array(n);
-    const phase = new Float64Array(n);
-    for (let i = 0; i < n; i++) {
-      t[i] = timeShape ? rfStart + timeShape[i] * raster : rfStart + (i + 0.5) * raster;
-      amp[i] = rf.amplitude * mag[i];
-      const dt = t[i] - rfStart;
-      phase[i] = 2 * Math.PI * ph[i] + phaseFull + 2 * Math.PI * freqFull * dt;
-    }
-    const duration = n > 0 ? timeShape ? t[n - 1] - rfStart : n * raster : 0;
-    const centerTime = rf.center >= 0 ? blockStart + rfDelay + rf.center * 1e-6 : estimateRfPeakTime(t, amp, rfStart, duration);
-    const use = classifiedUse || "u";
-    const ptxChannels = timeShape ? detectPtxTimeShapeChannels(timeShape) : 0;
-    return {
-      ...ptxChannels > 1 ? { ptxChannels } : {},
-      blockIndex: rf.id,
-      startTime: rfStart,
-      centerTime,
-      duration,
-      timePoints: t,
-      magnitude: amp,
-      phase,
-      amplitude: rf.amplitude,
-      response,
-      freqOffset: freqFull,
-      phaseOffset: phaseFull,
-      use
-    };
-  }
-  function decodeGradient(seq, gradId, blockStart, blockDur, channel) {
-    if (gradId <= 0) return zeroGradient(blockStart, blockDur, channel);
-    const trap = seq.trapGrads.get(gradId);
-    if (trap) return decodeTrap(trap, blockStart, channel);
-    const arb = seq.arbitraryGrads.get(gradId);
-    if (arb) return decodeArb(seq, arb, blockStart, channel);
-    return zeroGradient(blockStart, blockDur, channel);
-  }
-  function zeroGradient(t0, dur, ch) {
-    return {
-      blockIndex: 0,
-      startTime: t0,
-      duration: dur,
-      timePoints: new Float64Array([t0, t0 + dur]),
-      waveform: new Float64Array([0, 0]),
-      amplitude: 0,
-      type: "none",
-      channel: ch
-    };
-  }
-  function decodeTrap(trap, blockStart, ch) {
-    const rise = trap.rise * 1e-6;
-    const flat = trap.flat * 1e-6;
-    const fall = trap.fall * 1e-6;
-    const delay = trap.delay * 1e-6;
-    const gradStart = blockStart + delay;
-    const tRel = [0, rise, rise + flat, rise + flat + fall];
-    const wfRel = [0, trap.amplitude, trap.amplitude, 0];
-    if (delay > 0) {
-      const tp2 = new Float64Array(5);
-      const wf2 = new Float64Array(5);
-      tp2[0] = blockStart;
-      wf2[0] = 0;
-      for (let i = 0; i < 4; i++) {
-        tp2[i + 1] = gradStart + tRel[i];
-        wf2[i + 1] = wfRel[i];
-      }
-      return {
-        blockIndex: trap.id,
-        startTime: blockStart,
-        duration: delay + rise + flat + fall,
-        timePoints: tp2,
-        waveform: wf2,
-        amplitude: trap.amplitude,
-        type: "trap",
-        channel: ch
-      };
-    }
-    const tp = new Float64Array(4);
-    const wf = new Float64Array(4);
-    for (let i = 0; i < 4; i++) {
-      tp[i] = gradStart + tRel[i];
-      wf[i] = wfRel[i];
-    }
-    return {
-      blockIndex: trap.id,
-      startTime: blockStart,
-      duration: rise + flat + fall,
-      timePoints: tp,
-      waveform: wf,
-      amplitude: trap.amplitude,
-      type: "trap",
-      channel: ch
-    };
-  }
-  function decodeArb(seq, arb, blockStart, ch) {
-    const shape = seq.shapes.get(arb.shapeId);
-    if (!shape) return zeroGradient(blockStart, 0, ch);
-    const raster = seq.rasterTimes.gradientRaster;
-    const delay = arb.delay * 1e-6;
-    const gradStart = blockStart + delay;
-    const n = shape.numSamples;
-    const oversampled = arb.timeId === -1;
-    const timeShape = arb.timeId > 0 ? seq.shapes.get(arb.timeId)?.samples ?? null : null;
-    if (timeShape) {
-      const tp2 = new Float64Array(n);
-      const wf2 = new Float64Array(n);
-      for (let i = 0; i < n; i++) {
-        tp2[i] = gradStart + timeShape[i] * raster;
-        wf2[i] = arb.amplitude * shape.samples[i];
-      }
-      const dur2 = n > 0 ? tp2[n - 1] - blockStart + raster : delay;
-      return {
-        blockIndex: arb.id,
-        startTime: blockStart,
-        duration: dur2,
-        timePoints: tp2,
-        waveform: wf2,
-        amplitude: arb.amplitude,
-        type: "arb",
-        channel: ch
-      };
-    }
-    const tp = new Float64Array(n + 2);
-    const wf = new Float64Array(n + 2);
-    tp[0] = gradStart;
-    wf[0] = edgeAmplitude(arb.first, arb.amplitude, shape.samples, true);
-    if (oversampled) {
-      const dt = raster * 0.5;
-      for (let i = 0; i < n; i++) {
-        tp[i + 1] = gradStart + (i + 1) * dt;
-        wf[i + 1] = arb.amplitude * shape.samples[i];
-      }
-      tp[n + 1] = gradStart + (n + 1) * dt;
-    } else {
-      for (let i = 0; i < n; i++) {
-        tp[i + 1] = gradStart + (i + 0.5) * raster;
-        wf[i + 1] = arb.amplitude * shape.samples[i];
-      }
-      tp[n + 1] = gradStart + n * raster;
-    }
-    wf[wf.length - 1] = edgeAmplitude(arb.last, arb.amplitude, shape.samples, false);
-    const dur = tp[tp.length - 1] - blockStart;
-    return {
-      blockIndex: arb.id,
-      startTime: blockStart,
-      duration: dur,
-      timePoints: tp,
-      waveform: wf,
-      amplitude: arb.amplitude,
-      type: "arb",
-      channel: ch
-    };
-  }
-  function edgeAmplitude(stored, amplitude, samples, first) {
-    let value;
-    if (Number.isFinite(stored)) {
-      value = stored;
-      if (Math.abs(value) > 1 + 1e-6 && Math.abs(amplitude) > 0) value /= amplitude;
-    } else if (samples.length === 0) {
-      value = 0;
-    } else if (samples.length === 1) {
-      value = samples[0];
-    } else if (first) {
-      value = 0.5 * (3 * samples[0] - samples[1]);
-    } else {
-      value = 0.5 * (3 * samples[samples.length - 1] - samples[samples.length - 2]);
-    }
-    return value * amplitude;
-  }
-  function decodeADC(adc, blockStart, seq) {
-    const b0 = getB02(seq);
-    const freqFull = effFreqOff(adc.freqOffset, adc.freqPPM, b0);
-    const phaseFull = effPhaseOff(adc.phaseOffset, adc.phasePPM, b0);
-    const decoded = {
-      blockIndex: adc.id,
-      startTime: blockStart,
-      numSamples: adc.numSamples,
-      dwell: adc.dwell * 1e-9,
-      // ns → s
-      delay: adc.delay * 1e-6,
-      // µs → s
-      freqOffset: freqFull,
-      phaseOffset: phaseFull
-    };
-    const modulation = adc.phaseModShapeId > 0 ? seq.shapes.get(adc.phaseModShapeId) : void 0;
-    if (modulation) decoded.phaseModulation = modulation.samples;
-    return decoded;
-  }
-  function decodeExtensions(seq, ext, db, blockStart, context) {
-    const visited = /* @__PURE__ */ new Set();
-    let cur = ext;
-    while (cur && !visited.has(cur.id)) {
-      visited.add(cur.id);
-      const type = seq.extensionTypes.get(cur.type) ?? 999 /* EXT_UNKNOWN */;
-      if (type === 1 /* EXT_TRIGGER */) {
-        let cached = context.triggerCache.get(cur.id);
-        if (!cached) {
-          const trigger = findById(seq.triggers, cur.ref);
-          if (trigger) {
-            cached = {
-              blockIndex: trigger.id,
-              startTime: 0,
-              triggerType: trigger.triggerType,
-              channel: trigger.channel,
-              delay: trigger.delay * 1e-6,
-              duration: trigger.duration * 1e-6
-            };
-            context.triggerCache.set(cur.id, cached);
-          }
-        }
-        if (cached) {
-          if (!db.triggers) db.triggers = [];
-          db.triggers.push({ ...cached, startTime: blockStart });
-        }
-      } else if (type === 100 /* EXT_NCO */) {
-        let cached = context.ncoCache.get(cur.id);
-        if (!cached) {
-          const nco = findById(seq.ncos, cur.ref);
-          if (nco) {
-            cached = {
-              blockIndex: nco.id,
-              startTime: 0,
-              channel: nco.channel,
-              frequency: nco.frequency,
-              phase: nco.phase,
-              delay: nco.delay * 1e-6,
-              duration: nco.duration * 1e-6
-            };
-            context.ncoCache.set(cur.id, cached);
-          }
-        }
-        if (cached) {
-          if (!db.nco) db.nco = [];
-          db.nco.push({ ...cached, startTime: blockStart });
-        }
-      } else if (type === 2 /* EXT_ROTATION */) {
-        const rotation = findById(seq.rotations, cur.ref);
-        if (rotation) db.rotation = { id: rotation.id, values: [...rotation.values] };
-      } else if (type === 3 /* EXT_LABELSET */) {
-        const label = findById(seq.labelSets, cur.ref);
-        if (label) {
-          if (!db.labelSets) db.labelSets = [];
-          db.labelSets.push({ ...label });
-        }
-      } else if (type === 4 /* EXT_LABELINC */) {
-        const label = findById(seq.labelIncs, cur.ref);
-        if (label) {
-          if (!db.labelIncs) db.labelIncs = [];
-          db.labelIncs.push({ ...label });
-        }
-      } else if (type === 5 /* EXT_DELAY */) {
-        const delay = findById(seq.softDelays, cur.ref);
-        if (delay) db.softDelay = { ...delay };
-      } else if (type === 6 /* EXT_RF_SHIM */) {
-        const shim = findById(seq.rfShims, cur.ref);
-        if (shim) {
-          db.rfShim = {
-            id: shim.id,
-            nChannels: shim.nChannels,
-            amplitudes: [...shim.amplitudes],
-            phases: [...shim.phases]
-          };
-        }
-      }
-      cur = cur.nextId > 0 ? seq.extensions.get(cur.nextId) : void 0;
-    }
-  }
-  function makeConstant(n, value) {
-    const a = new Float64Array(Math.max(n, 2));
-    a.fill(value);
-    return a;
-  }
-  function estimateRfPeakTime(timePoints, magnitude, startTime, duration) {
-    if (!timePoints.length || !magnitude.length) return startTime + duration * 0.5;
-    let peak = Math.abs(magnitude[0]);
-    for (let i = 1; i < magnitude.length; i++) {
-      const v = Math.abs(magnitude[i]);
-      if (v > peak) peak = v;
-    }
-    const threshold = Math.abs(peak) * 0.99999;
-    let firstPeak = -1;
-    let lastPeak = -1;
-    for (let i = 0; i < magnitude.length; i++) {
-      if (Math.abs(magnitude[i]) >= threshold) {
-        if (firstPeak < 0) firstPeak = i;
-        lastPeak = i;
-      }
-    }
-    if (firstPeak < 0 || lastPeak < 0) return startTime + duration * 0.5;
-    return 0.5 * (timePoints[Math.min(firstPeak, timePoints.length - 1)] + timePoints[Math.min(lastPeak, timePoints.length - 1)]);
-  }
-  function findById(items, id) {
-    return items.find((item) => item.id === id);
   }
 
   // src/pulseq/physicalGradients.ts
@@ -2199,16 +5440,16 @@
     const values = block.rotation?.values;
     if (!values) return [gx, gy, gz];
     if (values.length === 4) {
-      const [w, x, y, z] = values;
+      const [w, x2, y, z] = values;
       const r00 = 1 - 2 * y * y - 2 * z * z;
-      const r01 = 2 * x * y - 2 * w * z;
-      const r02 = 2 * x * z + 2 * w * y;
-      const r10 = 2 * x * y + 2 * w * z;
-      const r11 = 1 - 2 * x * x - 2 * z * z;
-      const r12 = 2 * y * z - 2 * w * x;
-      const r20 = 2 * x * z - 2 * w * y;
-      const r21 = 2 * y * z + 2 * w * x;
-      const r22 = 1 - 2 * x * x - 2 * y * y;
+      const r01 = 2 * x2 * y - 2 * w * z;
+      const r02 = 2 * x2 * z + 2 * w * y;
+      const r10 = 2 * x2 * y + 2 * w * z;
+      const r11 = 1 - 2 * x2 * x2 - 2 * z * z;
+      const r12 = 2 * y * z - 2 * w * x2;
+      const r20 = 2 * x2 * z - 2 * w * y;
+      const r21 = 2 * y * z + 2 * w * x2;
+      const r22 = 1 - 2 * x2 * x2 - 2 * y * y;
       return [
         r00 * gx + r01 * gy + r02 * gz,
         r10 * gx + r11 * gy + r12 * gz,
@@ -2318,13 +5559,13 @@
     /** Release every chunk that lies entirely before `index`. */
     releaseBefore(index) {
       const lastReleasable = Math.min(index, this.count) >>> CHUNK_BITS;
-      for (let i = 0; i < lastReleasable; i++) this.chunks[i] = null;
+      for (let i2 = 0; i2 < lastReleasable; i2++) this.chunks[i2] = null;
     }
     /** Exact-size copy of every value (none may have been released). */
     toArray() {
       const out = new Float64Array(this.count);
-      for (let i = 0, offset = 0; offset < this.count; i++, offset += CHUNK_SIZE) {
-        const chunk = this.chunks[i];
+      for (let i2 = 0, offset = 0; offset < this.count; i2++, offset += CHUNK_SIZE) {
+        const chunk = this.chunks[i2];
         if (!chunk) throw new RangeError("cannot copy a series whose chunks were released");
         const n = Math.min(CHUNK_SIZE, this.count - offset);
         out.set(n === CHUNK_SIZE ? chunk : chunk.subarray(0, n), offset);
@@ -2412,7 +5653,7 @@
           this.support(-SERIES_PADDING_EPSILON_SEC);
           this.support(firstTime - SERIES_PADDING_EPSILON_SEC);
         }
-        for (let i = 0; i < n; i++) this.pushPoint(times[i], values[i]);
+        for (let i2 = 0; i2 < n; i2++) this.pushPoint(times[i2], values[i2]);
         return;
       }
       const raster = this.gradientRaster;
@@ -2439,7 +5680,7 @@
       const currentLast = this.pendingTime;
       let start = 0;
       while (start < n && times[start] <= currentLast) start++;
-      for (let i = start; i < n; i++) this.pushPoint(times[i], i === 0 ? firstValue : values[i]);
+      for (let i2 = start; i2 < n; i2++) this.pushPoint(times[i2], i2 === 0 ? firstValue : values[i2]);
     }
     /** Emit the held-back point and the trailing zero padding. */
     finish(totalDuration) {
@@ -2552,12 +5793,12 @@
     }
     numbers(values) {
       this.word(values.length);
-      for (let i = 0; i < values.length; i++) this.number(values[i]);
+      for (let i2 = 0; i2 < values.length; i2++) this.number(values[i2]);
       return this;
     }
     text(value) {
       this.word(value.length);
-      for (let i = 0; i < value.length; i++) this.word(value.charCodeAt(i));
+      for (let i2 = 0; i2 < value.length; i2++) this.word(value.charCodeAt(i2));
       return this;
     }
     /** Hex digest; the hasher can keep absorbing afterwards. */
@@ -2584,8 +5825,8 @@
     }
     const cuts = [ta];
     for (const axis of axes) {
-      for (let i = 0; i < axis.times.length; i++) {
-        const time = axis.times[i];
+      for (let i2 = 0; i2 < axis.times.length; i2++) {
+        const time = axis.times[i2];
         if (time > ta && time < tb) cuts.push(time);
       }
     }
@@ -2710,8 +5951,8 @@
   var RELATIVE_TIME_QUANTUM_SEC = 1e-12;
   function relativePieces(pieces, t0) {
     const t = new Float64Array(pieces.t.length);
-    for (let i = 0; i < t.length; i++) {
-      t[i] = Math.round((pieces.t[i] - t0) / RELATIVE_TIME_QUANTUM_SEC) * RELATIVE_TIME_QUANTUM_SEC;
+    for (let i2 = 0; i2 < t.length; i2++) {
+      t[i2] = Math.round((pieces.t[i2] - t0) / RELATIVE_TIME_QUANTUM_SEC) * RELATIVE_TIME_QUANTUM_SEC;
     }
     return { t, ga: pieces.ga.slice(), gb: pieces.gb.slice() };
   }
@@ -2721,7 +5962,7 @@
   var KEY_TIME_QUANTUM_SEC = 1e-10;
   var KEY_GRADIENT_QUANTUM = 1e6;
   function compileProgram(seq, options = {}) {
-    const b0 = options.b0 ?? fileB0(seq) ?? DEFAULT_B0_T;
+    const b0 = options.b0 ?? fileB0(seq) ?? DEFAULT_B0_T3;
     const gamma = options.gamma ?? PULSEQ_GAMMA_HZ_PER_T;
     const blockStartTimes = computeBlockStartTimes(seq, options);
     const blockCount = seq.blocks.length;
@@ -2899,8 +6140,8 @@
   function buildAdcSegment(seq, ctx, readers, adc, t0, t1, blockIndex, adcIndex) {
     const gradient = windowPieces(readers, t0, t1);
     let activeAxes = 0;
-    for (let i = 0; i < gradient.ga.length; i++) {
-      if (gradient.ga[i] !== 0 || gradient.gb[i] !== 0) activeAxes |= 1 << i % 3;
+    for (let i2 = 0; i2 < gradient.ga.length; i2++) {
+      if (gradient.ga[i2] !== 0 || gradient.gb[i2] !== 0) activeAxes |= 1 << i2 % 3;
     }
     const modulation = adc.phaseModShapeId > 0 ? seq.shapes.get(adc.phaseModShapeId)?.samples ?? null : null;
     return {
@@ -2950,20 +6191,20 @@
     const eventEnd = event.t[event.t.length - 1] - t0;
     if (Math.abs(storedEnd - eventEnd) > KEY_TIME_QUANTUM_SEC) return false;
     const cuts = [];
-    for (let i = 0; i < stored.t.length; i++) cuts.push(stored.t[i]);
-    for (let i = 0; i < event.t.length; i++) cuts.push(event.t[i] - t0);
+    for (let i2 = 0; i2 < stored.t.length; i2++) cuts.push(stored.t[i2]);
+    for (let i2 = 0; i2 < event.t.length; i2++) cuts.push(event.t[i2] - t0);
     cuts.sort((a2, b2) => a2 - b2);
     let peak = 0;
     for (const values of [stored.ga, stored.gb, event.ga, event.gb]) {
-      for (let i = 0; i < values.length; i++) peak = Math.max(peak, Math.abs(values[i]));
+      for (let i2 = 0; i2 < values.length; i2++) peak = Math.max(peak, Math.abs(values[i2]));
     }
     const tolerance = 1e-6 + 1e-9 * peak;
     const a = new Float64Array(3), b = new Float64Array(3);
-    for (let i = 1; i < cuts.length; i++) {
-      const span = cuts[i] - cuts[i - 1];
+    for (let i2 = 1; i2 < cuts.length; i2++) {
+      const span = cuts[i2] - cuts[i2 - 1];
       if (!(span > KEY_TIME_QUANTUM_SEC)) continue;
       for (const fraction of [1 / 3, 2 / 3]) {
-        const time = cuts[i - 1] + fraction * span;
+        const time = cuts[i2 - 1] + fraction * span;
         evaluatePieces(stored, time, a);
         evaluatePieces(event, time + t0, b);
         for (let axis = 0; axis < 3; axis++) {
@@ -2991,13 +6232,13 @@
   function gradientContentHash(gradient, t0) {
     const hasher = new ContentHasher();
     const n = pieceCount(gradient);
-    for (let i = 0; i < n; i++) {
-      if (!(gradient.t[i + 1] - gradient.t[i] > KEY_TIME_QUANTUM_SEC)) continue;
-      hasher.number(Math.round((gradient.t[i] - t0) / KEY_TIME_QUANTUM_SEC));
-      hasher.number(Math.round((gradient.t[i + 1] - t0) / KEY_TIME_QUANTUM_SEC));
+    for (let i2 = 0; i2 < n; i2++) {
+      if (!(gradient.t[i2 + 1] - gradient.t[i2] > KEY_TIME_QUANTUM_SEC)) continue;
+      hasher.number(Math.round((gradient.t[i2] - t0) / KEY_TIME_QUANTUM_SEC));
+      hasher.number(Math.round((gradient.t[i2 + 1] - t0) / KEY_TIME_QUANTUM_SEC));
       for (let axis = 0; axis < 3; axis++) {
-        hasher.number(Math.round(gradient.ga[3 * i + axis] * KEY_GRADIENT_QUANTUM));
-        hasher.number(Math.round(gradient.gb[3 * i + axis] * KEY_GRADIENT_QUANTUM));
+        hasher.number(Math.round(gradient.ga[3 * i2 + axis] * KEY_GRADIENT_QUANTUM));
+        hasher.number(Math.round(gradient.gb[3 * i2 + axis] * KEY_GRADIENT_QUANTUM));
       }
     }
     return hasher.digest();
@@ -3026,9 +6267,9 @@
     const softDelays = options.softDelayInputs ? softDelayDurations(seq, options, tick) : null;
     const starts = new Float64Array(seq.blocks.length + 1);
     let ticks = 0;
-    for (let i = 0; i < seq.blocks.length; i++) {
-      starts[i] = ticks * tick;
-      ticks += softDelays?.get(i) ?? seq.blocks[i].dur;
+    for (let i2 = 0; i2 < seq.blocks.length; i2++) {
+      starts[i2] = ticks * tick;
+      ticks += softDelays?.get(i2) ?? seq.blocks[i2].dur;
     }
     starts[seq.blocks.length] = ticks * tick;
     return starts;
@@ -3069,12 +6310,12 @@
     const next = [new Int32Array(n + 1), new Int32Array(n + 1), new Int32Array(n + 1)];
     for (let axis = 0; axis < 3; axis++) next[axis][n] = n;
     const exists = (id) => id > 0 && (seq.trapGrads.has(id) || seq.arbitraryGrads.has(id));
-    for (let i = n - 1; i >= 0; i--) {
-      const block = seq.blocks[i];
+    for (let i2 = n - 1; i2 >= 0; i2--) {
+      const block = seq.blocks[i2];
       const logical = [exists(block.gxId), exists(block.gyId), exists(block.gzId)];
       const rotated = logical.some(Boolean) && hasRotation(seq, block.extId);
       for (let axis = 0; axis < 3; axis++) {
-        next[axis][i] = rotated || logical[axis] ? i : next[axis][i + 1];
+        next[axis][i2] = rotated || logical[axis] ? i2 : next[axis][i2 + 1];
       }
     }
     return next;
@@ -3167,9 +6408,10 @@
     const signal = new Float64Array(sampleCount * coils * 2);
     const area = new Float64Array(3);
     const cache = (options.rfMode ?? "cached") === "cached" ? new RfOperatorCache(spins) : null;
-    const grouper = new ReadoutGrouper(spins, (options.readout ?? "grouped") === "grouped");
+    const grouper = new ReadoutGrouper(spins, (options.readout ?? "grouped") !== "direct");
+    const lattice = (options.readout ?? "lattice") === "lattice";
     const interval = Math.max(1, options.progressInterval ?? 64);
-    const free = new PendingFree();
+    const free = new PendingFree(new FreeKernel(spins));
     let sampleOffset = 0;
     let processed = 0;
     const until = options.until ?? Infinity;
@@ -3183,7 +6425,7 @@
         else applyRf(segment, spins, state);
       } else {
         free.flush(spins, state);
-        sampleAdc(segment, spins, state, signal, sampleOffset, grouper, members, area);
+        sampleAdc(segment, spins, state, signal, sampleOffset, grouper, members, area, lattice);
         sampleOffset += segment.numSamples;
         free.add(segment.moments.dk, segment.t1 - segment.t0);
       }
@@ -3206,7 +6448,8 @@
     }
   }
   var PendingFree = class {
-    constructor() {
+    constructor(kernel) {
+      __publicField(this, "kernel", kernel);
       __publicField(this, "dk", new Float64Array(3));
       __publicField(this, "dt", 0);
       __publicField(this, "empty", true);
@@ -3220,27 +6463,84 @@
     }
     flush(spins, state) {
       if (this.empty) return;
-      applyFreeInterval(this.dk, this.dt, spins, state);
+      this.kernel.apply(this.dk, this.dt, state);
       this.dk.fill(0);
       this.dt = 0;
       this.empty = true;
     }
   };
-  function applyFreeInterval(dk, dt, spins, state) {
-    const { mx, my, mz } = state;
-    const twoPi = 2 * Math.PI;
-    for (let i = 0; i < spins.count; i++) {
-      const cycles = dk[0] * spins.x[i] + dk[1] * spins.y[i] + dk[2] * spins.z[i] + spins.df[i] * dt;
-      const angle = twoPi * (cycles - Math.round(cycles));
-      const e2 = Math.exp(-dt * spins.r2[i]);
-      const e1 = Math.exp(-dt * spins.r1[i]);
-      const c = Math.cos(angle) * e2, s = Math.sin(angle) * e2;
-      const x = mx[i], y = my[i];
-      mx[i] = x * c - y * s;
-      my[i] = x * s + y * c;
-      mz[i] = mz[i] * e1 + (1 - e1);
+  var FreeKernel = class {
+    constructor(spins) {
+      __publicField(this, "spins", spins);
+      /** Distinct (x, y, z, Δf) of the spins, and each spin's entry. */
+      __publicField(this, "keyOf");
+      __publicField(this, "kx");
+      __publicField(this, "ky");
+      __publicField(this, "kz");
+      __publicField(this, "kdf");
+      __publicField(this, "cos");
+      __publicField(this, "sin");
+      __publicField(this, "relaxation", /* @__PURE__ */ new Map());
+      const index = /* @__PURE__ */ new Map();
+      const keyOf = new Int32Array(spins.count);
+      const x2 = [], y = [], z = [], df = [];
+      for (let i2 = 0; i2 < spins.count; i2++) {
+        const key = `${spins.x[i2]}|${spins.y[i2]}|${spins.z[i2]}|${spins.df[i2]}`;
+        let k = index.get(key);
+        if (k === void 0) {
+          k = x2.length;
+          index.set(key, k);
+          x2.push(spins.x[i2]);
+          y.push(spins.y[i2]);
+          z.push(spins.z[i2]);
+          df.push(spins.df[i2]);
+        }
+        keyOf[i2] = k;
+      }
+      this.keyOf = keyOf;
+      this.kx = Float64Array.from(x2);
+      this.ky = Float64Array.from(y);
+      this.kz = Float64Array.from(z);
+      this.kdf = Float64Array.from(df);
+      this.cos = new Float64Array(x2.length);
+      this.sin = new Float64Array(x2.length);
     }
-  }
+    apply(dk, dt, state) {
+      const twoPi = 2 * Math.PI;
+      for (let k = 0; k < this.kx.length; k++) {
+        const cycles = dk[0] * this.kx[k] + dk[1] * this.ky[k] + dk[2] * this.kz[k] + this.kdf[k] * dt;
+        const angle = twoPi * (cycles - Math.round(cycles));
+        this.cos[k] = Math.cos(angle);
+        this.sin[k] = Math.sin(angle);
+      }
+      const { e1, e2 } = this.factors(dt);
+      const { mx, my, mz } = state;
+      const keyOf = this.keyOf, cosT = this.cos, sinT = this.sin;
+      for (let i2 = 0; i2 < this.spins.count; i2++) {
+        const k = keyOf[i2];
+        const c = cosT[k] * e2[i2], sn = sinT[k] * e2[i2];
+        const x2 = mx[i2], y = my[i2];
+        mx[i2] = x2 * c - y * sn;
+        my[i2] = x2 * sn + y * c;
+        mz[i2] = mz[i2] * e1[i2] + (1 - e1[i2]);
+      }
+    }
+    /** E1 and E2 of every spin for an interval, cached for the lengths that recur. */
+    factors(dt) {
+      let entry = this.relaxation.get(dt);
+      if (entry) return entry;
+      const n = this.spins.count;
+      entry = { e1: new Float64Array(n), e2: new Float64Array(n) };
+      for (let i2 = 0; i2 < n; i2++) {
+        entry.e1[i2] = Math.exp(-dt * this.spins.r1[i2]);
+        entry.e2[i2] = Math.exp(-dt * this.spins.r2[i2]);
+      }
+      if (this.relaxation.size >= FREE_CACHE_LENGTHS) this.relaxation.clear();
+      this.relaxation.set(dt, entry);
+      return entry;
+    }
+  };
+  var FREE_CACHE_LENGTHS = 32;
   function rfCells(segment, phaseOffset = segment.phaseOffset) {
     const op = segment.operator;
     if (op.ptxChannels > 1) throw new Error("Dynamic pTx RF (pTx-Pulseq layout) is not supported yet.");
@@ -3282,42 +6582,42 @@
   }
   function applyRf(segment, spins, state) {
     const cells = rfCells(segment);
-    for (let i = 0; i < spins.count; i++) stepRfSpin(cells, spins, i, state);
+    for (let i2 = 0; i2 < spins.count; i2++) stepRfSpin(cells, spins, i2, state);
   }
-  function stepRfSpin(cells, spins, i, state) {
-    const out = stepRfVector(cells, spins, i, state.mx[i], state.my[i], state.mz[i]);
-    state.mx[i] = out[0];
-    state.my[i] = out[1];
-    state.mz[i] = out[2];
+  function stepRfSpin(cells, spins, i2, state) {
+    const out = stepRfVector(cells, spins, i2, state.mx[i2], state.my[i2], state.mz[i2]);
+    state.mx[i2] = out[0];
+    state.my[i2] = out[1];
+    state.mz[i2] = out[2];
   }
-  function stepRfVector(cells, spins, i, x, y, z) {
+  function stepRfVector(cells, spins, i2, x2, y, z) {
     {
       const c2 = Math.cos(cells.phaseIn), s2 = Math.sin(cells.phaseIn);
-      const nx = x * c2 + y * s2, ny = -x * s2 + y * c2;
-      x = nx;
+      const nx = x2 * c2 + y * s2, ny = -x2 * s2 + y * c2;
+      x2 = nx;
       y = ny;
     }
-    const sx = spins.x[i], sy = spins.y[i], sz = spins.z[i];
-    const offset = spins.df[i] - cells.freq;
-    const r1 = spins.r1[i], r2 = spins.r2[i];
-    const bRe = spins.b1Re[i], bIm = spins.b1Im[i];
+    const sx = spins.x[i2], sy = spins.y[i2], sz = spins.z[i2];
+    const offset = spins.df[i2] - cells.freq;
+    const r1 = spins.r1[i2], r2 = spins.r2[i2];
+    const bRe = spins.b1Re[i2], bIm = spins.b1Im[i2];
     for (let j = 0; j < cells.count; j++) {
       const w = cells.width[j];
       const half = 0.5 * w;
       const e2h = Math.exp(-half * r2), e1h = Math.exp(-half * r1);
-      x *= e2h;
+      x2 *= e2h;
       y *= e2h;
       z = z * e1h + (1 - e1h);
       const bx = cells.b1Re[j] * bRe - cells.b1Im[j] * bIm;
       const by = cells.b1Re[j] * bIm + cells.b1Im[j] * bRe;
       const bz = cells.grad[3 * j] * sx + cells.grad[3 * j + 1] * sy + cells.grad[3 * j + 2] * sz + offset;
-      [x, y, z] = rotateCayleyKlein(x, y, z, bx, by, bz, w);
-      x *= e2h;
+      [x2, y, z] = rotateCayleyKlein(x2, y, z, bx, by, bz, w);
+      x2 *= e2h;
       y *= e2h;
       z = z * e1h + (1 - e1h);
     }
     const c = Math.cos(cells.phaseOut), s = Math.sin(cells.phaseOut);
-    return [x * c - y * s, x * s + y * c, z];
+    return [x2 * c - y * s, x2 * s + y * c, z];
   }
   var RfOperatorCache = class {
     constructor(spins) {
@@ -3338,17 +6638,17 @@
       const phi = segment.phaseOffset;
       const cp = Math.cos(phi), sp = Math.sin(phi);
       const { mx, my, mz } = state;
-      for (let i = 0; i < this.spins.count; i++) {
-        const o = 12 * i;
-        const vx = mx[i] * cp + my[i] * sp;
-        const vy = -mx[i] * sp + my[i] * cp;
-        const vz = mz[i];
+      for (let i2 = 0; i2 < this.spins.count; i2++) {
+        const o = 12 * i2;
+        const vx = mx[i2] * cp + my[i2] * sp;
+        const vy = -mx[i2] * sp + my[i2] * cp;
+        const vz = mz[i2];
         const wx = map[o] * vx + map[o + 1] * vy + map[o + 2] * vz + map[o + 9];
         const wy = map[o + 3] * vx + map[o + 4] * vy + map[o + 5] * vz + map[o + 10];
         const wz = map[o + 6] * vx + map[o + 7] * vy + map[o + 8] * vz + map[o + 11];
-        mx[i] = wx * cp - wy * sp;
-        my[i] = wx * sp + wy * cp;
-        mz[i] = wz;
+        mx[i2] = wx * cp - wy * sp;
+        my[i2] = wx * sp + wy * cp;
+        mz[i2] = wz;
       }
     }
     build(segment) {
@@ -3361,20 +6661,20 @@
       }
       const coordinates = [spins.x, spins.y, spins.z];
       const built = /* @__PURE__ */ new Map();
-      for (let i = 0; i < spins.count; i++) {
-        let signature = `${spins.df[i]}|${spins.r1[i]}|${spins.r2[i]}|${spins.b1Re[i]}|${spins.b1Im[i]}`;
-        for (let axis = 0; axis < 3; axis++) if (active[axis]) signature += `|${coordinates[axis][i]}`;
+      for (let i2 = 0; i2 < spins.count; i2++) {
+        let signature = `${spins.df[i2]}|${spins.r1[i2]}|${spins.r2[i2]}|${spins.b1Re[i2]}|${spins.b1Im[i2]}`;
+        for (let axis = 0; axis < 3; axis++) if (active[axis]) signature += `|${coordinates[axis][i2]}`;
         const twin = built.get(signature);
         if (twin !== void 0) {
-          map.copyWithin(12 * i, 12 * twin, 12 * twin + 12);
+          map.copyWithin(12 * i2, 12 * twin, 12 * twin + 12);
           continue;
         }
-        built.set(signature, i);
-        const c = stepRfVector(cells, spins, i, 0, 0, 0);
-        const ex = stepRfVector(cells, spins, i, 1, 0, 0);
-        const ey = stepRfVector(cells, spins, i, 0, 1, 0);
-        const ez = stepRfVector(cells, spins, i, 0, 0, 1);
-        const o = 12 * i;
+        built.set(signature, i2);
+        const c = stepRfVector(cells, spins, i2, 0, 0, 0);
+        const ex = stepRfVector(cells, spins, i2, 1, 0, 0);
+        const ey = stepRfVector(cells, spins, i2, 0, 1, 0);
+        const ez = stepRfVector(cells, spins, i2, 0, 0, 1);
+        const o = 12 * i2;
         for (let row = 0; row < 3; row++) {
           map[o + 3 * row] = ex[row] - c[row];
           map[o + 3 * row + 1] = ey[row] - c[row];
@@ -3386,12 +6686,12 @@
       return map;
     }
   };
-  function sinc(x) {
-    const px = Math.PI * x;
+  function sinc(x2) {
+    const px = Math.PI * x2;
     if (Math.abs(px) < 1e-4) return 1 - px * px / 6;
     return Math.sin(px) / px;
   }
-  function rotateCayleyKlein(x, y, z, bx, by, bz, w) {
+  function rotateCayleyKlein(x2, y, z, bx, by, bz, w) {
     const magnitude = Math.sqrt(bx * bx + by * by + bz * bz);
     const sc = Math.PI * w * sinc(magnitude * w);
     const aRe = Math.cos(Math.PI * magnitude * w);
@@ -3404,12 +6704,40 @@
     const b2Im = 2 * bRe * bIm;
     const abRe = aRe * bRe + aIm * bIm;
     const abIm = aRe * bIm - aIm * bRe;
-    const nx = a2Re * x - a2Im * y - (b2Re * x + b2Im * y) + 2 * abRe * z;
-    const ny = a2Re * y + a2Im * x - (b2Im * x - b2Re * y) + 2 * abIm * z;
+    const nx = a2Re * x2 - a2Im * y - (b2Re * x2 + b2Im * y) + 2 * abRe * z;
+    const ny = a2Re * y + a2Im * x2 - (b2Im * x2 - b2Re * y) + 2 * abIm * z;
     const pRe = aRe * bRe - aIm * bIm;
     const pIm = aRe * bIm + aIm * bRe;
-    const nz = -2 * (pRe * x + pIm * y) + (aRe * aRe + aIm * aIm - bRe * bRe - bIm * bIm) * z;
+    const nz = -2 * (pRe * x2 + pIm * y) + (aRe * aRe + aIm * aIm - bRe * bRe - bIm * bIm) * z;
     return [nx, ny, nz];
+  }
+  function groupLattice(groups, axis) {
+    groups.lattices ?? (groups.lattices = []);
+    const cached = groups.lattices[axis];
+    if (cached !== void 0) return cached;
+    const position = axis === 0 ? groups.x : axis === 1 ? groups.y : groups.z;
+    const values = Float64Array.from(position).sort();
+    let result = null;
+    if (values.length) {
+      const origin = values[0];
+      let pitch = Infinity;
+      for (let i2 = 1; i2 < values.length; i2++) {
+        const gap = values[i2] - values[i2 - 1];
+        if (gap > 1e-12 * Math.max(1, Math.abs(values[i2])) && gap < pitch) pitch = gap;
+      }
+      if (!Number.isFinite(pitch)) pitch = 1;
+      const span = Math.round((values[values.length - 1] - origin) / pitch) + 1;
+      const slot = new Int32Array(groups.count);
+      let onLattice = span <= 1 << 22;
+      for (let g = 0; g < groups.count && onLattice; g++) {
+        const offset = (position[g] - origin) / pitch;
+        slot[g] = Math.round(offset);
+        if (Math.abs(offset - slot[g]) > 1e-6) onLattice = false;
+      }
+      if (onLattice) result = { origin, pitch, span, slot };
+    }
+    groups.lattices[axis] = result;
+    return result;
   }
   var ReadoutGrouper = class {
     constructor(spins, enabled = true) {
@@ -3430,35 +6758,35 @@
       const spins = this.spins;
       const groupOf = new Int32Array(spins.count);
       const index = /* @__PURE__ */ new Map();
-      const x = [], y = [], z = [], df = [], r2 = [];
-      for (let i = 0; i < spins.count; i++) {
-        const gx = mask < 0 || mask & 1 ? spins.x[i] : 0;
-        const gy = mask < 0 || mask & 2 ? spins.y[i] : 0;
-        const gz = mask < 0 || mask & 4 ? spins.z[i] : 0;
+      const x2 = [], y = [], z = [], df = [], r2 = [];
+      for (let i2 = 0; i2 < spins.count; i2++) {
+        const gx = mask < 0 || mask & 1 ? spins.x[i2] : 0;
+        const gy = mask < 0 || mask & 2 ? spins.y[i2] : 0;
+        const gz = mask < 0 || mask & 4 ? spins.z[i2] : 0;
         let group;
         if (mask >= 0) {
-          const signature = `${gx}|${gy}|${gz}|${spins.df[i]}|${spins.r2[i]}`;
+          const signature = `${gx}|${gy}|${gz}|${spins.df[i2]}|${spins.r2[i2]}`;
           group = index.get(signature);
           if (group === void 0) {
-            group = x.length;
+            group = x2.length;
             index.set(signature, group);
           }
         } else {
-          group = x.length;
+          group = x2.length;
         }
-        if (group === x.length) {
-          x.push(gx);
+        if (group === x2.length) {
+          x2.push(gx);
           y.push(gy);
           z.push(gz);
-          df.push(spins.df[i]);
-          r2.push(spins.r2[i]);
+          df.push(spins.df[i2]);
+          r2.push(spins.r2[i2]);
         }
-        groupOf[i] = group;
+        groupOf[i2] = group;
       }
       return {
-        count: x.length,
+        count: x2.length,
         groupOf,
-        x: Float64Array.from(x),
+        x: Float64Array.from(x2),
         y: Float64Array.from(y),
         z: Float64Array.from(z),
         df: Float64Array.from(df),
@@ -3469,15 +6797,15 @@
   function sumSpins(spins, groups, state, gRe, gIm) {
     const coils = spins.coils;
     let any = false;
-    for (let i = 0; i < spins.count; i++) {
-      const mx = state.mx[i], my = state.my[i];
+    for (let i2 = 0; i2 < spins.count; i2++) {
+      const mx = state.mx[i2], my = state.my[i2];
       if (mx === 0 && my === 0) continue;
       any = true;
-      const w = spins.weight[i];
-      const g = groups.groupOf[i];
+      const w = spins.weight[i2];
+      const g = groups.groupOf[i2];
       for (let c = 0; c < coils; c++) {
-        const rr = spins.rxRe[c * spins.count + i];
-        const ri = -spins.rxIm[c * spins.count + i];
+        const rr = spins.rxRe[c * spins.count + i2];
+        const ri = -spins.rxIm[c * spins.count + i2];
         gRe[g * coils + c] += w * (rr * mx - ri * my);
         gIm[g * coils + c] += w * (rr * my + ri * mx);
       }
@@ -3515,8 +6843,121 @@
     }
     return any;
   }
+  var LATTICE_MAX_TERMS = 24;
+  var LATTICE_TOLERANCE = 1e-13;
+  function synthesizeOnLattice(segment, groups, gRe, gIm, coils, k, times, sumRe, sumIm) {
+    const axes = segment.activeAxes & 7;
+    const axis = axes === 1 ? 0 : axes === 2 ? 1 : axes === 4 ? 2 : -1;
+    if (axis < 0) return false;
+    const lattice = groupLattice(groups, axis);
+    if (!lattice) return false;
+    const { origin, pitch, span } = lattice;
+    const n = segment.numSamples;
+    const active = [];
+    let zRe = 0, zIm = 0;
+    for (let g = 0; g < groups.count; g++) {
+      let nonzero = false;
+      for (let c = 0; c < coils; c++) if (gRe[g * coils + c] !== 0 || gIm[g * coils + c] !== 0) nonzero = true;
+      if (!nonzero) continue;
+      active.push(g);
+      zRe -= groups.r2[g];
+      zIm += 2 * Math.PI * groups.df[g];
+    }
+    if (active.length < 64) return false;
+    zRe /= active.length;
+    zIm /= active.length;
+    const tauMax = times[n - 1] - segment.t0;
+    let spread = 0;
+    for (const g of active) {
+      const dRe = -groups.r2[g] - zRe, dIm = 2 * Math.PI * groups.df[g] - zIm;
+      spread = Math.max(spread, Math.sqrt(dRe * dRe + dIm * dIm));
+    }
+    spread *= tauMax;
+    let terms = 1, bound = Math.exp(spread);
+    for (; terms <= LATTICE_MAX_TERMS; terms++) {
+      bound *= spread / terms;
+      if (bound < LATTICE_TOLERANCE) break;
+    }
+    if (terms > LATTICE_MAX_TERMS) return false;
+    if (span * (1 + terms * coils) > 0.5 * active.length * (1 + coils) || span * terms * coils > 4e6) return false;
+    const slot = lattice.slot;
+    const stride = span * coils;
+    const cRe = new Float64Array(terms * stride), cIm = new Float64Array(terms * stride);
+    for (let i2 = 0; i2 < active.length; i2++) {
+      const g = active[i2];
+      const dRe = -groups.r2[g] - zRe, dIm = 2 * Math.PI * groups.df[g] - zIm;
+      let pRe2 = 1, pIm2 = 0;
+      for (let m = 0; m < terms; m++) {
+        for (let c = 0; c < coils; c++) {
+          const ar = gRe[g * coils + c], ai = gIm[g * coils + c];
+          const o = m * stride + slot[g] * coils + c;
+          cRe[o] += ar * pRe2 - ai * pIm2;
+          cIm[o] += ar * pIm2 + ai * pRe2;
+        }
+        const nr = (pRe2 * dRe - pIm2 * dIm) / (m + 1);
+        pIm2 = (pRe2 * dIm + pIm2 * dRe) / (m + 1);
+        pRe2 = nr;
+      }
+    }
+    const pStride = n * coils;
+    const pRe = new Float64Array(terms * pStride), pIm = new Float64Array(terms * pStride);
+    const twoPi = 2 * Math.PI;
+    const step = k[3 + axis] - k[axis];
+    for (let j = 0; j < span; j++) {
+      let any = false;
+      for (let m = 0; m < terms && !any; m++) {
+        for (let c = 0; c < coils; c++) if (cRe[m * stride + j * coils + c] !== 0 || cIm[m * stride + j * coils + c] !== 0) any = true;
+      }
+      if (!any) continue;
+      const x2 = origin + j * pitch;
+      const stepCycles = step * x2;
+      const stepAngle = twoPi * (stepCycles - Math.round(stepCycles));
+      const sRe = Math.cos(stepAngle), sIm = Math.sin(stepAngle);
+      let eRe = 0, eIm = 0;
+      for (let s = 0; s < n; s++) {
+        if (s % RECURRENCE_ANCHOR === 0) {
+          const cycles = k[3 * s + axis] * x2;
+          const angle = twoPi * (cycles - Math.round(cycles));
+          eRe = Math.cos(angle);
+          eIm = Math.sin(angle);
+        } else {
+          const nr = eRe * sRe - eIm * sIm;
+          eIm = eRe * sIm + eIm * sRe;
+          eRe = nr;
+        }
+        for (let m = 0; m < terms; m++) {
+          for (let c = 0; c < coils; c++) {
+            const o = m * stride + j * coils + c;
+            const ar = cRe[o], ai = cIm[o];
+            const q = m * pStride + s * coils + c;
+            pRe[q] += ar * eRe - ai * eIm;
+            pIm[q] += ar * eIm + ai * eRe;
+          }
+        }
+      }
+    }
+    for (let s = 0; s < n; s++) {
+      const tau = times[s] - segment.t0;
+      const decay = Math.exp(zRe * tau);
+      const turns = zIm * tau / twoPi;
+      const angle = twoPi * (turns - Math.round(turns));
+      const wRe = decay * Math.cos(angle), wIm = decay * Math.sin(angle);
+      for (let c = 0; c < coils; c++) {
+        let accRe = 0, accIm = 0, power = 1;
+        for (let m = 0; m < terms; m++) {
+          const q = m * pStride + s * coils + c;
+          accRe += pRe[q] * power;
+          accIm += pIm[q] * power;
+          power *= tau;
+        }
+        sumRe[s * coils + c] += accRe * wRe - accIm * wIm;
+        sumIm[s * coils + c] += accRe * wIm + accIm * wRe;
+      }
+    }
+    return true;
+  }
   var RECURRENCE_ANCHOR = 64;
-  function sampleAdc(segment, spins, state, signal, sampleOffset, grouper, members, area) {
+  function sampleAdc(segment, spins, state, signal, sampleOffset, grouper, members, area, useLattice) {
     const n = segment.numSamples;
     const coils = members ? members.coils : spins.coils;
     const times = adcSampleTimes(segment);
@@ -3539,21 +6980,22 @@
       }
       const twoPi = 2 * Math.PI;
       const dwell = segment.dwell;
-      for (let g = 0; g < groups.count; g++) {
+      const lattice = uniform && useLattice && synthesizeOnLattice(segment, groups, gRe, gIm, coils, k, times, sumRe, sumIm);
+      for (let g = 0; g < groups.count && !lattice; g++) {
         let nonzero = false;
         for (let c = 0; c < coils; c++) if (gRe[g * coils + c] !== 0 || gIm[g * coils + c] !== 0) nonzero = true;
         if (!nonzero) continue;
-        const x = groups.x[g], y = groups.y[g], z = groups.z[g], df = groups.df[g], r2 = groups.r2[g];
+        const x2 = groups.x[g], y = groups.y[g], z = groups.z[g], df = groups.df[g], r2 = groups.r2[g];
         const exact = (s) => {
           const tau = times[s] - segment.t0;
-          const cycles = k[3 * s] * x + k[3 * s + 1] * y + k[3 * s + 2] * z + df * tau;
+          const cycles = k[3 * s] * x2 + k[3 * s + 1] * y + k[3 * s + 2] * z + df * tau;
           const angle = twoPi * (cycles - Math.round(cycles));
           const decay = Math.exp(-tau * r2);
           return [Math.cos(angle) * decay, Math.sin(angle) * decay];
         };
         let stepRe = 0, stepIm = 0;
         if (uniform) {
-          const cycles = (k[3] - k[0]) * x + (k[4] - k[1]) * y + (k[5] - k[2]) * z + df * dwell;
+          const cycles = (k[3] - k[0]) * x2 + (k[4] - k[1]) * y + (k[5] - k[2]) * z + df * dwell;
           const angle = twoPi * (cycles - Math.round(cycles));
           const decay = Math.exp(-dwell * r2);
           stepRe = Math.cos(angle) * decay;
@@ -3643,21 +7085,181 @@
     }
     return grid;
   }
-  function nonEmptyVoxels(grid) {
+  function sheppLoganPhantom2D(n, fovX, fovY) {
+    const grid = sheppLoganPhantom(n, fovX, fovY);
+    return {
+      nx: n,
+      ny: n,
+      voxel: [fovX / n, fovY / n, 0],
+      maps: { pd: grid.pd, t1: grid.t1, t2: grid.t2 },
+      source: `Shepp\u2013Logan ${n}\xB2`,
+      notes: []
+    };
+  }
+
+  // src/sim/phantom/model.ts
+  function sliceVolume(volume2, options = {}) {
+    const plane = options.plane ?? "xy";
+    const [sx, sy, sz] = volume2.shape;
+    const axes = plane === "xy" ? [0, 1, 2] : plane === "xz" ? [0, 2, 1] : [1, 2, 0];
+    const sizes = [sx, sy, sz];
+    const nu = sizes[axes[0]], nv = sizes[axes[1]], nw = sizes[axes[2]];
+    const index = Math.round(options.index ?? Math.floor(nw / 2));
+    if (!(index >= 0 && index < nw)) throw new Error(`Slice ${index} is outside 0\u2026${nw - 1}.`);
+    const fovU = nu * volume2.voxel[axes[0]], fovV = nv * volume2.voxel[axes[1]];
+    let nx = nu, ny = nv;
+    if (options.matrix && options.matrix > 0) {
+      const scale2 = options.matrix / Math.max(nu, nv);
+      nx = Math.max(1, Math.round(nu * scale2));
+      ny = Math.max(1, Math.round(nv * scale2));
+    }
+    const strides = [1, sx, sx * sy];
+    const source = new Int32Array(nx * ny);
+    for (let row = 0; row < ny; row++) {
+      const v = Math.min(nv - 1, Math.floor((ny - 1 - row + 0.5) * nv / ny));
+      for (let col = 0; col < nx; col++) {
+        const u = Math.min(nu - 1, Math.floor((col + 0.5) * nu / nx));
+        source[row * nx + col] = u * strides[axes[0]] + v * strides[axes[1]] + index * strides[axes[2]];
+      }
+    }
+    const pick = (map) => {
+      const out = new Float32Array(nx * ny);
+      for (let i2 = 0; i2 < out.length; i2++) out[i2] = map[source[i2]];
+      return out;
+    };
+    const maps = { pd: pick(volume2.maps.pd), t1: pick(volume2.maps.t1), t2: pick(volume2.maps.t2) };
+    for (const name of ["t2prime", "adc", "b0", "b1"]) {
+      const map = volume2.maps[name];
+      if (map) maps[name] = pick(map);
+    }
+    const label = "xyz";
+    return {
+      nx,
+      ny,
+      voxel: [fovU / nx, fovV / ny, volume2.voxel[axes[2]]],
+      maps,
+      source: `${volume2.source} \xB7 ${label[axes[0]]}${label[axes[1]]} plane, ${label[axes[2]]} = ${index}`,
+      notes: volume2.notes.slice()
+    };
+  }
+  function mrzeroFieldMaps(volume2) {
+    const [nx, ny, nz] = volume2.shape;
+    const n = nx * ny * nz;
+    const b0 = new Float32Array(n), b1 = new Float32Array(n);
+    const lin = (count, i2) => count > 1 ? -1 + 2 * i2 / (count - 1) : -1;
+    let weightSum = 0, b0Sum = 0, b1Sum = 0;
+    for (let z = 0; z < nz; z++) {
+      const pz = lin(nz, z);
+      for (let y = 0; y < ny; y++) {
+        const py = lin(ny, y);
+        for (let x2 = 0; x2 < nx; x2++) {
+          const px = lin(nx, x2);
+          const i2 = x2 + nx * (y + ny * z);
+          const field = Math.exp(-(0.4 * px * px + 0.2 * py * py + 0.3 * pz * pz));
+          const dist2 = 0.4 * px * px + 0.2 * (py - 0.7) ** 2 + 0.3 * pz * pz;
+          const offset = 7 / (0.05 + dist2) - 45 / (0.3 + dist2);
+          b1[i2] = field;
+          b0[i2] = offset;
+          const w = volume2.maps.pd[i2];
+          weightSum += w;
+          b0Sum += offset * w;
+          b1Sum += field * w;
+        }
+      }
+    }
+    if (weightSum > 0) {
+      const meanB0 = b0Sum / weightSum, meanB1 = b1Sum / weightSum;
+      for (let i2 = 0; i2 < n; i2++) {
+        b0[i2] -= meanB0;
+        if (meanB1 > 0) b1[i2] /= meanB1;
+      }
+    }
+    return { b0, b1 };
+  }
+  function syntheticCoils(nx, ny, voxel, count) {
+    const cells = nx * ny;
+    const re = new Float32Array(count * cells), im = new Float32Array(count * cells);
+    const halfX = nx * voxel[0] / 2, halfY = ny * voxel[1] / 2;
+    const radius = 1.1 * Math.max(halfX, halfY);
+    const width = 0.9 * Math.max(halfX, halfY);
+    const centre = (c) => {
+      const angle = 2 * Math.PI * c / count + Math.PI / 2;
+      return [radius * Math.cos(angle), radius * Math.sin(angle)];
+    };
+    let centrePower = 0;
+    for (let c = 0; c < count; c++) {
+      const [cx, cy] = centre(c);
+      centrePower += Math.exp(-(cx * cx + cy * cy) / (width * width));
+    }
+    const norm2 = count === 1 ? 1 : 1 / Math.sqrt(centrePower);
+    for (let c = 0; c < count; c++) {
+      const [cx, cy] = centre(c);
+      for (let row = 0; row < ny; row++) {
+        const y = (ny / 2 - 1 - row) * voxel[1];
+        for (let col = 0; col < nx; col++) {
+          const x2 = (col - nx / 2) * voxel[0];
+          const i2 = c * cells + row * nx + col;
+          if (count === 1) {
+            re[i2] = 1;
+            continue;
+          }
+          const dx = x2 - cx, dy = y - cy;
+          const magnitude = norm2 * Math.exp(-(dx * dx + dy * dy) / (2 * width * width));
+          const phase = Math.atan2(dy, dx);
+          re[i2] = magnitude * Math.cos(phase);
+          im[i2] = magnitude * Math.sin(phase);
+        }
+      }
+    }
+    return { count, re, im };
+  }
+  function occupiedVoxels(phantom) {
+    const pd = phantom.maps.pd;
     let count = 0;
-    for (let i = 0; i < grid.pd.length; i++) if (grid.pd[i] > 0) count++;
+    for (let i2 = 0; i2 < pd.length; i2++) if (pd[i2] > 0) count++;
     const voxels = new Int32Array(count);
     let k = 0;
-    for (let i = 0; i < grid.pd.length; i++) if (grid.pd[i] > 0) voxels[k++] = i;
+    for (let i2 = 0; i2 < pd.length; i2++) if (pd[i2] > 0) voxels[k++] = i2;
     return voxels;
   }
-  function spinsFromGrid2D(grid, options = {}) {
-    const zPositions = options.zPositions?.length ? options.zPositions : [0];
-    const sub = options.subSpins ?? 1;
-    const [mx, my] = (typeof sub === "number" ? [sub, sub] : sub).map((m) => Math.max(1, Math.floor(m)));
-    const voxels = options.voxels ?? nonEmptyVoxels(grid);
-    const perVoxel = zPositions.length * mx * my;
-    const count = voxels.length * perVoxel;
+  function rate(time) {
+    return Number.isFinite(time) && time > 0 ? 1 / time : 0;
+  }
+  function physicsTable(phantom) {
+    const { pd, t1, t2, b0, b1 } = phantom.maps;
+    const of = new Int32Array(pd.length).fill(-1);
+    const table = { of, t1: [], t2: [], df: [], b1: [] };
+    const index = /* @__PURE__ */ new Map();
+    for (let i2 = 0; i2 < pd.length; i2++) {
+      if (!(pd[i2] > 0)) continue;
+      const df = b0 ? b0[i2] : 0, gain = b1 ? b1[i2] : 1;
+      const key = `${t1[i2]}|${t2[i2]}|${df}|${gain}`;
+      let k = index.get(key);
+      if (k === void 0) {
+        k = table.t1.length;
+        index.set(key, k);
+        table.t1.push(t1[i2]);
+        table.t2.push(t2[i2]);
+        table.df.push(df);
+        table.b1.push(gain);
+      }
+      of[i2] = k;
+    }
+    return table;
+  }
+  function xCount(options, index) {
+    return options.countX ? options.countX[index] : options.subSpins[0];
+  }
+  function spinCount(options) {
+    let total = 0;
+    for (let v = 0; v < options.voxels.length; v++) total += xCount(options, options.voxels[v]);
+    return total * options.subSpins[1];
+  }
+  function phantomSpins(phantom, options) {
+    const my = options.subSpins[1];
+    const voxels = options.voxels;
+    const count = spinCount(options);
+    const coils = phantom.coils?.count ?? 1;
     const set = {
       count,
       x: new Float64Array(count),
@@ -3667,40 +7269,139 @@
       r1: new Float64Array(count),
       r2: new Float64Array(count),
       weight: new Float64Array(count),
-      b1Re: new Float64Array(count).fill(1),
+      b1Re: new Float64Array(count),
+      b1Im: new Float64Array(count),
+      coils,
+      rxRe: new Float64Array(coils * count),
+      rxIm: new Float64Array(coils * count)
+    };
+    const { pd, t1, t2, b0, b1 } = phantom.maps;
+    const [dx, dy] = phantom.voxel;
+    const offsetsY = stratified(my);
+    let k = 0;
+    for (let v = 0; v < voxels.length; v++) {
+      const index = voxels[v];
+      const mx = xCount(options, index);
+      const offsetsX = stratified(mx);
+      const col = index % phantom.nx, row = Math.floor(index / phantom.nx);
+      const x0 = (col - phantom.nx / 2) * dx;
+      const y0 = (phantom.ny / 2 - 1 - row) * dy;
+      const r1 = rate(t1[index]), r2 = rate(t2[index]);
+      const df = b0 ? b0[index] : 0;
+      const gain = b1 ? b1[index] : 1;
+      const weight = pd[index] / (mx * my);
+      for (const oy of offsetsY) {
+        for (const ox of offsetsX) {
+          set.x[k] = x0 + ox * dx;
+          set.y[k] = y0 + oy * dy;
+          set.df[k] = df;
+          set.r1[k] = r1;
+          set.r2[k] = r2;
+          set.weight[k] = weight;
+          set.b1Re[k] = gain;
+          for (let c = 0; c < coils; c++) {
+            set.rxRe[c * count + k] = phantom.coils ? phantom.coils.re[c * pd.length + index] : 1;
+            set.rxIm[c * count + k] = phantom.coils ? phantom.coils.im[c * pd.length + index] : 0;
+          }
+          k++;
+        }
+      }
+    }
+    return set;
+  }
+  function foldedPhantomSpins(phantom, physics, options, fold) {
+    const [finest, my] = options.subSpins;
+    const voxels = options.voxels;
+    const foldX = (fold & 1) !== 0, foldY = (fold & 2) !== 0;
+    const [dx, dy] = phantom.voxel;
+    const offsetsY = stratified(my);
+    const lineY = phantom.ny * my;
+    const entries = physics.t1.length;
+    const coils = phantom.coils?.count ?? 1;
+    const cells = phantom.nx * phantom.ny;
+    const memberCount = spinCount(options);
+    const classOf = new Int32Array(memberCount);
+    const weight = new Float64Array(memberCount);
+    const foldOf = new Int32Array(memberCount);
+    const rxRe = new Float64Array(coils * memberCount), rxIm = new Float64Array(coils * memberCount);
+    const classIndex = /* @__PURE__ */ new Map();
+    const pointIndex = /* @__PURE__ */ new Map();
+    const classX = [], classY = [], classEntry = [];
+    const points = [];
+    let m = 0;
+    for (let v = 0; v < voxels.length; v++) {
+      const index = voxels[v];
+      const mx = xCount(options, index);
+      const offsetsX = stratified(mx);
+      const stepX = finest / mx;
+      const col = index % phantom.nx, row = Math.floor(index / phantom.nx);
+      const entry = physics.of[index];
+      const w = phantom.maps.pd[index] / (mx * my);
+      const x0 = (col - phantom.nx / 2) * dx;
+      const y0 = (phantom.ny / 2 - 1 - row) * dy;
+      for (let ay = 0; ay < my; ay++) {
+        const y = y0 + offsetsY[ay] * dy;
+        const jy = row * my + ay;
+        for (let ax = 0; ax < mx; ax++) {
+          const x2 = x0 + offsetsX[ax] * dx;
+          const jx = col * 2 * finest + (2 * ax + 1) * stepX;
+          const classKey = ((foldX ? 0 : jx) * lineY + (foldY ? 0 : jy)) * entries + entry;
+          let c = classIndex.get(classKey);
+          if (c === void 0) {
+            c = classX.length;
+            classIndex.set(classKey, c);
+            classX.push(foldX ? 0 : x2);
+            classY.push(foldY ? 0 : y);
+            classEntry.push(entry);
+          }
+          const pointKey = (foldX ? jx : 0) * (lineY + 1) + (foldY ? jy : 0);
+          let p = pointIndex.get(pointKey);
+          if (p === void 0) {
+            p = points.length / 3;
+            pointIndex.set(pointKey, p);
+            points.push(foldX ? x2 : 0, foldY ? y : 0, 0);
+          }
+          classOf[m] = c;
+          weight[m] = w;
+          foldOf[m] = p;
+          for (let coil = 0; coil < coils; coil++) {
+            rxRe[coil * memberCount + m] = phantom.coils ? phantom.coils.re[coil * cells + index] : 1;
+            rxIm[coil * memberCount + m] = phantom.coils ? phantom.coils.im[coil * cells + index] : 0;
+          }
+          m++;
+        }
+      }
+    }
+    const count = classX.length;
+    const classes = {
+      count,
+      x: Float64Array.from(classX),
+      y: Float64Array.from(classY),
+      z: new Float64Array(count),
+      df: Float64Array.from(classEntry, (e) => physics.df[e]),
+      r1: Float64Array.from(classEntry, (e) => rate(physics.t1[e])),
+      r2: Float64Array.from(classEntry, (e) => rate(physics.t2[e])),
+      weight: new Float64Array(count),
+      b1Re: Float64Array.from(classEntry, (e) => physics.b1[e]),
       b1Im: new Float64Array(count),
       coils: 1,
       rxRe: new Float64Array(count).fill(1),
       rxIm: new Float64Array(count)
     };
-    const dx = grid.fovX / grid.nx, dy = grid.fovY / grid.ny;
-    const offsetsX = Array.from({ length: mx }, (_, a) => (a + 0.5) / mx - 0.5);
-    const offsetsY = Array.from({ length: my }, (_, a) => (a + 0.5) / my - 0.5);
-    let k = 0;
-    for (let v = 0; v < voxels.length; v++) {
-      const index = voxels[v];
-      const ix = index % grid.nx, iy = Math.floor(index / grid.nx);
-      const x0 = (ix - grid.nx / 2) * dx;
-      const y0 = (grid.ny / 2 - 1 - iy) * dy;
-      const t1 = grid.t1[index], t2 = grid.t2[index];
-      const r1 = Number.isFinite(t1) && t1 > 0 ? 1 / t1 : 0;
-      const r2 = Number.isFinite(t2) && t2 > 0 ? 1 / t2 : 0;
-      const weight = grid.pd[index] / perVoxel;
-      for (const z of zPositions) {
-        for (const oy of offsetsY) {
-          for (const ox of offsetsX) {
-            set.x[k] = x0 + ox * dx;
-            set.y[k] = y0 + oy * dy;
-            set.z[k] = z;
-            set.r1[k] = r1;
-            set.r2[k] = r2;
-            set.weight[k] = weight;
-            k++;
-          }
-        }
-      }
-    }
-    return set;
+    const members = {
+      count: memberCount,
+      classOf,
+      weight,
+      foldOf,
+      foldPoints: Float64Array.from(points),
+      coils,
+      rxRe,
+      rxIm
+    };
+    return { classes, members };
+  }
+  function stratified(count) {
+    return Array.from({ length: count }, (_, a) => (a + 0.5) / count - 0.5);
   }
 
   // src/sim/plan/dephasing.ts
@@ -3718,7 +7419,7 @@
       if (segment.kind === "rf") {
         for (let a = 0; a < 3; a++) areaAtRf[a] = Math.max(areaAtRf[a], Math.abs(total[a]));
         const { ga, gb } = segment.gradient;
-        for (let i = 0; i < ga.length; i++) if (ga[i] !== 0 || gb[i] !== 0) rfGradientAxes |= 1 << i % 3;
+        for (let i2 = 0; i2 < ga.length; i2++) if (ga[i2] !== 0 || gb[i2] !== 0) rfGradientAxes |= 1 << i2 % 3;
         const head = segment.kToCenter;
         if (rfEvents > 0) {
           for (let a = 0; a < 3; a++) {
@@ -3765,13 +7466,14 @@
   }
   function resolutionCount(analysis, axis, voxel) {
     const extent = analysis.readoutExtent[axis] * voxel;
-    return extent > 0.5 + 1e-3 ? Math.ceil(4 * extent) : 1;
+    return extent > 0.5 + 1e-3 ? Math.ceil(4 * extent - 0.05) : 1;
   }
   function intervalCycles(analysis, axis, voxel) {
     return analysis.intervalArea[axis] * voxel;
   }
 
   // src/sim/plan/probe.ts
+  var POWER_OF_TWO_COUNTS = Array.from({ length: 13 }, (_, i2) => 2 ** i2);
   var CANDIDATES = [2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048];
   function probeSubSpins(program, axis, voxel, tissues, options = {}) {
     const minimum = Math.max(1, Math.floor(options.minimum ?? 1));
@@ -3792,7 +7494,9 @@
       }
       return signal;
     };
-    const candidates = [minimum, ...CANDIDATES.filter((n) => n > minimum && n <= maximum)];
+    const list = options.candidates ?? CANDIDATES;
+    const first = options.candidates ? list.find((n) => n >= minimum) ?? maximum : minimum;
+    const candidates = [first, ...list.filter((n) => n > first && n <= maximum)];
     const tested = [];
     for (const count of candidates) {
       let error = 0;
@@ -3820,15 +7524,15 @@
   function probeVoxel(axis, voxel, count, tissue) {
     const positions = [new Float64Array(count), new Float64Array(count), new Float64Array(count)];
     for (let a = 0; a < count; a++) positions[axis][a] = ((a + 0.5) / count - 0.5) * voxel;
-    const rate = (time) => Number.isFinite(time) && time > 0 ? 1 / time : 0;
+    const rate2 = (time) => Number.isFinite(time) && time > 0 ? 1 / time : 0;
     return {
       count,
       x: positions[0],
       y: positions[1],
       z: positions[2],
       df: new Float64Array(count),
-      r1: new Float64Array(count).fill(rate(tissue.t1)),
-      r2: new Float64Array(count).fill(rate(tissue.t2)),
+      r1: new Float64Array(count).fill(rate2(tissue.t1)),
+      r2: new Float64Array(count).fill(rate2(tissue.t2)),
       weight: new Float64Array(count).fill(1 / count),
       b1Re: new Float64Array(count).fill(1),
       b1Im: new Float64Array(count),
@@ -3849,12 +7553,12 @@
   }
   function norm(signal) {
     let sum = 0;
-    for (let i = 0; i < signal.length; i++) sum += signal[i] * signal[i];
+    for (let i2 = 0; i2 < signal.length; i2++) sum += signal[i2] * signal[i2];
     return Math.sqrt(sum);
   }
   function distance(a, b) {
     let sum = 0;
-    for (let i = 0; i < a.length; i++) sum += (a[i] - b[i]) ** 2;
+    for (let i2 = 0; i2 < a.length; i2++) sum += (a[i2] - b[i2]) ** 2;
     return Math.sqrt(sum);
   }
 
@@ -3876,9 +7580,9 @@
       if (fov && fov > 0) return 1 / fov;
       return estimateStep(trajectory, axis);
     });
-    const offset = axes.map((axis, i) => gridOffset(k, axis, delta[i]));
-    const size = axes.map((axis, i) => {
-      const n = 2 * Math.round(extent[axis] / delta[i] + (offset[i] ? 0.5 : 0));
+    const offset = axes.map((axis, i2) => gridOffset(k, axis, delta[i2]));
+    const size = axes.map((axis, i2) => {
+      const n = 2 * Math.round(extent[axis] / delta[i2] + (offset[i2] ? 0.5 : 0));
       return Math.max(2, Math.min(maxSize, n));
     });
     const [nu, nv] = size;
@@ -3947,6 +7651,9 @@
     }
     const images = new Float32Array(frames * cells);
     const kspace = new Float32Array(frames * cells);
+    const complexSize = options.complex ? frames * coils * cells : 0;
+    const coilImages = options.complex ? { re: new Float32Array(complexSize), im: new Float32Array(complexSize) } : void 0;
+    const coilKspace = options.complex ? { re: new Float32Array(complexSize), im: new Float32Array(complexSize) } : void 0;
     const twiddleU = centredTwiddles(nu, offset[0]);
     const twiddleV = centredTwiddles(nv, offset[1]);
     const workRe = new Float64Array(cells), workIm = new Float64Array(cells);
@@ -3955,32 +7662,36 @@
       const ks = kspace.subarray(frame * cells, (frame + 1) * cells);
       for (let c = 0; c < coils; c++) {
         const base = (frame * coils + c) * cells;
-        for (let i = 0; i < cells; i++) {
-          workRe[i] = gridRe[base + i];
-          workIm[i] = gridIm[base + i];
-          ks[i] += workRe[i] * workRe[i] + workIm[i] * workIm[i];
+        for (let i2 = 0; i2 < cells; i2++) {
+          workRe[i2] = gridRe[base + i2];
+          workIm[i2] = gridIm[base + i2];
+          ks[i2] += workRe[i2] * workRe[i2] + workIm[i2] * workIm[i2];
         }
+        if (coilKspace) copyTopDown(workRe, workIm, nu, nv, coilKspace, base);
         inverseDft2(workRe, workIm, nu, nv, twiddleU, twiddleV);
         for (let iv = 0; iv < nv; iv++) {
           const row = nv - 1 - iv;
           for (let iu = 0; iu < nu; iu++) {
-            const i = iv * nu + iu;
-            image[row * nu + iu] += workRe[i] * workRe[i] + workIm[i] * workIm[i];
+            const i2 = iv * nu + iu;
+            image[row * nu + iu] += workRe[i2] * workRe[i2] + workIm[i2] * workIm[i2];
           }
         }
+        if (coilImages) copyTopDown(workRe, workIm, nu, nv, coilImages, base);
       }
-      for (let i = 0; i < cells; i++) {
-        image[i] = Math.sqrt(image[i]);
-        ks[i] = Math.sqrt(ks[i]);
+      for (let i2 = 0; i2 < cells; i2++) {
+        image[i2] = Math.sqrt(image[i2]);
+        ks[i2] = Math.sqrt(ks[i2]);
       }
       flipRows(ks, nu, nv);
     }
     let filledCount = 0;
-    for (let i = 0; i < filled.length; i++) filledCount += filled[i];
+    for (let i2 = 0; i2 < filled.length; i2++) filledCount += filled[i2];
     return {
       axes,
       nu,
       nv,
+      delta,
+      offset,
       frames,
       images,
       kspace,
@@ -3988,8 +7699,19 @@
       frameRepeat: Int32Array.from(frameRepeat.slice(0, frames)),
       fill: frames > 0 ? filledCount / (frames * cells) : 0,
       offGridFraction,
-      warnings
+      warnings,
+      coilImages,
+      coilKspace
     };
+  }
+  function copyTopDown(re, im, nu, nv, out, base) {
+    for (let iv = 0; iv < nv; iv++) {
+      const row = nv - 1 - iv;
+      for (let iu = 0; iu < nu; iu++) {
+        out.re[base + row * nu + iu] = re[iv * nu + iu];
+        out.im[base + row * nu + iu] = im[iv * nu + iu];
+      }
+    }
   }
   function estimateStep(trajectory, axis) {
     const values = [];
@@ -4004,21 +7726,21 @@
     values.sort((a, b) => a - b);
     let step = Infinity;
     const span = values.length ? values[values.length - 1] - values[0] : 0;
-    for (let i = 1; i < values.length; i++) {
-      const d = values[i] - values[i - 1];
+    for (let i2 = 1; i2 < values.length; i2++) {
+      const d = values[i2] - values[i2 - 1];
       if (d > span * 1e-6 && d < step) step = d;
     }
     return Number.isFinite(step) && step > 0 ? step : 1;
   }
   function gridOffset(k, axis, delta) {
-    let integer = 0, half = 0;
+    let integer2 = 0, half = 0;
     for (let s = axis; s < k.length; s += 3) {
       const f = k[s] / delta;
       const fraction = Math.abs(f - Math.round(f));
-      if (fraction < 0.1) integer++;
+      if (fraction < 0.1) integer2++;
       else if (Math.abs(fraction - 0.5) < 0.1) half++;
     }
-    return half > integer ? 0.5 : 0;
+    return half > integer2 ? 0.5 : 0;
   }
   function centredTwiddles(n, offset = 0) {
     const re = new Float64Array(n * n), im = new Float64Array(n * n);
@@ -4076,6 +7798,8 @@
     const offsets = [];
     const excitation = [];
     const excitationKey = [];
+    const t0 = [];
+    const dwell = [];
     const chunks = [];
     const k = [0, 0, 0];
     let total = 0;
@@ -4105,6 +7829,8 @@
         samples.push(segment.numSamples);
         excitation.push(excitations);
         excitationKey.push(currentKey);
+        t0.push(segment.t0);
+        dwell.push(segment.dwell);
         total += segment.numSamples;
         for (let a = 0; a < 3; a++) k[a] += segment.moments.dk[a];
       } else {
@@ -4123,63 +7849,85 @@
       offsets: Int32Array.from(offsets),
       k: kAll,
       excitation: Int32Array.from(excitation),
-      excitationKey
+      excitationKey,
+      t0: Float64Array.from(t0),
+      dwell: Float64Array.from(dwell)
     };
   }
 
   // src/sim/job.ts
   var MAX_JOB_SPINS = 32e6;
   var MAX_JOB_SIMULATED = 4e6;
+  var MAX_JOB_COILS = 32;
   var MIN_CHUNK_SPINS = 16384;
   var MAX_CHUNKS = 64;
   var REPLAY_BLOCK_LIMIT = 2e5;
+  var PROBE_TISSUES = 4;
+  var T2_BAND_EDGES = [0.03, 0.06, 0.12, 0.25, 0.5, 1, Infinity];
   var SimulationJob = class {
-    constructor(bytes, name, settings) {
+    constructor(bytes, name, settings, hooks = {}) {
       __publicField(this, "program");
       __publicField(this, "analysis");
-      __publicField(this, "grid");
+      __publicField(this, "phantom");
       __publicField(this, "plan");
       /** Folded axes (bit 0 = x, bit 1 = y). */
       __publicField(this, "fold");
-      /** Tissue index of every voxel (−1 when empty), and the tissues' T1/T2. */
-      __publicField(this, "tissueOf");
-      __publicField(this, "tissues");
+      __publicField(this, "physics");
       __publicField(this, "chunkVoxels");
+      /** Spins along x per voxel when banded (indexed like the maps), else null. */
+      __publicField(this, "countX");
       __publicField(this, "sequenceFov");
       __publicField(this, "trajectory", null);
+      __publicField(this, "hooks");
+      this.hooks = hooks;
+      this.report("Parsing the sequence", 0);
       const seq = parseSequenceBytes(bytes, name);
       this.program = replayable(compileProgram(seq));
+      this.report("Analysing gradients and pulses", 0.05);
       this.analysis = analyzeDephasing(this.program);
       if (this.analysis.adcEvents === 0) throw new Error("The sequence has no ADC events, so there is no signal to simulate.");
       const definition = seq.definitions.get("FOV");
       this.sequenceFov = definition && definition.length >= 2 && definition.every((v) => Number.isFinite(+v)) ? [+definition[0], +definition[1], definition.length > 2 ? +definition[2] : 0] : null;
-      const size = Math.round(settings.size);
-      if (!(size >= 2 && size <= 1024)) throw new Error(`Phantom size must be between 2 and 1024, got ${settings.size}.`);
-      const fov = settings.fov ?? (this.sequenceFov && this.sequenceFov[0] > 0 && this.sequenceFov[1] > 0 ? [this.sequenceFov[0], this.sequenceFov[1]] : [0.256, 0.256]);
-      this.grid = sheppLoganPhantom(size, fov[0], fov[1]);
-      ({ tissueOf: this.tissueOf, tissues: this.tissues } = tissueTable(this.grid));
+      this.report("Preparing the phantom", 0.15);
+      this.phantom = this.resolvePhantom(settings);
+      const { nx, ny, voxel } = this.phantom;
+      const fov = [nx * voxel[0], ny * voxel[1]];
+      this.physics = physicsTable(this.phantom);
       this.fold = foldableAxes(this.analysis, [fov[0], fov[1], 0]) & 3;
-      const voxel = [fov[0] / size, fov[1] / size];
-      const axes = [0, 1].map((axis) => this.planAxis(axis, voxel[axis], settings));
+      const voxels = occupiedVoxels(this.phantom);
+      if (!voxels.length) throw new Error("The phantom plane is empty (no voxel has PD > 0).");
+      const banded = this.planBands(voxels, voxel[0], settings);
+      const axes = [0, 1].map((axis) => axis === 0 && banded ? banded.axis : this.planAxis(axis, voxel[axis], settings));
       const subSpins = [axes[0].count, axes[1].count];
-      const perVoxel = subSpins[0] * subSpins[1];
-      const voxels = nonEmptyVoxels(this.grid);
-      const spins = voxels.length * perVoxel;
+      this.countX = banded ? banded.countX : null;
+      if (banded) banded.resolved.y = subSpins[1];
+      const spinsOf = (v) => (this.countX ? this.countX[v] : subSpins[0]) * subSpins[1];
+      let spins = 0;
+      for (const v of voxels) spins += spinsOf(v);
       if (spins > MAX_JOB_SPINS) {
-        throw new Error(`${spins.toLocaleString("en-US")} spins exceed the ${MAX_JOB_SPINS.toLocaleString("en-US")} limit; use a smaller phantom or fewer spins per voxel.`);
+        throw new Error(`${spins.toLocaleString("en-US")} spins exceed the ${MAX_JOB_SPINS.toLocaleString("en-US")} limit; use a smaller phantom matrix or fewer spins per voxel.`);
       }
+      this.report("Splitting the spins into chunks", 0.95);
       const units = this.chunkUnits(voxels);
-      const simulated = this.countClasses(units, subSpins);
+      const simulated = this.countClasses(units, subSpins, spinsOf);
       if (simulated > MAX_JOB_SIMULATED) {
-        throw new Error(`${simulated.toLocaleString("en-US")} simulated spins exceed the ${MAX_JOB_SIMULATED.toLocaleString("en-US")} limit; use a smaller phantom or fewer spins per voxel.`);
+        throw new Error(`${simulated.toLocaleString("en-US")} simulated spins exceed the ${MAX_JOB_SIMULATED.toLocaleString("en-US")} limit; use a smaller phantom matrix or fewer spins per voxel.`);
       }
-      this.chunkVoxels = splitUnits(units, perVoxel, Math.max(MIN_CHUNK_SPINS, Math.ceil(spins / MAX_CHUNKS)));
+      this.chunkVoxels = splitUnits(units, spinsOf, Math.max(MIN_CHUNK_SPINS, Math.ceil(spins / MAX_CHUNKS)));
       const notes = ["2D phantom: one plane at z = 0, so the slice profile and through-plane dephasing are not simulated."];
-      for (const [axis, plan] of axes.entries()) {
-        if (plan.probe?.capped) {
-          notes.push(`${"xy"[axis]}: ${plan.count} spins per voxel did not reach the 2 % target (error ${(100 * plan.probe.error).toFixed(0)} %); expect residual stripes from incomplete spoiling.`);
+      for (const band of banded?.bands ?? []) {
+        if (band.capped) {
+          notes.push(`x, T2 ${(band.t2Min * 1e3).toFixed(0)}\u2013${Number.isFinite(band.t2Max) ? (band.t2Max * 1e3).toFixed(0) : "\u221E"} ms: ${band.count} spins per voxel did not reach the ${tolerancePercent(settings)} target (error ${(100 * band.error).toFixed(0)} %).`);
         }
       }
+      for (const [axis, plan] of axes.entries()) {
+        if (plan.probe?.capped) {
+          notes.push(`${"xy"[axis]}: ${plan.count} spins per voxel did not reach the ${tolerancePercent(settings)} target (error ${(100 * plan.probe.error).toFixed(0)} %); expect residual stripes from incomplete spoiling.`);
+        }
+      }
+      if (this.phantom.maps.t2prime) notes.push("The T2\u2032 map is loaded but not simulated yet (no intravoxel dephasing).");
+      if (this.phantom.maps.adc) notes.push("The ADC map is loaded but diffusion is not simulated yet.");
+      for (const note of this.phantom.notes) notes.push(note);
       for (const feature of this.program.ignoredFeatures) notes.push(`Not simulated: ${feature}.`);
       this.plan = {
         blocks: this.program.blockCount,
@@ -4187,63 +7935,106 @@
         rfEvents: this.analysis.rfEvents,
         adcEvents: this.analysis.adcEvents,
         adcSamples: this.analysis.adcSamples,
-        phantom: { nx: size, ny: size, fov, voxels: voxels.length, tissues: this.tissues.length },
+        phantom: {
+          source: this.phantom.source,
+          nx,
+          ny,
+          fov,
+          voxels: voxels.length,
+          tissues: this.physics.t1.length,
+          maps: Object.keys(this.phantom.maps).filter((key) => this.phantom.maps[key])
+        },
         axes,
         subSpins,
+        bands: banded ? banded.bands : null,
+        resolved: banded ? banded.resolved : subSpins,
         spins,
         simulated,
         chunks: this.chunkVoxels.length,
-        coils: 1,
+        coils: this.phantom.coils?.count ?? 1,
+        b0: this.program.b0,
+        gamma: this.program.gamma,
         notes
       };
+    }
+    report(message, fraction) {
+      this.hooks.onPlanProgress?.(message, fraction);
     }
     /** Simulate one chunk; returns its delivered signal (see SimulationResult.signal). */
     simulateChunk(index, options = {}) {
       const voxels = this.chunkVoxels[index];
       if (!voxels) throw new Error(`No chunk ${index} (the job has ${this.chunkVoxels.length}).`);
-      if (!this.fold) {
-        const spins = spinsFromGrid2D(this.grid, { subSpins: this.plan.subSpins, voxels });
-        return simulateReference(this.program, spins, options).signal;
-      }
-      const { classes, members } = this.foldChunk(voxels);
+      const spinOptions = { subSpins: this.plan.subSpins, voxels, countX: this.countX ?? void 0 };
+      if (!this.fold) return simulateReference(this.program, phantomSpins(this.phantom, spinOptions), options).signal;
+      const { classes, members } = foldedPhantomSpins(this.phantom, this.physics, spinOptions, this.fold);
       return simulateReference(this.program, classes, { ...options, members }).signal;
     }
     reconstruct(signal) {
-      this.trajectory ?? (this.trajectory = adcTrajectory(this.program));
-      return reconstructCartesian(this.trajectory, signal, this.plan.coils, { fov: this.sequenceFov });
+      return reconstructCartesian(this.adcTrajectory(), signal, this.plan.coils, { fov: this.sequenceFov, complex: true });
     }
-    /** |signal| as readouts × samples, for the raw-data view. */
-    rawMagnitude(signal) {
+    rawLayout() {
+      const trajectory = this.adcTrajectory();
+      const labels = evaluateAdcLabels(this.program.sequence);
+      if (labels.count !== trajectory.readouts) {
+        throw new Error(`Internal error: ${labels.count} labelled ADCs but ${trajectory.readouts} readouts.`);
+      }
+      return {
+        acquisitions: trajectory.readouts,
+        coils: this.plan.coils,
+        samples: trajectory.samples,
+        offsets: trajectory.offsets,
+        t0: trajectory.t0,
+        dwell: trajectory.dwell,
+        k: Float32Array.from(trajectory.k),
+        excitation: trajectory.excitation,
+        labels: { names: labels.names, kinds: labels.kinds, values: labels.values }
+      };
+    }
+    /** The FOV definition of the sequence, if it has one [m]. */
+    get fieldOfView() {
+      return this.sequenceFov;
+    }
+    adcTrajectory() {
       this.trajectory ?? (this.trajectory = adcTrajectory(this.program));
-      const { readouts, samples, offsets } = this.trajectory;
-      let columns = 0;
-      for (let r = 0; r < readouts; r++) columns = Math.max(columns, samples[r]);
-      const coils = this.plan.coils;
-      const magnitude = new Float32Array(readouts * columns);
-      for (let r = 0; r < readouts; r++) {
-        for (let s = 0; s < samples[r]; s++) {
-          let power = 0;
-          for (let c = 0; c < coils; c++) {
-            const o = ((offsets[r] + s) * coils + c) * 2;
-            power += signal[o] * signal[o] + signal[o + 1] * signal[o + 1];
-          }
-          magnitude[r * columns + s] = Math.sqrt(power);
+      return this.trajectory;
+    }
+    resolvePhantom(settings) {
+      const source = settings.phantom;
+      let phantom;
+      if (source.kind === "shepp-logan") {
+        const size = Math.round(source.size);
+        if (!(size >= 2 && size <= 1024)) throw new Error(`Phantom size must be between 2 and 1024, got ${source.size}.`);
+        const fov = source.fov ?? (this.sequenceFov && this.sequenceFov[0] > 0 && this.sequenceFov[1] > 0 ? [this.sequenceFov[0], this.sequenceFov[1]] : [0.256, 0.256]);
+        phantom = sheppLoganPhantom2D(size, fov[0], fov[1]);
+      } else {
+        phantom = source.phantom;
+        const cells = phantom.nx * phantom.ny;
+        if (!(phantom.nx >= 1 && phantom.ny >= 1) || phantom.maps.pd.length !== cells) {
+          throw new Error("The phantom maps do not match its matrix size.");
         }
       }
-      return { rows: readouts, columns, magnitude };
+      const coils = Math.round(settings.coils ?? 1);
+      if (!(coils >= 1 && coils <= MAX_JOB_COILS)) throw new Error(`Coils must be between 1 and ${MAX_JOB_COILS}, got ${settings.coils}.`);
+      if (!phantom.coils && coils > 1) phantom = { ...phantom, coils: syntheticCoils(phantom.nx, phantom.ny, phantom.voxel, coils) };
+      return phantom;
     }
     planAxis(axis, voxel, settings) {
       const folded = (this.fold & 1 << axis) !== 0;
-      if (settings.subSpins !== "auto") {
+      if (Array.isArray(settings.subSpins)) {
         return { count: clampCount(settings.subSpins[axis]), reason: "manual", folded };
+      }
+      if (settings.subSpins !== "auto") {
+        return { count: clampCount(settings.subSpins.y), reason: "manual", folded };
       }
       const resolution = resolutionCount(this.analysis, axis, voxel);
       if (folded || intervalCycles(this.analysis, axis, voxel) <= 0.05) {
         return { count: resolution, reason: resolution > 1 ? "resolution" : "none", folded };
       }
-      const probe = probeSubSpins(this.program, axis, voxel, this.tissues, {
+      this.report(`Probing spins per voxel along ${"xy"[axis]}`, 0.2 + 0.4 * axis);
+      const probe = probeSubSpins(this.program, axis, voxel, representativeTissues(this.physics), {
         minimum: resolution,
         maximum: settings.maxSubSpins,
+        tolerance: settings.tolerance,
         intervalCycles: intervalCycles(this.analysis, axis, voxel)
       });
       return {
@@ -4253,9 +8044,91 @@
         probe: { error: probe.error, reference: probe.reference, capped: probe.capped, tested: probe.tested }
       };
     }
+    /**
+     * Spins per voxel along a spoiled x axis, per T2 band. Long-T2 tissue keeps
+     * transverse pathways for many TRs and needs hundreds of spins; white and
+     * grey matter lose them in a few. Probing each band's longest-lived tissue
+     * (its largest T2 with its largest T1, which bounds the band) and giving
+     * each voxel its band's count cuts BrainWeb-like phantoms several-fold.
+     * Counts are powers of two, so every voxel's spins lie on one lattice
+     * (folding and lattice synthesis need that).
+     *
+     * Null when x is not spoiled or the settings fix the counts uniformly.
+     */
+    planBands(voxels, voxel, settings) {
+      const folded = (this.fold & 1) !== 0;
+      const t2 = this.phantom.maps.t2;
+      const bandOf = (v, edges2) => {
+        const time = Number.isFinite(t2[v]) && t2[v] > 0 ? t2[v] : Infinity;
+        let b = 0;
+        while (time > edges2[b]) b++;
+        return b;
+      };
+      let edges;
+      let counts;
+      let bands;
+      let y;
+      if (settings.subSpins !== "auto" && !Array.isArray(settings.subSpins)) {
+        ({ edges, counts, y } = settings.subSpins);
+        bands = [];
+      } else {
+        if (settings.subSpins !== "auto" || folded || intervalCycles(this.analysis, 0, voxel) <= 0.05) return null;
+        const resolution = resolutionCount(this.analysis, 0, voxel);
+        edges = T2_BAND_EDGES;
+        const members = edges.map(() => []);
+        for (const v of voxels) members[bandOf(v, edges)].push(v);
+        counts = edges.map(() => 0);
+        bands = [];
+        const occupied = members.filter((list) => list.length).length;
+        let probed = 0;
+        for (let b = 0; b < edges.length; b++) {
+          if (!members[b].length) continue;
+          const range = `${b ? Math.round(edges[b - 1] * 1e3) : 0}\u2013${Number.isFinite(edges[b]) ? Math.round(edges[b] * 1e3) + " ms" : "\u221E"}`;
+          this.report(`Probing spins per voxel: T2 ${range} (band ${++probed} of ${occupied})`, 0.2 + 0.7 * (probed - 1) / occupied);
+          let t1Max = 0, t2Max = 0;
+          for (const v of members[b]) {
+            const time1 = Number.isFinite(this.phantom.maps.t1[v]) ? this.phantom.maps.t1[v] : 1e9;
+            const time2 = Number.isFinite(t2[v]) ? t2[v] : 1e9;
+            t1Max = Math.max(t1Max, time1);
+            t2Max = Math.max(t2Max, time2);
+          }
+          const probe = probeSubSpins(this.program, 0, voxel, [{ t1: t1Max, t2: t2Max }], {
+            minimum: resolution,
+            maximum: settings.maxSubSpins,
+            tolerance: settings.tolerance,
+            intervalCycles: intervalCycles(this.analysis, 0, voxel),
+            candidates: POWER_OF_TWO_COUNTS
+          });
+          counts[b] = probe.count;
+          bands.push({
+            t2Min: b ? edges[b - 1] : 0,
+            t2Max: edges[b],
+            count: probe.count,
+            error: probe.error,
+            capped: probe.capped,
+            voxels: members[b].length
+          });
+        }
+        y = 0;
+      }
+      const finest = Math.max(...counts);
+      for (const count of counts) {
+        if (count && (finest % count !== 0 || (count & count - 1) !== 0)) throw new Error("Banded spin counts must be powers of two.");
+      }
+      const countX = new Int32Array(this.phantom.nx * this.phantom.ny);
+      for (const v of voxels) countX[v] = counts[bandOf(v, edges)] || finest;
+      const worst = bands.reduce((max2, band) => Math.max(max2, band.error), 0);
+      const axis = {
+        count: finest,
+        reason: bands.length ? "spoiling" : "manual",
+        folded,
+        probe: bands.length ? { error: worst, reference: 0, capped: bands.some((b) => b.capped), tested: [] } : void 0
+      };
+      return { axis, countX, bands, resolved: { kind: "bands", edges, counts, y } };
+    }
     /** Voxels grouped into the units chunks are cut from (see the file comment). */
     chunkUnits(voxels) {
-      const nx = this.grid.nx;
+      const nx = this.phantom.nx;
       const byColumn = this.fold === 2 || this.fold === 0 && (this.analysis.readoutAxes & 7) === 1;
       const byRow = this.fold === 1;
       if (!byColumn && !byRow) return Array.from(voxels, (v) => Int32Array.of(v));
@@ -4269,136 +8142,53 @@
       return [...lines.keys()].sort((a, b) => a - b).map((line) => Int32Array.from(lines.get(line)));
     }
     /** Simulated spins over all chunks: classes when folded, else every spin. */
-    countClasses(units, subSpins) {
-      if (!this.fold) return units.reduce((sum, unit) => sum + unit.length, 0) * subSpins[0] * subSpins[1];
-      const unfolded = (this.fold & 1 ? 1 : subSpins[0]) * (this.fold & 2 ? 1 : subSpins[1]);
-      if (this.fold === 3) return this.tissues.length;
+    countClasses(units, subSpins, spinsOf) {
+      if (!this.fold) return units.reduce((sum, unit) => sum + unit.reduce((s, v) => s + spinsOf(v), 0), 0);
+      if (this.fold === 3) return this.physics.t1.length;
       let total = 0;
       for (const unit of units) {
-        const seen = /* @__PURE__ */ new Set();
-        for (const v of unit) seen.add(this.tissueOf[v]);
-        total += seen.size * unfolded;
+        const seen = /* @__PURE__ */ new Map();
+        for (const v of unit) {
+          const along = this.fold & 1 ? 1 : this.countX ? this.countX[v] : subSpins[0];
+          const key = this.physics.of[v] * 8192 + along;
+          seen.set(key, along * (this.fold & 2 ? 1 : subSpins[1]));
+        }
+        for (const count of seen.values()) total += count;
       }
       return total;
     }
-    /** Classes (one per unfolded sub-position and tissue) and members of a chunk's voxels. */
-    foldChunk(voxels) {
-      const grid = this.grid;
-      const [mx, my] = this.plan.subSpins;
-      const foldX = (this.fold & 1) !== 0, foldY = (this.fold & 2) !== 0;
-      const dx = grid.fovX / grid.nx, dy = grid.fovY / grid.ny;
-      const offsetsX = Array.from({ length: mx }, (_, a) => (a + 0.5) / mx - 0.5);
-      const offsetsY = Array.from({ length: my }, (_, a) => (a + 0.5) / my - 0.5);
-      const lineY = grid.ny * my;
-      const memberCount = voxels.length * mx * my;
-      const classOf = new Int32Array(memberCount);
-      const weight = new Float64Array(memberCount);
-      const foldOf = new Int32Array(memberCount);
-      const classIndex = /* @__PURE__ */ new Map();
-      const pointIndex = /* @__PURE__ */ new Map();
-      const classX = [], classY = [], classTissue = [];
-      const points = [];
-      let m = 0;
-      for (let v = 0; v < voxels.length; v++) {
-        const index = voxels[v];
-        const ix = index % grid.nx, iy = Math.floor(index / grid.nx);
-        const tissue = this.tissueOf[index];
-        const w = grid.pd[index] / (mx * my);
-        const x0 = (ix - grid.nx / 2) * dx;
-        const y0 = (grid.ny / 2 - 1 - iy) * dy;
-        for (let ay = 0; ay < my; ay++) {
-          const y = y0 + offsetsY[ay] * dy;
-          const jy = iy * my + ay;
-          for (let ax = 0; ax < mx; ax++) {
-            const x = x0 + offsetsX[ax] * dx;
-            const jx = ix * mx + ax;
-            const classKey = ((foldX ? 0 : jx) * lineY + (foldY ? 0 : jy)) * this.tissues.length + tissue;
-            let c = classIndex.get(classKey);
-            if (c === void 0) {
-              c = classX.length;
-              classIndex.set(classKey, c);
-              classX.push(foldX ? 0 : x);
-              classY.push(foldY ? 0 : y);
-              classTissue.push(tissue);
-            }
-            const pointKey = (foldX ? jx : 0) * (lineY + 1) + (foldY ? jy : 0);
-            let p = pointIndex.get(pointKey);
-            if (p === void 0) {
-              p = points.length / 3;
-              pointIndex.set(pointKey, p);
-              points.push(foldX ? x : 0, foldY ? y : 0, 0);
-            }
-            classOf[m] = c;
-            weight[m] = w;
-            foldOf[m] = p;
-            m++;
-          }
-        }
-      }
-      const count = classX.length;
-      const rate = (time) => Number.isFinite(time) && time > 0 ? 1 / time : 0;
-      const classes = {
-        count,
-        x: Float64Array.from(classX),
-        y: Float64Array.from(classY),
-        z: new Float64Array(count),
-        df: new Float64Array(count),
-        r1: Float64Array.from(classTissue, (t) => rate(this.tissues[t].t1)),
-        r2: Float64Array.from(classTissue, (t) => rate(this.tissues[t].t2)),
-        weight: new Float64Array(count),
-        b1Re: new Float64Array(count).fill(1),
-        b1Im: new Float64Array(count),
-        coils: 1,
-        rxRe: new Float64Array(count).fill(1),
-        rxIm: new Float64Array(count)
-      };
-      const members = {
-        count: memberCount,
-        classOf,
-        weight,
-        foldOf,
-        foldPoints: Float64Array.from(points),
-        coils: 1,
-        rxRe: new Float64Array(memberCount).fill(1),
-        rxIm: new Float64Array(memberCount)
-      };
-      return { classes, members };
-    }
   };
+  function tolerancePercent(settings) {
+    return `${+(100 * (settings.tolerance ?? 0.02)).toFixed(1)} %`;
+  }
   function clampCount(value) {
     const n = Math.floor(value);
     if (!(n >= 1 && n <= 4096)) throw new Error(`Spins per voxel must be between 1 and 4096 per axis, got ${value}.`);
     return n;
   }
-  function tissueTable(grid) {
-    const tissueOf = new Int32Array(grid.pd.length).fill(-1);
-    const tissues = [];
-    const index = /* @__PURE__ */ new Map();
-    for (let i = 0; i < grid.pd.length; i++) {
-      if (!(grid.pd[i] > 0)) continue;
-      const key = `${grid.t1[i]}|${grid.t2[i]}`;
-      let t = index.get(key);
-      if (t === void 0) {
-        t = tissues.length;
-        index.set(key, t);
-        tissues.push({ t1: grid.t1[i], t2: grid.t2[i] });
-      }
-      tissueOf[i] = t;
-    }
-    return { tissueOf, tissues };
+  function representativeTissues(physics) {
+    const indices = physics.t1.map((_, i2) => i2);
+    if (indices.length <= PROBE_TISSUES) return indices.map((i2) => ({ t1: physics.t1[i2], t2: physics.t2[i2] }));
+    const life = (time) => Number.isFinite(time) && time > 0 ? time : 0;
+    const byT2 = indices.slice().sort((a, b) => life(physics.t2[b]) - life(physics.t2[a]) || life(physics.t1[b]) - life(physics.t1[a]));
+    const byT1 = indices.slice().sort((a, b) => life(physics.t1[b]) - life(physics.t1[a]));
+    const chosen = /* @__PURE__ */ new Set([byT2[0], byT1[0], byT2[Math.floor(byT2.length / 2)], byT2[1]]);
+    return [...chosen].slice(0, PROBE_TISSUES).map((i2) => ({ t1: physics.t1[i2], t2: physics.t2[i2] }));
   }
-  function splitUnits(units, perVoxel, target) {
+  function splitUnits(units, spinsOf, target) {
     const chunks = [];
     let current = [];
     let spins = 0;
     for (const unit of units) {
-      if (current.length && spins + unit.length * perVoxel > target) {
+      let unitSpins = 0;
+      for (const v of unit) unitSpins += spinsOf(v);
+      if (current.length && spins + unitSpins > target) {
         chunks.push(Int32Array.from(current));
         current = [];
         spins = 0;
       }
       for (const v of unit) current.push(v);
-      spins += unit.length * perVoxel;
+      spins += unitSpins;
     }
     if (current.length) chunks.push(Int32Array.from(current));
     return chunks;
@@ -4423,6 +8213,715 @@
     };
   }
 
+  // src/sim/io/mat5.ts
+  var miINT8 = 1;
+  var miUINT8 = 2;
+  var miINT16 = 3;
+  var miUINT16 = 4;
+  var miINT32 = 5;
+  var miUINT32 = 6;
+  var miINT64 = 12;
+  var miUINT64 = 13;
+  var miMATRIX = 14;
+  var miCOMPRESSED = 15;
+  var miUTF8 = 16;
+  var miUTF16 = 17;
+  var miUTF32 = 18;
+  var NUMERIC_STORAGE = {
+    [miINT8]: "i1",
+    [miUINT8]: "u1",
+    [miINT16]: "i2",
+    [miUINT16]: "u2",
+    [miINT32]: "i4",
+    [miUINT32]: "u4",
+    7: "f4",
+    9: "f8",
+    [miINT64]: "i8",
+    [miUINT64]: "u8"
+  };
+  var CLASS_NAMES = [
+    "unknown",
+    "cell",
+    "struct",
+    "object",
+    "char",
+    "sparse",
+    "double",
+    "single",
+    "int8",
+    "uint8",
+    "int16",
+    "uint16",
+    "int32",
+    "uint32",
+    "int64",
+    "uint64",
+    "function_handle",
+    "opaque"
+  ];
+  var CLASS_PRECISION = {
+    double: "f8",
+    single: "f4",
+    int8: "f4",
+    uint8: "f4",
+    int16: "f4",
+    uint16: "f4",
+    int32: "f8",
+    uint32: "f8",
+    int64: "f8",
+    uint64: "f8",
+    logical: "f4"
+  };
+  var SKIP_REASONS = {
+    cell: "cell arrays are not supported; save each cell as its own variable",
+    struct: "structs are not supported; save the fields as variables (save(file, '-struct', 's'))",
+    object: "MATLAB objects are not supported",
+    sparse: "sparse matrices are not supported; save full(x) instead",
+    function_handle: "function handles are not supported"
+  };
+  var MAT_V73_MESSAGE = "MAT v7.3 files are HDF5; save with -v7 or use .npz.";
+  function readMat5(bytes) {
+    const littleEndian = readHeader(bytes);
+    const variables = [];
+    let pos = 128;
+    for (let index = 1; bytes.length - pos >= 8; index++) {
+      const what = `MAT variable ${index}`;
+      const tag = readTag(bytes, pos, bytes.length, littleEndian, what);
+      let variable;
+      if (tag.type === miCOMPRESSED) {
+        const inner = unzlib(
+          bytes.subarray(tag.start, tag.start + tag.length),
+          8,
+          (prefix) => compressedSize(prefix, littleEndian, what),
+          what
+        );
+        const element = readTag(inner, 0, inner.length, littleEndian, what);
+        variable = readVariable(inner, element, littleEndian, what);
+      } else {
+        variable = readVariable(bytes, tag, littleEndian, what);
+      }
+      if (variable) variables.push(variable);
+      pos = tag.start + tag.length;
+    }
+    return variables;
+  }
+  function readHeader(bytes) {
+    if (isHdf5(bytes, 0) || isHdf5(bytes, 512)) throw new Error(MAT_V73_MESSAGE);
+    if (isMat4(bytes)) throw new Error("MAT v4 (Level 4) files are not supported; save with -v7.");
+    if (bytes.length < 128) throw new Error("Not a MAT-file: shorter than the 128-byte header.");
+    const indicator = String.fromCharCode(bytes[126], bytes[127]);
+    if (indicator !== "IM" && indicator !== "MI") throw new Error("Not a MAT-file: the endian indicator is missing.");
+    const littleEndian = indicator === "IM";
+    const major = littleEndian ? bytes[125] : bytes[124];
+    if (major === 2) throw new Error(MAT_V73_MESSAGE);
+    if (major !== 1) throw new Error(`Unsupported MAT-file version ${major} (Level 5 files are version 1).`);
+    return littleEndian;
+  }
+  function isMat4(bytes) {
+    if (bytes.length < 20) return false;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, 20);
+    return [true, false].some((littleEndian) => {
+      const [mopt, rows, columns, imagf, nameLength] = [0, 4, 8, 12, 16].map((p) => view.getInt32(p, littleEndian));
+      return mopt >= 0 && mopt <= 4052 && Math.floor(mopt / 100) % 10 === 0 && Math.floor(mopt / 10) % 10 <= 5 && mopt % 10 <= 2 && rows >= 0 && columns >= 0 && (imagf === 0 || imagf === 1) && nameLength >= 1 && nameLength <= 65536;
+    });
+  }
+  function isHdf5(bytes, offset) {
+    const signature = [137, 72, 68, 70, 13, 10, 26, 10];
+    return bytes.length >= offset + 8 && signature.every((byte, i2) => bytes[offset + i2] === byte);
+  }
+  function readTag(bytes, pos, end, littleEndian, what) {
+    if (pos + 8 > end) throw new Error(`${what}: the MAT-file is truncated (an element tag is cut off).`);
+    const view = new DataView(bytes.buffer, bytes.byteOffset + pos, 8);
+    const first = view.getUint32(0, littleEndian);
+    const small = first >>> 16;
+    if (small !== 0) {
+      if (small > 4) throw new Error(`${what}: corrupt MAT-file (small data element of ${small} bytes).`);
+      return { type: first & 65535, start: pos + 4, length: small, next: pos + 8 };
+    }
+    const length = view.getUint32(4, littleEndian);
+    const start = pos + 8;
+    if (start + length > end) {
+      throw new Error(`${what}: the MAT-file is truncated (an element needs ${length} bytes, ${end - start} remain).`);
+    }
+    return { type: first, start, length, next: Math.min(start + Math.ceil(length / 8) * 8, end) };
+  }
+  function compressedSize(prefix, littleEndian, what) {
+    if (prefix.length < 8) throw new Error(`${what}: the compressed variable is empty or corrupt.`);
+    const view = new DataView(prefix.buffer, prefix.byteOffset, 8);
+    const first = view.getUint32(0, littleEndian);
+    return first >>> 16 ? 8 : 8 + view.getUint32(4, littleEndian);
+  }
+  function readVariable(bytes, element, littleEndian, what) {
+    if (element.type !== miMATRIX) {
+      throw new Error(`${what}: expected a MATLAB array (miMATRIX), found data element type ${element.type}; the file is corrupt.`);
+    }
+    const end = element.start + element.length;
+    if (element.length === 0) return null;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const flagsTag = readTag(bytes, element.start, end, littleEndian, what);
+    if (flagsTag.type !== miUINT32 || flagsTag.length < 4) throw new Error(`${what}: corrupt MAT-file (no array flags).`);
+    const flags = view.getUint32(flagsTag.start, littleEndian);
+    const classCode = flags & 255;
+    const complex = (flags & 2048) !== 0, logical = (flags & 512) !== 0;
+    const mclass = CLASS_NAMES[classCode] ?? "unknown";
+    if (mclass === "opaque") {
+      const nameTag2 = readTag(bytes, flagsTag.next, end, littleEndian, what);
+      const name2 = latin12(bytes, nameTag2);
+      if (!name2) return null;
+      let className = "object";
+      try {
+        const systemTag = readTag(bytes, nameTag2.next, end, littleEndian, what);
+        className = latin12(bytes, readTag(bytes, systemTag.next, end, littleEndian, what)) || className;
+      } catch {
+      }
+      return {
+        kind: "skipped",
+        name: name2,
+        class: "opaque",
+        shape: [],
+        reason: `MATLAB ${className} objects are not supported; convert to a numeric or char array (e.g. char(x)) before saving`
+      };
+    }
+    const dimsTag = readTag(bytes, flagsTag.next, end, littleEndian, what);
+    if (dimsTag.type !== miINT32 || dimsTag.length % 4 !== 0 || dimsTag.length === 0) {
+      throw new Error(`${what}: corrupt MAT-file (invalid dimensions).`);
+    }
+    const shape = [];
+    for (let p = dimsTag.start; p < dimsTag.start + dimsTag.length; p += 4) shape.push(view.getInt32(p, littleEndian));
+    if (shape.some((size) => size < 0)) throw new Error(`${what}: corrupt MAT-file (negative dimension).`);
+    const nameTag = readTag(bytes, dimsTag.next, end, littleEndian, what);
+    const name = latin12(bytes, nameTag);
+    if (!name) return null;
+    const label = `${what} ('${name}')`;
+    const dataStart = nameTag.next;
+    if (classCode >= 6 && classCode <= 15) {
+      const cls = logical ? "logical" : mclass;
+      const count = elementCount(shape);
+      const precision = CLASS_PRECISION[cls];
+      const real = readNumeric(bytes, dataStart, end, littleEndian, count, shape, precision, `${label}, real part`);
+      const array = { kind: "array", name, class: cls, dtype: cls, shape, order: "F", data: real.data };
+      if (complex) array.imag = readNumeric(bytes, real.next, end, littleEndian, count, shape, precision, `${label}, imaginary part`).data;
+      return array;
+    }
+    if (mclass === "char") return readText(bytes, dataStart, end, littleEndian, name, shape, label);
+    return {
+      kind: "skipped",
+      name,
+      class: mclass,
+      shape,
+      reason: SKIP_REASONS[mclass] ?? `unknown MATLAB class ${classCode}`
+    };
+  }
+  function readNumeric(bytes, pos, end, littleEndian, count, shape, precision, what) {
+    const tag = readTag(bytes, pos, end, littleEndian, what);
+    const type = NUMERIC_STORAGE[tag.type];
+    if (!type) throw new Error(`${what}: unsupported storage type ${tag.type}.`);
+    if (tag.length !== count * ELEMENT_SIZE[type]) {
+      throw new Error(`${what}: ${tag.length} bytes of ${type} data do not fit dimensions [${shape.join(", ")}].`);
+    }
+    return { data: decodeElements(bytes, tag.start, count, type, littleEndian, precision), next: tag.next };
+  }
+  function readText(bytes, pos, end, littleEndian, name, shape, what) {
+    const tag = readTag(bytes, pos, end, littleEndian, what);
+    const raw = bytes.subarray(tag.start, tag.start + tag.length);
+    let text2;
+    if (tag.type === miUTF8) {
+      text2 = new TextDecoder("utf-8").decode(raw);
+    } else if (tag.type === miUINT8 || tag.type === miINT8) {
+      text2 = latin12(bytes, tag);
+    } else if (tag.type === miUINT16 || tag.type === miUTF16 || tag.type === miINT16) {
+      text2 = fromCodes(decodeElements(bytes, tag.start, tag.length >> 1, "u2", littleEndian, "f4"), String.fromCharCode);
+    } else if (tag.type === miUTF32 || tag.type === miUINT32) {
+      const codes = Array.from(
+        decodeElements(bytes, tag.start, tag.length >> 2, "u4", littleEndian, "f8"),
+        (code) => code <= 1114111 ? code : 65533
+      );
+      text2 = fromCodes(codes, String.fromCodePoint);
+    } else {
+      return { kind: "skipped", name, class: "char", shape, reason: `char data stored as unsupported type ${tag.type}` };
+    }
+    const count = elementCount(shape);
+    let rows;
+    if (text2.length !== count) {
+      rows = [text2];
+    } else {
+      const height = shape[0], width = shape.length > 1 ? shape[1] : 1;
+      const pages = height * width > 0 ? count / (height * width) : 0;
+      rows = [];
+      for (let page = 0; page < pages; page++) {
+        for (let i2 = 0; i2 < height; i2++) {
+          let row = "";
+          for (let j = 0; j < width; j++) row += text2[page * height * width + j * height + i2];
+          rows.push(row);
+        }
+      }
+      if (pages === 0 && height > 0 && width === 0) rows = new Array(height).fill("");
+    }
+    return { kind: "text", name, class: "char", shape, rows, value: rows.join("\n") };
+  }
+  function fromCodes(codes, convert) {
+    let text2 = "";
+    for (let i2 = 0; i2 < codes.length; i2 += 8192) {
+      text2 += convert(...Array.from({ length: Math.min(8192, codes.length - i2) }, (_, k) => codes[i2 + k]));
+    }
+    return text2;
+  }
+  function latin12(bytes, tag) {
+    let text2 = "";
+    for (let i2 = tag.start; i2 < tag.start + tag.length; i2++) text2 += String.fromCharCode(bytes[i2]);
+    return text2;
+  }
+
+  // src/sim/io/nifti.ts
+  var DATATYPES = {
+    2: { name: "uint8", element: "u1", complex: false },
+    4: { name: "int16", element: "i2", complex: false },
+    8: { name: "int32", element: "i4", complex: false },
+    16: { name: "float32", element: "f4", complex: false },
+    32: { name: "complex64", element: "f4", complex: true },
+    64: { name: "float64", element: "f8", complex: false },
+    256: { name: "int8", element: "i1", complex: false },
+    512: { name: "uint16", element: "u2", complex: false },
+    768: { name: "uint32", element: "u4", complex: false },
+    1024: { name: "int64", element: "i8", complex: false },
+    1280: { name: "uint64", element: "u8", complex: false },
+    1792: { name: "complex128", element: "f8", complex: true }
+  };
+  var UNSUPPORTED_DATATYPES = {
+    0: "unknown",
+    1: "binary (1 bit)",
+    128: "RGB24",
+    1536: "float128",
+    2048: "complex256",
+    2304: "RGBA32"
+  };
+  var SPATIAL_UNITS = {
+    0: ["unknown", 1e-3],
+    1: ["meter", 1],
+    2: ["mm", 1e-3],
+    3: ["micron", 1e-6]
+  };
+  var TEMPORAL_UNITS = {
+    0: "unknown",
+    8: "sec",
+    16: "msec",
+    24: "usec",
+    32: "hz",
+    40: "ppm",
+    48: "rads"
+  };
+  function readNifti(bytes) {
+    const file = isGzip(bytes) ? gunzip(bytes, 544, (prefix) => {
+      const h = parseHeader(prefix);
+      return h.voxOffset + h.dataBytes;
+    }, "NIfTI") : bytes;
+    const header = parseHeader(file);
+    const available = file.length - header.voxOffset;
+    if (header.dataBytes > available) {
+      throw new Error(`NIfTI data is truncated: ${header.shape.join("\xD7")} ${header.type.name} voxels need ${header.dataBytes} bytes after offset ${header.voxOffset}, ${Math.max(0, available)} remain.`);
+    }
+    const { element, complex } = header.type;
+    const count = elementCount(header.shape);
+    const precision = outputPrecision(element);
+    const data = decodeElements(file, header.voxOffset, count, element, header.littleEndian, precision, complex ? 2 : 1);
+    const imag = complex ? decodeElements(file, header.voxOffset + ELEMENT_SIZE[element], count, element, header.littleEndian, precision, 2) : void 0;
+    const { sclSlope: slope, sclInter: inter } = header;
+    const scaled = Number.isFinite(slope) && slope !== 0;
+    if (scaled && !Number.isFinite(inter)) throw new Error(`NIfTI header has scl_slope ${slope} but an invalid scl_inter (${inter}).`);
+    if (scaled && (slope !== 1 || inter !== 0)) {
+      for (let i2 = 0; i2 < count; i2++) data[i2] = data[i2] * slope + inter;
+      if (imag) for (let i2 = 0; i2 < count; i2++) imag[i2] *= slope;
+    }
+    const [spatialUnits, metres] = SPATIAL_UNITS[header.xyztUnits & 7] ?? SPATIAL_UNITS[0];
+    const step = (k) => {
+      const value = header.pixdim[k];
+      return value !== 0 && Number.isFinite(value) ? value : 1;
+    };
+    const { affine, source } = worldAffine(header, step, metres * 1e3);
+    const image = {
+      dtype: header.type.name,
+      shape: header.shape,
+      order: "F",
+      data,
+      version: header.version,
+      littleEndian: header.littleEndian,
+      datatype: header.datatype,
+      pixdim: header.pixdim,
+      spatialUnits,
+      temporalUnits: TEMPORAL_UNITS[header.xyztUnits & 56] ?? "unknown",
+      voxelSize: [Math.abs(step(1)) * metres, Math.abs(step(2)) * metres, Math.abs(step(3)) * metres],
+      affine,
+      affineSource: source,
+      qformCode: header.qformCode,
+      sformCode: header.sformCode,
+      sclSlope: slope,
+      sclInter: inter,
+      scaled,
+      intentCode: header.intentCode,
+      intentName: header.intentName,
+      description: header.description
+    };
+    if (imag) image.imag = imag;
+    return image;
+  }
+  function worldAffine(header, step, toMm) {
+    let rows;
+    let source;
+    if (header.sformCode > 0) {
+      rows = header.srow.slice();
+      source = "sform";
+    } else if (header.qformCode > 0) {
+      rows = quaternionAffine(header);
+      source = "qform";
+    } else {
+      rows = [step(1), 0, 0, 0, 0, step(2), 0, 0, 0, 0, step(3), 0];
+      source = "pixdim";
+    }
+    return { affine: [...rows.map((value) => value * toMm), 0, 0, 0, 1], source };
+  }
+  function quaternionAffine(header) {
+    let [b, c, d] = header.quatern;
+    let a = 1 - (b * b + c * c + d * d);
+    if (a < 1e-7) {
+      const norm2 = 1 / Math.sqrt(b * b + c * c + d * d);
+      b *= norm2;
+      c *= norm2;
+      d *= norm2;
+      a = 0;
+    } else {
+      a = Math.sqrt(a);
+    }
+    const positive = (value) => value > 0 ? value : 1;
+    const dx = positive(header.pixdim[1]), dy = positive(header.pixdim[2]);
+    const dz = positive(header.pixdim[3]) * (header.pixdim[0] < 0 ? -1 : 1);
+    const [qx, qy, qz] = header.qoffset;
+    return [
+      (a * a + b * b - c * c - d * d) * dx,
+      2 * (b * c - a * d) * dy,
+      2 * (b * d + a * c) * dz,
+      qx,
+      2 * (b * c + a * d) * dx,
+      (a * a + c * c - b * b - d * d) * dy,
+      2 * (c * d - a * b) * dz,
+      qy,
+      2 * (b * d - a * c) * dx,
+      2 * (c * d + a * b) * dy,
+      (a * a + d * d - c * c - b * b) * dz,
+      qz
+    ];
+  }
+  function parseHeader(bytes) {
+    if (bytes.length < 4) throw new Error("Not a NIfTI file: too short.");
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let littleEndian = true;
+    let size = view.getInt32(0, true);
+    if (size !== 348 && size !== 540) {
+      littleEndian = false;
+      size = view.getInt32(0, false);
+    }
+    if (size !== 348 && size !== 540) throw new Error("Not a NIfTI file: sizeof_hdr is neither 348 (NIfTI-1) nor 540 (NIfTI-2).");
+    const version = size === 348 ? 1 : 2;
+    if (bytes.length < size) throw new Error(`NIfTI file is truncated inside its ${size}-byte header.`);
+    const magic = text(bytes, version === 1 ? 344 : 4, 4);
+    const single = version === 1 ? "n+1" : "n+2", pair = version === 1 ? "ni1" : "ni2";
+    if (magic === pair) {
+      throw new Error("This is the header of a NIfTI .hdr/.img pair; only single-file .nii or .nii.gz images are supported. Convert it first, e.g. nibabel.save(nibabel.load('x.hdr'), 'x.nii') or fslchfiletype NIFTI x.");
+    }
+    if (magic !== single) {
+      throw new Error(`Not a single-file NIfTI-${version} image (magic '${magic.replace(/[^\x20-\x7e]/g, "?")}'); Analyze 7.5 and .hdr/.img pairs are not supported.`);
+    }
+    const i16 = (p) => view.getInt16(p, littleEndian);
+    const i322 = (p) => view.getInt32(p, littleEndian);
+    const f32 = (p) => view.getFloat32(p, littleEndian);
+    const f64 = (p) => view.getFloat64(p, littleEndian);
+    const i64 = (p) => {
+      const low = littleEndian ? p : p + 4, high = littleEndian ? p + 4 : p;
+      return view.getInt32(high, littleEndian) * 4294967296 + view.getUint32(low, littleEndian);
+    };
+    const n1 = version === 1;
+    const dim = Array.from({ length: 8 }, (_, k) => n1 ? i16(40 + 2 * k) : i64(16 + 8 * k));
+    const pixdim = Array.from({ length: 8 }, (_, k) => n1 ? f32(76 + 4 * k) : f64(104 + 8 * k));
+    const datatype = n1 ? i16(70) : i16(12);
+    const rank = dim[0];
+    if (!(rank >= 1 && rank <= 7)) throw new Error(`NIfTI header has an invalid dim[0] = ${rank}.`);
+    const shape = dim.slice(1, rank + 1);
+    if (shape.some((extent) => extent < 0)) throw new Error(`NIfTI header has a negative dimension: [${shape.join(", ")}].`);
+    const type = DATATYPES[datatype];
+    if (!type) {
+      const what = UNSUPPORTED_DATATYPES[datatype];
+      throw new Error(`NIfTI datatype ${datatype}${what ? ` (${what})` : ""} is not supported; use an integer, float32/64 or complex type.`);
+    }
+    const voxelBytes = ELEMENT_SIZE[type.element] * (type.complex ? 2 : 1);
+    const storedOffset = n1 ? f32(108) : i64(168);
+    if (!(storedOffset >= 0 && Number.isFinite(storedOffset))) throw new Error(`NIfTI header has an invalid vox_offset (${storedOffset}).`);
+    const voxOffset = Math.max(Math.floor(storedOffset), size + 4);
+    const srow = n1 ? Array.from({ length: 12 }, (_, k) => f32(280 + 4 * k)) : Array.from({ length: 12 }, (_, k) => f64(400 + 8 * k));
+    return {
+      version,
+      littleEndian,
+      datatype,
+      type,
+      shape,
+      pixdim,
+      voxOffset,
+      dataBytes: elementCount(shape) * voxelBytes,
+      sclSlope: n1 ? f32(112) : f64(176),
+      sclInter: n1 ? f32(116) : f64(184),
+      xyztUnits: n1 ? bytes[123] : i322(500),
+      qformCode: n1 ? i16(252) : i322(344),
+      sformCode: n1 ? i16(254) : i322(348),
+      quatern: n1 ? [f32(256), f32(260), f32(264)] : [f64(352), f64(360), f64(368)],
+      qoffset: n1 ? [f32(268), f32(272), f32(276)] : [f64(376), f64(384), f64(392)],
+      srow,
+      intentCode: n1 ? i16(68) : i322(504),
+      intentName: text(bytes, n1 ? 328 : 508, 16),
+      description: text(bytes, n1 ? 148 : 240, 80)
+    };
+  }
+  function text(bytes, offset, length) {
+    let result = "";
+    for (let i2 = offset; i2 < offset + length && bytes[i2] !== 0; i2++) result += String.fromCharCode(bytes[i2]);
+    return result;
+  }
+
+  // src/sim/phantom/files.ts
+  var MRZERO_NPZ_FOV = 0.192;
+  var MRZERO_MAT_SIZE = [0.2, 0.2, 8e-3];
+  var MRZERO_MAT_T2DASH = 0.03;
+  var MRZERO_MAT_ADC = 1e-9;
+  var DEFAULT_FOV = 0.2;
+  var ALIASES = {
+    pd: ["pd", "rho", "m0", "density", "protondensity"],
+    t1: ["t1"],
+    t2: ["t2"],
+    t2prime: ["t2prime", "t2dash", "t2'", "t2p"],
+    adc: ["adc", "d"],
+    b0: ["b0", "db0", "df", "deltab0"],
+    b1: ["b1", "b1+", "b1plus", "b1p"]
+  };
+  function loadPhantomFiles(files) {
+    if (!files.length) throw new Error("No phantom file given.");
+    const lower = files.map((file) => file.name.toLowerCase());
+    let volume2;
+    if (lower.every((name) => name.endsWith(".nii") || name.endsWith(".nii.gz"))) {
+      volume2 = fromNifti(files);
+    } else if (files.length === 1 && lower[0].endsWith(".npz")) {
+      volume2 = fromArrays(readNpz(files[0].bytes), files[0].name);
+    } else if (files.length === 1 && lower[0].endsWith(".mat")) {
+      volume2 = fromMat(files[0]);
+    } else if (files.length === 1 && lower[0].endsWith(".npy")) {
+      volume2 = fromStack(readNpy(files[0].bytes), files[0].name, null);
+    } else if (lower.some((name) => name.endsWith(".json"))) {
+      throw new Error("MRzero NIfTI phantoms (.json + .nii.gz) are not supported yet; load the maps as separate NIfTI files.");
+    } else {
+      throw new Error("Load one .npz, .mat or .npy file, or one or more NIfTI (.nii, .nii.gz) maps.");
+    }
+    return sanitise(volume2);
+  }
+  function fromArrays(arrays, source) {
+    const found = /* @__PURE__ */ new Map();
+    const used = [];
+    for (const [key, array] of arrays) {
+      const name = mapNameOf(key);
+      if (name && !found.has(name)) {
+        found.set(name, array);
+        used.push(key);
+      }
+    }
+    if (!found.has("pd")) {
+      const keys = [...arrays.keys()].join(", ") || "none";
+      throw new Error(`No proton-density map (PD, PD_map, rho, M0, density) among the arrays: ${keys}.`);
+    }
+    const mrzero = arrays.has("PD_map") && arrays.has("T1_map");
+    const notes = [];
+    const pd = found.get("pd");
+    const shape = spatialShape(pd, source);
+    const fovArray = arrays.get("FOV") ?? arrays.get("fov");
+    let fov;
+    if (fovArray) {
+      fov = vector3(fovArray, "FOV");
+      if (Math.max(...fov) > 2) {
+        fov = fov.map((v) => v / 1e3);
+        notes.push("FOV looked like millimetres and was converted to metres.");
+      }
+    } else if (mrzero) {
+      fov = [MRZERO_NPZ_FOV, MRZERO_NPZ_FOV, MRZERO_NPZ_FOV];
+    } else {
+      fov = [DEFAULT_FOV, DEFAULT_FOV, shape[2] > 1 ? DEFAULT_FOV : 0];
+      notes.push(`No FOV in the file: assumed ${DEFAULT_FOV * 1e3} mm.`);
+    }
+    const maps = {};
+    for (const [name, array] of found) {
+      const values = toVolume(array, shape, `${name.toUpperCase()} map`);
+      maps[name] = name === "adc" && mrzero ? scale(values, 1e-9) : values;
+    }
+    if (!maps.t1 || !maps.t2) throw new Error("The phantom needs T1 and T2 maps (T1, T2 or T1_map, T2_map).");
+    if (!mrzero && maps.adc) notes.push("ADC map taken as m\xB2/s.");
+    return {
+      shape,
+      voxel: voxelOf(fov, shape),
+      maps,
+      source: `${baseName(source)} (${mrzero ? "MRzero" : used.join(", ")})`,
+      notes
+    };
+  }
+  function fromMat(file) {
+    const variables = readMat5(file.bytes).filter((v) => v.kind === "array" && v.data.length > 0);
+    const arrays = new Map(variables.map((v) => [v.name, v]));
+    const stacked = variables.filter((v) => v.shape.length >= 3 && v.shape[v.shape.length - 1] === 5);
+    if (stacked.length === 1 && ![...arrays.keys()].some((key) => mapNameOf(key) === "pd")) {
+      return fromStack(stacked[0], file.name, stacked[0].name);
+    }
+    return fromArrays(arrays, file.name);
+  }
+  function fromStack(array, source, variable) {
+    const channels = array.shape[array.shape.length - 1];
+    if (array.shape.length < 3 || channels < 3 || channels > 5) {
+      throw new Error(`Expected an array [x, y, (z,) 5] of PD, T1, T2, B0, B1 (MRzero layout); got [${array.shape.join(", ")}].`);
+    }
+    const spatial = array.shape.slice(0, -1);
+    const shape = [spatial[0], spatial[1], spatial[2] ?? 1];
+    const channel = (c) => toVolume(channelOf(array, c), shape, ["PD", "T1", "T2", "B0", "B1"][c]);
+    const maps = { pd: channel(0), t1: channel(1), t2: channel(2) };
+    if (channels > 3) maps.b0 = channel(3);
+    if (channels > 4) maps.b1 = channel(4);
+    const n = shape[0] * shape[1] * shape[2];
+    maps.t2prime = new Float32Array(n).fill(MRZERO_MAT_T2DASH);
+    maps.adc = new Float32Array(n).fill(MRZERO_MAT_ADC);
+    const size = shape[2] > 1 ? [MRZERO_MAT_SIZE[0], MRZERO_MAT_SIZE[1], MRZERO_MAT_SIZE[0]] : MRZERO_MAT_SIZE;
+    return {
+      shape,
+      voxel: voxelOf(size, shape),
+      maps,
+      source: `${baseName(source)} (MRzero${variable ? ` ${variable}` : ""})`,
+      notes: [`MRzero .mat layout: FOV ${size.map((v) => v * 1e3).join(" \xD7 ")} mm, T2\u2032 30 ms and ADC 1e-9 m\xB2/s everywhere (MRzero's defaults).`]
+    };
+  }
+  function fromNifti(files) {
+    const maps = {};
+    let shape = null;
+    let voxel = [1e-3, 1e-3, 1e-3];
+    const names = [];
+    for (const file of files) {
+      const image = readNifti(file.bytes);
+      const name = niftiMapName(file.name);
+      if (!name) throw new Error(`Cannot tell which map ${file.name} holds; name it like brain_T1.nii.gz (PD, T1, T2, T2prime, ADC, B0, B1).`);
+      if (maps[name]) throw new Error(`Two files hold the ${name.toUpperCase()} map.`);
+      const own = spatialShape(image, file.name);
+      if (shape && own.some((v, i2) => v !== shape[i2])) throw new Error(`${file.name} is ${own.join("\xD7")}, the other maps ${shape.join("\xD7")}.`);
+      shape = own;
+      maps[name] = toVolume(image, own, file.name);
+      voxel = image.voxelSize;
+      names.push(name.toUpperCase());
+    }
+    if (!maps.pd) throw new Error("No proton-density NIfTI (e.g. brain.nii.gz, brain_PD.nii.gz or brain_density.nii.gz).");
+    if (!maps.t1 || !maps.t2) throw new Error("NIfTI phantoms need T1 and T2 maps as well (brain_T1.nii.gz, brain_T2.nii.gz).");
+    return { shape, voxel, maps, source: `NIfTI (${names.join(", ")})`, notes: [] };
+  }
+  function niftiMapName(fileName) {
+    const stem = baseName(fileName).replace(/\.nii(\.gz)?$/i, "");
+    const cut = stem.lastIndexOf("_");
+    if (cut < 0) return "pd";
+    return mapNameOf(stem.slice(cut + 1)) ?? (/^(pd|density)$/i.test(stem.slice(cut + 1)) ? "pd" : null);
+  }
+  function mapNameOf(key) {
+    const normalised = key.toLowerCase().replace(/_map$/, "");
+    for (const name of Object.keys(ALIASES)) {
+      if (ALIASES[name].includes(normalised)) return name;
+    }
+    return null;
+  }
+  function spatialShape(array, what) {
+    const shape = array.shape.slice();
+    while (shape.length > 3 && shape[shape.length - 1] === 1) shape.pop();
+    if (shape.length < 2 || shape.length > 3) {
+      throw new Error(`${baseName(what)}: expected a 2-D or 3-D map, got [${array.shape.join(", ")}].`);
+    }
+    return [shape[0], shape[1], shape[2] ?? 1];
+  }
+  function toVolume(array, shape, what) {
+    const [nx, ny, nz] = shape;
+    const n = nx * ny * nz;
+    if (array.data.length < n) throw new Error(`${what}: ${array.data.length} values for a ${nx}\xD7${ny}\xD7${nz} grid.`);
+    const out = new Float32Array(n);
+    if (array.order === "F" || ny === 1 && nz === 1) {
+      for (let i2 = 0; i2 < n; i2++) out[i2] = array.data[i2];
+      return out;
+    }
+    for (let x2 = 0; x2 < nx; x2++) {
+      for (let y = 0; y < ny; y++) {
+        const row = (x2 * ny + y) * nz;
+        for (let z = 0; z < nz; z++) out[x2 + nx * (y + ny * z)] = array.data[row + z];
+      }
+    }
+    return out;
+  }
+  function channelOf(array, c) {
+    const spatial = array.shape.slice(0, -1);
+    const n = spatial.reduce((a, b) => a * b, 1);
+    const channels = array.shape[array.shape.length - 1];
+    const data = new Float32Array(n);
+    if (array.order === "F") {
+      for (let i2 = 0; i2 < n; i2++) data[i2] = array.data[c * n + i2];
+    } else {
+      for (let i2 = 0; i2 < n; i2++) data[i2] = array.data[i2 * channels + c];
+    }
+    return { dtype: array.dtype, shape: spatial, order: array.order, data };
+  }
+  function vector3(array, what) {
+    const v = Array.from(array.data);
+    if (v.length < 2 || v.some((x2) => !(x2 > 0))) throw new Error(`${what} must hold 2 or 3 positive numbers.`);
+    return [v[0], v[1], v[2] ?? v[0]];
+  }
+  function voxelOf(fov, shape) {
+    return [0, 1, 2].map((i2) => fov[i2] > 0 ? fov[i2] / shape[i2] : 1e-3);
+  }
+  function scale(values, factor) {
+    for (let i2 = 0; i2 < values.length; i2++) values[i2] *= factor;
+    return values;
+  }
+  function sanitise(volume2) {
+    const { maps, notes } = volume2;
+    for (let i2 = 0; i2 < maps.pd.length; i2++) if (!(maps.pd[i2] > 0)) maps.pd[i2] = 0;
+    for (const name of ["t1", "t2", "t2prime"]) {
+      const map = maps[name];
+      if (!map) continue;
+      let max2 = 0;
+      for (let i2 = 0; i2 < map.length; i2++) if (maps.pd[i2] > 0 && map[i2] > max2) max2 = map[i2];
+      if (max2 > 50) {
+        scale(map, 1e-3);
+        notes.push(`${name.toUpperCase()} looked like milliseconds (max ${max2.toFixed(0)}) and was converted to seconds.`);
+      }
+    }
+    if (maps.b1) {
+      let max2 = 0;
+      for (let i2 = 0; i2 < maps.b1.length; i2++) if (maps.pd[i2] > 0 && maps.b1[i2] > max2) max2 = maps.b1[i2];
+      if (max2 > 10) {
+        scale(maps.b1, 0.01);
+        notes.push("B1 looked like percent and was converted to a relative factor.");
+      }
+    }
+    return volume2;
+  }
+  function withFieldMode(volume2, fields) {
+    if (fields === "none") {
+      const maps = { ...volume2.maps };
+      delete maps.b0;
+      delete maps.b1;
+      return { ...volume2, maps };
+    }
+    if (fields === "mrzero" && (!volume2.maps.b0 || !volume2.maps.b1)) {
+      const generated = mrzeroFieldMaps(volume2);
+      const maps = { ...volume2.maps, b0: volume2.maps.b0 ?? generated.b0, b1: volume2.maps.b1 ?? generated.b1 };
+      return { ...volume2, maps, notes: [...volume2.notes, "B0/B1 generated as MRzero does for files without them."] };
+    }
+    return volume2;
+  }
+  function baseName(path) {
+    const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+    return cut >= 0 ? path.slice(cut + 1) : path;
+  }
+
   // src/sim/platform/browser.ts
   function standardSelfPort() {
     const g = globalThis;
@@ -4435,6 +8934,8 @@
   // src/sim/worker/entry.ts
   var port = standardSelfPort();
   var jobs = /* @__PURE__ */ new Map();
+  var volume = null;
+  var previewSession = null;
   var PROGRESS_SPACING_MS = 100;
   function now() {
     const clock = globalThis.performance;
@@ -4448,13 +8949,87 @@
     if (!job) throw new Error("The simulation job is not open in this worker.");
     return job;
   }
+  function phantomBuffers(phantom) {
+    const buffers = /* @__PURE__ */ new Set();
+    for (const map of Object.values(phantom.maps)) if (map) buffers.add(map.buffer);
+    if (phantom.coils) {
+      buffers.add(phantom.coils.re.buffer);
+      buffers.add(phantom.coils.im.buffer);
+    }
+    return [...buffers];
+  }
+  function volumeSummary(v) {
+    return {
+      shape: v.shape,
+      voxel: v.voxel,
+      source: v.source,
+      notes: v.notes,
+      maps: Object.keys(v.maps).filter((key) => v.maps[key])
+    };
+  }
+  function loadPhantom(request) {
+    if (request.kind === "shepp-logan") {
+      let fov = [0.256, 0.256];
+      if (request.sequence) {
+        const definition = parseSequenceBytes(new Uint8Array(request.sequence), request.name ?? "").definitions.get("FOV");
+        if (definition && definition.length >= 2 && +definition[0] > 0 && +definition[1] > 0) fov = [+definition[0], +definition[1]];
+      }
+      return { volume: null, phantom: sheppLoganPhantom2D(request.size, fov[0], fov[1]) };
+    }
+    if (request.kind === "files") {
+      volume = loadPhantomFiles(request.files.map((file) => ({ name: file.name, bytes: new Uint8Array(file.bytes) })));
+    } else if (!volume) {
+      throw new Error("Load a phantom file first.");
+    }
+    const phantom = sliceVolume(withFieldMode(volume, request.fields), request.slice);
+    return { volume: volumeSummary(volume), phantom };
+  }
   function handle(request) {
     switch (request.type) {
+      case "phantom": {
+        const result = loadPhantom(request.request);
+        port.post({ type: "phantom", id: request.id, ...result }, phantomBuffers(result.phantom));
+        return;
+      }
       case "open": {
         jobs.clear();
-        const job = new SimulationJob(new Uint8Array(request.bytes), request.name, request.settings);
+        let last = -Infinity;
+        const job = new SimulationJob(new Uint8Array(request.bytes), request.name, request.settings, {
+          onPlanProgress: (message, fraction) => {
+            const t = now();
+            if (t - last < PROGRESS_SPACING_MS) return;
+            last = t;
+            port.post({ type: "planProgress", job: request.job, message, fraction }, []);
+          }
+        });
         jobs.set(request.job, job);
-        port.post({ type: "plan", job: request.job, plan: job.plan }, []);
+        const layout = request.layout ? job.rawLayout() : void 0;
+        port.post({ type: "plan", job: request.job, plan: job.plan, layout }, layout ? [layout.k.buffer] : []);
+        return;
+      }
+      case "previewOpen": {
+        const seq = parseSequenceBytes(new Uint8Array(request.bytes), request.name);
+        const definition = seq.definitions.get("FOV");
+        const fov = definition && definition.length >= 2 && definition.every((v) => Number.isFinite(+v)) ? [+definition[0], +definition[1], definition.length > 2 ? +definition[2] : 0] : null;
+        previewSession = { id: request.id, trajectory: adcTrajectory(compileProgram(seq)), fov };
+        return;
+      }
+      case "preview": {
+        if (!previewSession || previewSession.id !== request.id) throw new Error("No preview session for this run.");
+        const recon = reconstructCartesian(previewSession.trajectory, request.signal, request.coils, { fov: previewSession.fov });
+        port.post({
+          type: "preview",
+          id: request.id,
+          recon: {
+            axes: recon.axes,
+            nu: recon.nu,
+            nv: recon.nv,
+            delta: recon.delta,
+            frames: recon.frames,
+            images: recon.images,
+            kspace: recon.kspace
+          }
+        }, [recon.images.buffer, recon.kspace.buffer]);
         return;
       }
       case "chunk": {
@@ -4479,7 +9054,12 @@
       case "recon": {
         const job = jobFor(request.job);
         const recon = job.reconstruct(request.signal);
-        const raw = job.rawMagnitude(request.signal);
+        const layout = job.rawLayout();
+        const transfer = [recon.images.buffer, recon.kspace.buffer];
+        for (const stack of [recon.coilImages, recon.coilKspace]) {
+          if (stack) transfer.push(stack.re.buffer, stack.im.buffer);
+        }
+        transfer.push(layout.k.buffer);
         port.post({
           type: "recon",
           job: request.job,
@@ -4487,15 +9067,26 @@
             axes: recon.axes,
             nu: recon.nu,
             nv: recon.nv,
+            delta: recon.delta,
             frames: recon.frames,
             images: recon.images,
             kspace: recon.kspace,
+            coilImages: recon.coilImages,
+            coilKspace: recon.coilKspace,
             fill: recon.fill,
             offGridFraction: recon.offGridFraction,
             warnings: recon.warnings
           },
-          raw
-        }, [recon.images.buffer, recon.kspace.buffer, raw.magnitude.buffer]);
+          // The phantom the job simulated (resolved coils included), for the Phantom view.
+          phantom: job.phantom,
+          layout
+        }, transfer);
+        return;
+      }
+      case "export": {
+        const job = jobFor(request.job);
+        const file = buildExport(job, request.signal, request.format);
+        port.post({ type: "export", job: request.job, id: request.id, ...file }, [file.bytes.buffer]);
         return;
       }
       case "close":
@@ -4508,7 +9099,8 @@
     try {
       handle(request);
     } catch (error) {
-      port.post({ type: "error", job: request?.job ?? -1, message: errorMessage(error) }, []);
+      const ids = request;
+      port.post({ type: "error", job: ids.job ?? -1, id: ids.id ?? -1, message: errorMessage(error) }, []);
     }
   });
 })();
