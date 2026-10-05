@@ -517,6 +517,7 @@ function compileMeasure(type: Hdf5Type, packer: HeapPacker, where: string): Meas
         case 'float':
             return null;
         case 'string':
+            // Even '' gets a (zero-length) heap object: a nil string reads back as a NULL char*.
             return value => packer.place(utf8.encode(asString(value, where)).length);
         case 'vlen': {
             const baseSize = typeInfo(type.base).size;
