@@ -10,6 +10,7 @@ import { analyzeDephasing, foldableAxes } from '../../src/sim/plan/dephasing';
 import { probeSubSpins } from '../../src/sim/plan/probe';
 import { compileProgram } from '../../src/sim/program/compile';
 import { TISSUES } from '../../src/sim/phantom/builtin';
+import { seqText } from './helpers/seqBuilder';
 
 const demo = (file: string) => {
     const path = join(__dirname, '..', 'seqeyes_demo_seq_files', file);
@@ -112,6 +113,20 @@ describe('simulation jobs', () => {
         const chunk = Math.floor(leader.plan.chunks / 2);
         const a = leader.simulateChunk(chunk), b = follower.simulateChunk(chunk);
         expect(Buffer.from(b.buffer).equals(Buffer.from(a.buffer))).toBe(true);
+    });
+
+    it('says that RF shims are not simulated rather than ignoring them silently', () => {
+        // A hard pulse played with a two-channel RF_SHIMS vector, then an FID.
+        let text = seqText({
+            blocks: [{ ticks: 10, rf: 1 }, { ticks: 64, adc: 1 }],
+            rf: [{ amplitude: 2500, magShape: 1, centerUs: 50, use: 'e' }],
+            adc: [{ samples: 64, dwellNs: 10_000 }],
+            shapes: [new Array(100).fill(1)],
+        });
+        text = text.replace(/^1 10 1 0 0 0 0 0$/m, '1 10 1 0 0 0 0 1')
+            .replace('[SHAPES]', ['[EXTENSIONS]', '1 1 1 0', 'extension RF_SHIMS 1', '1 2 1 0 1 1.5707963267948966', '', '[SHAPES]'].join('\n'));
+        const job = new SimulationJob(new TextEncoder().encode(text), 'shim.seq', { phantom: { kind: 'shepp-logan', size: 4 }, subSpins: [1, 1] });
+        expect(job.plan.notes.some(note => note.startsWith('Not simulated: RF shims (static pTx)'))).toBe(true);
     });
 
     it('chooses spins per voxel automatically and reports why', () => {

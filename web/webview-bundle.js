@@ -8068,6 +8068,8 @@ var SeqEyesSimulation = (function () {
   var sliceMode = choice(get('seqeyes.simulation.slices'), SLICE_CHOICES.map(function (c) { return c[0]; }), 'auto');
   var rfAxis = choice(get('seqeyes.simulation.rfAxis'), RF_AXES.map(function (a) { return a[0]; }), 'z');
   var dataTab = choice(get('seqeyes.simulation.data'), DATA_TABS.map(function (t) { return t[0]; }), 'image');
+  /* The progress card can sit minimized in the corner (remembered). */
+  var cardMinimized = get('seqeyes.simulation.cardMinimized') === '1';
   var rawOrder = choice(get('seqeyes.simulation.rawOrder'), ['labels', 'acquisition', 'time'], 'labels');
   var slicePlane = choice(get('seqeyes.simulation.plane'), ['xy', 'xz', 'yz'], 'xy');
   var sliceIndex = null;          // null: the middle of the volume
@@ -8602,13 +8604,20 @@ var SeqEyesSimulation = (function () {
     return { done: r.added + pending, partial: partial };
   }
 
-  /** The phase, overall progress, throughput and one bar per worker. */
+  /** The phase, overall progress, throughput and one bar per worker (or, minimized, phase and percent). */
   function renderRunCard(r) {
     var card = el('simRunCard');
     if (!card) return;
     var active = !!(r && r === run && !r.finished);
     card.hidden = !active;
     if (!active) return;
+    card.classList.toggle('mini', cardMinimized);
+    var toggle = el('simRunMin');
+    if (toggle) {
+      toggle.textContent = cardMinimized ? '▢' : '–';
+      toggle.title = cardMinimized ? 'Restore the progress card' : 'Minimize the progress card to the corner';
+      toggle.setAttribute('aria-pressed', cardMinimized ? 'true' : 'false');
+    }
     var phase, fraction, stats = '';
     if (r.phase === 'planning' || !r.plan) {
       phase = 'Planning · ' + (r.planMessage || '…');
@@ -9419,6 +9428,14 @@ var SeqEyesSimulation = (function () {
     if (order) order.onchange = function () { rawOrder = this.value; set('seqeyes.simulation.rawOrder', rawOrder); showData('raw'); };
     var reveal = el('simReveal');
     if (reveal) reveal.onclick = revealSelected;
+    var card = el('simRunCard'), minimize = el('simRunMin');
+    var setMinimized = function (value) {
+      cardMinimized = value;
+      set('seqeyes.simulation.cardMinimized', value ? '1' : '0');
+      renderRunCard(run);
+    };
+    if (minimize) minimize.onclick = function (event) { event.stopPropagation(); setMinimized(!cardMinimized); };
+    if (card) card.onclick = function () { if (cardMinimized) setMinimized(false); };
 
     var body = el('simBody');
     if (body && typeof ResizeObserver !== 'undefined') new ResizeObserver(function () { if (shown && viewer) viewer.render(); }).observe(body);
@@ -9522,7 +9539,7 @@ var SeqEyesSimulation = (function () {
       acquisitions: result ? result.layout.acquisitions : 0,
       labelView: !!datasets.rawLabels,
       live: run && !run.finished ? { phase: run.phase || 'planning', chunks: run.liveChunks || 0, previews: run.livePreviews || 0,
-        cardVisible: !!(el('simRunCard') && !el('simRunCard').hidden) } : null,
+        cardVisible: !!(el('simRunCard') && !el('simRunCard').hidden), cardMinimized: cardMinimized } : null,
       timings: result ? result.timings : null,
       status: el('simReadout') ? el('simReadout').textContent : ''
     };

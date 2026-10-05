@@ -106,4 +106,4 @@ export interface CompileOptions {
 }
 
 /** Sequence features present but not represented by the program. */
-export type IgnoredFeature = 'trigger' | 'nco' | 'dynamic-ptx-rf';
+export type IgnoredFeature = 'trigger' | 'nco' | 'dynamic-ptx-rf' | 'rf-shims';

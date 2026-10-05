@@ -214,8 +214,16 @@ body.layout-vertical.sg-split-drag{cursor:col-resize}
 #simEmpty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:12px;color:var(--lb);font-size:12px;text-align:center;pointer-events:none}
 #simRunCard{position:absolute;top:8px;left:50%;transform:translateX(-50%);width:min(440px,calc(100% - 16px));z-index:8;background:var(--bg);border:1px solid var(--gr);border-radius:6px;box-shadow:0 2px 12px rgba(0,0,0,.18);padding:7px 10px;font-size:11px;color:var(--fg);pointer-events:none}
 #simRunCard[hidden]{display:none}
-.sim-run-head{display:flex;justify-content:space-between;gap:10px;font-weight:600;margin-bottom:5px;white-space:nowrap;overflow:hidden}
+.sim-run-head{display:flex;justify-content:space-between;align-items:center;gap:10px;font-weight:600;margin-bottom:5px;white-space:nowrap;overflow:hidden}
 .sim-run-head span:first-child{overflow:hidden;text-overflow:ellipsis}
+.sim-run-end{display:flex;align-items:center;gap:6px;flex:none}
+#simRunMin{pointer-events:auto;cursor:pointer;background:none;border:1px solid var(--gr);border-radius:3px;color:var(--fg);font-size:11px;line-height:1;padding:1px 5px}
+#simRunMin:hover{background:var(--gr)}
+/* Minimized: a small pill in the bottom-right corner; click anywhere on it to restore. */
+#simRunCard.mini{top:auto;bottom:8px;left:auto;right:8px;transform:none;width:190px;padding:5px 8px;pointer-events:auto;cursor:pointer;box-shadow:0 1px 6px rgba(0,0,0,.16)}
+#simRunCard.mini .sim-run-head{margin-bottom:3px;font-size:10px}
+#simRunCard.mini .sim-run-bar{height:4px}
+#simRunCard.mini .sim-run-stats,#simRunCard.mini .sim-run-workers{display:none}
 .sim-run-bar{height:8px;border-radius:4px;background:var(--gr);overflow:hidden}
 #simRunFill{height:100%;width:0;background:var(--adc);transition:width .25s}
 .sim-run-stats{margin-top:5px;font:10px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--lb)}

@@ -6142,6 +6142,7 @@
       ctx.rfOperators.set(key, operator);
     }
     if (timing.ptxChannels > 1) ctx.ignoredFeatures.add("dynamic-ptx-rf");
+    if (shim) ctx.ignoredFeatures.add("rf-shims");
     const centerTime = decoded.rf.centerTime;
     const kToCenter = new Float64Array(3);
     addPiecesIntegral(gradient, t0, Math.min(Math.max(centerTime, t0), t1), kToCenter);
@@ -8739,7 +8740,7 @@
       if (this.phantom.maps.t2prime) notes.push("The T2\u2032 map is loaded but not simulated yet (no intravoxel dephasing).");
       if (this.phantom.maps.adc) notes.push("The ADC map is loaded but diffusion is not simulated yet.");
       for (const note of this.phantom.notes) notes.push(note);
-      for (const feature of this.program.ignoredFeatures) notes.push(`Not simulated: ${feature}.`);
+      for (const feature of this.program.ignoredFeatures) notes.push(`Not simulated: ${IGNORED_FEATURE_TEXT[feature]}.`);
       this.plan = {
         blocks: this.program.blockCount,
         duration: this.program.totalDuration,
@@ -9126,6 +9127,12 @@
   function tolerancePercent(settings) {
     return `${+(100 * (settings.tolerance ?? 0.02)).toFixed(1)} %`;
   }
+  var IGNORED_FEATURE_TEXT = {
+    "trigger": "trigger events",
+    "nco": "NCO frequency and phase events",
+    "dynamic-ptx-rf": "dynamic pTx RF (per-channel waveforms)",
+    "rf-shims": "RF shims (static pTx). Phantoms have no per-channel B1+ maps yet, so the shim weights are not applied"
+  };
   function bandCount(bands, t2) {
     const time = Number.isFinite(t2) && t2 > 0 ? t2 : Infinity;
     let b = 0;

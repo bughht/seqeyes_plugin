@@ -320,7 +320,7 @@ export class SimulationJob {
         if (this.phantom.maps.t2prime) notes.push('The T2′ map is loaded but not simulated yet (no intravoxel dephasing).');
         if (this.phantom.maps.adc) notes.push('The ADC map is loaded but diffusion is not simulated yet.');
         for (const note of this.phantom.notes) notes.push(note);
-        for (const feature of this.program.ignoredFeatures) notes.push(`Not simulated: ${feature}.`);
+        for (const feature of this.program.ignoredFeatures) notes.push(`Not simulated: ${IGNORED_FEATURE_TEXT[feature]}.`);
 
         this.plan = {
             blocks: this.program.blockCount,
@@ -770,6 +770,14 @@ export class ChunkAccumulator {
 function tolerancePercent(settings: JobSettings): string {
     return `${+(100 * (settings.tolerance ?? 0.02)).toFixed(1)} %`;
 }
+
+/** How the notes name what a program leaves out. */
+const IGNORED_FEATURE_TEXT: Record<SimProgram['ignoredFeatures'] extends Set<infer F> ? F & string : never, string> = {
+    'trigger': 'trigger events',
+    'nco': 'NCO frequency and phase events',
+    'dynamic-ptx-rf': 'dynamic pTx RF (per-channel waveforms)',
+    'rf-shims': 'RF shims (static pTx). Phantoms have no per-channel B1+ maps yet, so the shim weights are not applied',
+};
 
 /** Spins along x a band plan gives a tissue of this T2. */
 function bandCount(bands: SpinBands, t2: number): number {

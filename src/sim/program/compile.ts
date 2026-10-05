@@ -264,6 +264,8 @@ function buildRfSegment(
         ctx.rfOperators.set(key, operator);
     }
     if (timing.ptxChannels > 1) ctx.ignoredFeatures.add('dynamic-ptx-rf');
+    // Shim weights need per-channel B1+ maps, which phantoms do not carry yet.
+    if (shim) ctx.ignoredFeatures.add('rf-shims');
 
     const centerTime = decoded.rf!.centerTime;
     const kToCenter = new Float64Array(3);

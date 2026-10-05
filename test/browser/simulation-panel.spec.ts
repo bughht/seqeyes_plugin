@@ -42,7 +42,7 @@ interface SimulationState {
   frames: number;
   acquisitions: number;
   labelView: boolean;
-  live: null | { phase: string; chunks: number; previews: number; cardVisible: boolean };
+  live: null | { phase: string; chunks: number; previews: number; cardVisible: boolean; cardMinimized: boolean };
   status: string;
 }
 
@@ -279,6 +279,15 @@ test('plans spins per voxel automatically and can be cancelled', async ({ page }
   await expect(page.locator('#simRunCard')).toBeVisible();
   await expect(page.locator('#simRunPhase')).toContainText('Simulating');
   await expect(page.locator('#simRunStats')).toContainText('chunks');
+  // The card minimizes to the corner and comes back; the choice is remembered.
+  await page.locator('#simRunMin').click();
+  await expect(page.locator('#simRunCard')).toHaveClass(/mini/);
+  await expect(page.locator('#simRunStats')).toBeHidden();
+  await expect(page.locator('#simRunPercent')).toBeVisible();
+  expect((await simulationState(page)).live?.cardMinimized).toBe(true);
+  await page.locator('#simRunCard').click();
+  await expect(page.locator('#simRunCard')).not.toHaveClass(/mini/);
+  await expect(page.locator('#simRunStats')).toBeVisible();
   await expect.poll(async () => (await simulationState(page)).live?.previews ?? 0, { timeout: 60_000 }).toBeGreaterThan(0);
   expect((await simulationState(page)).tab).toBe('image');
   await expect(page.locator('#simData button[data-tab="raw"]')).toBeEnabled();
