@@ -66,32 +66,41 @@ const SHEPP_LOGAN: Ellipse[] = [
     { a: 0.023, b: 0.046, x0: 0.06, y0: -0.605, deg: 0, tissue: TISSUES.lesion },
 ];
 
-/**
- * The 3-D modified Shepp–Logan (Kak & Slaney's ellipsoids as Toft modified
- * them): the 2-D layout's ellipses with a third semi-axis c and centre z0.
- * Rotations stay in-plane, so the 2-D layout is the 3-D one's footprint.
- */
-interface Ellipsoid extends Ellipse {
-    c: number;
-    z0: number;
+/** Ellipsoid: semi-axes (a, b, c) and centre (x0, y0, z0) in [−1, 1]³ units, rotated about z by deg (a's direction from x). */
+interface Ellipsoid {
+    a: number; b: number; c: number;
+    x0: number; y0: number; z0: number;
+    deg: number;
+    tissue: Tissue;
 }
 
+/**
+ * The 3-D Shepp–Logan head phantom of Kak and Roberts (Kak & Slaney,
+ * Principles of Computerized Tomographic Imaging, 1988), as tabulated by
+ * Koay, Sarlls and Özarslan, Magn Reson Med 58:430–436 (2007), and as BART
+ * draws it (github.com/mrirecon/bart, src/simu/shepplogan.c, BSD-3-Clause).
+ * Its structures sit at different heights: the ventricles, the large
+ * ellipsoid above them and the small lesions at z = −0.25 (the classic 2-D
+ * cross-section), a lesion and a CSF spot near the vertex at z = 0.625.
+ * Painted with the 2-D phantom's tissues, in the same order.
+ */
 const SHEPP_LOGAN_3D: Ellipsoid[] = [
-    { ...SHEPP_LOGAN[0], c: 0.81, z0: 0 },
-    { ...SHEPP_LOGAN[1], c: 0.78, z0: 0 },
-    { ...SHEPP_LOGAN[2], c: 0.22, z0: 0 },
-    { ...SHEPP_LOGAN[3], c: 0.28, z0: 0 },
-    { ...SHEPP_LOGAN[4], c: 0.41, z0: -0.15 },
-    { ...SHEPP_LOGAN[5], c: 0.05, z0: 0.25 },
-    { ...SHEPP_LOGAN[6], c: 0.05, z0: 0.25 },
-    { ...SHEPP_LOGAN[7], c: 0.05, z0: 0 },
-    { ...SHEPP_LOGAN[8], c: 0.02, z0: 0 },
-    { ...SHEPP_LOGAN[9], c: 0.02, z0: 0 },
+    { a: 0.69, b: 0.92, c: 0.9, x0: 0, y0: 0, z0: 0, deg: 0, tissue: TISSUES.skin },
+    { a: 0.6624, b: 0.874, c: 0.88, x0: 0, y0: 0, z0: 0, deg: 0, tissue: TISSUES.whiteMatter },
+    { a: 0.41, b: 0.16, c: 0.21, x0: -0.22, y0: 0, z0: -0.25, deg: 108, tissue: TISSUES.csf },
+    { a: 0.31, b: 0.11, c: 0.22, x0: 0.22, y0: 0, z0: -0.25, deg: 72, tissue: TISSUES.csf },
+    { a: 0.21, b: 0.25, c: 0.5, x0: 0, y0: 0.35, z0: -0.25, deg: 0, tissue: TISSUES.greyMatter },
+    { a: 0.046, b: 0.046, c: 0.046, x0: 0, y0: 0.1, z0: -0.25, deg: 0, tissue: TISSUES.greyMatter },
+    { a: 0.046, b: 0.023, c: 0.02, x0: -0.08, y0: -0.65, z0: -0.25, deg: 0, tissue: TISSUES.lesion },
+    { a: 0.046, b: 0.023, c: 0.02, x0: 0.06, y0: -0.65, z0: -0.25, deg: 90, tissue: TISSUES.lesion },
+    { a: 0.056, b: 0.04, c: 0.1, x0: 0.06, y0: -0.105, z0: 0.625, deg: 90, tissue: TISSUES.lesion },
+    { a: 0.056, b: 0.056, c: 0.1, x0: 0, y0: 0.1, z0: 0.625, deg: 0, tissue: TISSUES.csf },
 ];
 
 /**
- * The 3-D tissue Shepp–Logan on an n × n × nz grid spanning the FOV, painted
- * like the 2-D one (the last ellipsoid covering a voxel decides its tissue).
+ * The 3-D tissue Shepp–Logan (SHEPP_LOGAN_3D) on an n × n × nz grid spanning
+ * the FOV, painted like the 2-D one (the last ellipsoid covering a voxel
+ * decides its tissue).
  * Voxel (i, j, k) is centred at ((i − n/2)Δx, (j − n/2)Δy, (k − nz/2)Δz), the
  * sample points of a centred DFT, with j counting up from the bottom (the
  * volume layout sliceVolume reads).

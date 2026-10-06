@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { parseSequenceBytes } from '../../src/pulseq/sequenceReader';
 import { simulateReference } from '../../src/sim/engine/reference';
 import { ChunkAccumulator, SimulationJob } from '../../src/sim/job';
-import { sheppLoganPhantom2D } from '../../src/sim/phantom/builtin';
+import { sheppLoganPhantom2D, sheppLoganVolume, TISSUES } from '../../src/sim/phantom/builtin';
 import {
     mrzeroFieldMaps,
     occupiedVoxels,
@@ -24,6 +24,35 @@ function codedVolume(): PhantomVolume {
     for (let z = 0; z < 3; z++) for (let y = 0; y < 4; y++) for (let x = 0; x < 5; x++) pd[x + 5 * (y + 4 * z)] = 1 + x + 10 * y + 100 * z;
     return { shape, voxel: [1e-3, 2e-3, 3e-3], maps: { pd, t1, t2 }, source: 'coded', notes: [] };
 }
+
+describe('the 3-D Shepp–Logan', () => {
+    it('places its structures at their published heights, so planes differ as through a head', () => {
+        // 64 × 64 × 64 over [−1, 1]³: plane k sits at w = (k − 32)/32.
+        const n = 64;
+        const volume = sheppLoganVolume(n, n, [0.256, 0.256, 0.256]);
+        const at = (u: number, v: number, w: number) => {
+            const i = Math.round(u * n / 2 + n / 2), j = Math.round(v * n / 2 + n / 2), k = Math.round(w * n / 2 + n / 2);
+            return volume.maps.t2[(k * n + j) * n + i];
+        };
+        const planeHas = (w: number, t2: number) => {
+            const k = Math.round(w * n / 2 + n / 2);
+            return volume.maps.t2.subarray(k * n * n, (k + 1) * n * n).some(v => v === Math.fround(t2));
+        };
+        // The ventricles at z = −0.25 (Kak & Roberts; Koay et al. 2007), not at 0 or above.
+        expect(at(-0.25, 0.08, -0.25)).toBe(Math.fround(TISSUES.csf.t2));
+        expect(at(0.25, 0, -0.25)).toBe(Math.fround(TISSUES.csf.t2));
+        expect(planeHas(-0.25, TISSUES.csf.t2)).toBe(true);
+        expect(planeHas(0, TISSUES.csf.t2)).toBe(false);
+        expect(planeHas(0.25, TISSUES.csf.t2)).toBe(false);
+        // The large ellipsoid above them spans z −0.75…0.25; near the vertex, a CSF spot and a lesion.
+        expect(at(0, 0.35, -0.6)).toBe(Math.fround(TISSUES.greyMatter.t2));
+        expect(at(0, 0.35, 0.4)).toBe(Math.fround(TISSUES.whiteMatter.t2));
+        expect(at(0, 0.1, 0.625)).toBe(Math.fround(TISSUES.csf.t2));
+        expect(planeHas(0.625, TISSUES.lesion.t2)).toBe(true);
+        // The head ends at |z| = 0.9.
+        expect(volume.maps.pd.subarray(0, n * n).every(v => v === 0)).toBe(true);
+    });
+});
 
 describe('phantom volumes', () => {
     const volume = codedVolume();

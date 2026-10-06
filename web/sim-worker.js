@@ -8914,16 +8914,16 @@
     { a: 0.023, b: 0.046, x0: 0.06, y0: -0.605, deg: 0, tissue: TISSUES.lesion }
   ];
   var SHEPP_LOGAN_3D = [
-    { ...SHEPP_LOGAN[0], c: 0.81, z0: 0 },
-    { ...SHEPP_LOGAN[1], c: 0.78, z0: 0 },
-    { ...SHEPP_LOGAN[2], c: 0.22, z0: 0 },
-    { ...SHEPP_LOGAN[3], c: 0.28, z0: 0 },
-    { ...SHEPP_LOGAN[4], c: 0.41, z0: -0.15 },
-    { ...SHEPP_LOGAN[5], c: 0.05, z0: 0.25 },
-    { ...SHEPP_LOGAN[6], c: 0.05, z0: 0.25 },
-    { ...SHEPP_LOGAN[7], c: 0.05, z0: 0 },
-    { ...SHEPP_LOGAN[8], c: 0.02, z0: 0 },
-    { ...SHEPP_LOGAN[9], c: 0.02, z0: 0 }
+    { a: 0.69, b: 0.92, c: 0.9, x0: 0, y0: 0, z0: 0, deg: 0, tissue: TISSUES.skin },
+    { a: 0.6624, b: 0.874, c: 0.88, x0: 0, y0: 0, z0: 0, deg: 0, tissue: TISSUES.whiteMatter },
+    { a: 0.41, b: 0.16, c: 0.21, x0: -0.22, y0: 0, z0: -0.25, deg: 108, tissue: TISSUES.csf },
+    { a: 0.31, b: 0.11, c: 0.22, x0: 0.22, y0: 0, z0: -0.25, deg: 72, tissue: TISSUES.csf },
+    { a: 0.21, b: 0.25, c: 0.5, x0: 0, y0: 0.35, z0: -0.25, deg: 0, tissue: TISSUES.greyMatter },
+    { a: 0.046, b: 0.046, c: 0.046, x0: 0, y0: 0.1, z0: -0.25, deg: 0, tissue: TISSUES.greyMatter },
+    { a: 0.046, b: 0.023, c: 0.02, x0: -0.08, y0: -0.65, z0: -0.25, deg: 0, tissue: TISSUES.lesion },
+    { a: 0.046, b: 0.023, c: 0.02, x0: 0.06, y0: -0.65, z0: -0.25, deg: 90, tissue: TISSUES.lesion },
+    { a: 0.056, b: 0.04, c: 0.1, x0: 0.06, y0: -0.105, z0: 0.625, deg: 90, tissue: TISSUES.lesion },
+    { a: 0.056, b: 0.056, c: 0.1, x0: 0, y0: 0.1, z0: 0.625, deg: 0, tissue: TISSUES.csf }
   ];
   function sheppLoganVolume(n, nz, fov) {
     if (!(n >= 2) || !Number.isInteger(n) || !(nz >= 1) || !Number.isInteger(nz)) {

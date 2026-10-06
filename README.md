@@ -216,7 +216,11 @@ simulation of the open sequence on a phantom, entirely in your browser
 **Phantoms**
 
 - the built-in tissue Shepp–Logan (PD, T1, T2, T2′ and ADC at 3 T) in the
-  sequence's FOV, in 2-D or as a 3-D volume (the 3-D ellipsoids). The volume
+  sequence's FOV, in 2-D or as a 3-D volume. The 3-D one is Kak & Roberts'
+  head phantom as Koay et al. (MRM 2007) tabulate it and BART draws it. Its
+  ventricles, lesions and the large ellipsoid above them sit at z = −0.25
+  (the classic 2-D cross-section), with a CSF spot and a lesion near the
+  vertex. The volume
   spans the sequence's FOV along z for a 3-D sequence and is a cube
   otherwise;
 - MRzero's example phantoms: the cropped 2-D brain and the BrainWeb-derived

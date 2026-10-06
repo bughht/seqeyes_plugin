@@ -290,15 +290,15 @@ test('images the 3-D Shepp–Logan with a 3-D sequence, plane by plane', async (
   await page.locator('#simData button[data-tab="image"]').click();
   await expect.poll(async () => (await simulationState(page)).view?.dims.map(d => d.name).slice(0, 3)).toEqual(['x', 'y', 'z']);
   await expectCanvasVaried(page.locator('#simCanvas'));
-  // One window for every plane: the bottom plane, below the head, stays dark
-  // (its own faint ringing is not stretched to white), the middle one fills it.
+  // One window for every plane: the bottom plane (the head's lower cap) shows
+  // darker than the volume's brightest, not stretched to its own range.
   const plane = page.locator('#simDims .nd-dim[data-dim="2"] input[type=range]');
   await plane.fill('0');
   const bottom = await viewSummary(page);
   await plane.fill('4');
   const middle = await viewSummary(page);
   expect(bottom.windowMax).toBeCloseTo(middle.windowMax, 6);
-  expect(bottom.max).toBeLessThan(0.25 * bottom.windowMax);
+  expect(bottom.max).toBeLessThan(0.8 * bottom.windowMax);
   expect(middle.max).toBeGreaterThan(0.5 * middle.windowMax);
 });
 
