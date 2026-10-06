@@ -32,6 +32,7 @@ import { phaseGraphPhantom, type ClassBinning, type PhaseGraphPhantom } from './
 import { sheppLoganPhantom2D } from './phantom/builtin';
 import {
     assignPlanes,
+    coarsenPhantom,
     foldedPhantomSpins,
     occupiedVoxels,
     phantomSpins,
@@ -97,7 +98,8 @@ export interface JobSettings {
     /**
      * Signal error 'auto' accepts from the spin discretisation, relative L2 per
      * tissue (default 0.02). Larger is faster; long-T2 tissue such as CSF needs
-     * the most spins.
+     * the most spins. From INSTANT_TOLERANCE on, the phantom is also
+     * simulated at half its resolution (coarsenPhantom).
      */
     tolerance?: number;
     /**
@@ -249,6 +251,12 @@ export const MAX_JOB_SIMULATED = 128_000_000;
 const SLICE_WORK_BUDGET = 4e9;
 /** Receive coils beyond which a job is refused. */
 export const MAX_JOB_COILS = 32;
+/**
+ * The accuracy target from which a job simulates its phantom at half
+ * resolution (Instant): past Sketch, the engines' own settings buy no more
+ * speed (see phaseGraphPreset), the phantom's voxel count does.
+ */
+export const INSTANT_TOLERANCE = 0.5;
 /** Chunks hold MIN…MAX_CHUNK_SPINS spins, and about MAX_CHUNKS of them when that allows. */
 const MIN_CHUNK_SPINS = 16_384;
 const MAX_CHUNK_SPINS = 262_144;
@@ -397,6 +405,10 @@ export class SimulationJob {
         }
         for (const note of this.phantom.notes) notes.push(note);
         for (const feature of this.program.ignoredFeatures) notes.push(`Not simulated: ${IGNORED_FEATURE_TEXT[feature]}.`);
+        if ((settings.tolerance ?? 0.02) >= 0.25 && !(this.analysis.rfGradientAxes & 3)) {
+            notes.push('For speed, try the phase-graph engine (Engine: phase graph): at this accuracy it ran the demo spoiled GRE, '
+                + 'TSE and balanced SSFP 15–30× faster than isochromats.');
+        }
 
         this.plan = {
             engine: 'isochromat',
@@ -635,6 +647,15 @@ export class SimulationJob {
         if (!(coils >= 1 && coils <= MAX_JOB_COILS)) throw new Error(`Coils must be between 1 and ${MAX_JOB_COILS}, got ${settings.coils}.`);
         for (const plane of phantom.planes ?? []) {
             if (plane.maps.pd.length !== phantom.nx * phantom.ny) throw new Error('A phantom plane does not match the phantom matrix size.');
+        }
+        if ((settings.tolerance ?? 0.02) >= INSTANT_TOLERANCE) {
+            const coarse = coarsenPhantom(phantom);
+            if (coarse) {
+                const size = (p: Phantom2D) => `${p.nx}×${p.ny}${p.planes ? ` × ${p.planes.length + 1} planes` : ''}`;
+                coarse.notes.push(`Instant: the phantom is simulated at half resolution, ${size(coarse)} from ${size(phantom)}; `
+                    + 'choose Sketch or finer for its full detail.');
+                phantom = coarse;
+            }
         }
         if (!phantom.coils && coils > 1) phantom = { ...phantom, coils: syntheticCoils(phantom.nx, phantom.ny, phantom.voxel, coils) };
         return phantom;
@@ -1058,12 +1079,18 @@ export function encodingExtent(trajectory: AdcTrajectory, axis: number): number 
  * balanced SSFP then goes 40 % wrong. Past 1e-2 pruning drops the transverse
  * states of low flip angles (a 10° GRE loses 93 % at 3e-2), and below half a
  * sub-slice per resolution cell slice profiles break (33–85 % at 0.25).
+ * Instant keeps Sketch's pruning and sampling (pruning at 2e-2 gained at
+ * most 1.2×; 0.35 sub-slices per cell up to 1.9×, 83 % off on the balanced
+ * SSFP) and takes its speed from the phantom at half resolution instead
+ * (INSTANT_TOLERANCE).
  */
 export function phaseGraphPreset(tolerance: number): PhaseGraphTuning {
     if (tolerance <= 0.02) return { prune: 1e-5, maxStates: 2000, density: 2, rfStep: 5, fine: { t: 0.005, b1: 0.0025 } };
     if (tolerance <= 0.05) return { prune: 3e-4, maxStates: 2000, density: 1.5, rfStep: 10, fine: { t: 0.01, b1: 0.005 } };
     if (tolerance <= 0.1) return { prune: 1e-3, maxStates: 2000, density: 1, rfStep: 20, fine: { t: 0.02, b1: 0.01 } };
-    return { prune: 1e-2, maxStates: 2000, density: 0.5, rfStep: 40, fine: { t: 0.04, b1: 0.02 } };
+    if (tolerance < INSTANT_TOLERANCE) return { prune: 1e-2, maxStates: 2000, density: 0.5, rfStep: 40, fine: { t: 0.04, b1: 0.02 } };
+    // Instant: Sketch with coarser bins for continuous maps' classes; its speed comes from the halved phantom.
+    return { prune: 1e-2, maxStates: 2000, density: 0.5, rfStep: 80, fine: { t: 0.08, b1: 0.04 } };
 }
 
 /** Consecutive units into chunks of about `target` spins (never splitting a unit). */

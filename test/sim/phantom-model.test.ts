@@ -4,14 +4,16 @@ import { join } from 'node:path';
 
 import { parseSequenceBytes } from '../../src/pulseq/sequenceReader';
 import { simulateReference } from '../../src/sim/engine/reference';
-import { ChunkAccumulator, SimulationJob } from '../../src/sim/job';
+import { ChunkAccumulator, INSTANT_TOLERANCE, SimulationJob } from '../../src/sim/job';
 import { sheppLoganPhantom2D, sheppLoganVolume, TISSUES } from '../../src/sim/phantom/builtin';
 import {
+    coarsenPhantom,
     mrzeroFieldMaps,
     occupiedVoxels,
     phantomSpins,
     sliceVolume,
     syntheticCoils,
+    type Phantom2D,
     type PhantomVolume,
 } from '../../src/sim/phantom/model';
 import { compileProgram } from '../../src/sim/program/compile';
@@ -51,6 +53,60 @@ describe('the 3-D Shepp–Logan', () => {
         expect(planeHas(0.625, TISSUES.lesion.t2)).toBe(true);
         // The head ends at |z| = 0.9.
         expect(volume.maps.pd.subarray(0, n * n).every(v => v === 0)).toBe(true);
+    });
+});
+
+describe('the half-resolution phantom of the Instant accuracy', () => {
+    /** PD sum and PD-weighted centroid over a phantom's planes, in the simulation's coordinates. */
+    function moments(p: Phantom2D) {
+        let sum = 0, x = 0, y = 0, z = 0;
+        for (const plane of [{ offset: 0, maps: p.maps }, ...(p.planes ?? [])]) {
+            for (let row = 0; row < p.ny; row++) {
+                for (let col = 0; col < p.nx; col++) {
+                    const pd = plane.maps.pd[row * p.nx + col];
+                    sum += pd;
+                    x += pd * (col - p.nx / 2) * p.voxel[0];
+                    y += pd * (p.ny / 2 - 1 - row) * p.voxel[1];
+                    z += pd * plane.offset * p.voxel[2];
+                }
+            }
+        }
+        return { sum, x: x / sum, y: y / sum, z: z / sum };
+    }
+
+    it('keeps the PD sum and its centroid, and only real tissues', () => {
+        // An off-centre 3-D Shepp–Logan, 64³: every axis halves.
+        const volume = sheppLoganVolume(64, 64, [0.256, 0.256, 0.256]);
+        const fine = sliceVolume(volume, { index: 37, neighbours: [-37, 26] });
+        const coarse = coarsenPhantom(fine)!;
+        expect([coarse.nx, coarse.ny, 1 + coarse.planes!.length]).toEqual([32, 32, 33]);
+        expect(coarse.voxel.map(v => v / 0.004)).toEqual([2, 2, 2]);
+        const a = moments(fine), b = moments(coarse);
+        expect(b.sum).toBeCloseTo(a.sum, 1);
+        // No shift: the centroid stays within a hundredth of a fine voxel.
+        for (const axis of ['x', 'y', 'z'] as const) expect(Math.abs(b[axis] - a[axis])).toBeLessThan(0.04e-3);
+        const tissues = new Set(Object.values(TISSUES).map(t => Math.fround(t.t2)));
+        for (const plane of [coarse.maps, ...coarse.planes!.map(p => p.maps)]) {
+            plane.t2.forEach((t2, i) => { if (plane.pd[i] > 0) expect(tissues.has(t2)).toBe(true); });
+        }
+    });
+
+    it('halves only axes with an even count of at least 64, and leaves small phantoms alone', () => {
+        expect(coarsenPhantom(sheppLoganPhantom2D(32, 0.256, 0.256))).toBeNull();
+        const wide = sheppLoganPhantom2D(128, 0.256, 0.256);
+        const odd = { ...wide, nx: 127, ny: 128, maps: { pd: wide.maps.pd.subarray(0, 127 * 128), t1: wide.maps.t1.subarray(0, 127 * 128), t2: wide.maps.t2.subarray(0, 127 * 128) } };
+        const coarse = coarsenPhantom(odd)!;
+        expect([coarse.nx, coarse.ny]).toEqual([127, 64]);
+        expect(coarse.voxel[0]).toBe(odd.voxel[0]);
+    });
+
+    it('is what a job at the Instant accuracy simulates', () => {
+        const bytes = new Uint8Array(readFileSync(join(__dirname, '../seqeyes_demo_seq_files/writeEpiRS.seq')));
+        const job = new SimulationJob(bytes, 'epi.seq', { phantom: { kind: 'shepp-logan', size: 128 }, engine: 'phase-graph', tolerance: INSTANT_TOLERANCE });
+        expect([job.plan.phantom.nx, job.plan.phantom.ny]).toEqual([64, 64]);
+        expect(job.plan.notes.some(note => note.startsWith('Instant: the phantom is simulated at half resolution, 64×64 from 128×128'))).toBe(true);
+        const sketch = new SimulationJob(bytes, 'epi.seq', { phantom: { kind: 'shepp-logan', size: 128 }, engine: 'phase-graph', tolerance: 0.25 });
+        expect(sketch.plan.phantom.nx).toBe(128);
     });
 });
 

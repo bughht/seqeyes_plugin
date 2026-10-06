@@ -269,6 +269,23 @@ test('simulates with the phase-graph engine when chosen', async ({ page }) => {
   await expect(page.locator('#simSpins')).toBeVisible();
 });
 
+test('simulates the phantom at half resolution at the Instant accuracy', async ({ page }) => {
+  await loadViewer(page, gre);
+  await openSimulation(page);
+  await expect.poll(async () => (await simulationState(page)).phantom.status).toBe('ready');
+  await page.locator('#simEngine').selectOption('phase-graph');
+  await page.locator('#simAccuracy').selectOption('0.5');
+  await expect(page.locator('#simAccuracy option:checked')).toHaveText('Instant (50 %)');
+  await page.locator('#simRun').click();
+  await expect.poll(async () => (await simulationState(page)).done, { timeout: 60_000 }).toBe(true);
+  const state = await simulationState(page);
+  // The chosen phantom stays as it is; the run simulates it at half resolution and says so.
+  expect(state.phantom.nx).toBe(128);
+  expect(state.plan?.phaseGraph?.sources).toBeLessThan(0.3 * 128 * 128);
+  expect(state.status).toContain('Instant: the phantom is simulated at half resolution, 64×64 from 128×128');
+  await expectCanvasVaried(page.locator('#simCanvas'));
+});
+
 test('images the 3-D Shepp–Logan with a 3-D sequence, plane by plane', async ({ page }, testInfo) => {
   // 16 × 16 phase encodes in-plane, 8 partitions along z, a non-selective pulse.
   const sequence = testInfo.outputPath('warp3d.seq');

@@ -8481,6 +8481,93 @@
     }
     return { count, re, im };
   }
+  function coarsenPhantom(phantom, min = 64) {
+    const { nx, ny } = phantom;
+    const planes = phantom.planes ?? [];
+    const offsets = [0, ...planes.map((p) => p.offset)];
+    const lo = Math.min(...offsets), hi = Math.max(...offsets);
+    const halve = [nx >= min && nx % 2 === 0, ny >= min && ny % 2 === 0, hi - lo + 1 >= min];
+    if (!halve.some(Boolean)) return null;
+    const mx = halve[0] ? nx / 2 : nx, my = halve[1] ? ny / 2 : ny;
+    const taps = (halved, centre) => halved ? [[centre - 1, 0.5], [centre, 1], [centre + 1, 0.5]] : [[centre, 1]];
+    const fineMaps = new Map([[0, phantom.maps], ...planes.map((p) => [p.offset, p.maps])]);
+    const fineCells = nx * ny, cells = mx * my;
+    const coarsePlane = (offset) => {
+      const sources = taps(halve[2], halve[2] ? 2 * offset : offset).filter(([o]) => fineMaps.has(o)).map(([o, w]) => [fineMaps.get(o), w]);
+      const has = (name) => sources.some(([maps2]) => maps2[name]);
+      const maps = { pd: new Float32Array(cells), t1: new Float32Array(cells), t2: new Float32Array(cells) };
+      for (const name of ["t2prime", "adc", "b0", "b1"]) if (has(name)) maps[name] = new Float32Array(cells);
+      for (let row = 0; row < my; row++) {
+        const rows = taps(halve[1], halve[1] ? 2 * row + 1 : row).filter(([r]) => r >= 0 && r < ny);
+        for (let col = 0; col < mx; col++) {
+          const cols = taps(halve[0], halve[0] ? 2 * col : col).filter(([c]) => c >= 0 && c < nx);
+          let pd = 0, best = 0, bestMaps = null, i2 = 0, b0 = 0, b1 = 0;
+          for (const [fine, wz] of sources) {
+            for (const [r, wy] of rows) {
+              for (const [c, wx] of cols) {
+                const v = r * nx + c, part = wz * wy * wx * fine.pd[v];
+                if (!(part > 0)) continue;
+                pd += part;
+                b0 += part * (fine.b0 ? fine.b0[v] : 0);
+                b1 += part * (fine.b1 ? fine.b1[v] : 1);
+                if (part > best) {
+                  best = part;
+                  bestMaps = fine;
+                  i2 = v;
+                }
+              }
+            }
+          }
+          if (!bestMaps) continue;
+          const o = row * mx + col;
+          maps.pd[o] = pd;
+          maps.t1[o] = bestMaps.t1[i2];
+          maps.t2[o] = bestMaps.t2[i2];
+          if (maps.t2prime) maps.t2prime[o] = bestMaps.t2prime ? bestMaps.t2prime[i2] : Infinity;
+          if (maps.adc) maps.adc[o] = bestMaps.adc ? bestMaps.adc[i2] : 0;
+          if (maps.b0) maps.b0[o] = b0 / pd;
+          if (maps.b1) maps.b1[o] = b1 / pd;
+        }
+      }
+      return maps;
+    };
+    let coils;
+    if (phantom.coils) {
+      const { count } = phantom.coils;
+      const re = new Float32Array(count * cells), im = new Float32Array(count * cells);
+      for (let row = 0; row < my; row++) {
+        const rows = taps(halve[1], halve[1] ? 2 * row + 1 : row).filter(([r]) => r >= 0 && r < ny);
+        for (let col = 0; col < mx; col++) {
+          const cols = taps(halve[0], halve[0] ? 2 * col : col).filter(([c]) => c >= 0 && c < nx);
+          for (let k = 0; k < count; k++) {
+            let sr = 0, si = 0, sw = 0;
+            for (const [r, wy] of rows) {
+              for (const [c, wx] of cols) {
+                sr += wy * wx * phantom.coils.re[k * fineCells + r * nx + c];
+                si += wy * wx * phantom.coils.im[k * fineCells + r * nx + c];
+                sw += wy * wx;
+              }
+            }
+            re[k * cells + row * mx + col] = sr / sw;
+            im[k * cells + row * mx + col] = si / sw;
+          }
+        }
+      }
+      coils = { count, re, im };
+    }
+    const coarseOffsets = halve[2] ? Array.from({ length: Math.floor((hi + 1) / 2) - Math.ceil((lo - 1) / 2) + 1 }, (_, j) => Math.ceil((lo - 1) / 2) + j) : offsets.slice().sort((a, b) => a - b);
+    const coarsePlanes = coarseOffsets.filter((o) => o !== 0).map((offset) => ({ offset, maps: coarsePlane(offset) }));
+    return {
+      nx: mx,
+      ny: my,
+      voxel: [phantom.voxel[0] * (halve[0] ? 2 : 1), phantom.voxel[1] * (halve[1] ? 2 : 1), phantom.voxel[2] * (halve[2] ? 2 : 1)],
+      maps: coarsePlane(0),
+      coils,
+      planes: coarsePlanes.length ? coarsePlanes : void 0,
+      source: phantom.source,
+      notes: phantom.notes.slice()
+    };
+  }
   function occupiedVoxels(phantom) {
     const cells = phantom.nx * phantom.ny;
     const any = new Uint8Array(cells);
@@ -10098,6 +10185,7 @@
   var MAX_JOB_SIMULATED = 128e6;
   var SLICE_WORK_BUDGET = 4e9;
   var MAX_JOB_COILS = 32;
+  var INSTANT_TOLERANCE = 0.5;
   var MIN_CHUNK_SPINS = 16384;
   var MAX_CHUNK_SPINS = 262144;
   var MAX_CHUNKS = 64;
@@ -10203,6 +10291,9 @@
       }
       for (const note of this.phantom.notes) notes.push(note);
       for (const feature of this.program.ignoredFeatures) notes.push(`Not simulated: ${IGNORED_FEATURE_TEXT[feature]}.`);
+      if ((settings.tolerance ?? 0.02) >= 0.25 && !(this.analysis.rfGradientAxes & 3)) {
+        notes.push("For speed, try the phase-graph engine (Engine: phase graph): at this accuracy it ran the demo spoiled GRE, TSE and balanced SSFP 15\u201330\xD7 faster than isochromats.");
+      }
       this.plan = {
         engine: "isochromat",
         phaseGraph: null,
@@ -10442,6 +10533,14 @@
       if (!(coils >= 1 && coils <= MAX_JOB_COILS)) throw new Error(`Coils must be between 1 and ${MAX_JOB_COILS}, got ${settings.coils}.`);
       for (const plane of phantom.planes ?? []) {
         if (plane.maps.pd.length !== phantom.nx * phantom.ny) throw new Error("A phantom plane does not match the phantom matrix size.");
+      }
+      if ((settings.tolerance ?? 0.02) >= INSTANT_TOLERANCE) {
+        const coarse = coarsenPhantom(phantom);
+        if (coarse) {
+          const size = (p) => `${p.nx}\xD7${p.ny}${p.planes ? ` \xD7 ${p.planes.length + 1} planes` : ""}`;
+          coarse.notes.push(`Instant: the phantom is simulated at half resolution, ${size(coarse)} from ${size(phantom)}; choose Sketch or finer for its full detail.`);
+          phantom = coarse;
+        }
       }
       if (!phantom.coils && coils > 1) phantom = { ...phantom, coils: syntheticCoils(phantom.nx, phantom.ny, phantom.voxel, coils) };
       return phantom;
@@ -10787,7 +10886,8 @@
     if (tolerance <= 0.02) return { prune: 1e-5, maxStates: 2e3, density: 2, rfStep: 5, fine: { t: 5e-3, b1: 25e-4 } };
     if (tolerance <= 0.05) return { prune: 3e-4, maxStates: 2e3, density: 1.5, rfStep: 10, fine: { t: 0.01, b1: 5e-3 } };
     if (tolerance <= 0.1) return { prune: 1e-3, maxStates: 2e3, density: 1, rfStep: 20, fine: { t: 0.02, b1: 0.01 } };
-    return { prune: 0.01, maxStates: 2e3, density: 0.5, rfStep: 40, fine: { t: 0.04, b1: 0.02 } };
+    if (tolerance < INSTANT_TOLERANCE) return { prune: 0.01, maxStates: 2e3, density: 0.5, rfStep: 40, fine: { t: 0.04, b1: 0.02 } };
+    return { prune: 0.01, maxStates: 2e3, density: 0.5, rfStep: 80, fine: { t: 0.08, b1: 0.04 } };
   }
   function splitUnits(units, spinsOf, target) {
     const chunks = [];

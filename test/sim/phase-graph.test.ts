@@ -7,7 +7,7 @@ import { parseSequenceBytes } from '../../src/pulseq/sequenceReader';
 import { simulatePhaseGraph, type PhaseGraphModel } from '../../src/sim/engine/phaseGraph';
 import { simulateReference } from '../../src/sim/engine/reference';
 import { spinSetFrom, type SpinSet } from '../../src/sim/engine/spins';
-import { ChunkAccumulator, SimulationJob, type JobSettings } from '../../src/sim/job';
+import { ChunkAccumulator, INSTANT_TOLERANCE, SimulationJob, type JobSettings } from '../../src/sim/job';
 import { sheppLoganPhantom2D, sheppLoganVolume, TISSUES } from '../../src/sim/phantom/builtin';
 import { sliceVolume, type Phantom2D } from '../../src/sim/phantom/model';
 import { phaseGraphPhantom } from '../../src/sim/phantom/phaseGraphModel';
@@ -447,6 +447,18 @@ describe('phase-graph engine', () => {
         };
         const reference3d = run3d(0.02);
         for (const tolerance of [0.05, 0.1, 0.25]) expect(relativeDifference(run3d(tolerance), reference3d)).toBeLessThan(tolerance);
+    });
+
+    it('simulates the phantom at half resolution at Instant, within its target', () => {
+        // Past Sketch the engine settings buy no more speed (pruning past 1e-2
+        // and fewer sub-slices break, see phaseGraphPreset); fewer voxels do.
+        for (const file of ['writeEpiRS.seq', 'writeHASTE.seq']) {
+            const settings = (tolerance: number): JobSettings => ({ phantom: { kind: 'shepp-logan', size: 64 }, subSpins: 'auto', engine: 'phase-graph', tolerance });
+            const reference = runJob(file, settings(0.02)).signal;
+            const instant = runJob(file, settings(INSTANT_TOLERANCE));
+            expect([instant.job.plan.phantom.nx, instant.job.plan.phantom.ny]).toEqual([32, 32]);
+            expect(relativeDifference(instant.signal, reference)).toBeLessThan(INSTANT_TOLERANCE);
+        }
     });
 
     it('refuses pulses played with in-plane gradients, pointing to the isochromat engine', () => {

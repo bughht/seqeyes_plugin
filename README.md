@@ -303,14 +303,14 @@ reconstructing), overall progress with an ETA and throughput, and one bar per
 worker. Workers simulate strips of phantom columns through the whole
 sequence, so the raw data builds up as strips finish and the image fills in
 strip by strip; the result replaces the live preview when the run ends.
-**Accuracy** (Accurate 2 %, Fast 5 %, Draft 10 %, Sketch 25 %) sets the
-signal error a run may trade for speed.
+**Accuracy** (Accurate 2 %, Fast 5 %, Draft 10 %, Sketch 25 %, Instant
+50 %) sets the signal error a run may trade for speed.
 
 - **Isochromats** probe the spins per voxel and the sub-slices needed to meet
   it. Long-T2 tissue such as CSF needs the most spins.
-- **Phase graph**: each level is a pruning threshold and a sub-slice
-  sampling, measured against Accurate on the spoiled GRE, TSE, HASTE, EPI,
-  diffusion EPI, balanced SSFP and a spoiled 3-D GRE.
+- **Phase graph**: Fast to Sketch are each a pruning threshold and a
+  sub-slice sampling, measured against Accurate on the spoiled GRE, TSE,
+  HASTE, EPI, diffusion EPI, balanced SSFP and a spoiled 3-D GRE.
 
 | Phase graph | Pruning | Sub-slices | Worst error | Speed-up |
 |---|---|---|---|---|
@@ -318,9 +318,26 @@ signal error a run may trade for speed.
 | Draft | 1e-3 | 1 | 6 % | 1.4–3.9× |
 | Sketch | 1e-2 | 0.5 | 13 % | 2.1–7.1× |
 
-Sketch is as far as the measurements allow. Pruning above 1e-2 drops the
+Sketch is as far as the engines' settings go. Pruning above 1e-2 drops the
 small transverse states of low flip angles: a 10° GRE goes 93 % wrong at
 3e-2. Fewer sub-slices break slice profiles (33–85 % wrong at 0.25 per cell).
+
+**Instant** therefore cuts the phantom instead: it simulates it at half
+resolution along each axis with at least 64 voxels or planes, so a 128²
+phantom runs as 64² and a 3-D one with an eighth of its voxels. Each coarse
+voxel sums the PD around it and keeps its centroid, so nothing shifts, and
+takes the tissue of the voxel weighing most, so tissues are never mixed. The
+image keeps the sequence's matrix; the run's notes say what was simulated.
+
+- **Phase graph**: on the 2-D demos (128² Shepp–Logan), 1.3–2.8× faster
+  than Sketch, where fixed costs dominate, and at most 17 % off Accurate on
+  the full phantom. In 3-D (64³ Shepp–Logan), 6.1× on a spoiled 3-D GRE and
+  8.4× on a 3-D diffusion bSSFP, at most 32 % off. In the browser that
+  bSSFP went from 110 s to 25 s.
+- **Isochromats** gain less, 0.7–5.6×, because their spins per voxel follow
+  the spoiling rather than the voxel count. The phase-graph engine is the
+  faster route there: 15–30× on the spoiled GRE, TSE and balanced SSFP demos
+  at Sketch. The run's notes suggest it.
 
 **Export**: ISMRMRD raw data (`.h5`, readable by ismrmrd-python, h5py, MATLAB
 and Gadgetron), the ISMRMRD stream format, a NumPy `.npz` with data,

@@ -286,7 +286,108 @@ export function syntheticCoils(nx: number, ny: number, voxel: readonly [number, 
     return { count, re, im };
 }
 
-/** Row-major indices of the voxels with PD > 0. */
+/**
+ * The phantom at half its resolution along each axis with an even count of
+ * at least `min` voxels (or planes, for a 3-D phantom's neighbours): what the
+ * Instant accuracy simulates. A coarse voxel is centred on a fine one, so
+ * the grid keeps its convention (x = (col − nx/2)·Δx, the plane at offset
+ * 0) and nothing shifts, and gathers it with half of each neighbour
+ * (weights ½, 1, ½ per axis): PD adds up (a voxel's PD is its share of the
+ * signal) and keeps its centroid. T1, T2, T2′ and ADC come from the voxel
+ * weighing most, never mixed into a tissue that does not exist; B0 and B1
+ * are PD-weighted means, coil sensitivities plain means. Null when no axis
+ * qualifies.
+ */
+export function coarsenPhantom(phantom: Phantom2D, min = 64): Phantom2D | null {
+    const { nx, ny } = phantom;
+    const planes = phantom.planes ?? [];
+    const offsets = [0, ...planes.map(p => p.offset)];
+    const lo = Math.min(...offsets), hi = Math.max(...offsets);
+    const halve = [nx >= min && nx % 2 === 0, ny >= min && ny % 2 === 0, hi - lo + 1 >= min];
+    if (!halve.some(Boolean)) return null;
+    const mx = halve[0] ? nx / 2 : nx, my = halve[1] ? ny / 2 : ny;
+    // Fine indices and weights gathered into coarse index c along an axis: column c ↔ 2c,
+    // row r ↔ 2r + 1 (rows count down from y = (ny/2 − 1)·Δy), plane offset o ↔ 2o.
+    const taps = (halved: boolean, centre: number): [number, number][] =>
+        halved ? [[centre - 1, 0.5], [centre, 1], [centre + 1, 0.5]] : [[centre, 1]];
+    const fineMaps = new Map<number, PhantomMaps>([[0, phantom.maps], ...planes.map(p => [p.offset, p.maps] as [number, PhantomMaps])]);
+    const fineCells = nx * ny, cells = mx * my;
+    const coarsePlane = (offset: number): PhantomMaps => {
+        const sources = taps(halve[2], halve[2] ? 2 * offset : offset)
+            .filter(([o]) => fineMaps.has(o)).map(([o, w]) => [fineMaps.get(o)!, w] as [PhantomMaps, number]);
+        const has = (name: 't2prime' | 'adc' | 'b0' | 'b1') => sources.some(([maps]) => maps[name]);
+        const maps: PhantomMaps = { pd: new Float32Array(cells), t1: new Float32Array(cells), t2: new Float32Array(cells) };
+        for (const name of ['t2prime', 'adc', 'b0', 'b1'] as const) if (has(name)) maps[name] = new Float32Array(cells);
+        for (let row = 0; row < my; row++) {
+            const rows = taps(halve[1], halve[1] ? 2 * row + 1 : row).filter(([r]) => r >= 0 && r < ny);
+            for (let col = 0; col < mx; col++) {
+                const cols = taps(halve[0], halve[0] ? 2 * col : col).filter(([c]) => c >= 0 && c < nx);
+                let pd = 0, best = 0, bestMaps: PhantomMaps | null = null, i = 0, b0 = 0, b1 = 0;
+                for (const [fine, wz] of sources) {
+                    for (const [r, wy] of rows) {
+                        for (const [c, wx] of cols) {
+                            const v = r * nx + c, part = wz * wy * wx * fine.pd[v];
+                            if (!(part > 0)) continue;
+                            pd += part;
+                            b0 += part * (fine.b0 ? fine.b0[v] : 0);
+                            b1 += part * (fine.b1 ? fine.b1[v] : 1);
+                            if (part > best) { best = part; bestMaps = fine; i = v; }
+                        }
+                    }
+                }
+                if (!bestMaps) continue;
+                const o = row * mx + col;
+                maps.pd[o] = pd;
+                maps.t1[o] = bestMaps.t1[i];
+                maps.t2[o] = bestMaps.t2[i];
+                if (maps.t2prime) maps.t2prime[o] = bestMaps.t2prime ? bestMaps.t2prime[i] : Infinity;
+                if (maps.adc) maps.adc[o] = bestMaps.adc ? bestMaps.adc[i] : 0;
+                if (maps.b0) maps.b0[o] = b0 / pd;
+                if (maps.b1) maps.b1[o] = b1 / pd;
+            }
+        }
+        return maps;
+    };
+    let coils: CoilMaps | undefined;
+    if (phantom.coils) {
+        const { count } = phantom.coils;
+        const re = new Float32Array(count * cells), im = new Float32Array(count * cells);
+        for (let row = 0; row < my; row++) {
+            const rows = taps(halve[1], halve[1] ? 2 * row + 1 : row).filter(([r]) => r >= 0 && r < ny);
+            for (let col = 0; col < mx; col++) {
+                const cols = taps(halve[0], halve[0] ? 2 * col : col).filter(([c]) => c >= 0 && c < nx);
+                for (let k = 0; k < count; k++) {
+                    let sr = 0, si = 0, sw = 0;
+                    for (const [r, wy] of rows) {
+                        for (const [c, wx] of cols) {
+                            sr += wy * wx * phantom.coils.re[k * fineCells + r * nx + c];
+                            si += wy * wx * phantom.coils.im[k * fineCells + r * nx + c];
+                            sw += wy * wx;
+                        }
+                    }
+                    re[k * cells + row * mx + col] = sr / sw;
+                    im[k * cells + row * mx + col] = si / sw;
+                }
+            }
+        }
+        coils = { count, re, im };
+    }
+    const coarseOffsets = halve[2]
+        ? Array.from({ length: Math.floor((hi + 1) / 2) - Math.ceil((lo - 1) / 2) + 1 }, (_, j) => Math.ceil((lo - 1) / 2) + j)
+        : offsets.slice().sort((a, b) => a - b);
+    const coarsePlanes = coarseOffsets.filter(o => o !== 0).map(offset => ({ offset, maps: coarsePlane(offset) }));
+    return {
+        nx: mx,
+        ny: my,
+        voxel: [phantom.voxel[0] * (halve[0] ? 2 : 1), phantom.voxel[1] * (halve[1] ? 2 : 1), phantom.voxel[2] * (halve[2] ? 2 : 1)],
+        maps: coarsePlane(0),
+        coils,
+        planes: coarsePlanes.length ? coarsePlanes : undefined,
+        source: phantom.source,
+        notes: phantom.notes.slice(),
+    };
+}
+
 /** Row-major indices of the voxels with PD > 0 in this plane or any neighbouring one. */
 export function occupiedVoxels(phantom: Phantom2D): Int32Array {
     const cells = phantom.nx * phantom.ny;
