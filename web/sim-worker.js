@@ -9192,33 +9192,41 @@
   var TIERS = [0.1, 0.02, 4e-3];
   var FREQUENCY_LIMIT = 5e4;
   function measurePulses(program, options = {}) {
-    const found = /* @__PURE__ */ new Map();
-    for (const segment of program.segments()) {
-      if (segment.kind !== "rf") continue;
+    const pulses = new PulseCollector();
+    for (const segment of program.segments()) if (segment.kind === "rf") pulses.add(segment);
+    return pulses.measure(options);
+  }
+  var PulseCollector = class {
+    constructor() {
+      __publicField(this, "found", /* @__PURE__ */ new Map());
+    }
+    add(segment) {
       const use = segment.use || "u";
-      const entry = found.get(segment.key);
+      const entry = this.found.get(segment.key);
       if (entry) {
         entry.events++;
         entry.uses.add(use);
       } else {
-        found.set(segment.key, { segment, events: 1, uses: /* @__PURE__ */ new Set([use]) });
+        this.found.set(segment.key, { segment, events: 1, uses: /* @__PURE__ */ new Set([use]) });
       }
     }
-    const alike = /* @__PURE__ */ new Map();
-    for (const [key, entry] of found) {
-      const cells = rfCells(entry.segment, 0);
-      const signature = zSignature(cells);
-      const twin = alike.get(signature);
-      if (twin) {
-        twin.keys.push(key);
-        twin.events += entry.events;
-        for (const use of entry.uses) twin.uses.add(use);
-      } else {
-        alike.set(signature, { segment: entry.segment, cells, keys: [key], events: entry.events, uses: entry.uses });
+    measure(options = {}) {
+      const alike = /* @__PURE__ */ new Map();
+      for (const [key, entry] of this.found) {
+        const cells = rfCells(entry.segment, 0);
+        const signature = zSignature(cells);
+        const twin = alike.get(signature);
+        if (twin) {
+          twin.keys.push(key);
+          twin.events += entry.events;
+          for (const use of entry.uses) twin.uses.add(use);
+        } else {
+          alike.set(signature, { segment: entry.segment, cells, keys: [key], events: entry.events, uses: entry.uses });
+        }
       }
+      return [...alike.values()].map((entry) => measurePulse(entry.segment, entry.cells, entry.keys, roleOf(entry.uses), entry.events, options));
     }
-    return [...alike.values()].map((entry) => measurePulse(entry.segment, entry.cells, entry.keys, roleOf(entry.uses), entry.events, options));
-  }
+  };
   function zSignature(cells) {
     const n = cells.count;
     const values = new Float64Array(4 * n + 1);
@@ -10016,11 +10024,49 @@
     const t0 = [];
     const dwell = [];
     const chunks = [];
-    const k = [0, 0, 0];
     let total = 0;
+    forEachReadout(program.segments(), (segment, local, excitations, currentKey) => {
+      chunks.push(local);
+      offsets.push(total);
+      samples.push(segment.numSamples);
+      excitation.push(excitations);
+      excitationKey.push(currentKey);
+      t0.push(segment.t0);
+      dwell.push(segment.dwell);
+      total += segment.numSamples;
+    });
+    const kAll = new Float64Array(3 * total);
+    let position = 0;
+    for (const chunk of chunks) {
+      kAll.set(chunk, position);
+      position += chunk.length;
+    }
+    return {
+      readouts: samples.length,
+      samples: Int32Array.from(samples),
+      offsets: Int32Array.from(offsets),
+      k: kAll,
+      excitation: Int32Array.from(excitation),
+      excitationKey,
+      t0: Float64Array.from(t0),
+      dwell: Float64Array.from(dwell)
+    };
+  }
+  function adcEncodingExtents(segments) {
+    const largest = [0, 0, 0];
+    forEachReadout(segments, (_segment, local) => {
+      for (let i2 = 0; i2 < local.length; i2++) {
+        const a = i2 % 3;
+        if (Math.abs(local[i2]) > largest[a]) largest[a] = Math.abs(local[i2]);
+      }
+    });
+    return largest;
+  }
+  function forEachReadout(segments, visit) {
+    const k = [0, 0, 0];
     let excitations = -1;
     let currentKey = "";
-    for (const segment of program.segments()) {
+    for (const segment of segments) {
       if (segment.kind === "rf") {
         for (let a = 0; a < 3; a++) k[a] += segment.kToCenter[a];
         const use = segment.use || "";
@@ -10039,35 +10085,12 @@
         for (let s = 0; s < times.length; s++) {
           for (let a = 0; a < 3; a++) local[3 * s + a] += k[a];
         }
-        chunks.push(local);
-        offsets.push(total);
-        samples.push(segment.numSamples);
-        excitation.push(excitations);
-        excitationKey.push(currentKey);
-        t0.push(segment.t0);
-        dwell.push(segment.dwell);
-        total += segment.numSamples;
+        visit(segment, local, excitations, currentKey);
         for (let a = 0; a < 3; a++) k[a] += segment.moments.dk[a];
       } else {
         for (let a = 0; a < 3; a++) k[a] += segment.moments.dk[a];
       }
     }
-    const kAll = new Float64Array(3 * total);
-    let position = 0;
-    for (const chunk of chunks) {
-      kAll.set(chunk, position);
-      position += chunk.length;
-    }
-    return {
-      readouts: samples.length,
-      samples: Int32Array.from(samples),
-      offsets: Int32Array.from(offsets),
-      k: kAll,
-      excitation: Int32Array.from(excitation),
-      excitationKey,
-      t0: Float64Array.from(t0),
-      dwell: Float64Array.from(dwell)
-    };
   }
 
   // src/sim/job.ts
@@ -11526,6 +11549,28 @@
   var port = standardSelfPort();
   var jobs = /* @__PURE__ */ new Map();
   var volume = null;
+  var facts = null;
+  function sequenceFacts(ref, full) {
+    if (ref.key !== void 0 && facts?.key === ref.key && (!full || facts.pulses)) return facts;
+    const seq = parseSequenceBytes(new Uint8Array(ref.sequence), ref.name ?? "");
+    const definition = seq.definitions.get("FOV");
+    const found = { key: ref.key, fov: definition ? Array.from(definition, Number) : null };
+    if (full) {
+      const pulses = new PulseCollector();
+      found.encoding = adcEncodingExtents(tap(compileProgram(seq).segments(), (segment) => {
+        if (segment.kind === "rf") pulses.add(segment);
+      }));
+      found.pulses = pulses.measure();
+    }
+    if (ref.key !== void 0) facts = found;
+    return found;
+  }
+  function* tap(items, see) {
+    for (const item of items) {
+      see(item);
+      yield item;
+    }
+  }
   var previewSession = null;
   var PROGRESS_SPACING_MS = 100;
   function now() {
@@ -11561,35 +11606,30 @@
     };
   }
   function loadPhantom(request) {
+    const sequence = request.sequence;
     if (request.kind === "shepp-logan") {
-      let fov = [0.256, 0.256];
-      if (request.sequence) {
-        const definition = parseSequenceBytes(new Uint8Array(request.sequence), request.name ?? "").definitions.get("FOV");
-        if (definition && definition.length >= 2 && +definition[0] > 0 && +definition[1] > 0) fov = [+definition[0], +definition[1]];
-      }
-      return { volume: null, phantom: sheppLoganPhantom2D(request.size, fov[0], fov[1]) };
+      const fov = sequence ? definedFov(sequenceFacts({ ...request, sequence }, false)) : null;
+      return { volume: null, phantom: sheppLoganPhantom2D(request.size, fov ? fov[0] : 0.256, fov ? fov[1] : 0.256) };
     }
     if (request.kind === "files") {
       volume = loadPhantomFiles(request.files.map((file) => ({ name: file.name, bytes: new Uint8Array(file.bytes) })));
     } else if (request.kind === "shepp-logan-3d") {
-      volume = sheppLogan3d(request.size, request.sequence ? sequenceFov(request.sequence, request.name ?? "") : null);
+      volume = sheppLogan3d(request.size, sequence ? definedFov(sequenceFacts({ ...request, sequence }, !!request.neighbours)) : null);
     } else if (!volume) {
       throw new Error("Load a phantom file first.");
     }
     const fielded = withFieldMode(volume, request.fields);
     const slice = { ...request.slice };
-    if (request.sequence) {
-      const neighbours = neighbourRange(fielded, slice, new Uint8Array(request.sequence), request.name ?? "");
+    if (sequence && request.neighbours) {
+      const neighbours = neighbourRange(fielded, slice, () => sequenceFacts({ ...request, sequence }, true));
       if (neighbours) slice.neighbours = neighbours;
     }
     const phantom = sliceVolume(fielded, slice);
     return { volume: volumeSummary(volume), phantom };
   }
-  function sequenceFov(bytes, name) {
-    const definition = parseSequenceBytes(new Uint8Array(bytes), name).definitions.get("FOV");
-    if (!definition || definition.length < 2) return null;
-    const fov = Array.from(definition, Number);
-    return fov.slice(0, 2).every((v) => v > 0) ? fov : null;
+  function definedFov(found) {
+    const fov = found.fov;
+    return fov && fov.length >= 2 && fov[0] > 0 && fov[1] > 0 ? fov : null;
   }
   function sheppLogan3d(size, fov) {
     const fx = fov ? fov[0] : 0.256, fy = fov ? fov[1] : 0.256;
@@ -11597,7 +11637,7 @@
     const nz = Math.max(2, Math.min(64, Math.round(size * fz / fx)));
     return sheppLoganVolume(size, nz, [fx, fy, fz]);
   }
-  function neighbourRange(v, slice, sequence, name) {
+  function neighbourRange(v, slice, sequence) {
     const plane = slice.plane ?? "xy";
     const normal = plane === "xy" ? 2 : plane === "xz" ? 1 : 0;
     const planes = v.shape[normal];
@@ -11608,13 +11648,13 @@
     if (v.maps.b0) {
       for (let i2 = 0; i2 < v.maps.b0.length; i2++) if (v.maps.pd[i2] > 0) offResonance = Math.max(offResonance, Math.abs(v.maps.b0[i2]));
     }
-    const program = compileProgram(parseSequenceBytes(sequence, name));
-    const plan = planSlices(measurePulses(program), {
+    const found = sequence();
+    const plan = planSlices(found.pulses, {
       density: 1,
       planeThickness: spacing,
       offResonance,
       volume: [(-index - 0.5) * spacing, (planes - 1 - index + 0.5) * spacing],
-      encodingZ: encodingExtent(adcTrajectory(program), normal)
+      encodingZ: found.encoding[normal]
     });
     if (plan?.extent === "volume") return [-index, planes - 1 - index];
     if (!plan || plan.extent === "plane" || !(spacing > 0)) return void 0;
@@ -11633,7 +11673,8 @@
         return;
       }
       case "pulses": {
-        const pulses = measurePulses(compileProgram(parseSequenceBytes(new Uint8Array(request.bytes), request.name)));
+        const found = sequenceFacts({ sequence: request.bytes, name: request.name, key: request.key }, true);
+        const pulses = found.pulses.map((p) => ({ ...p, offsets: p.offsets.slice(), mx: p.mx.slice(), my: p.my.slice(), mz: p.mz.slice() }));
         port.post({ type: "pulses", id: request.id, pulses }, pulseBuffers(pulses));
         return;
       }
@@ -11752,7 +11793,7 @@
       handle(request);
     } catch (error) {
       const ids = request;
-      port.post({ type: "error", job: ids.job ?? -1, id: ids.id ?? -1, message: errorMessage(error) }, []);
+      port.post({ type: "error", request: request.type, job: ids.job ?? -1, id: ids.id ?? -1, message: errorMessage(error) }, []);
     }
   });
 })();

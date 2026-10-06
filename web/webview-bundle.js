@@ -8125,10 +8125,14 @@ var SeqEyesSimulation = (function () {
 
   /* Phantom state. */
   var phantomWorker = null;
-  var phantomRequest = 0;
+  var phantomRequest = 0;         // the newest phantom request's id
+  var phantomSent = 0;            // the request the phantom worker is on (0: none)
+  var phantomWanted = null;       // { id, cut } waiting for the worker (only the newest waits)
+  var phantomPosts = 0;           // requests sent to the worker (for tests)
   var phantom = { status: 'idle', id: 0, data: null, volume: null, label: '', error: null };
   var uploaded = null;            // { label, files } of the user's last upload
   var presetBytes = {};           // preset id → ArrayBuffer (fetched once per session)
+  var presetDownloads = {};       // preset id → Promise while it downloads
 
   /* The open sequence's RF pulses, measured by the phantom worker. */
   var pulseRequest = PULSE_ID_BASE;
@@ -8230,14 +8234,43 @@ var SeqEyesSimulation = (function () {
 
   function ensurePhantomWorker() {
     if (phantomWorker) return phantomWorker;
-    phantomWorker = host().createSimulationWorker();
-    phantomWorker.onmessage = function (event) { onPhantomMessage(event.data); };
-    phantomWorker.onerror = function (event) {
-      if (event && event.preventDefault) event.preventDefault();
-      phantomWorker = null;
-      phantomFailed(phantom.id, 'The phantom worker failed: ' + (event && event.message || 'unknown error'));
+    var worker = host().createSimulationWorker();
+    worker.onmessage = function (event) { if (worker === phantomWorker) onPhantomMessage(event.data); };
+    worker.onmessageerror = function () {
+      if (worker === phantomWorker) phantomWorkerFailed('A reply from the phantom worker could not be read.');
     };
-    return phantomWorker;
+    worker.onerror = function (event) {
+      if (event && event.preventDefault) event.preventDefault();
+      if (worker === phantomWorker) phantomWorkerFailed('The phantom worker failed: ' + (event && event.message || 'unknown error'));
+    };
+    phantomWorker = worker;
+    return worker;
+  }
+
+  /** The phantom worker broke: drop it (its volume goes with it), so the next request starts a fresh one. */
+  function phantomWorkerFailed(text) {
+    var broken = phantomWorker;
+    phantomWorker = null;
+    if (broken) broken.terminate();
+    phantomSent = 0;
+    phantom.volume = null;
+    if (pulses.status === 'loading') { pulses.status = 'error'; pulses.error = text; }
+    if (run) run.previewPending = false;
+    if (phantomWanted) pumpPhantom();
+    else if (phantom.status === 'loading') phantomFailed(phantom.id, text);
+  }
+
+  /* Each sequence's bytes get a key, so the phantom worker keeps what it reads of them (see sim/worker/entry.ts). */
+  var sequenceKeys = typeof WeakMap === 'function' ? new WeakMap() : null;
+  var lastSequenceKey = 0;
+  function sequenceKey(bytes) {
+    if (!sequenceKeys || !bytes || typeof bytes !== 'object') return undefined;
+    var key = sequenceKeys.get(bytes);
+    if (key === undefined) {
+      key = ++lastSequenceKey;
+      sequenceKeys.set(bytes, key);
+    }
+    return key;
   }
 
   function sliceOptions() {
@@ -8250,48 +8283,55 @@ var SeqEyesSimulation = (function () {
   /** A built-in phantom: its matrix is chosen, not resampled, and it follows the sequence's FOV. */
   function isBuiltIn() { return phantomChoice === 'shepp-logan' || phantomChoice === 'shepp-logan-3d'; }
 
-  /** Load the chosen phantom (or a new plane of it). */
+  /**
+   * Load the chosen phantom (or a new plane of it). The phantom worker takes
+   * one request at a time and only the newest waits for it, built from the
+   * panel's state when it is sent: switching phantoms quickly costs at most
+   * the request in progress, never every choice made in between.
+   */
   function loadPhantom(reason) {
     if (!isAvailable()) return;
     var id = ++phantomRequest;
     phantom.status = 'loading';
     phantom.id = id;
     phantom.error = null;
+    // A plane is cut from the worker's volume only while that volume is this phantom's; anything else loads afresh.
+    var cut = !!(reason === 'slice' && phantom.volume && !(phantomWanted && !phantomWanted.cut));
+    if (!cut) phantom.volume = null;
+    phantomWanted = { id: id, cut: cut };
     syncControls();
+    pumpPhantom();
+  }
+
+  /** Send the waiting request once the worker is free. */
+  function pumpPhantom() {
+    if (phantomSent || !phantomWanted) return;
+    var wanted = phantomWanted;
+    phantomWanted = null;
+    sendPhantom(wanted.id, wanted.cut);
+  }
+
+  function sendPhantom(id, cut) {
+    if (!(run && !run.finished)) setProgress(null);    // a download given up on leaves its bar
     if (phantomChoice === 'shepp-logan') {
-      var source = host().getSequenceSource();
       var request = { kind: 'shepp-logan', size: sheppSize };
-      var transfer = [];
-      if (source && source.bytes) {
-        var copy = source.bytes.slice();
-        request.sequence = copy.buffer;
-        request.name = source.name || '';
-        transfer.push(copy.buffer);
-      }
+      attachSequence(request);
       phantom.label = 'Shepp–Logan';
-      postPhantom(id, request, transfer);
+      postPhantom(id, request, request.sequence ? [request.sequence] : []);
       return;
     }
-    if (reason === 'slice' && phantom.volume) {
+    if (cut) {
       var sliceRequest = { kind: 'slice', fields: fields, slice: sliceOptions() };
       postPhantom(id, sliceRequest, withSequence(sliceRequest));
       return;
     }
     if (phantomChoice === 'shepp-logan-3d') {
       var volumeRequest = { kind: 'shepp-logan-3d', size: sheppSize, fields: fields, slice: sliceOptions() };
-      var shared = withSequence(volumeRequest);
+      withSequence(volumeRequest);
       // The FOV comes from the sequence even with through-slice sampling off.
-      if (!volumeRequest.sequence) {
-        var open = host().getSequenceSource();
-        if (open && open.bytes && open.bytes.length) {
-          var own = open.bytes.slice();
-          volumeRequest.sequence = own.buffer;
-          volumeRequest.name = open.name || '';
-          shared = [own.buffer];
-        }
-      }
+      if (!volumeRequest.sequence) attachSequence(volumeRequest);
       phantom.label = PRESETS['shepp-logan-3d'].label;
-      postPhantom(id, volumeRequest, shared);
+      postPhantom(id, volumeRequest, volumeRequest.sequence ? [volumeRequest.sequence] : []);
       return;
     }
     if (phantomChoice === 'file') {
@@ -8316,18 +8356,31 @@ var SeqEyesSimulation = (function () {
   }
 
   /**
-   * Attach a copy of the open sequence to a phantom request, so a 3-D
+   * Attach a copy of the open sequence and its key to a request (the
+   * built-in phantoms take its FOV). Returns the sequence's bytes, or null
+   * without one.
+   */
+  function attachSequence(request) {
+    var source = host() && host().getSequenceSource();
+    if (!source || !source.bytes || !source.bytes.length) return null;
+    request.sequence = source.bytes.slice().buffer;
+    request.name = source.name || '';
+    request.key = sequenceKey(source.bytes);
+    return source.bytes;
+  }
+
+  /**
+   * With through-slice sampling on, attach the open sequence so that a 3-D
    * phantom comes with the neighbouring planes its slabs reach. Returns the
    * buffers to transfer.
    */
   function withSequence(request) {
-    var source = sliceMode === 'auto' && host() && host().getSequenceSource();
-    if (!source || !source.bytes || !source.bytes.length) return [];
-    var copy = source.bytes.slice();
-    request.sequence = copy.buffer;
-    request.name = source.name || '';
-    phantom.sequenceBytes = source.bytes;
-    return [copy.buffer];
+    if (sliceMode !== 'auto') return [];
+    var bytes = attachSequence(request);
+    if (!bytes) return [];
+    request.neighbours = true;
+    phantom.sequenceBytes = bytes;
+    return [request.sequence];
   }
 
   /** Measure the open sequence's RF pulses (for the RF pulses tab). */
@@ -8341,7 +8394,7 @@ var SeqEyesSimulation = (function () {
     pulses = { status: 'loading', id: id, list: null, error: null };
     var copy = source.bytes.slice();
     try {
-      ensurePhantomWorker().postMessage({ type: 'pulses', id: id, bytes: copy.buffer, name: source.name || '' }, [copy.buffer]);
+      ensurePhantomWorker().postMessage({ type: 'pulses', id: id, bytes: copy.buffer, name: source.name || '', key: sequenceKey(source.bytes) }, [copy.buffer]);
     } catch (error) {
       pulses.status = 'error';
       pulses.error = String(error && error.message || error);
@@ -8362,16 +8415,38 @@ var SeqEyesSimulation = (function () {
   function postPhantom(id, request, transfer) {
     try {
       ensurePhantomWorker().postMessage({ type: 'phantom', id: id, request: request }, transfer);
+      phantomSent = id;
+      phantomPosts++;
     } catch (error) {
       phantomFailed(id, 'Could not start the phantom worker: ' + (error && error.message || error));
     }
   }
 
+  /** Download a preset (once; a choice made again while it downloads waits for the same download), then load it. */
   function fetchPreset(presetId, id) {
     var preset = PRESETS[presetId];
     setStatus(['Downloading ' + preset.file + ' (' + formatBytes(preset.bytes) + ') from MRsources/MRzero-Core on GitHub…']);
     setProgress(0);
-    fetch(MRZERO_BASE + preset.file).then(function (response) {
+    presetDownloads[presetId] = presetDownloads[presetId] || download(presetId);
+    presetDownloads[presetId].then(function () {
+      if (id !== phantomRequest) return;
+      setProgress(null);
+      setStatus(['Parsing ' + preset.file + '…']);
+      // The worker may have taken another request meanwhile: this one waits its turn.
+      phantomWanted = { id: id, cut: false };
+      pumpPhantom();
+    }, function (error) {
+      if (id !== phantomRequest) return;
+      setProgress(null);
+      phantomFailed(id, 'Could not download ' + preset.file + ': ' + (error && error.message || error)
+        + '. You can download it from github.com/MRsources/MRzero-Core and load it as your file.');
+    });
+  }
+
+  /** A preset's bytes from GitHub, SHA-256 checked, into presetBytes. */
+  function download(presetId) {
+    var preset = PRESETS[presetId];
+    return fetch(MRZERO_BASE + preset.file).then(function (response) {
       if (!response.ok) throw new Error('HTTP ' + response.status);
       var total = +response.headers.get('content-length') || preset.bytes;
       if (!response.body || !response.body.getReader) return response.arrayBuffer();
@@ -8385,7 +8460,7 @@ var SeqEyesSimulation = (function () {
           }
           chunks.push(part.value);
           received += part.value.length;
-          if (id === phantomRequest) setProgress(received / total);
+          if (phantomChoice === presetId && phantom.status === 'loading') setProgress(received / total);
           return pump();
         });
       }
@@ -8394,14 +8469,10 @@ var SeqEyesSimulation = (function () {
       return verifyDigest(buffer, preset.sha256).then(function () { return buffer; });
     }).then(function (buffer) {
       presetBytes[presetId] = buffer;
-      if (id !== phantomRequest) return;
-      setProgress(null);
-      setStatus(['Parsing ' + preset.file + '…']);
-      postFiles(id, [{ name: preset.file, bytes: buffer }]);
-    }).catch(function (error) {
-      setProgress(null);
-      phantomFailed(id, 'Could not download ' + preset.file + ': ' + (error && error.message || error)
-        + '. You can download it from github.com/MRsources/MRzero-Core and load it as your file.');
+      delete presetDownloads[presetId];
+    }, function (error) {
+      delete presetDownloads[presetId];
+      throw error;
     });
   }
 
@@ -8419,17 +8490,32 @@ var SeqEyesSimulation = (function () {
     if (!message) return;
     if (message.type === 'preview') { onPreview(message); return; }
     if (message.type === 'pulses') { onPulses(message); return; }
-    if (message.type === 'error' && message.id > PULSE_ID_BASE) {
+    if (message.type === 'error') { onPhantomWorkerError(message); return; }
+    if (message.type !== 'phantom') return;
+    if (message.id === phantomSent) phantomSent = 0;
+    if (message.id === phantomRequest) acceptPhantom(message);
+    pumpPhantom();
+  }
+
+  /** Errors name the request that failed: phantom, pulse and preview ids are separate counters. */
+  function onPhantomWorkerError(message) {
+    var failed = message.request || (message.id > PULSE_ID_BASE ? 'pulses' : 'phantom');
+    if (failed === 'pulses') {
       if (message.id === pulses.id) { pulses.status = 'error'; pulses.error = message.message; syncControls(); }
       return;
     }
-    if (message.type === 'error' && run && message.id === run.id && run.previewPending) {
+    if (failed === 'preview' || failed === 'previewOpen') {
       // A failed preview is not worth stopping the run for.
-      run.previewPending = false;
+      if (run && message.id === run.id) run.previewPending = false;
       return;
     }
-    if (message.type === 'error') { phantomFailed(message.id, message.message); return; }
-    if (message.type !== 'phantom' || message.id !== phantomRequest) return;
+    if (failed !== 'phantom') return;
+    if (message.id === phantomSent) phantomSent = 0;
+    phantomFailed(message.id, message.message);
+    pumpPhantom();
+  }
+
+  function acceptPhantom(message) {
     phantom.status = 'ready';
     phantom.data = message.phantom;
     phantom.volume = message.volume;
@@ -8448,6 +8534,7 @@ var SeqEyesSimulation = (function () {
     if (id !== phantomRequest && id !== -1) return;
     phantom.status = 'error';
     phantom.error = text;
+    phantom.runWhenReady = false;
     syncControls();
     setStatus([], ['Phantom: ' + text]);
   }
@@ -8475,21 +8562,25 @@ var SeqEyesSimulation = (function () {
     var files = Array.prototype.slice.call(fileList || []);
     if (!files.length) return;
     // Loading from now on: the old phantom is on its way out while the files are read.
+    var id = ++phantomRequest;
     phantom.status = 'loading';
-    phantom.id = ++phantomRequest;
+    phantom.id = id;
+    phantom.error = null;
+    phantomWanted = null;
     syncControls();
     var reads = files.map(function (file) {
       return file.arrayBuffer().then(function (bytes) { return { name: file.name, bytes: bytes }; });
     });
     Promise.all(reads).then(function (loaded) {
       uploaded = { label: loaded.map(function (f) { return f.name; }).join(', '), files: loaded };
+      // Another phantom chosen while the files were read wins; the files stay on the list.
+      if (id !== phantomRequest) { syncControls(); return; }
       phantomChoice = 'file';
       sliceIndex = null;
       phantom.volume = null;
-      syncControls();
       loadPhantom('choice');
     }).catch(function (error) {
-      phantomFailed(phantom.id, 'Could not read the file: ' + (error && error.message || error));
+      phantomFailed(id, 'Could not read the file: ' + (error && error.message || error));
     });
   }
 
@@ -9631,7 +9722,7 @@ var SeqEyesSimulation = (function () {
       phantom: { choice: phantomChoice, status: phantom.status, error: phantom.error,
         nx: phantom.data ? phantom.data.nx : 0, ny: phantom.data ? phantom.data.ny : 0,
         volume: phantom.volume ? phantom.volume.shape.slice() : null, plane: slicePlane, index: sliceIndex,
-        source: phantom.data ? phantom.data.source : '' },
+        source: phantom.data ? phantom.data.source : '', requests: phantomPosts },
       coils: coils,
       spins: spins,
       engine: engine,

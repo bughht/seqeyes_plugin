@@ -4,7 +4,7 @@
  *
  * Messages (panel → worker):
  *   { type: 'phantom', id, request }                 load or re-slice a phantom
- *   { type: 'pulses',  id, bytes, name }             measure every RF pulse (plan/slices.ts)
+ *   { type: 'pulses',  id, bytes, name, key? }       measure every RF pulse (plan/slices.ts)
  *   { type: 'open',    job, bytes, name, settings, layout? }  parse, compile, plan
  *   { type: 'previewOpen', id, bytes, name }         recon context for live previews
  *   { type: 'preview', id, signal, coils }           reconstruct a partial signal
@@ -18,7 +18,7 @@
  *   { type: 'planProgress', job, message, fraction }   { type: 'preview', id, recon }
  *   { type: 'progress', job, chunk, fraction } { type: 'chunk', job, chunk, signal, ms }
  *   { type: 'recon', job, recon, layout }      { type: 'export', job, id, name, mime, bytes }
- *   { type: 'error', job?, id?, message }
+ *   { type: 'error', request, job?, id?, message }   (request: the failed message's type)
  * Several workers serve one job, each opening it; the panel hands out chunks
  * and sums them in order (job.ts). One worker keeps the job after the run
  * for exports. Cancelling terminates the workers.
@@ -29,31 +29,44 @@ import { SimulationJob, type JobSettings } from '../job';
 import { sheppLoganPhantom2D, sheppLoganVolume } from '../phantom/builtin';
 import { loadPhantomFiles, withFieldMode, type FieldMapMode } from '../phantom/files';
 import { sliceVolume, type Phantom2D, type PhantomVolume, type SliceOptions } from '../phantom/model';
-import { measurePulses, planSlices, type PulseResponse } from '../plan/slices';
+import { PulseCollector, planSlices, type PulseResponse } from '../plan/slices';
 import { standardSelfPort } from '../platform/browser';
 import { compileProgram } from '../program/compile';
-import { encodingExtent } from '../job';
 import { reconstructCartesian } from '../recon/cartesian';
-import { adcTrajectory, type AdcTrajectory } from '../recon/trajectory';
+import { adcEncodingExtents, adcTrajectory, type AdcTrajectory } from '../recon/trajectory';
 import { parseSequenceBytes } from '../../pulseq/sequenceReader';
 
 /**
- * With `sequence`, a plane of a volume comes with the neighbouring planes
+ * With `neighbours`, a plane of a volume comes with the neighbouring planes
  * the sequence's slabs reach, for through-slice sampling.
  */
-type PhantomRequest =
+type PhantomRequest = SequenceRef & (
     /** The built-in phantom in the FOV of the given sequence (0.256 m without one). */
-    | { kind: 'shepp-logan'; size: number; sequence?: ArrayBuffer; name?: string }
+    | { kind: 'shepp-logan'; size: number }
     /** The built-in 3-D phantom as a volume (kept for re-slicing), size² in-plane (see sheppLogan3d). */
-    | { kind: 'shepp-logan-3d'; size: number; fields: FieldMapMode; slice: SliceOptions; sequence?: ArrayBuffer; name?: string }
+    | { kind: 'shepp-logan-3d'; size: number; fields: FieldMapMode; slice: SliceOptions }
     /** Parse files into a volume (kept for re-slicing) and return one plane. */
-    | { kind: 'files'; files: { name: string; bytes: ArrayBuffer }[]; fields: FieldMapMode; slice: SliceOptions; sequence?: ArrayBuffer; name?: string }
+    | { kind: 'files'; files: { name: string; bytes: ArrayBuffer }[]; fields: FieldMapMode; slice: SliceOptions }
     /** Another plane, or other field maps, of the volume loaded last. */
-    | { kind: 'slice'; fields: FieldMapMode; slice: SliceOptions; sequence?: ArrayBuffer; name?: string };
+    | { kind: 'slice'; fields: FieldMapMode; slice: SliceOptions });
+
+/**
+ * The open sequence, sent along with phantom and pulse requests. `key`
+ * names these bytes for the panel's session: the worker keeps what it reads
+ * from the last keyed sequence (SequenceFacts), so switching phantoms does
+ * not parse it again.
+ */
+interface SequenceRef {
+    sequence?: ArrayBuffer;
+    name?: string;
+    key?: number;
+    /** Include the neighbouring planes the sequence's slabs reach (through-slice sampling on). */
+    neighbours?: boolean;
+}
 
 type Request =
     | { type: 'phantom'; id: number; request: PhantomRequest }
-    | { type: 'pulses'; id: number; bytes: ArrayBuffer; name: string }
+    | { type: 'pulses'; id: number; bytes: ArrayBuffer; name: string; key?: number }
     | { type: 'open'; job: number; bytes: ArrayBuffer; name: string; settings: JobSettings; layout?: boolean }
     | { type: 'previewOpen'; id: number; bytes: ArrayBuffer; name: string }
     | { type: 'preview'; id: number; signal: Float64Array; coils: number }
@@ -65,6 +78,47 @@ type Request =
 const port = standardSelfPort();
 const jobs = new Map<number, SimulationJob>();
 let volume: PhantomVolume | null = null;
+
+/**
+ * What phantom and pulse requests need of a sequence: its FOV definition
+ * and, when a 3-D phantom or the RF tab asks, its measured pulses and k
+ * extent per axis. Reading them takes seconds for a long 3-D sequence
+ * (parsing, then two passes over the program), so they are kept for the
+ * last keyed sequence.
+ */
+interface SequenceFacts {
+    key: number | undefined;
+    /** The FOV definition [m], as many entries as it has, or null. */
+    fov: number[] | null;
+    pulses?: PulseResponse[];
+    /** Largest |k| at the ADC samples along x, y and z [1/m]. */
+    encoding?: [number, number, number];
+}
+let facts: SequenceFacts | null = null;
+
+function sequenceFacts(ref: SequenceRef & { sequence: ArrayBuffer }, full: boolean): SequenceFacts {
+    if (ref.key !== undefined && facts?.key === ref.key && (!full || facts.pulses)) return facts;
+    const seq = parseSequenceBytes(new Uint8Array(ref.sequence), ref.name ?? '');
+    const definition = seq.definitions.get('FOV');
+    const found: SequenceFacts = { key: ref.key, fov: definition ? Array.from(definition, Number) : null };
+    if (full) {
+        // One pass over the program for both: a long sequence takes seconds per pass.
+        const pulses = new PulseCollector();
+        found.encoding = adcEncodingExtents(tap(compileProgram(seq).segments(), segment => {
+            if (segment.kind === 'rf') pulses.add(segment);
+        }));
+        found.pulses = pulses.measure();
+    }
+    if (ref.key !== undefined) facts = found;
+    return found;
+}
+
+function* tap<T>(items: Iterable<T>, see: (item: T) => void): Generator<T> {
+    for (const item of items) {
+        see(item);
+        yield item;
+    }
+}
 /** Trajectory and FOV of the sequence being run, for reconstructing partial signals. */
 let previewSession: { id: number; trajectory: AdcTrajectory; fov: [number, number, number] | null } | null = null;
 /** Progress messages per chunk are spaced at least this far apart [ms]. */
@@ -109,37 +163,33 @@ function volumeSummary(v: PhantomVolume) {
 }
 
 function loadPhantom(request: PhantomRequest): { volume: ReturnType<typeof volumeSummary> | null; phantom: Phantom2D } {
+    const sequence = request.sequence;
     if (request.kind === 'shepp-logan') {
-        let fov: [number, number] = [0.256, 0.256];
-        if (request.sequence) {
-            const definition = parseSequenceBytes(new Uint8Array(request.sequence), request.name ?? '').definitions.get('FOV');
-            if (definition && definition.length >= 2 && +definition[0] > 0 && +definition[1] > 0) fov = [+definition[0], +definition[1]];
-        }
-        return { volume: null, phantom: sheppLoganPhantom2D(request.size, fov[0], fov[1]) };
+        const fov = sequence ? definedFov(sequenceFacts({ ...request, sequence }, false)) : null;
+        return { volume: null, phantom: sheppLoganPhantom2D(request.size, fov ? fov[0] : 0.256, fov ? fov[1] : 0.256) };
     }
     if (request.kind === 'files') {
         volume = loadPhantomFiles(request.files.map(file => ({ name: file.name, bytes: new Uint8Array(file.bytes) })));
     } else if (request.kind === 'shepp-logan-3d') {
-        volume = sheppLogan3d(request.size, request.sequence ? sequenceFov(request.sequence, request.name ?? '') : null);
+        // Its neighbouring planes need the pulses too: read everything in one pass.
+        volume = sheppLogan3d(request.size, sequence ? definedFov(sequenceFacts({ ...request, sequence }, !!request.neighbours)) : null);
     } else if (!volume) {
         throw new Error('Load a phantom file first.');
     }
     const fielded = withFieldMode(volume, request.fields);
     const slice: SliceOptions = { ...request.slice };
-    if (request.sequence) {
-        const neighbours = neighbourRange(fielded, slice, new Uint8Array(request.sequence), request.name ?? '');
+    if (sequence && request.neighbours) {
+        const neighbours = neighbourRange(fielded, slice, () => sequenceFacts({ ...request, sequence }, true));
         if (neighbours) slice.neighbours = neighbours;
     }
     const phantom = sliceVolume(fielded, slice);
     return { volume: volumeSummary(volume), phantom };
 }
 
-/** The FOV a sequence defines [m], or null. */
-function sequenceFov(bytes: ArrayBuffer, name: string): number[] | null {
-    const definition = parseSequenceBytes(new Uint8Array(bytes), name).definitions.get('FOV');
-    if (!definition || definition.length < 2) return null;
-    const fov = Array.from(definition, Number);
-    return fov.slice(0, 2).every(v => v > 0) ? fov : null;
+/** The FOV a sequence defines [m] (x and y positive), or null. */
+function definedFov(found: SequenceFacts): number[] | null {
+    const fov = found.fov;
+    return fov && fov.length >= 2 && fov[0] > 0 && fov[1] > 0 ? fov : null;
 }
 
 /**
@@ -161,7 +211,7 @@ function sheppLogan3d(size: number, fov: number[] | null): PhantomVolume {
  * plane, or no slab selective along z. An excitation that is not selective
  * along z reaches every plane.
  */
-function neighbourRange(v: PhantomVolume, slice: SliceOptions, sequence: Uint8Array, name: string): [number, number] | undefined {
+function neighbourRange(v: PhantomVolume, slice: SliceOptions, sequence: () => SequenceFacts): [number, number] | undefined {
     const plane = slice.plane ?? 'xy';
     const normal = plane === 'xy' ? 2 : plane === 'xz' ? 1 : 0;
     const planes = v.shape[normal];
@@ -170,11 +220,11 @@ function neighbourRange(v: PhantomVolume, slice: SliceOptions, sequence: Uint8Ar
     const index = Math.round(slice.index ?? Math.floor(planes / 2));
     let offResonance = 0;
     if (v.maps.b0) for (let i = 0; i < v.maps.b0.length; i++) if (v.maps.pd[i] > 0) offResonance = Math.max(offResonance, Math.abs(v.maps.b0[i]));
-    const program = compileProgram(parseSequenceBytes(sequence, name));
-    const plan = planSlices(measurePulses(program), {
+    const found = sequence();
+    const plan = planSlices(found.pulses!, {
         density: 1, planeThickness: spacing, offResonance,
         volume: [(-index - 0.5) * spacing, (planes - 1 - index + 0.5) * spacing],
-        encodingZ: encodingExtent(adcTrajectory(program), normal),
+        encodingZ: found.encoding![normal],
     });
     if (plan?.extent === 'volume') return [-index, planes - 1 - index];
     if (!plan || plan.extent === 'plane' || !(spacing > 0)) return undefined;
@@ -196,7 +246,9 @@ function handle(request: Request): void {
             return;
         }
         case 'pulses': {
-            const pulses = measurePulses(compileProgram(parseSequenceBytes(new Uint8Array(request.bytes), request.name)));
+            const found = sequenceFacts({ sequence: request.bytes, name: request.name, key: request.key }, true);
+            // The worker keeps its own: send copies.
+            const pulses = found.pulses!.map(p => ({ ...p, offsets: p.offsets.slice(), mx: p.mx.slice(), my: p.my.slice(), mz: p.mz.slice() }));
             port.post({ type: 'pulses', id: request.id, pulses }, pulseBuffers(pulses));
             return;
         }
@@ -313,6 +365,7 @@ port.onMessage(data => {
         handle(request);
     } catch (error) {
         const ids = request as { job?: number; id?: number };
-        port.post({ type: 'error', job: ids.job ?? -1, id: ids.id ?? -1, message: errorMessage(error) }, []);
+        // `request` says what failed: phantom, pulse and preview ids count separately.
+        port.post({ type: 'error', request: request.type, job: ids.job ?? -1, id: ids.id ?? -1, message: errorMessage(error) }, []);
     }
 });

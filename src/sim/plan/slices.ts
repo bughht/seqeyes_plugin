@@ -177,35 +177,45 @@ const FREQUENCY_LIMIT = 50_000;
 
 /** Every distinct pulse of the program, measured (see the file comment). */
 export function measurePulses(program: SimProgram, options: MeasureOptions = {}): PulseResponse[] {
-    const found = new Map<string, { segment: RfSegment; events: number; uses: Set<string> }>();
-    for (const segment of program.segments()) {
-        if (segment.kind !== 'rf') continue;
+    const pulses = new PulseCollector();
+    for (const segment of program.segments()) if (segment.kind === 'rf') pulses.add(segment);
+    return pulses.measure(options);
+}
+
+/** measurePulses in two steps, for a pass over the program that does more: each RF segment, then the measurement. */
+export class PulseCollector {
+    private readonly found = new Map<string, { segment: RfSegment; events: number; uses: Set<string> }>();
+
+    add(segment: RfSegment): void {
         const use = segment.use || 'u';
-        const entry = found.get(segment.key);
+        const entry = this.found.get(segment.key);
         if (entry) {
             entry.events++;
             entry.uses.add(use);
         } else {
-            found.set(segment.key, { segment, events: 1, uses: new Set([use]) });
+            this.found.set(segment.key, { segment, events: 1, uses: new Set([use]) });
         }
     }
-    // Keys that differ only in what does not change the response along z
-    // (x and y gradients, as in a TrueFISP whose phase encode overlaps the
-    // pulse) are measured once.
-    const alike = new Map<string, { segment: RfSegment; cells: RfCells; keys: string[]; events: number; uses: Set<string> }>();
-    for (const [key, entry] of found) {
-        const cells = rfCells(entry.segment, 0);
-        const signature = zSignature(cells);
-        const twin = alike.get(signature);
-        if (twin) {
-            twin.keys.push(key);
-            twin.events += entry.events;
-            for (const use of entry.uses) twin.uses.add(use);
-        } else {
-            alike.set(signature, { segment: entry.segment, cells, keys: [key], events: entry.events, uses: entry.uses });
+
+    measure(options: MeasureOptions = {}): PulseResponse[] {
+        // Keys that differ only in what does not change the response along z
+        // (x and y gradients, as in a TrueFISP whose phase encode overlaps the
+        // pulse) are measured once.
+        const alike = new Map<string, { segment: RfSegment; cells: RfCells; keys: string[]; events: number; uses: Set<string> }>();
+        for (const [key, entry] of this.found) {
+            const cells = rfCells(entry.segment, 0);
+            const signature = zSignature(cells);
+            const twin = alike.get(signature);
+            if (twin) {
+                twin.keys.push(key);
+                twin.events += entry.events;
+                for (const use of entry.uses) twin.uses.add(use);
+            } else {
+                alike.set(signature, { segment: entry.segment, cells, keys: [key], events: entry.events, uses: entry.uses });
+            }
         }
+        return [...alike.values()].map(entry => measurePulse(entry.segment, entry.cells, entry.keys, roleOf(entry.uses), entry.events, options));
     }
-    return [...alike.values()].map(entry => measurePulse(entry.segment, entry.cells, entry.keys, roleOf(entry.uses), entry.events, options));
 }
 
 /** Hash of what sets a pulse's response along z: cell widths, B1, z gradient and carrier. */

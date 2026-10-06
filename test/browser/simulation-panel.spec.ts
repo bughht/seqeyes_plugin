@@ -23,7 +23,10 @@ interface SimulationState {
   running: boolean;
   runs: number;
   workers: number;
-  phantom: { choice: string; status: string; error: string | null; nx: number; ny: number; volume: number[] | null; plane: string; index: number | null; source: string };
+  phantom: {
+    choice: string; status: string; error: string | null; nx: number; ny: number; volume: number[] | null;
+    plane: string; index: number | null; source: string; requests: number;
+  };
   coils: number;
   engine: string;
   slices: string;
@@ -390,6 +393,29 @@ test('leaves the k-space and spectrogram cycle intact', async ({ page }) => {
   await page.locator('#simBtn').click();
   await expect.poll(() => panelMode(page)).toBe('off');
   await expect(page.locator('#right')).not.toHaveClass(/open/);
+});
+
+test('settles on the last phantom when the choice changes quickly', async ({ page }) => {
+  // The phantom worker takes one request at a time and only the newest waits,
+  // so a burst of changes neither queues every choice nor leaves Run disabled.
+  await loadViewer(page, gre);
+  await openSimulation(page);
+  await expect.poll(async () => (await simulationState(page)).phantom.status).toBe('ready');
+  const before = (await simulationState(page)).phantom.requests;
+  await page.evaluate((choices) => {
+    const select = document.querySelector('#simPhantom') as HTMLSelectElement;
+    for (const choice of choices) {
+      select.value = choice;
+      select.dispatchEvent(new Event('change'));
+    }
+  }, ['shepp-logan-3d', 'shepp-logan', 'shepp-logan-3d', 'shepp-logan', 'shepp-logan-3d', 'shepp-logan']);
+  await expect.poll(async () => (await simulationState(page)).phantom.status).toBe('ready');
+  const state = await simulationState(page);
+  expect(state.phantom.choice).toBe('shepp-logan');
+  expect(state.phantom.volume).toBeNull();
+  // The first change went straight to the worker; the other five became one request.
+  expect(state.phantom.requests - before).toBe(2);
+  await expect(page.locator('#simRun')).toBeEnabled();
 });
 
 test('a new sequence clears the previous result', async ({ page }) => {
