@@ -132,9 +132,24 @@ function pushM1DerivedPart(parts,label,series,t){
   }
   pushDerivedPart(parts,label,series,t,'s/m');
 }
+/* Coarse PNS buckets span many TRs, so there is no single value to report: the
+   plot draws the band and the readout has to say the same thing. Interpolating
+   first to last, as the point sampler does, lands near the baseline and
+   disagrees with a band reaching several times higher. */
+function pushPnsDerivedPart(parts,label,series,t){
+  if(series&&series.kind==='envelope'){
+    var range=sampleEnvelopeRangeAtTime(series,t);if(!range)return;
+    if(range.min===range.max)parts.push(label+'='+fmtDerivedValue(range.min,'%'));
+    else parts.push(label+'\u2208['+range.min.toFixed(1)+', '+range.max.toFixed(1)+']%');
+    return;
+  }
+  pushDerivedPart(parts,label,series,t,'%');
+}
 function appendDerivedTooltipLines(lines,ct){
-  if(pnsData&&chVis[7]){
-    var p=[];pushDerivedPart(p,'X',pnsData.x,ct,'%');pushDerivedPart(p,'Y',pnsData.y,ct,'%');pushDerivedPart(p,'Z',pnsData.z,ct,'%');pushDerivedPart(p,'Norm',pnsData.n,ct,'%');
+  // The series the plot is showing, not the full-sequence one behind it.
+  var activePns=pnsSeriesShown(ox,ox+visibleDuration());
+  if(activePns&&chVis[7]){
+    var p=[];pushPnsDerivedPart(p,'X',activePns.x,ct);pushPnsDerivedPart(p,'Y',activePns.y,ct);pushPnsDerivedPart(p,'Z',activePns.z,ct);pushPnsDerivedPart(p,'Norm',activePns.n,ct);
     if(p.length)lines.push('PNS: '+p.join('  '));
   }
   var activeM1=m1SeriesForView(ox,ox+visibleDuration());
@@ -146,14 +161,17 @@ function appendDerivedTooltipLines(lines,ct){
 function placeTooltip(cx,cy){
   var pad=8;tt.style.left='0px';tt.style.top='0px';
   var r=tt.getBoundingClientRect(),vw=window.innerWidth,vh=window.innerHeight;
-  var left=Math.min(Math.max(pad,cx+15),Math.max(pad,vw-r.width-pad));
-  var top=cy+12;if(top+r.height+pad>vh)top=cy-r.height-12;if(top<pad)top=pad;
-  /* `left`/`top` are client coordinates, but #tt is absolutely positioned
-     inside #cc, so its style offsets are measured from #cc's box.  Writing
-     client coordinates straight out put the tooltip #cc's own offset too low
-     and made the bottom flip fire that far past the real bottom of the
-     window. */
-  var host=tt.offsetParent?tt.offsetParent.getBoundingClientRect():{left:0,top:0};
+  /* #tt is absolutely positioned inside #cc, which hides its overflow, so the
+     usable area is the plot box and not the window: with the analysis panel
+     open the window extends well past #cc, and a readout clamped to the window
+     edge is cut off where the panel begins. Its style offsets are measured
+     from #cc's box too, which is why they are written relative to it. */
+  var host=tt.offsetParent?tt.offsetParent.getBoundingClientRect()
+    :{left:0,top:0,right:vw,bottom:vh};
+  var minX=Math.max(pad,host.left+pad),maxX=Math.min(vw,host.right)-pad-r.width;
+  var minY=Math.max(pad,host.top+pad),maxY=Math.min(vh,host.bottom)-pad-r.height;
+  var left=Math.min(Math.max(minX,cx+15),Math.max(minX,maxX));
+  var top=cy+12;if(top>maxY)top=cy-r.height-12;if(top<minY)top=minY;
   tt.style.left=(left-host.left)+'px';tt.style.top=(top-host.top)+'px';
 }
 function fmtFlipAngle(value){

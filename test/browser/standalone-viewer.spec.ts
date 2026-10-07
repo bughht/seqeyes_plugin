@@ -471,6 +471,41 @@ test('keeps every in-window k-space point when the visible range narrows', async
  * of its own: what is pinned is that any readout stays inside the box and hangs
  * correctly, and no shipped fixture produces a line this long.
  */
+/**
+ * With the analysis panel open the readout has to stay inside the plot box.
+ *
+ * #tt is absolutely positioned inside #cc, which hides its overflow, but it was
+ * clamped against the window. Open the k-space panel and the window extends
+ * well past #cc, so a hover near the right of the plot placed the readout over
+ * the panel, where #cc clipped it away.
+ */
+test('keeps the hover readout inside the plot box when the panel is open', async ({ page }) => {
+  await loadViewer(page, fixtures.gre);
+  await openKspace(page);
+
+  // #right animates its width open, so the plot is still shrinking for a
+  // moment after the panel appears; measuring through that gives a plot box
+  // wider than it ends up and a panel that has not reached its place yet.
+  await expect.poll(async () => {
+    const cc = await page.locator('#cc').boundingBox();
+    const pane = await page.locator('#kpane').boundingBox();
+    return !!(cc && pane && pane.width > 0 && pane.x >= cc.x + cc.width - 1);
+  }, { timeout: 10_000 }).toBe(true);
+
+  const plot = (await page.locator('#cc').boundingBox())!;
+
+  // Hover near the right edge of the plot, where the readout wants to open
+  // rightwards into the panel.
+  await page.mouse.move(plot.x + plot.width - 8, plot.y + plot.height / 2);
+  const tip = page.locator('#tt');
+  await expect(tip).toBeVisible();
+
+  const box = (await tip.boundingBox())!;
+  expect(box.x + box.width, `readout right edge ${box.x + box.width} vs plot ${plot.x + plot.width}`)
+    .toBeLessThanOrEqual(plot.x + plot.width);
+  expect(box.x).toBeGreaterThanOrEqual(plot.x);
+});
+
 test('wraps hover readout lines and hangs them under the field', async ({ page }) => {
   await loadViewer(page, fixtures.gre);
 
@@ -1200,6 +1235,48 @@ test('uses ranges for coarse M1 tooltips and point values after detailed-window 
   await expect.poll(async () => (
     await page.evaluate(time => window.__seqeyesDebug.m1TooltipLineAt(time), rangeTime)
   ), { timeout: 20_000 }).not.toContain('∈[');
+});
+
+/**
+ * The PNS readout has to agree with the PNS plot.
+ *
+ * It read `pnsData` — the bounded full-sequence series — while the plot draws
+ * whichever series `pnsSeriesForView` picked, so once a detailed window covered
+ * the view the two disagreed outright. And on coarse data it reported a point
+ * interpolated from each bucket's first sample to its last, which lands near
+ * the baseline while the plot draws a band several times higher: a readout of
+ * 35% under a curve topping 86%.
+ */
+test('reports the PNS band while coarse and the drawn window once detailed', async ({ page }) => {
+  await loadViewer(page, fixtures.largeSequence);
+
+  const pnsLegend = page.locator('#legend .li').filter({ hasText: 'PNS' });
+  const chooserPromise = page.waitForEvent('filechooser');
+  await page.locator('#pnsBtn').click();
+  const chooser = await chooserPromise;
+  await chooser.setFiles({ name: 'synthetic.asc', mimeType: 'text/plain', buffer: Buffer.from(syntheticAsc()) });
+  await expect(pnsLegend).not.toHaveClass(/off/, { timeout: 20_000 });
+
+  const rangeTime = await page.evaluate(() => (window as unknown as {
+    __seqeyesDebug: { firstPnsRangeTime(): number | null };
+  }).__seqeyesDebug.firstPnsRangeTime());
+  expect(rangeTime, 'this fixture should give a coarse PNS series with a spread bucket').not.toBeNull();
+
+  // Coarse: the readout names the band the plot draws, not a point across it.
+  const coarse = await page.evaluate(time => (window as unknown as {
+    __seqeyesDebug: { pnsTooltipLineAt(t: number): string | null };
+  }).__seqeyesDebug.pnsTooltipLineAt(time), rangeTime!);
+  expect(coarse).toContain('PNS:');
+  expect(coarse, `coarse readout was ${coarse}`).toContain('\u2208[');
+
+  // Detailed: once a window covers the view, the readout follows it to points.
+  const start = Math.max(0, rangeTime! - 0.045);
+  await page.evaluate(({ s, e }) => (window as unknown as {
+    __seqeyesDebug: { setView(a: number, b: number): boolean };
+  }).__seqeyesDebug.setView(s, e), { s: start, e: start + 0.09 });
+  await expect.poll(async () => page.evaluate(time => (window as unknown as {
+    __seqeyesDebug: { pnsTooltipLineAt(t: number): string | null };
+  }).__seqeyesDebug.pnsTooltipLineAt(time), rangeTime!), { timeout: 20_000 }).not.toContain('\u2208[');
 });
 
 test('replaces coarse M1 with budgeted viewport detail when TR metadata is unavailable', async ({ page }) => {
