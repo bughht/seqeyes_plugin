@@ -1181,6 +1181,15 @@ function schedulePnsWindow(vs,ve){
   },180);
 }
 
+/* The series the plot is drawing, chosen exactly as pnsSeriesForView does but
+   without scheduling a window or touching the notices: the readout runs on
+   every mouse move and must report what is on screen. */
+function pnsSeriesShown(vs,ve){
+  if(!pnsData)return null;
+  if(shouldCalculateDetailedWindow(pnsData,vs,ve)&&derivedWindowCovers(pnsWindowData,vs,ve))return pnsWindowData;
+  return pnsData;
+}
+
 function pnsSeriesForView(vs,ve){
   if(!pnsData)return null;
   if(shouldCalculateDetailedWindow(pnsData,vs,ve)){
@@ -2184,8 +2193,12 @@ function pushM1DerivedPart(parts,label,series,t){
   pushDerivedPart(parts,label,series,t,'s/m');
 }
 function appendDerivedTooltipLines(lines,ct){
-  if(pnsData&&chVis[7]){
-    var p=[];pushDerivedPart(p,'X',pnsData.x,ct,'%');pushDerivedPart(p,'Y',pnsData.y,ct,'%');pushDerivedPart(p,'Z',pnsData.z,ct,'%');pushDerivedPart(p,'Norm',pnsData.n,ct,'%');
+  // The series the plot is showing, not the full-sequence one behind it; and a
+  // coarse bucket spans many TRs, so it is reported as the band the plot draws
+  // rather than a point interpolated across it.
+  var activePns=pnsSeriesShown(ox,ox+visibleDuration());
+  if(activePns&&chVis[7]){
+    var p=[];pushPnsDerivedPart(p,'X',activePns.x,ct);pushPnsDerivedPart(p,'Y',activePns.y,ct);pushPnsDerivedPart(p,'Z',activePns.z,ct);pushPnsDerivedPart(p,'Norm',activePns.n,ct);
     if(p.length)lines.push('PNS: '+p.join('  '));
   }
   var activeM1=m1SeriesForView(ox,ox+visibleDuration());
@@ -2197,14 +2210,17 @@ function appendDerivedTooltipLines(lines,ct){
 function placeTooltip(cx,cy){
   var pad=8;tt.style.left='0px';tt.style.top='0px';
   var r=tt.getBoundingClientRect(),vw=window.innerWidth,vh=window.innerHeight;
-  var left=Math.min(Math.max(pad,cx+15),Math.max(pad,vw-r.width-pad));
-  var top=cy+12;if(top+r.height+pad>vh)top=cy-r.height-12;if(top<pad)top=pad;
-  /* `left`/`top` are client coordinates, but #tt is absolutely positioned
-     inside #cc, so its style offsets are measured from #cc's box.  Writing
-     client coordinates straight out put the tooltip #cc's own offset too low
-     and made the bottom flip fire that far past the real bottom of the
-     window. */
-  var host=tt.offsetParent?tt.offsetParent.getBoundingClientRect():{left:0,top:0};
+  /* #tt is absolutely positioned inside #cc, which hides its overflow, so the
+     usable area is the plot box and not the window: with the analysis panel
+     open the window extends well past #cc, and a readout clamped to the window
+     edge is cut off where the panel begins. Its style offsets are measured
+     from #cc's box too, which is why they are written relative to it. */
+  var host=tt.offsetParent?tt.offsetParent.getBoundingClientRect()
+    :{left:0,top:0,right:vw,bottom:vh};
+  var minX=Math.max(pad,host.left+pad),maxX=Math.min(vw,host.right)-pad-r.width;
+  var minY=Math.max(pad,host.top+pad),maxY=Math.min(vh,host.bottom)-pad-r.height;
+  var left=Math.min(Math.max(minX,cx+15),Math.max(minX,maxX));
+  var top=cy+12;if(top>maxY)top=cy-r.height-12;if(top<minY)top=minY;
   tt.style.left=(left-host.left)+'px';tt.style.top=(top-host.top)+'px';
 }
 function fmtFlipAngle(value){
@@ -2986,6 +3002,17 @@ if(location.search.indexOf("debug=1")>=0){
     m1TooltipLineAt:function(timeSec){
       var lines=[];appendDerivedTooltipLines(lines,timeSec);
       for(var i=0;i<lines.length;i++)if(lines[i].indexOf('M1:')===0)return lines[i];
+      return null;
+    },
+    firstPnsRangeTime:function(){
+      if(!pnsData||!pnsData.n||pnsData.n.kind!=='envelope')return null;
+      var base=pnsData.n.levels&&pnsData.n.levels[0];if(!base)return null;
+      for(var i=0;i<base.count;i++)if(base.min[i]!==base.max[i])return 0.5*(base.t0[i]+base.t1[i]);
+      return null;
+    },
+    pnsTooltipLineAt:function(timeSec){
+      var lines=[];appendDerivedTooltipLines(lines,timeSec);
+      for(var i=0;i<lines.length;i++)if(lines[i].indexOf('PNS:')===0)return lines[i];
       return null;
     },
     rfEvents:function(){var out=[];for(var i=0;i<BL.length;i++)if(BL[i].rf)out.push({start:BL[i].rf.s,end:BL[i].rf.s+BL[i].rf.d,points:Math.min(BL[i].rf.t?BL[i].rf.t.length:0,BL[i].rf.m?BL[i].rf.m.length:0),blockPulse:!!BL[i].rf.bp,carrierAreaDeg:BL[i].rf.a0,responseBands:BL[i].rf.rb});return out;},
