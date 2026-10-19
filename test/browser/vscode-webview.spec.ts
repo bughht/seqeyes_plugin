@@ -765,3 +765,57 @@ test.describe('minimap block cache', () => {
     expect(failures).toEqual([]);
   });
 });
+
+/**
+ * Measurement markers through the bundle's own renderer, which is the one
+ * VS Code runs (the standalone page installs its copy over it): right-click
+ * keeps VS Code's menu away and offers a marker; adding one fills the table.
+ */
+test('adds a measurement marker from the right-click menu', async ({ page }) => {
+  const failures: string[] = [];
+  page.on('pageerror', e => failures.push(e.message));
+  page.on('console', m => { if (m.type() === 'error') failures.push(m.text()); });
+  const { seq } = loadSequence();
+  const packed = packSequenceBlocks(seq);
+  await openWebview(page);
+  await post(page, {
+    type: 'sequenceData',
+    sequenceGeneration: 1,
+    blocks: packed.blocks,
+    sampleCount: packed.sampleCount,
+    totalDuration: getTotalDuration(seq),
+    gradRaster: seq.rasterTimes.gradientRaster,
+    rfRaster: seq.rasterTimes.rfRaster,
+    adcRaster: seq.rasterTimes.adcRaster,
+    blockRaster: seq.rasterTimes.blockDurationRaster,
+    timing: detectSequenceTiming(seq),
+    notices: [],
+  }, { sampleTimes: b64(packed.sampleTimes), sampleValues: b64(packed.sampleValues) });
+
+  const cc = (await page.locator('#cc').boundingBox())!;
+  const prevented = page.evaluate(() => new Promise<boolean>(done => {
+    window.addEventListener('contextmenu', e => done(e.defaultPrevented), { once: true });
+  }));
+  await page.mouse.click(cc.x + cc.width * 0.5, cc.y + cc.height * 0.4, { button: 'right' });
+  expect(await prevented).toBe(true);
+  const items = page.locator('#markerMenu .mk-item');
+  await expect(items.first()).toContainText('Add marker');
+  await items.first().click();
+
+  await expect(page.locator('#mkTable tbody tr')).toHaveCount(1);
+  await expect(page.locator('#mkTable tbody tr td').first()).toHaveText('M1');
+  const markers = await page.evaluate(() =>
+    (window as unknown as { SeqEyesDev: { markers(): { t: number }[] } }).SeqEyesDev.markers());
+  expect(markers).toHaveLength(1);
+  expect(markers[0].t).toBeGreaterThan(0);
+
+  // A new sequence clears them.
+  await post(page, {
+    type: 'sequenceData', sequenceGeneration: 2, blocks: packed.blocks, sampleCount: packed.sampleCount,
+    totalDuration: getTotalDuration(seq), gradRaster: seq.rasterTimes.gradientRaster,
+    rfRaster: seq.rasterTimes.rfRaster, adcRaster: seq.rasterTimes.adcRaster,
+    blockRaster: seq.rasterTimes.blockDurationRaster, timing: detectSequenceTiming(seq), notices: [],
+  }, { sampleTimes: b64(packed.sampleTimes), sampleValues: b64(packed.sampleValues) });
+  await expect(page.locator('#mkTable')).toBeHidden();
+  expect(failures).toEqual([]);
+});

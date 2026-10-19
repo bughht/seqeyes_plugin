@@ -353,7 +353,7 @@ function applySerializedKspace(payload){
    much as the message: the progress overlay reaches "Ready" either way, so
    leaving stale blocks on screen would read as a successful load. */
 function showSequenceLoadFailure(message){
-  BL=[];waveformOverview=null;blockPos=[];mmCache=null;resetWaveformDetail();
+  BL=[];waveformOverview=null;blockPos=[];mmCache=null;resetWaveformDetail();SeqEyesMarkers.reset();
   labelInfo={names:[],kinds:[]};labelTable=null;labelBusy=false;chVis[11]=false;SeqEyesLabels.closeControls(false);buildLegend();
   setViewerNotice('sequence',message);
   setExportButtonEnabled(false);
@@ -382,7 +382,7 @@ window.addEventListener('message',function(e){
     return;
   }
   if(m.type==='sequenceData'){
-    resetWaveformDetail(m.sequenceGeneration);
+    resetWaveformDetail(m.sequenceGeneration);SeqEyesMarkers.reset();
     try{
       BL=unpackSequenceBlocks(m.blocks,m.sampleTimes,m.sampleValues,m.sampleCount||0);
     }catch(err){
@@ -1115,9 +1115,9 @@ window.SeqEyesPanelHost={
     message.endSec=endSec;
     vscApi.postMessage(message);
   },
-  /* Simulation: only inside VS Code, where the extension answers these. The
-     Python viewer runs this bundle too, with no host to ask, so it keeps the
-     Simulation button hidden. */
+  /* Simulation: only inside VS Code, where the extension answers these. Any
+     page that loads this bundle without a VS Code host keeps the Simulation
+     button hidden. (The Python viewer has its own renderer and does not.) */
   createSimulationWorker:vscApi?createSimulationWorkerStandIn:undefined,
   getSequenceSource:vscApi?simulationSequenceSource:undefined,
   getSequenceSourceStatus:vscApi?simulationSequenceStatus:undefined,

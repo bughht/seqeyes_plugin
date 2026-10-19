@@ -832,7 +832,7 @@ function loadSequenceSource(sourceBytes,fileName,parseSource){
 
     showProgress('decode',15,'Preparing blocks in bounded batches...');
     var packed=Pulseq.packSequenceBlocks(seq);
-    resetWaveformDetail();
+    resetWaveformDetail();SeqEyesMarkers.reset();
     BL=unpackSequenceBlocks(packed.blocks,packed.sampleTimes,packed.sampleValues,packed.sampleCount);
     decodedBlocks=null;
     decodeContext=Pulseq.createSequenceDecodeContext(seq);
@@ -1573,6 +1573,7 @@ function drawCursorOverlay(){
   var dpr=window.devicePixelRatio||1,w=moc.width/dpr,h=moc.height/dpr;
   moctx.clearRect(0,0,w,h);
   drawPanelMarker(w,h);
+  if(typeof SeqEyesMarkers!=='undefined')SeqEyesMarkers.drawOverlay(moctx,w,h);
   if(!cursorActive)return;var cx=t2x(cursorT);
   if(cx<M.l||cx>w-M.r)return;
   var color=getComputedStyle(document.body).getPropertyValue('--cr').trim();
@@ -3013,6 +3014,14 @@ function selectPanelWindowBlocks(startSec,endSec){
 
 SeqEyesPanel.install(window.SeqEyesPanelHost);
 SeqEyesPrefsUi.install();
+/* Over the bundle's install: markers must read this page's BL and view, not
+   the bundle's empty copies. */
+SeqEyesMarkers.install({
+  blocks:function(){return BL;},duration:function(){return TD;},margins:function(){return M;},
+  t2x:t2x,x2t:x2t,visChannels:visChannels,cH:cH,cy:cy,channelRange:channelRange,
+  timeConv:timeConv,timeUnitStr:timeUnitStr,gradConv:gradConv,gradUnitStr:gradUnitStr,
+  requestOverlay:drawCursorOverlay
+});
 
 /* Re-apply the ASC profile cached from an earlier session.  Only the display
    side runs here: there is no sequence open yet, so PNS waits for

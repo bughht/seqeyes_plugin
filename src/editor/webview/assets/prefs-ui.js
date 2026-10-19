@@ -77,7 +77,8 @@ var SeqEyesPrefsUi = (function () {
     var note = element('div', 'prefs-note');
     note.appendChild(element('div', null,
       'Theme, time and gradient units, the Blocks toggle, k-space and '
-      + 'spectrogram options, and panel sizes are kept between sessions.'));
+      + 'spectrogram options, marker snapping, and panel sizes are kept '
+      + 'between sessions.'));
     note.appendChild(element('div', null, inVsCode()
       /* Different sentences because the two hosts really do keep different
          things: a path the extension re-reads, versus the file's text. */

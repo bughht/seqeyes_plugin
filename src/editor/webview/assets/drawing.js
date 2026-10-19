@@ -26,6 +26,7 @@ function drawCursorOverlay(){
   var dpr=window.devicePixelRatio||1,w=moc.width/dpr,h=moc.height/dpr;
   moctx.clearRect(0,0,w,h);
   drawPanelMarker(w,h);
+  if(typeof SeqEyesMarkers!=='undefined')SeqEyesMarkers.drawOverlay(moctx,w,h);
   if(!cursorActive)return;var cx=t2x(cursorT);
   if(cx<M.l||cx>w-M.r)return;
   var color=getComputedStyle(document.body).getPropertyValue('--cr').trim();
