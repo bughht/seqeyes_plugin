@@ -1,18 +1,22 @@
-name: Preview simulation branch on GitHub Pages
+name: Preview feature branches on GitHub Pages
 
 # GitHub Pages serves one site per repository, and a deployment replaces all
 # of it. This workflow therefore deploys the production site built from main
-# at the root, unchanged for visitors, and this branch's build under
-# /preview/simulation/, so the branch can be checked on github.io before it is
-# merged. A deployment from main (deploy-pages.yml) removes the preview again;
-# re-run this workflow from the Actions tab to restore it.
+# at the root, unchanged for visitors, and every branch in PREVIEW_BRANCHES
+# under /preview/<branch without "feature/">/, so a branch can be checked on
+# github.io before it is merged. Each run rebuilds all of them, so one
+# branch's preview does not wipe another's.
 #
-# Requires feature/simulation in the github-pages environment's deployment
-# branch policy (Settings → Environments → github-pages).
+# A deployment from main (deploy-pages.yml) removes the previews again; re-run
+# this workflow from the Actions tab, on any listed branch, to restore them.
+#
+# Every listed branch needs an entry in the github-pages environment's
+# deployment branch policy (Settings → Environments → github-pages), and its
+# own copy of this file must list it under on.push.branches.
 
 on:
   push:
-    branches: ['feature/simulation']
+    branches: ['feature/measurement-markers']
   workflow_dispatch:
 
 permissions:
@@ -24,51 +28,90 @@ concurrency:
   group: "pages"
   cancel-in-progress: false
 
+env:
+  # Space-separated. The branch that triggers a run must be one of them.
+  PREVIEW_BRANCHES: feature/measurement-markers
+
 jobs:
   build-and-deploy:
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}preview/simulation/
+      url: ${{ steps.deployment.outputs.page_url }}preview/${{ steps.assemble.outputs.slug }}/
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout main (production root)
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          path: main
-
-      - name: Checkout this branch (preview)
-        uses: actions/checkout@v4
-        with:
-          path: branch
+      - name: Only listed branches deploy
+        run: |
+          case " $PREVIEW_BRANCHES " in
+            *" $GITHUB_REF_NAME "*) ;;
+            *) echo "::error::$GITHUB_REF_NAME is not in PREVIEW_BRANCHES ($PREVIEW_BRANCHES)"; exit 1 ;;
+          esac
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '24'
 
-      - name: Build the production site exactly as deploy-pages.yml does
+      - name: Checkout main (production root)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main
+
+      # deploy-pages.yml validates main on every push; here it is only rebuilt.
+      - name: Build the production site
         working-directory: main
         run: |
           npm ci
-          npm run check
+          npm run build:web
 
-      - name: Validate and build the branch site
+      - name: Checkout this branch
+        uses: actions/checkout@v4
+        with:
+          path: branch
+
+      - name: Validate and build this branch
         working-directory: branch
         run: |
           npm ci
           npm run check
 
-      - name: Assemble the site
+      # Their own pushes validate them; here they are only rebuilt.
+      - name: Build the other preview branches
         run: |
-          mkdir -p _site/preview/simulation
-          cp -R main/web/. _site/
-          cp -R branch/web/. _site/preview/simulation/
-          {
-            echo "branch: ${GITHUB_REF_NAME}"
-            echo "commit: ${GITHUB_SHA}"
+          for b in $PREVIEW_BRANCHES; do
+            [ "$b" = "$GITHUB_REF_NAME" ] && continue
+            s="${b#feature/}"; s="${s//\//-}"
+            if ! git -C branch fetch --no-tags --depth 1 origin "refs/heads/$b"; then
+              echo "::warning::$b could not be fetched; its preview is left out"
+              continue
+            fi
+            git -C branch worktree add --detach "$PWD/previews/$s" FETCH_HEAD
+            (cd "previews/$s" && npm ci && npm run build:web)
+          done
+
+      - name: Assemble the site
+        id: assemble
+        run: |
+          stamp() {
+            echo "branch: $1"
+            echo "commit: $2"
             echo "built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          } > _site/preview/simulation/preview.txt
+          }
+          mkdir -p _site
+          cp -R main/web/. _site/
+          s="${GITHUB_REF_NAME#feature/}"; s="${s//\//-}"
+          echo "slug=$s" >> "$GITHUB_OUTPUT"
+          mkdir -p "_site/preview/$s"
+          cp -R branch/web/. "_site/preview/$s/"
+          stamp "$GITHUB_REF_NAME" "$GITHUB_SHA" > "_site/preview/$s/preview.txt"
+          for d in previews/*/; do
+            [ -d "$d" ] || continue
+            o=$(basename "$d")
+            mkdir -p "_site/preview/$o"
+            cp -R "$d/web/." "_site/preview/$o/"
+            stamp "$o" "$(git -C "$d" rev-parse HEAD)" > "_site/preview/$o/preview.txt"
+          done
+          find _site/preview -maxdepth 2 -name preview.txt -exec sh -c 'echo "== $1"; cat "$1"' _ {} \;
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
