@@ -110,7 +110,8 @@ function estimateRfDuration(rf: RFEntry, seq: PulseqSequence): number {
     const raster = seq.rasterTimes.rfRaster;
     const timeShape = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId)?.samples : undefined;
     if (timeShape && timeShape.length > 0) {
-        return timeShape[timeShape.length - 1] * raster + raster;
+        // Time-shape samples are breakpoints: the pulse ends at the last one.
+        return timeShape[timeShape.length - 1] * raster;
     }
     return magShape.numSamples * raster;
 }

@@ -1,2 +1,5 @@
 # Preserve official upstream Pulseq fixtures byte-for-byte, including their spacing.
 test/pulseq/binary/*.seq -whitespace
+# Byte-exact outputs of the ISMRMRD writers (test/sim/io/ismrmrd.test.ts).
+test/fixtures/ismrmrd/*.h5 binary
+test/fixtures/ismrmrd/*.stream binary

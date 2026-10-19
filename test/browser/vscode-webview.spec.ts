@@ -30,6 +30,7 @@ import { parseSequenceBytes } from '../../src/pulseq/sequenceReader';
 import { detectSequenceTiming } from '../../src/pulseq/trdetect';
 
 const FIXTURE = resolve('test/seq/spiral_inout.seq');
+const SIM_FIXTURE = resolve('test/kspace_baselines/v151_gre/seq/writeGradientEcho.seq');
 const OUT = resolve('out/editor/webview/assets');
 
 const b64 = (buffer: ArrayBuffer): string => Buffer.from(new Uint8Array(buffer)).toString('base64');
@@ -334,6 +335,104 @@ test('asks for label values on first use and draws only the current sequence\'s 
   await expect.poll(async () => (await canvasShot(page)).equals(before) === false, { timeout: 5_000 }).toBe(true);
   expect(failures).toEqual([]);
 });
+
+/**
+ * The Simulation panel inside VS Code: the worker script and the sequence's own
+ * bytes are asked for on first use, the simulation runs in a worker started
+ * from a Blob URL, and an export goes back to the extension to be saved.
+ */
+test('runs the Simulation panel over the extension message contract', async ({ page }) => {
+  test.setTimeout(120_000);
+  const failures: string[] = [];
+  page.on('pageerror', e => failures.push(e.message));
+  page.on('console', m => { if (m.type() === 'error') failures.push(m.text()); });
+
+  const name = 'writeGradientEcho.seq';
+  const fileBytes = new Uint8Array(readFileSync(SIM_FIXTURE));
+  const seq = parseSequenceBytes(fileBytes, name);
+  const packed = packSequenceBlocks(seq);
+  const sequenceData = (generation: number) => post(page, {
+    type: 'sequenceData',
+    sequenceGeneration: generation,
+    labels: listSequenceLabels(seq),
+    blocks: packed.blocks,
+    sampleCount: packed.sampleCount,
+    totalDuration: getTotalDuration(seq),
+    gradRaster: seq.rasterTimes.gradientRaster,
+    rfRaster: seq.rasterTimes.rfRaster,
+    adcRaster: seq.rasterTimes.adcRaster,
+    blockRaster: seq.rasterTimes.blockDurationRaster,
+    timing: detectSequenceTiming(seq),
+    notices: [],
+  }, { sampleTimes: b64(packed.sampleTimes), sampleValues: b64(packed.sampleValues) });
+  const sequenceSource = (generation: number) => postExtensionMessage(page, {
+    type: 'sequenceSource',
+    sequenceGeneration: generation,
+    name,
+    bytes: fileBytes.slice().buffer,
+  });
+  const commands = async (command: string) => (await posted(page)).filter(m => m.command === command);
+
+  await openWebview(page);
+  await sequenceData(1);
+  // Nothing is fetched until the panel is used.
+  await expect(page.locator('#simBtn')).toBeVisible();
+  expect(await commands('requestSimulationWorker')).toEqual([]);
+  expect(await commands('requestSequenceSource')).toEqual([]);
+
+  await page.locator('#simBtn').click();
+  await expect(page.locator('#simpane')).toBeVisible();
+  await expect.poll(async () => (await commands('requestSimulationWorker')).length).toBe(1);
+  await expect.poll(async () => (await commands('requestSequenceSource')).length).toBe(1);
+  expect((await commands('requestSequenceSource'))[0].sequenceGeneration).toBe(1);
+
+  // The worker script arrives once, however many workers are waiting for it.
+  await post(page, { type: 'simulationWorker', source: readFileSync(resolve(OUT, 'sim-worker.js'), 'utf8') });
+  // A reply for a sequence the viewer has since replaced is dropped.
+  await sequenceSource(0);
+  expect((await simulationState(page)).pulses.status).toBe('idle');
+  await sequenceSource(1);
+  await expect.poll(async () => (await simulationState(page)).pulses.status).toBe('ready');
+  await expect.poll(async () => (await simulationState(page)).phantom.status).toBe('ready');
+
+  await page.locator('#simMatrix').selectOption('32');
+  await expect.poll(async () => (await simulationState(page)).phantom.nx).toBe(32);
+  await page.locator('#simSpins').selectOption('1x1');
+  await page.locator('#simRun').click();
+  await expect.poll(async () => (await simulationState(page)).done, { timeout: 90_000 }).toBe(true);
+  const state = await simulationState(page);
+  expect(state.tab).toBe('image');
+  expect((await commands('requestSimulationWorker')).length).toBe(1);
+
+  // Exports cannot download from a webview; the extension saves them.
+  await page.locator('#simExport').selectOption('ismrmrd-h5');
+  await expect.poll(async () => (await commands('saveSimulationFile')).length, { timeout: 20_000 }).toBe(1);
+  const saved = await page.evaluate(() => {
+    const message = (window as unknown as { __posted: { command: string; name: string; mime: string; bytes: ArrayBuffer }[] })
+      .__posted.find(m => m.command === 'saveSimulationFile')!;
+    return { name: message.name, mime: message.mime, size: message.bytes.byteLength, head: Array.from(new Uint8Array(message.bytes, 0, 8)) };
+  });
+  expect(saved.name).toBe('writeGradientEcho_sim.h5');
+  expect(saved.mime).toBe('application/x-hdf5');
+  expect(saved.size).toBeGreaterThan(1000);
+  expect(saved.head).toEqual([0x89, 0x48, 0x44, 0x46, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+  // A new sequence clears the result, and its bytes are asked for afresh.
+  await sequenceData(2);
+  await expect.poll(async () => (await commands('requestSequenceSource')).length).toBe(2);
+  expect((await commands('requestSequenceSource'))[1].sequenceGeneration).toBe(2);
+  expect((await simulationState(page)).done).toBe(false);
+  expect(failures).toEqual([]);
+});
+
+async function simulationState(page: Page): Promise<{
+  done: boolean; tab: string;
+  phantom: { status: string; nx: number };
+  pulses: { status: string };
+}> {
+  return await page.evaluate(() => (window as unknown as { SeqEyesDev: { simulationState(): unknown } })
+    .SeqEyesDev.simulationState()) as never;
+}
 
 /** Post a label reply the way VS Code does, rebuilding its buffers in-page. */
 async function postLabels(page: Page, sequenceGeneration: number, payload: SerializedLabelTable) {

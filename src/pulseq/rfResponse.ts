@@ -1,5 +1,6 @@
 import { fftInPlace, nextPowerOfTwo } from './fft';
 import type { PulseqSequence, RFEntry, RFResponseAnalysis, RFResponseBand } from './types';
+import { forEachRasterCell, rasterCellCount, rasterCellsFromShapes, rfShapeArrays } from './rfWaveform';
 
 /** Hard ceiling for automatic RF spectral analysis and its scratch buffers. */
 export const MAX_RF_RESPONSE_FFT_POINTS = 131_072;
@@ -86,81 +87,54 @@ export function analyzeRfResponse(
 
 /** Carrier-frame complex RF-area equivalent, retained as diagnostic metadata. */
 export function estimateRfCarrierAreaDeg(rf: RFEntry, seq: PulseqSequence): number {
-    const magnitude = seq.shapes.get(rf.magShapeId);
-    if (!magnitude || magnitude.numSamples < 1) return 0;
-    const phase = seq.shapes.get(rf.phaseShapeId);
-    const time = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId) : undefined;
-    const count = rfSampleCount(rf, seq);
-    const raster = seq.rasterTimes.rfRaster;
+    const shapes = rfShapeArrays(rf, seq);
+    if (!shapes) return 0;
     let realArea = 0;
     let imaginaryArea = 0;
-    for (let index = 0; index < count; index++) {
-        const sampleTime = time ? time.samples[index] * raster : (index + 0.5) * raster;
-        const nextTime = time && index + 1 < count
-            ? time.samples[index + 1] * raster
-            : sampleTime + raster;
-        const width = nextTime - sampleTime;
-        const amplitude = rf.amplitude * magnitude.samples[index];
-        const phaseRad = TAU * (phase?.samples[index] ?? 0);
-        if (!Number.isFinite(width) || width <= 0
-            || !Number.isFinite(amplitude) || !Number.isFinite(phaseRad)) continue;
+    forEachRasterCell(shapes, (_start, width, magnitude, phaseCycles) => {
+        const amplitude = rf.amplitude * magnitude;
+        const phaseRad = TAU * phaseCycles;
+        if (!Number.isFinite(amplitude) || !Number.isFinite(phaseRad)) return;
         realArea += amplitude * Math.cos(phaseRad) * width;
         imaginaryArea += amplitude * Math.sin(phaseRad) * width;
-    }
+    });
     return DEG_PER_CYCLE * Math.hypot(realArea, imaginaryArea);
 }
 
 function rfSampleCount(rf: RFEntry, seq: PulseqSequence): number {
-    const magnitude = seq.shapes.get(rf.magShapeId);
-    if (!magnitude) return 0;
-    const phase = seq.shapes.get(rf.phaseShapeId);
-    const time = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId) : undefined;
-    return Math.min(
-        magnitude.numSamples,
-        phase?.numSamples ?? magnitude.numSamples,
-        time?.numSamples ?? magnitude.numSamples,
-    );
+    const shapes = rfShapeArrays(rf, seq);
+    return shapes ? rasterCellCount(shapes) : 0;
 }
 
+/**
+ * Complex RF samples as raster cells (see rfWaveform.ts): uniform pulses keep
+ * their samples, time-shaped pulses are resampled from their breakpoints. Each
+ * sample is evaluated at its cell centre.
+ */
 function buildComplexRfSamples(rf: RFEntry, seq: PulseqSequence): ComplexRfSamples {
-    const magnitude = seq.shapes.get(rf.magShapeId);
-    if (!magnitude || magnitude.numSamples < 1) return emptySamples(seq.rasterTimes.rfRaster);
-
-    const phase = seq.shapes.get(rf.phaseShapeId);
-    const time = rf.timeShapeId > 0 ? seq.shapes.get(rf.timeShapeId) : undefined;
-    const count = Math.min(
-        magnitude.numSamples,
-        phase?.numSamples ?? magnitude.numSamples,
-        time?.numSamples ?? magnitude.numSamples,
-    );
-    if (count < 1) return emptySamples(seq.rasterTimes.rfRaster);
-
     const raster = seq.rasterTimes.rfRaster;
-    const real = new Float64Array(count);
-    const imaginary = new Float64Array(count);
-    const times = new Float64Array(count);
-    const widths = new Float64Array(count);
-    let uniform = !time;
+    const shapes = rfShapeArrays(rf, seq);
+    if (!shapes) return emptySamples(raster);
+    const cells = rasterCellsFromShapes(shapes);
+    if (cells.count < 1) return emptySamples(raster);
 
-    for (let index = 0; index < count; index++) {
-        const sampleTime = time ? time.samples[index] * raster : (index + 0.5) * raster;
-        const nextTime = time && index + 1 < count
-            ? time.samples[index + 1] * raster
-            : sampleTime + raster;
-        const width = nextTime - sampleTime;
-        const amplitude = rf.amplitude * magnitude.samples[index];
-        const phaseRad = TAU * (phase?.samples[index] ?? 0);
-        times[index] = Number.isFinite(sampleTime) ? sampleTime : 0;
+    const real = new Float64Array(cells.count);
+    const imaginary = new Float64Array(cells.count);
+    const times = new Float64Array(cells.count);
+    const widths = new Float64Array(cells.count);
+    let uniform = true;
+    for (let index = 0; index < cells.count; index++) {
+        const amplitude = rf.amplitude * cells.magnitude[index];
+        const phaseRad = TAU * cells.phaseCycles[index];
+        const width = cells.width[index];
+        times[index] = cells.start[index] + 0.5 * width;
         widths[index] = Number.isFinite(width) && width > 0 ? width : 0;
-        real[index] = Number.isFinite(amplitude) && Number.isFinite(phaseRad)
-            ? amplitude * Math.cos(phaseRad)
-            : 0;
-        imaginary[index] = Number.isFinite(amplitude) && Number.isFinite(phaseRad)
-            ? amplitude * Math.sin(phaseRad)
-            : 0;
+        const finite = Number.isFinite(amplitude) && Number.isFinite(phaseRad);
+        real[index] = finite ? amplitude * Math.cos(phaseRad) : 0;
+        imaginary[index] = finite ? amplitude * Math.sin(phaseRad) : 0;
         if (Math.abs(widths[index] - raster) > Math.max(1e-12, raster * 1e-6)) uniform = false;
     }
-    return { real, imaginary, times, widths, uniform, dwell: raster };
+    return { real, imaginary, times, widths, uniform, dwell: uniform ? raster : widths[0] };
 }
 
 function emptySamples(raster: number): ComplexRfSamples {

@@ -19,6 +19,9 @@ import type {
 import { ExtType, VER_PRE_14 } from './types';
 import { classifyRfUses } from './rfClassification';
 import { analyzeRfResponse } from './rfResponse';
+import { detectPtxTimeShapeChannels } from './rfWaveform';
+
+export { detectPtxTimeShapeChannels };
 
 // ─── Constants ───────────────────────────────────────────────────────────
 
@@ -67,7 +70,19 @@ export interface SequenceDecodeContext {
     readonly rfResponseCache: Map<number, ReturnType<typeof analyzeRfResponse>>;
     readonly triggerCache: Map<number, DecodedTriggerEvent>;
     readonly ncoCache: Map<number, DecodedNCOEvent>;
+    /**
+     * Leave RF events' spectral band analysis out (DecodedRFWaveform.response
+     * is then UNANALYZED_RF_RESPONSE): for callers that only need the
+     * waveforms, such as the simulator, where sequences with an RF library
+     * entry per event would analyse every one.
+     */
+    readonly skipRfResponse?: boolean;
 }
+
+/** The response of an RF event decoded without spectral analysis. */
+export const UNANALYZED_RF_RESPONSE: ReturnType<typeof analyzeRfResponse> = Object.freeze({
+    carrierAreaDeg: NaN, bands: [], spectrumAnalyzed: false, limited: true,
+}) as ReturnType<typeof analyzeRfResponse>;
 
 /** Build reusable timing and RF metadata for indexed block-range decoding. */
 export function createSequenceDecodeContext(seq: PulseqSequence): SequenceDecodeContext {
@@ -128,7 +143,7 @@ export function decodeBlockRange(
                 const use = context.classifiedRfUses[i];
                 let response = context.rfResponseCache.get(rf.id);
                 if (!response) {
-                    response = analyzeRfResponse(rf, seq, use);
+                    response = context.skipRfResponse ? UNANALYZED_RF_RESPONSE : analyzeRfResponse(rf, seq, use);
                     context.rfResponseCache.set(rf.id, response);
                 }
                 db.rf = decodeRF(seq, rf, cumulative, dur, use, response);
@@ -235,14 +250,18 @@ function decodeRF(
         phase[i] = 2 * Math.PI * ph[i] + phaseFull + 2 * Math.PI * freqFull * dt;
     }
 
-    const duration = n > 0 ? t[n - 1] - rfStart + raster : 0;
+    // Uniform samples are held for one raster each, so the pulse lasts n·raster;
+    // time-shape samples are breakpoints, so it ends at the last one.
+    const duration = n > 0 ? (timeShape ? t[n - 1] - rfStart : n * raster) : 0;
     const centerTime = rf.center >= 0
         ? blockStart + rfDelay + rf.center * 1e-6
         : estimateRfPeakTime(t, amp, rfStart, duration);
 
     const use = classifiedUse || 'u';
+    const ptxChannels = timeShape ? detectPtxTimeShapeChannels(timeShape) : 0;
 
     return {
+        ...(ptxChannels > 1 ? { ptxChannels } : {}),
         blockIndex: rf.id,
         startTime: rfStart,
         centerTime,
@@ -431,7 +450,7 @@ function decodeADC(adc: ADCEntry, blockStart: number, seq: PulseqSequence): Deco
     const b0 = getB0(seq);
     const freqFull = effFreqOff(adc.freqOffset, adc.freqPPM, b0);
     const phaseFull = effPhaseOff(adc.phaseOffset, adc.phasePPM, b0);
-    return {
+    const decoded: DecodedADCEvent = {
         blockIndex: adc.id, startTime: blockStart,
         numSamples: adc.numSamples,
         dwell: adc.dwell * 1e-9,     // ns → s
@@ -439,6 +458,11 @@ function decodeADC(adc: ADCEntry, blockStart: number, seq: PulseqSequence): Deco
         freqOffset: freqFull,
         phaseOffset: phaseFull,
     };
+    // The modulation shape is shared, not copied: one ADC library entry is
+    // typically reused by thousands of blocks.
+    const modulation = adc.phaseModShapeId > 0 ? seq.shapes.get(adc.phaseModShapeId) : undefined;
+    if (modulation) decoded.phaseModulation = modulation.samples;
+    return decoded;
 }
 
 function decodeExtensions(
@@ -459,6 +483,7 @@ function decodeExtensions(
                     cached = {
                         blockIndex: trigger.id,
                         startTime: 0,
+                        triggerType: trigger.triggerType,
                         channel: trigger.channel,
                         delay: trigger.delay * 1e-6,
                         duration: trigger.duration * 1e-6,
@@ -525,6 +550,7 @@ function decodeExtensions(
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
+
 
 function makeConstant(n: number, value: number): Float64Array {
     const a = new Float64Array(Math.max(n, 2));

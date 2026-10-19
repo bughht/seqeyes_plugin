@@ -64,7 +64,9 @@ export interface RFEntry {
     freqOffset: number;        // [Hz]
     phaseOffset: number;       // [rad]
     phaseModShapeId: number;   // additional phase modulation (v1.5+)
-    use: string;               // 'e'|'r'|'i'|'s'|'u'  (v1.5+)
+    /** 'e'xcitation | 'r'efocusing | 'i'nversion | 's'aturation | 'p'reparation |
+     *  'o'ther | 'u'ndefined (v1.5+; older files are always 'u'). */
+    use: string;
 }
 
 /** [GRADIENTS] — arbitrary (shaped) gradient */
@@ -101,6 +103,8 @@ export interface ADCEntry {
     deadTime: number;       // [µs]  (v1.5+)
     discardPre: number;
     discardPost: number;
+    /** Shape id of the per-sample receiver phase modulation (v1.5+; 0 = none).
+     *  Upstream stores these samples in radians, unlike RF phase shapes (cycles). */
     phaseModShapeId: number;
 }
 
@@ -176,12 +180,14 @@ export interface SoftDelaySpec {
     hint: string;      // optional description
 }
 
-/** Per‑channel RF shimming (v1.5+) */
+/** Per‑channel RF shimming (v1.5+). Upstream `makeRfShim` stores the raw complex
+ *  shim vector, so each channel plays `amplitudes[c]·e^{i·phases[c]}` times the
+ *  block's RF waveform; the values are dimensionless, not Hz. */
 export interface RFShimSpec {
     id: number;
     nChannels: number;
-    amplitudes: number[];  // [Hz] per channel
-    phases: number[];      // [rad] per channel
+    amplitudes: number[];  // |w_c| per channel (dimensionless)
+    phases: number[];      // arg(w_c) per channel [rad]
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -205,12 +211,19 @@ export interface DecodedRFWaveform {
     duration: number;           // [s]  pulse length
     timePoints: Float64Array;   // [s]  absolute time per sample
     magnitude: Float64Array;    // [Hz]
-    phase: Float64Array;        // [rad]  wrapped to [-π, π]
+    phase: Float64Array;        // [rad]  unwrapped: shape phase + offset + 2π·f·(t − start)
     amplitude: number;          // [Hz]
     response: RFResponseAnalysis;
     freqOffset: number;         // [Hz]  (effective, incl. PPM)
     phaseOffset: number;        // [rad] (effective, incl. PPM)
-    use: string;                // 'e'=excitation, 'r'=refocusing, 'i'=inversion, 's'=saturation, 'u'=undefined
+    /** 'e'=excitation, 'r'=refocusing, 'i'=inversion, 's'=saturation,
+     *  'p'=preparation, 'o'=other, 'u'=undefined */
+    use: string;
+    /** Channel count when the time shape follows the pTx-Pulseq convention
+     *  (one arbitrary RF event holding every channel's samples back to back,
+     *  each repeating the same time base). The decoded samples are then the
+     *  channels concatenated, so single-channel analyses do not apply. */
+    ptxChannels?: number;
 }
 
 export interface RFResponseBand {
@@ -246,11 +259,16 @@ export interface DecodedADCEvent {
     delay: number;           // [s]
     freqOffset: number;
     phaseOffset: number;
+    /** Per-sample receiver phase modulation [rad] (v1.5+), shared with the shape
+     *  library — read-only. Absent when the ADC has no phase-modulation shape. */
+    phaseModulation?: Float64Array;
 }
 
 export interface DecodedTriggerEvent {
     blockIndex: number;
     startTime: number;
+    /** Pulseq trigger type: 1 = output (osc0/osc1/ext1), 2 = input (physio1/physio2). */
+    triggerType: number;
     channel: number;
     delay: number;           // [s]
     duration: number;        // [s]

@@ -16,7 +16,13 @@
  */
 
 import type { DecodedBlock } from './types';
-import { physicalGradientPiece, type GradientSeries } from './physicalGradients';
+import {
+    buildFrozenGradientSeries,
+    sampleSeries,
+    type FrozenGradientSeries,
+} from './gradientTimeline';
+
+export type { FrozenGradientSeries } from './gradientTimeline';
 
 /** ADC trajectory storage; Float32 for display, Float64 for export. */
 export type AdcSamples = Float64Array | Float32Array;
@@ -87,7 +93,6 @@ export interface KSpaceOptions {
 }
 
 const TRAJECTORY_TIME_ACCURACY_SEC = 1e-10;
-const POLYNOMIAL_SUPPORT_EPSILON_SEC = 1e-12;
 
 export function calculateKspace(
     blocks: DecodedBlock[],
@@ -140,7 +145,7 @@ export function calculateKspace(
     // Match Pulseq's waveform assembly before integrating. In particular, keep
     // the support on either side of event gaps instead of asking one block
     // lookup at one deduplicated timestamp to represent both sides.
-    const gradientSeries = buildGlobalGradientSeries(blocks, GR, totalDuration);
+    const gradientSeries = buildFrozenGradientSeries(blocks, GR, totalDuration);
 
     // ---- Pass 2: build non-uniform time grid (memory‑safe: sort+dedup array) ----
     // Use a sorted-array dedup instead of Set to avoid V8's ~16.7M Set size limit.
@@ -428,133 +433,3 @@ function collectSeriesSupport(
     }
     for (const time of series.requiredSupport) push(time);
 }
-
-/**
- * The assembled global series, in exact-size typed arrays.
- *
- * It is built through `number[]` because the pieces arrive one block at a time
- * and their total is not known until the end, but a push-grown array keeps
- * whatever capacity it doubled into: 72.3 M elements cost 789 MB where the
- * doubles need 552 MB. Freezing at the end returns that, and the transient
- * copy is one axis at a time.
- */
-export interface FrozenGradientSeries {
-    times: Float64Array;
-    values: Float64Array;
-    requiredSupport: Float64Array;
-}
-
-function freezeSeries(series: GradientSeries): FrozenGradientSeries {
-    const frozen = {
-        times: Float64Array.from(series.times),
-        values: Float64Array.from(series.values),
-        requiredSupport: Float64Array.from(series.requiredSupport),
-    };
-    series.times.length = 0;
-    series.values.length = 0;
-    series.requiredSupport.length = 0;
-    return frozen;
-}
-
-function buildGlobalGradientSeries(
-    blocks: DecodedBlock[],
-    gradientRaster: number,
-    totalDuration: number,
-): [FrozenGradientSeries, FrozenGradientSeries, FrozenGradientSeries] {
-    const output: [GradientSeries, GradientSeries, GradientSeries] = [
-        { times: [], values: [], requiredSupport: [] },
-        { times: [], values: [], requiredSupport: [] },
-        { times: [], values: [], requiredSupport: [] },
-    ];
-
-    for (const block of blocks) {
-        for (let axis = 0; axis < 3; axis++) {
-            const piece = physicalGradientPiece(block, axis);
-            if (piece.times.length) appendGradientPiece(output[axis], piece, gradientRaster);
-        }
-    }
-
-    for (const series of output) {
-        if (!series.times.length) continue;
-        const first = series.times[0];
-        const last = series.times[series.times.length - 1];
-        if (first > 0) {
-            series.times.unshift(-POLYNOMIAL_SUPPORT_EPSILON_SEC, first - POLYNOMIAL_SUPPORT_EPSILON_SEC);
-            series.values.unshift(0, 0);
-            series.requiredSupport.push(-POLYNOMIAL_SUPPORT_EPSILON_SEC, first - POLYNOMIAL_SUPPORT_EPSILON_SEC);
-        }
-        if (last < totalDuration) {
-            series.times.push(last + POLYNOMIAL_SUPPORT_EPSILON_SEC, totalDuration + POLYNOMIAL_SUPPORT_EPSILON_SEC);
-            series.values.push(0, 0);
-            series.requiredSupport.push(last + POLYNOMIAL_SUPPORT_EPSILON_SEC, totalDuration + POLYNOMIAL_SUPPORT_EPSILON_SEC);
-        }
-    }
-    // One axis at a time, so only one oversized array is duplicated at a time.
-    return [freezeSeries(output[0]), freezeSeries(output[1]), freezeSeries(output[2])];
-}
-
-function appendGradientPiece(
-    target: GradientSeries,
-    piece: GradientSeries,
-    gradientRaster: number,
-): void {
-    if (!piece.times.length) return;
-    target.requiredSupport.push(piece.times[0], piece.times[piece.times.length - 1]);
-    if (!target.times.length) {
-        target.times.push(...piece.times);
-        target.values.push(...piece.values);
-        return;
-    }
-
-    const lastIndex = target.times.length - 1;
-    const previousTime = target.times[lastIndex];
-    const firstTime = piece.times[0];
-    if (previousTime + gradientRaster < firstTime) {
-        if (target.values[lastIndex] !== 0) {
-            if (Math.abs(target.values[lastIndex]) > 1e-6) {
-                target.times.push(previousTime + gradientRaster * 0.5);
-                target.values.push(0);
-                target.requiredSupport.push(previousTime + gradientRaster * 0.5);
-            } else {
-                target.values[lastIndex] = 0;
-            }
-        }
-        if (piece.values[0] !== 0) {
-            if (Math.abs(piece.values[0]) > 1e-6) {
-                target.times.push(firstTime - gradientRaster * 0.5);
-                target.values.push(0);
-                target.requiredSupport.push(firstTime - gradientRaster * 0.5);
-            } else {
-                piece.values[0] = 0;
-            }
-        }
-    }
-
-    let start = 0;
-    const currentLast = target.times[target.times.length - 1];
-    while (start < piece.times.length && piece.times[start] <= currentLast) start++;
-    for (let i = start; i < piece.times.length; i++) {
-        target.times.push(piece.times[i]);
-        target.values.push(piece.values[i]);
-    }
-}
-
-function sampleSeries(
-    series: FrozenGradientSeries,
-    time: number,
-    cursors: number[],
-    axis: number,
-): number {
-    const n = series.times.length;
-    if (!n || time < series.times[0] || time > series.times[n - 1]) return 0;
-    let cursor = Math.min(cursors[axis], n - 2);
-    while (cursor + 1 < n && series.times[cursor + 1] < time) cursor++;
-    cursors[axis] = cursor;
-    if (cursor + 1 >= n) return series.values[n - 1];
-    const t0 = series.times[cursor], t1 = series.times[cursor + 1];
-    const v0 = series.values[cursor], v1 = series.values[cursor + 1];
-    if (time <= t0 || t1 <= t0) return v0;
-    if (time >= t1) return v1;
-    return v0 + (v1 - v0) * (time - t0) / (t1 - t0);
-}
-

@@ -136,6 +136,7 @@ All the same features as the other versions — interactive waveforms, k‑space
 - **Simulated gradient sound**: play the visible window with a playhead that tracks the audio clock (simulated, not calibrated — see the caveat below)
 - **ADC phase curve** on φ axis — continuous $\phi(t) = \phi_0 + 2\pi \cdot f_{offset} \cdot (t - t_0)$
 - **Analysis panel**: one panel, three states — closed, WebGL‑accelerated 3D k‑space scatter (millions of points @ 60 fps) with camera presets, or the gradient spectrogram
+- **Bloch simulation (preview, web app and VS Code)**: simulate the sequence on the built-in, MRzero/BrainWeb or your own phantom, locally in Web Workers, browse raw data, k-space and images in an N-D viewer, export ISMRMRD (`.h5`) or NumPy — see [Simulation](#simulation-preview-web-app-and-vs-code)
 - **Camera presets** (xy / xz / yz) rotate the 3D view; any drag reverts to free 3D
 - **Interactive Canvas**: cursor‑anchored time zoom, per‑row y‑axis zoom, drag‑pan, hover tooltips
 - **6 built‑in themes**: One Light · One Dark · Dracula · Nord · GitHub Light · GitHub Dark (+ system auto)
@@ -205,6 +206,159 @@ interactive budget the viewer asks you to zoom in rather than offering a
 “calculate anyway” override — unlike whole-sequence k-space, zooming always
 solves it. For the same reason the spectrogram stays available on sequences
 where k-space is refused, and the k-space safety dialog offers it as a way out.
+
+## Simulation (preview, web app and VS Code)
+
+The **Simulation** toggle next to the k-space/spectrogram button runs a Bloch
+simulation of the open sequence on a phantom, entirely on your machine (Web
+Workers in the browser or in the VS Code viewer, no server), and shows the raw
+data and a reconstruction.
+
+**Phantoms**
+
+- the built-in tissue Shepp–Logan (PD, T1, T2, T2′ and ADC at 3 T) in the
+  sequence's FOV, in 2-D or as a 3-D volume. The 3-D one is Kak & Roberts'
+  head phantom as Koay et al. (MRM 2007) tabulate it and BART draws it. Its
+  ventricles, lesions and the large ellipsoid above them sit at z = −0.25
+  (the classic 2-D cross-section), with a CSF spot and a lesion near the
+  vertex. The volume
+  spans the sequence's FOV along z for a 3-D sequence and is a cube
+  otherwise;
+- MRzero's example phantoms: the cropped 2-D brain and the BrainWeb-derived
+  3-D subjects. They are downloaded from
+  [MRsources/MRzero-Core](https://github.com/MRsources/MRzero-Core) (AGPL-3.0)
+  only when you pick them, pinned to a commit and checked against SHA-256;
+  SeqEyes does not bundle them;
+- your own files: MRzero `.npz` (`PD_map`, `T1_map`, … as written by
+  `generate_brainweb_phantoms`) and `.mat` (`load_mat` layout), NumPy
+  `.npz`/`.npy` or MATLAB `.mat` (v5–v7) with maps named PD, T1, T2, T2prime,
+  ADC, B0, B1, or NIfTI maps (`name_T1.nii.gz`, …). 3-D phantoms get a plane
+  and slice selector; B0/B1 come from the file, MRzero-style synthetic maps,
+  or ideal fields; synthetic receive coils give multi-coil data.
+
+**RF pulses and the slab.** Every RF pulse goes through the same Bloch
+stepping, raster cell by raster cell, with the gradients playing at the time,
+its frequency and phase, and each spin's off-resonance and B1. Excitation,
+refocusing, adiabatic inversion, VERSE, multiband, spectral-spatial and fat
+saturation pulses need no special treatment. **Slices: auto** (the default)
+also places spins along z wherever the sequence's pulses act. Each pulse's
+response is measured first, and sub-slices go across its slab, or its bands
+for a multiband pulse, at a spacing set by the pulse's k-space extent. A
+one-voxel probe checks that spacing against a finer one. Slice profiles,
+transition bands, refocusing slabs narrower than the excitation, and missing
+slice rephasers then show in the signal as on a scanner. A 2-D phantom is
+extruded through the slab; a 3-D phantom brings the planes its slabs reach.
+**Slices: z = 0** keeps every spin in one plane, which is faster. The **RF
+pulses** tab shows each pulse's measured tip angle, |Mxy|, Mz, Mx and My
+across z, or against off-resonance for pulses without a z gradient, as soon
+as a sequence is open.
+
+**Engine.** **Isochromats** (the default and the reference) simulate spins in
+every voxel. **Phase graph** simulates configuration states per tissue class
+instead: an extended phase graph with the same exact RF, sub-slices and B0/B1
+maps. Spoilers and crushers become exact bookkeeping rather than something
+hundreds of spins per voxel must resolve, so it needs no spins per voxel and
+converges through crushed slabs (TSE, HASTE) in a few sub-slices. On the demo
+sequences it is about 5–15× faster. Voxels are uniform boxes. Each voxel's
+B0 enters exactly, through the states' dephasing time; pulses use it rounded
+to a few Hz. **T2′** is exact too: each state decays by e^{−|τ|/T2′}, with τ
+its dephasing time counted from the pulses' centres. That is a Lorentzian line
+of reversible dephasing, which spin echoes refocus. So is **diffusion**: each
+state decays by e^{−bD}, with b = 4π²∫|k|²dt over its own history, Z states
+included, so stimulated echoes and the diffusion damping of spoiled steady
+states come out right. Continuous maps such as BrainWeb are binned into at
+most 2048 tissue classes, with a note. It cannot simulate pulses played with
+in-plane gradients (in-plane selective or oblique excitation); use isochromats
+there.
+
+Isochromats sum every pathway in each spin, so they weight T2′ and diffusion
+by the **main echo pathway**: from each excitation, reversed by each
+refocusing pulse. That is exact for gradient and spin echoes, CPMG trains and
+diffusion-weighted EPI. It is approximate where other pathways carry signal:
+balanced SSFP, stimulated echoes, and the diffusion damping of spoiled steady
+states. Lorentzian offsets on the spins themselves were tried and dropped.
+Pairing each spin with one offset undoes the spoiling cancellation (still
+8–16 % off at 2048 spins per voxel), and giving every spin a full line of
+offsets costs 50–100 × the spins.
+
+**3-D.** A 3-D phantom brings every plane the sequence's slab reaches. An
+excitation that is not selective along z (or no selective pulse at all)
+reaches the whole volume, and every plane gets sub-slices. Sub-slices are also
+close enough to resolve the readouts' z encoding. Partition encoding is
+recognised by an axis on which the readouts sit on two or more planes of a
+Cartesian lattice without moving within a readout. The recon then grids
+k-space in 3-D and transforms all three axes. The image and k-space views get
+the third axis as a dimension (a slider, or pick it for X or Y).
+
+**Viewing the data.** Phantom maps, raw data (by the sequence's labels — LIN,
+PAR, SLC, ECO, REP, … — by acquisition, or every sample in time order),
+gridded k-space and images all open in one N-D viewer: pick any dimension for
+X and Y (the others get sliders), show magnitude, phase, real or imaginary
+part, dB, apply a centred FFT along any k or image dimension (e.g. x–ky hybrid
+space), and read the waveform along X in the line plot under the image.
+Hovering raw data marks that sample's time on the sequence timeline;
+**⇱ Timeline** brings the selected readout into view.
+
+**While it runs**, a progress card shows the phase (planning, simulating,
+reconstructing), overall progress with an ETA and throughput, and one bar per
+worker. Workers simulate strips of phantom columns through the whole
+sequence, so the raw data builds up as strips finish and the image fills in
+strip by strip; the result replaces the live preview when the run ends.
+**Accuracy** (Accurate 2 %, Fast 5 %, Draft 10 %, Sketch 25 %, Instant
+50 %) sets the signal error a run may trade for speed.
+
+- **Isochromats** probe the spins per voxel and the sub-slices needed to meet
+  it. Long-T2 tissue such as CSF needs the most spins.
+- **Phase graph**: Fast to Sketch are each a pruning threshold and a
+  sub-slice sampling, measured against Accurate on the spoiled GRE, TSE,
+  HASTE, EPI, diffusion EPI, balanced SSFP and a spoiled 3-D GRE.
+
+| Phase graph | Pruning | Sub-slices | Worst error | Speed-up |
+|---|---|---|---|---|
+| Fast | 3e-4 | 1.5 per resolution cell | 1 % | 1.3–2.7× |
+| Draft | 1e-3 | 1 | 6 % | 1.4–3.9× |
+| Sketch | 1e-2 | 0.5 | 13 % | 2.1–7.1× |
+
+Sketch is as far as the engines' settings go. Pruning above 1e-2 drops the
+small transverse states of low flip angles: a 10° GRE goes 93 % wrong at
+3e-2. Fewer sub-slices break slice profiles (33–85 % wrong at 0.25 per cell).
+
+**Instant** therefore cuts the phantom instead: it simulates it at half
+resolution along each axis with at least 64 voxels or planes, so a 128²
+phantom runs as 64² and a 3-D one with an eighth of its voxels. Each coarse
+voxel sums the PD around it and keeps its centroid, so nothing shifts, and
+takes the tissue of the voxel weighing most, so tissues are never mixed. The
+image keeps the sequence's matrix; the run's notes say what was simulated.
+
+- **Phase graph**: on the 2-D demos (128² Shepp–Logan), 1.3–2.8× faster
+  than Sketch, where fixed costs dominate, and at most 17 % off Accurate on
+  the full phantom. In 3-D (64³ Shepp–Logan), 6.1× on a spoiled 3-D GRE and
+  8.4× on a 3-D diffusion bSSFP, at most 32 % off. In the browser that
+  bSSFP went from 110 s to 25 s.
+- **Isochromats** gain less, 0.7–5.6×, because their spins per voxel follow
+  the spoiling rather than the voxel count. The phase-graph engine is the
+  faster route there: 15–30× on the spoiled GRE, TSE and balanced SSFP demos
+  at Sketch. The run's notes suggest it.
+
+**Export**: ISMRMRD raw data (`.h5`, readable by ismrmrd-python, h5py, MATLAB
+and Gadgetron), the ISMRMRD stream format, a NumPy `.npz` with data,
+trajectory, labels and times, or the current view as PNG. In VS Code each
+export opens a save dialog next to the sequence; the web app downloads it.
+
+**What it simulates**: exact spin-domain RF on the native raster, through
+the slab (see above), with relaxation, gradients, RF/ADC phase and frequency
+offsets, B0 and B1 maps and receive coils. The number of spins per voxel
+along a spoiled axis is measured, not guessed. A one-voxel probe per tissue
+finds the count whose signal stays within 2 % of a reference that cannot
+alias; long-T2 CSF in an RF-spoiled GRE needs a few hundred. Sub-slices
+multiply the work. When a continuous map such as BrainWeb would take too
+long, the plan takes a coarser tested spacing and says so. **Not yet**:
+- anisotropic diffusion (the ADC is a scalar) and Monte Carlo diffusion in
+  restricted geometries;
+- dynamic pTx;
+- non-Cartesian gridding (the preview recon snaps samples to the nearest
+  Cartesian cell);
+- the MATLAB and Python hosts.
 
 ## Usage
 

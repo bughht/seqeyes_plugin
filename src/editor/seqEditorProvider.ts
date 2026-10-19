@@ -72,7 +72,7 @@ import {
     type WaveformDetailReply,
 } from './waveformDetailReply';
 import { ByteBoundedLru } from './windowDetailCache';
-import { getWebviewContent } from './webviewContent';
+import { getWebviewContent, readSimulationWorkerSource } from './webviewContent';
 import { serializeGradientSound, serializeSpectrogram } from './spectrogramTransport';
 import type { DecodedBlock, PulseqSequence } from '../pulseq/types';
 
@@ -1006,8 +1006,71 @@ export class SeqEditorProvider implements vscode.CustomReadonlyEditorProvider<Se
                         message: err instanceof Error ? err.message : String(err),
                     });
                 }
+            } else if (msg.command === 'requestSimulationWorker') {
+                // The Simulation panel runs its engine in workers inside the
+                // webview, which can start them only from a Blob URL.
+                try {
+                    panel.webview.postMessage({ type: 'simulationWorker', source: readSimulationWorkerSource() });
+                } catch (err) {
+                    panel.webview.postMessage({
+                        type: 'simulationWorker',
+                        message: 'The simulation worker script could not be read: '
+                            + (err instanceof Error ? err.message : String(err)),
+                    });
+                }
+            } else if (msg.command === 'requestSequenceSource') {
+                // The simulator parses the file itself, so it gets the bytes,
+                // read again here rather than kept for every open viewer.
+                const generation = Number(msg.sequenceGeneration);
+                const reply = (fields: Record<string, unknown>) => panel.webview.postMessage({
+                    type: 'sequenceSource', sequenceGeneration: generation, ...fields,
+                }).then(undefined, (err: unknown) => panel.webview.postMessage({
+                    type: 'sequenceSource',
+                    sequenceGeneration: generation,
+                    message: `The sequence could not be transferred to the viewer: ${err instanceof Error ? err.message : String(err)}`,
+                }));
+                if (generation !== sequenceGeneration) {
+                    reply({ message: 'A different sequence has been opened since.' });
+                    return;
+                }
+                const uri = activeUri;
+                try {
+                    const bytes = await vscode.workspace.fs.readFile(uri);
+                    if (generation !== sequenceGeneration) return;
+                    reply({
+                        name: uriFileName(uri),
+                        bytes: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+                    });
+                } catch (err) {
+                    reply({ message: err instanceof Error ? err.message : String(err) });
+                }
+            } else if (msg.command === 'saveSimulationFile') {
+                await this._saveSimulationFile(activeUri, msg);
             }
         });
+    }
+
+    /** Save a Simulation panel export (ISMRMRD, NumPy, PNG) next to the sequence. */
+    private async _saveSimulationFile(uri: vscode.Uri, msg: { name?: unknown; bytes?: unknown }): Promise<void> {
+        try {
+            const bytes = messageBytes(msg.bytes);
+            if (!bytes) throw new Error('the viewer sent no data.');
+            const name = sanitizeFileStem(String(msg.name || 'simulation'));
+            const extension = /\.([A-Za-z0-9]+)$/.exec(name)?.[1].toLowerCase() ?? '';
+            const label = SIMULATION_EXPORT_KINDS[extension];
+            const saveUri = await vscode.window.showSaveDialog({
+                defaultUri: siblingUri(uri, name),
+                filters: label ? { [label]: [extension] } : undefined,
+                title: 'Save Simulation Export',
+            });
+            if (!saveUri) return;
+            await vscode.workspace.fs.writeFile(saveUri, bytes);
+            vscode.window.showInformationMessage(`Saved ${uriFileName(saveUri)} (${formatMemorySize(bytes.byteLength)}).`);
+        } catch (err) {
+            vscode.window.showErrorMessage(
+                'Failed to save the simulation export: ' + (err instanceof Error ? err.message : String(err))
+            );
+        }
     }
 
     private async _exportKspace(uri: vscode.Uri): Promise<void> {
@@ -1071,6 +1134,22 @@ function uriFileName(uri: vscode.Uri): string {
 function siblingUri(uri: vscode.Uri, fileName: string): vscode.Uri {
     const dir = uri.path.replace(/\/[^/]*$/, '');
     return uri.with({ path: `${dir}/${fileName}` });
+}
+
+/** Save-dialog filter labels for the Simulation panel's export formats. */
+const SIMULATION_EXPORT_KINDS: Record<string, string> = {
+    h5: 'ISMRMRD HDF5',
+    bin: 'ISMRMRD stream',
+    npz: 'NumPy archive',
+    png: 'PNG image',
+};
+
+/** Bytes posted by the webview, which arrive as an ArrayBuffer or a typed array. */
+function messageBytes(value: unknown): Uint8Array | undefined {
+    if (value instanceof Uint8Array) return value;
+    if (value instanceof ArrayBuffer) return new Uint8Array(value);
+    if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    return undefined;
 }
 
 function sanitizeFileStem(name: string): string {

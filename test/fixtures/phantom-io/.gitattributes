@@ -1,0 +1,7 @@
+# Fixtures are compared byte for byte; keep Git from touching line endings.
+*.npy binary
+*.npz binary
+*.mat binary
+*.nii binary
+*.gz binary
+*.hdr binary

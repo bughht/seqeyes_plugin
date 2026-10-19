@@ -153,6 +153,13 @@ describe('Pulseq binary reader', () => {
         expect(() => new BinaryReader(new Uint8Array(3)).int32('test integer')).toThrow(/unexpected end of file/);
     });
 
+    it('accepts every upstream RF use letter, including preparation and other', () => {
+        const uses = ['e', 'r', 'i', 's', 'p', 'o', 'u'];
+        const seq = parseSequenceBinary(makeRfUseFixture(uses));
+        expect([...seq.rfs.values()].map(rf => rf.use)).toEqual(uses);
+        expect(() => parseSequenceBinary(makeRfUseFixture(['x']))).toThrow(/invalid RF use flag 'x'/);
+    });
+
     it('decodes every official extension payload and typed definitions', () => {
         const seq = parseSequenceBinary(makeExtensionFixture());
 
@@ -331,6 +338,39 @@ function makeExtensionFixture(options: { labelIndex?: number; quaternion?: numbe
     writer.int32(1);
     for (const value of options.quaternion ?? [2, 0, 0, 0]) writer.float64(value);
 
+    return writer.toBytes();
+}
+
+/** One block per RF event; each RF record carries the given use character. */
+function makeRfUseFixture(uses: string[]): Uint8Array {
+    const writer = binaryPreamble();
+    writer.uint64(SECTION_PREFIX | 1n);
+    writer.int64(4);
+    writeFloatDefinition(writer, 'AdcRasterTime', [1e-7]);
+    writeFloatDefinition(writer, 'GradientRasterTime', [1e-5]);
+    writeFloatDefinition(writer, 'RadiofrequencyRasterTime', [1e-6]);
+    writeFloatDefinition(writer, 'BlockDurationRaster', [1e-5]);
+
+    writer.uint64(SECTION_PREFIX | 2n);
+    writer.int64(uses.length);
+    uses.forEach((_, index) => {
+        writer.int64(100);
+        for (const id of [index + 1, 0, 0, 0, 0, 0]) writer.int32(id);
+    });
+
+    writer.uint64(SECTION_PREFIX | 3n);
+    writer.int64(uses.length);
+    uses.forEach((use, index) => {
+        writer.int32(index + 1);       // id
+        writer.float64(2500);          // amplitude [Hz]
+        writer.int32(1);               // magnitude shape
+        writer.int32(0);               // phase shape
+        writer.int32(0);               // time shape
+        writer.int64(2_000_000);       // center [ps]
+        writer.int64(0);               // delay [ps]
+        for (const value of [0, 0, 0, 0]) writer.float64(value); // freqPPM phasePPM freq phase
+        writer.text(use);
+    });
     return writer.toBytes();
 }
 

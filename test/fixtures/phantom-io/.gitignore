@@ -1,0 +1,3 @@
+# Real phantoms (e.g. the MRzero/BrainWeb examples) for test/sim/io/phantoms.test.ts.
+# Their licences do not allow committing them; place them here or set SEQEYES_PHANTOM_DIR.
+real/

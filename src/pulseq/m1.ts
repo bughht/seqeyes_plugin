@@ -1,6 +1,7 @@
 import type { DecodedBlock, DecodedGradWaveform } from './types';
 import { BoundedSeriesBuilder, type BoundedSeries } from './boundedSeries';
 import { createDecodedGradientSampler, decodedGradientTimeRange } from './gradientSampler';
+import { integrateLinearSegment } from './segmentMoments';
 
 export interface M1Data {
     valid: boolean;
@@ -581,15 +582,4 @@ function walkM1(
         }
     }
     return { t: outT, m1: outM1 };
-}
-
-function integrateLinearSegment(a: number, b: number, tRef: number, ga: number, gb: number): [number, number] {
-    const h = b - a;
-    if (!(h > 0)) return [0, 0];
-    const slope = (gb - ga) / h;
-    const aRel = a - tRef;
-    const m0 = ga * h + 0.5 * slope * h * h;
-    const m1 = ga * (aRel * h + 0.5 * h * h)
-        + slope * (0.5 * aRel * h * h + (h * h * h) / 3.0);
-    return [m0, m1];
 }

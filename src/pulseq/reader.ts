@@ -216,8 +216,10 @@ function parseRF(seq: PulseqSequence, lines: string[]): void {
             // v1.5.x: 12 fields
             //   id amp mag ph timeShape CENTER(us) delay(us) freqPPM phasePPM freq(Hz) phase(rad) use
             requireFieldCount('RF', line, parts.length, 12);
+            // Upstream getSupportedRfUse: excitation, refocusing, inversion, saturation,
+            // preparation, other, undefined — written as their initial.
             const use = parts[11].toLowerCase();
-            if (!/^[erisu]$/.test(use)) parseError(`RF row has invalid use flag '${parts[11]}': ${line}`);
+            if (!/^[erispou]$/.test(use)) parseError(`RF row has invalid use flag '${parts[11]}': ${line}`);
             seq.rfs.set(id, {
                 id, amplitude: amp,
                 magShapeId: magId, phaseShapeId: phId,

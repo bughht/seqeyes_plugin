@@ -226,7 +226,7 @@ function readRf(reader: BinaryReader, seq: PulseqSequence): void {
         const freqOffset = reader.float64('RF frequency offset');
         const phaseOffset = reader.float64('RF phase offset');
         const use = reader.char('RF use').toLowerCase();
-        if (!/^[erisu]$/.test(use)) reader.fail(`invalid RF use flag '${use}'`);
+        if (!/^[erispou]$/.test(use)) reader.fail(`invalid RF use flag '${use}'`);
         seq.rfs.set(id, {
             id,
             amplitude,

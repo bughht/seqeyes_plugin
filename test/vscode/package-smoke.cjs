@@ -11,6 +11,7 @@ const requiredEntries = [
   'extension/out/editor/webview/assets/template.html',
   'extension/out/editor/webview/assets/styles.css',
   'extension/out/editor/webview/assets/webview-bundle.js',
+  'extension/out/editor/webview/assets/sim-worker.js',
   'extension/images/logo.png',
   'extension/LICENSE.txt',
   'extension/README.md',
@@ -26,10 +27,13 @@ const forbiddenPrefixes = [
   'extension/performance-results/',
   'extension/matlab/',
   'extension/web/',
+  'extension/python/',
+  'extension/scripts/',
 ];
 
 const forbiddenEntries = [
   'extension/tsconfig.json',
+  'extension/tsconfig.sim-core.json',
   'extension/web/pulseq-browser.ts',
 ];
 
