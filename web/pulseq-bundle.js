@@ -2648,7 +2648,8 @@ var Pulseq = (() => {
       if (useM4) reduceM4Range(time, values, clipped.start, clipped.end, this.cap, this.emit);
       else reduceUniformRange(time, values, clipped.start, clipped.end, this.cap, this.emit);
       this.wrapPhase = false;
-      return { o: origin, n: this.cursor - origin };
+      const kept = this.cursor - origin;
+      return kept < clipped.end - clipped.start ? { o: origin, n: kept, r: true } : { o: origin, n: kept };
     }
   };
   function discard() {
@@ -2824,9 +2825,11 @@ var Pulseq = (() => {
       band.polarFlipDeg,
       band.mz
     ]);
-    return {
+    const packed = {
       s: rf.startTime,
       d: rf.duration,
+      // Absolute effective centre, the point TE and TR are measured from.
+      c: rf.centerTime,
       // `t`/`m` (magnitude) and `pt`/`p` (phase) buffer spans.
       o: magnitude.o,
       n: magnitude.n,
@@ -2845,9 +2848,11 @@ var Pulseq = (() => {
       u: rf.use || "u"
       // 'e'=excitation, 'r'=refocusing, 'i'=inversion, 's'=saturation, 'u'=undefined
     };
+    if (magnitude.r) packed.r = 1;
+    return packed;
   }
   function packGrad(grad, ref) {
-    return {
+    const packed = {
       s: grad.startTime,
       d: grad.duration,
       o: ref.o,
@@ -2856,6 +2861,8 @@ var Pulseq = (() => {
       ty: grad.type,
       ch: grad.channel
     };
+    if (ref.r) packed.r = 1;
+    return packed;
   }
   function waveformMagnitudeMetrics(time, values) {
     const count = Math.min(time.length, values.length);
