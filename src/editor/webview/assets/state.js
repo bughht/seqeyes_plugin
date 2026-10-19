@@ -663,6 +663,18 @@ function requestPnsWindow(vs,ve){
   vscApi.postMessage({command:'calculatePnsWindow',requestId:pnsWindowPending.requestId,startSec:start,endSec:end,maxPoints:120000});
 }
 
+/**
+ * The PNS series the plot is currently drawing, choosing it exactly as
+ * `pnsSeriesForView` does but without asking for a window or touching the
+ * notices. The readout runs on every mouse move and must report what is on
+ * screen, not what a hover happened to request.
+ */
+function pnsSeriesShown(vs,ve){
+  if(!pnsData)return null;
+  if(shouldRequestFinePnsWindow(vs,ve)&&pnsWindowCovers(pnsWindowData,vs,ve))return pnsWindowData;
+  return pnsData;
+}
+
 function pnsSeriesForView(vs,ve){
   if(!pnsData)return null;
   if(shouldRequestFinePnsWindow(vs,ve)){
