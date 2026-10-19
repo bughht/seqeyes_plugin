@@ -596,10 +596,19 @@ var SeqEyesSimulation = (function () {
     return settings;
   }
 
+  /** Why there is no sequence to run: VS Code reads the file on first use. */
+  function missingSequenceText() {
+    var h = host();
+    var status = h && h.getSequenceSourceStatus ? h.getSequenceSourceStatus() : '';
+    if (status.indexOf('error: ') === 0) return 'The sequence file could not be read: ' + status.slice(7);
+    if (status === 'loading') return 'Still reading the sequence file; run again in a moment.';
+    return 'Open a Pulseq sequence first.';
+  }
+
   function startRun() {
     if (!isAvailable()) return;
     var source = host().getSequenceSource();
-    if (!source || !source.bytes || !source.bytes.length) { setStatus(['Open a Pulseq sequence first.']); return; }
+    if (!source || !source.bytes || !source.bytes.length) { setStatus([missingSequenceText()]); return; }
     if (phantom.status !== 'ready' || !phantom.data) { setStatus(['The phantom is not ready yet.']); return; }
     if (phantom.volume && sliceMode === 'auto' && phantom.sequenceBytes !== source.bytes) {
       // The neighbouring planes depend on the sequence's slabs: cut them first.

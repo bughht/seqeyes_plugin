@@ -94,6 +94,10 @@ esbuild.buildSync({
     logLevel: 'warning',
 });
 console.log('✓  web/sim-worker.js');
+// The extension sends the same script to its webview, which starts it from a
+// Blob URL (web/ is not packaged into the VSIX).
+fs.copyFileSync(path.join(webDir, 'sim-worker.js'), path.join(outDir, 'sim-worker.js'));
+console.log('✓  out/editor/webview/assets/sim-worker.js');
 
 // Copy template.html to out/
 const htmlContent = fs.readFileSync(path.join(ASSETS_DIR, 'template.html'), 'utf-8');

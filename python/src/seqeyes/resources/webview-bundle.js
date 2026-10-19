@@ -1424,6 +1424,7 @@ window.addEventListener('message',function(e){
     if(seqTiming&&seqTiming.trTimeSec>0){fitToFirstTR();}else{fit();}
     draw();drawKs();drawMinimap();
     setExportButtonEnabled(true);
+    simSequence={generation:m.sequenceGeneration,bytes:null,name:'',pending:false,error:null};
     SeqEyesPanel.onSequenceLoaded();
     /* Ask the host to re-apply the ASC profile it remembered from an earlier
        session.  Sent only now because PNS needs the sequence's blocks, and
@@ -1548,6 +1549,15 @@ window.addEventListener('message',function(e){
     SeqEyesPanel.deliverAudio(m.requestId,deserializeGradientSound(m));
   }else if(m.type==='gradientSoundError'){
     SeqEyesPanel.deliverAudioError(m.requestId,m.message);
+  }else if(m.type==='simulationWorker'){
+    settleSimulationWorkerScript(m.source||null,m.message);
+  }else if(m.type==='sequenceSource'){
+    if(m.sequenceGeneration!==simSequence.generation)return;
+    simSequence.pending=false;
+    if(!m.bytes){simSequence.error=m.message||'The sequence file could not be read.';return;}
+    simSequence.bytes=new Uint8Array(m.bytes);simSequence.name=m.name||'';simSequence.error=null;
+    // The panel saw no sequence until now; this is when it arrives for it.
+    if(typeof SeqEyesSimulation!=='undefined')SeqEyesSimulation.onSequenceLoaded();
   }
 });
 
@@ -1999,6 +2009,84 @@ function fitToFirstTR(){
   clampView();
 }
 
+/* ── Simulation sources (VS Code webview) ───────────────────────────────
+   The Simulation panel runs its engine in workers inside this webview and
+   reads the sequence file itself, neither of which the extension otherwise
+   sends: the waveforms arrive already decoded. Both are fetched on first use.
+
+   A VS Code webview starts workers only from blob: URLs, so the worker script
+   arrives as text, once. Until it has, createSimulationWorker() returns a
+   stand-in that queues messages; the panel only ever uses postMessage,
+   terminate and the three handlers, so that is all the stand-in has.
+
+   The sequence bytes are tagged with the load they belong to. A reply for an
+   earlier sequence is dropped, and the panel hears about the bytes through
+   onSequenceLoaded(), as it does when a sequence opens on the web. */
+var simWorkerScript={url:null,error:null,pending:false,waiting:[]};
+var simSequence={generation:-1,bytes:null,name:'',pending:false,error:null};
+
+function whenSimulationWorkerScript(callback){
+  if(simWorkerScript.url){callback(simWorkerScript.url,null);return;}
+  simWorkerScript.waiting.push(callback);
+  if(simWorkerScript.pending)return;
+  simWorkerScript.pending=true;
+  vscApi.postMessage({command:'requestSimulationWorker'});
+}
+
+function settleSimulationWorkerScript(source,error){
+  simWorkerScript.pending=false;
+  if(source){
+    simWorkerScript.url=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));
+    simWorkerScript.error=null;
+  }else{
+    simWorkerScript.error=error||'The simulation worker script could not be loaded.';
+  }
+  var waiting=simWorkerScript.waiting;simWorkerScript.waiting=[];
+  for(var i=0;i<waiting.length;i++)waiting[i](simWorkerScript.url,simWorkerScript.url?null:simWorkerScript.error);
+}
+
+function createSimulationWorkerStandIn(){
+  var queue=[],worker=null,closed=false;
+  var standIn={
+    onmessage:null,onmessageerror:null,onerror:null,
+    postMessage:function(message,transfer){
+      if(closed)return;
+      if(worker)worker.postMessage(message,transfer||[]);
+      else queue.push([message,transfer||[]]);
+    },
+    terminate:function(){closed=true;queue=[];if(worker)worker.terminate();}
+  };
+  function fail(text){if(standIn.onerror)standIn.onerror({message:text,preventDefault:function(){}});}
+  whenSimulationWorkerScript(function(url,error){
+    if(closed)return;
+    if(!url){fail(error);return;}
+    try{worker=new Worker(url,{name:'seqeyes-sim'});}
+    catch(err){fail('Could not start the simulation worker: '+(err&&err.message||err));return;}
+    worker.onmessage=function(event){if(standIn.onmessage)standIn.onmessage(event);};
+    worker.onmessageerror=function(event){if(standIn.onmessageerror)standIn.onmessageerror(event);};
+    worker.onerror=function(event){if(standIn.onerror)standIn.onerror(event);};
+    var pending=queue;queue=[];
+    for(var i=0;i<pending.length;i++)worker.postMessage(pending[i][0],pending[i][1]);
+  });
+  return standIn;
+}
+
+function simulationSequenceSource(){
+  if(simSequence.bytes)return{bytes:simSequence.bytes,name:simSequence.name};
+  // A failed read is retried on the next use, and keeps its error until then.
+  if(!simSequence.pending&&simSequence.generation>=0){
+    simSequence.pending=true;
+    vscApi.postMessage({command:'requestSequenceSource',sequenceGeneration:simSequence.generation});
+  }
+  return null;
+}
+
+function simulationSequenceStatus(){
+  if(simSequence.bytes)return'ready';
+  if(simSequence.error)return'error: '+simSequence.error;
+  return simSequence.pending?'loading':'idle';
+}
+
 /* ── Analysis panel host adapter (VS Code webview) ──────────────────────
    panel.js reads the host only through this object, which is what lets
    web/index.html swap in its own without duplicating the panel code. */
@@ -2041,6 +2129,23 @@ window.SeqEyesPanelHost={
     message.startSec=startSec;
     message.endSec=endSec;
     vscApi.postMessage(message);
+  },
+  /* Simulation: only inside VS Code, where the extension answers these. The
+     Python viewer runs this bundle too, with no host to ask, so it keeps the
+     Simulation button hidden. */
+  createSimulationWorker:vscApi?createSimulationWorkerStandIn:undefined,
+  getSequenceSource:vscApi?simulationSequenceSource:undefined,
+  getSequenceSourceStatus:vscApi?simulationSequenceStatus:undefined,
+  saveBytes:vscApi?function(name,bytes,mime){
+    var view=bytes instanceof Uint8Array?bytes:new Uint8Array(bytes);
+    var copy=view.slice().buffer;
+    vscApi.postMessage({command:'saveSimulationFile',name:name,mime:mime||'',bytes:copy});
+  }:undefined,
+  revealTimeRange:function(startSec,endSec){
+    if(!isFinite(startSec)||!isFinite(endSec)||endSec<=startSec)return false;
+    ox=Math.max(0,startSec);sc=plotWidth()/(endSec-startSec);clampView();
+    scheduleViewerDraw(true);
+    return true;
   }
 };
 
@@ -8611,10 +8716,19 @@ var SeqEyesSimulation = (function () {
     return settings;
   }
 
+  /** Why there is no sequence to run: VS Code reads the file on first use. */
+  function missingSequenceText() {
+    var h = host();
+    var status = h && h.getSequenceSourceStatus ? h.getSequenceSourceStatus() : '';
+    if (status.indexOf('error: ') === 0) return 'The sequence file could not be read: ' + status.slice(7);
+    if (status === 'loading') return 'Still reading the sequence file; run again in a moment.';
+    return 'Open a Pulseq sequence first.';
+  }
+
   function startRun() {
     if (!isAvailable()) return;
     var source = host().getSequenceSource();
-    if (!source || !source.bytes || !source.bytes.length) { setStatus(['Open a Pulseq sequence first.']); return; }
+    if (!source || !source.bytes || !source.bytes.length) { setStatus([missingSequenceText()]); return; }
     if (phantom.status !== 'ready' || !phantom.data) { setStatus(['The phantom is not ready yet.']); return; }
     if (phantom.volume && sliceMode === 'auto' && phantom.sequenceBytes !== source.bytes) {
       // The neighbouring planes depend on the sequence's slabs: cut them first.
