@@ -10119,6 +10119,11 @@ var SeqEyesMarkers = (function () {
   var SNAP_PX = 8;
   var HIT_PX = 4;
   var REMOVE_PX = 6;
+  /* Fingers are wider and the press hides what is under it. */
+  var SNAP_PX_TOUCH = 16;
+  var HIT_PX_TOUCH = 12;
+  var LONG_PRESS_MS = 500;
+  var TOUCH_SLOP_PX = 8;
   /* More blocks than this inside the snap distance means the view is too
      zoomed out for a corner to be a meaningful target. */
   var MAX_SNAP_BLOCKS = 32;
@@ -10505,9 +10510,11 @@ var SeqEyesMarkers = (function () {
 
   /**
    * One row per marker, in time order, with everything formatted in the
-   * viewer's current units. `list` is [{id, t, snap}].
+   * viewer's current units. `list` is [{id, t, snap}]. `derived`, when
+   * given, returns the M1/PNS text for a time (the rows shown, as the hover
+   * readout words them).
    */
-  function tableRows(list, blocks, detail, units) {
+  function tableRows(list, blocks, detail, units, derived) {
     var rows = [];
     for (var i = 0; i < list.length; i++) {
       var m = list[i], r = readoutAt(blocks, m.t, detail), previous = i > 0 ? list[i - 1] : null;
@@ -10525,6 +10532,7 @@ var SeqEyesMarkers = (function () {
         phase: r.rf && isFinite(r.rf.phase) ? (r.rf.phase * 180 / Math.PI).toFixed(1) : '',
         adc: r.adc ? (r.adc.sample + 1) + '/' + r.adc.count : '',
         trigger: r.trigger ? 'on' : '',
+        derived: derived ? derived(m.t) : '',
         snap: m.snap || '',
         approx: !!(r.approx.gx || r.approx.gy || r.approx.gz || (r.rf && r.rf.approx))
       });
@@ -10532,20 +10540,27 @@ var SeqEyesMarkers = (function () {
     return rows;
   }
 
-  function columns(units) {
+  function columns(units, withDerived) {
     var t = unitName(units.timeUnit), g = units.gradUnit;
-    return [
+    var cols = [
       ['name', 'Marker'], ['time', 'Time (' + t + ')'], ['delta', 'Δt (' + t + ')'],
       ['block', 'Block'], ['offset', 'In block (' + t + ')'],
       ['gx', 'Gx (' + g + ')'], ['gy', 'Gy (' + g + ')'], ['gz', 'Gz (' + g + ')'],
       ['rf', 'RF (Hz)'], ['phase', 'RF phase (°)'], ['adc', 'ADC sample'], ['trigger', 'Trigger'],
       ['snap', 'Snapped to']
     ];
+    if (withDerived) cols.splice(cols.length - 1, 0, ['derived', 'M1 / PNS']);
+    return cols;
+  }
+
+  function hasDerived(rows) {
+    for (var i = 0; i < rows.length; i++) if (rows[i].derived) return true;
+    return false;
   }
 
   /** Tab-separated, with a header, for pasting into a spreadsheet. */
   function toTsv(rows, units) {
-    var cols = columns(units), lines = [cols.map(function (c) { return c[1]; }).join('\t')];
+    var cols = columns(units, hasDerived(rows)), lines = [cols.map(function (c) { return c[1]; }).join('\t')];
     for (var i = 0; i < rows.length; i++) {
       lines.push(cols.map(function (c) { return String(rows[i][c[0]]).replace(/[\t\n]/g, ' '); }).join('\t'));
     }
@@ -10614,6 +10629,15 @@ var SeqEyesMarkers = (function () {
   function el(id) { return document.getElementById(id); }
   function prefs() { return typeof SeqEyesPrefs !== 'undefined' ? SeqEyesPrefs : null; }
 
+  /** M1/PNS text at a time, when the renderer can give it and those rows are on. */
+  function derivedText() {
+    if (!ctx || typeof ctx.derivedLines !== 'function') return null;
+    var rows = ctx.visChannels(), shown = false;
+    for (var i = 0; i < rows.length; i++) if (rows[i] >= 7 && rows[i] <= 10) shown = true;
+    if (!shown) return null;
+    return function (t) { return ctx.derivedLines(t).join('  '); };
+  }
+
   function units() {
     return { timeConv: ctx.timeConv, timeUnit: ctx.timeUnitStr(), gradConv: ctx.gradConv, gradUnit: ctx.gradUnitStr() };
   }
@@ -10651,17 +10675,18 @@ var SeqEyesMarkers = (function () {
    * Snap target under the pointer, or null. Cached: in the web app the
    * overlay is drawn twice a frame (once by the bundle, once by the page).
    */
-  function snapFor(x, y) {
+  function snapFor(x, y, px) {
     if (!ctx || !snapEnabled) return null;
     var blocks = ctx.blocks();
     if (!blocks || !blocks.length) return null;
-    var t = ctx.x2t(x), tol = Math.abs(ctx.x2t(x + SNAP_PX) - t), rows = ctx.visChannels();
+    var reach = px || SNAP_PX;
+    var t = ctx.x2t(x), tol = Math.abs(ctx.x2t(x + reach) - t), rows = ctx.visChannels();
     var pointerCi = y === null || y === undefined ? -1 : rowAt(y), detail = liveDetail(), rowKey = rows.join(',');
     var c = snapCache;
     if (c && c.blocks === blocks && c.detail === detail && c.t === t && c.tol === tol && c.ci === pointerCi && c.rows === rowKey) {
       return c.result;
     }
-    var result = snapAt(blocks, t, tol, { rows: rows, pointerCi: pointerCi, detail: detail, onePx: tol / SNAP_PX });
+    var result = snapAt(blocks, t, tol, { rows: rows, pointerCi: pointerCi, detail: detail, onePx: tol / reach });
     snapCache = { blocks: blocks, detail: detail, t: t, tol: tol, ci: pointerCi, rows: rowKey, result: result };
     return result;
   }
@@ -10822,18 +10847,19 @@ var SeqEyesMarkers = (function () {
   function syncTable() {
     if (!tableEl || !ctx) return;
     var u = units(), detail = liveDetail(), blocks = ctx.blocks();
-    var key = [version, markers.length, u.timeUnit, u.gradUnit, tableOpen, detail ? detail.startSec + ':' + detail.endSec : '-', blocks ? blocks.length : 0].join('|');
+    var derived = derivedText(), derivedKey = derived ? markers.map(function (m) { return derived(m.t); }).join('|') : '';
+    var key = [version, markers.length, u.timeUnit, u.gradUnit, tableOpen, detail ? detail.startSec + ':' + detail.endSec : '-', blocks ? blocks.length : 0, derivedKey].join('|');
     if (key === tableKey && tableEl.__blocks === blocks && tableEl.__detail === detail) return;
     tableKey = key; tableEl.__blocks = blocks; tableEl.__detail = detail;
-    renderTable(u, detail, blocks);
+    renderTable(u, detail, blocks, derived);
   }
 
-  function renderTable(u, detail, blocks) {
+  function renderTable(u, detail, blocks, derived) {
     var wasHidden = tableEl.hidden;
     tableEl.textContent = '';
     tableEl.hidden = !markers.length;
     if (!markers.length) { if (!wasHidden) relayout(); return; }
-    var rows = tableRows(markers, blocks, detail, u);
+    var rows = tableRows(markers, blocks, detail, u, derived);
     var head = element('div', 'mk-head');
     head.appendChild(element('span', 'mk-title', 'Markers'));
     var span = markers.length > 1 ? ' · span ' + formatTime(markers[markers.length - 1].t - markers[0].t, u) + ' ' + unitName(u.timeUnit) : '';
@@ -10849,7 +10875,7 @@ var SeqEyesMarkers = (function () {
     tableEl.appendChild(head);
     if (tableOpen) {
       var scroll = element('div', 'mk-scroll'), table = element('table'), thead = element('thead'), tr = element('tr');
-      var cols = columns(u);
+      var cols = columns(u, hasDerived(rows));
       cols.forEach(function (c) { tr.appendChild(element('th', null, c[1])); });
       tr.appendChild(element('th'));
       thead.appendChild(tr); table.appendChild(thead);
@@ -10882,7 +10908,7 @@ var SeqEyesMarkers = (function () {
   }
 
   function copyTable(source) {
-    var text = toTsv(tableRows(markers, ctx.blocks(), liveDetail(), units()), units());
+    var text = toTsv(tableRows(markers, ctx.blocks(), liveDetail(), units(), derivedText()), units());
     var done = function () { if (source) { var old = source.textContent; source.textContent = 'Copied'; setTimeout(function () { source.textContent = old; }, 1200); } };
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text); done(); });
@@ -10927,9 +10953,10 @@ var SeqEyesMarkers = (function () {
     return row;
   }
 
-  function openMenu(event, p) {
+  function openMenu(event, p, reach) {
     closeMenu();
-    var u = units(), t = clampTime(ctx.x2t(p.x)), snap = snapFor(p.x, p.y), near = markerNear(p.x, REMOVE_PX);
+    var u = units(), t = clampTime(ctx.x2t(p.x)), snap = snapFor(p.x, p.y, reach);
+    var near = markerNear(p.x, reach ? HIT_PX_TOUCH : REMOVE_PX);
     var time = function (seconds) { return formatTime(seconds, u) + ' ' + unitName(u.timeUnit); };
     menuTarget = { x: p.x, y: p.y, snap: snap };
     menu = element('div', 'lblc mk-menu'); menu.id = 'markerMenu';
@@ -10942,7 +10969,7 @@ var SeqEyesMarkers = (function () {
     menu.appendChild(menuToggle('Snap to corners and block edges', snapEnabled, function (on) {
       snapEnabled = on;
       var pr = prefs(); if (pr && pr.KEYS.markerSnap) pr.setBool(pr.KEYS.markerSnap, on);
-      menuTarget.snap = on ? snapFor(p.x, p.y) : null;
+      menuTarget.snap = on ? snapFor(p.x, p.y, reach) : null;
       snapCache = null; redraw();
     }));
     if (markers.length) menu.appendChild(menuToggle('Show the marker table', tableOpen, function (on) { setTableOpen(on); }));
@@ -11045,6 +11072,74 @@ var SeqEyesMarkers = (function () {
     redraw();
   }
 
+  /* ── Touch ──────────────────────────────────────────────────────────
+
+     Capture phase on #cc again, ahead of both renderers' touch handlers on
+     #mc. A finger on a marker drags it, and the renderer never starts its
+     pan. A finger held still opens the menu, and its later moves and lift
+     are swallowed so the view does not pan and the tap tooltip does not
+     show. Any other touch passes through untouched. */
+
+  /** {x0, y0, timer, fired} for a press that may become a long-press, or {dragging}. */
+  var press = null;
+
+  function endPress() {
+    if (press && press.timer) clearTimeout(press.timer);
+    press = null;
+  }
+
+  function onTouchStart(event) {
+    endPress();
+    if (!ctx || event.target !== el('mc') || event.touches.length !== 1) return;
+    var finger = event.touches[0], p = canvasPoint(finger);
+    if (!insidePlot(p)) return;
+    var marker = markers.length ? markerNear(p.x, HIT_PX_TOUCH) : null;
+    if (marker) {
+      event.stopPropagation(); event.preventDefault();
+      press = { dragging: true };
+      drag = { id: marker.id, from: marker.t, fromSnap: marker.snap, snap: null };
+      el('cc').classList.add('mk-drag');
+      redraw();
+      return;
+    }
+    var x0 = finger.clientX, y0 = finger.clientY;
+    press = { x0: x0, y0: y0, fired: false, timer: setTimeout(function () {
+      if (!press || press.dragging) return;
+      press.fired = true; press.timer = 0;
+      var cc = el('cc'); if (cc) cc.classList.remove('pan');
+      var tip = el('tt'); if (tip) tip.style.display = 'none';
+      var at = { clientX: x0, clientY: y0 };
+      openMenu(at, canvasPoint(at), SNAP_PX_TOUCH);
+    }, LONG_PRESS_MS) };
+  }
+
+  function onTouchMove(event) {
+    if (!press) return;
+    if (press.dragging) {
+      event.stopPropagation(); event.preventDefault();
+      var p = canvasPoint(event.touches[0]), snap = snapFor(p.x, p.y, SNAP_PX_TOUCH);
+      drag.snap = snap;
+      moveMarker(drag.id, clampTime(snap ? snap.t : ctx.x2t(p.x)), snap ? snap.text : '');
+      afterChange();
+      return;
+    }
+    if (press.fired) { event.stopPropagation(); event.preventDefault(); return; }
+    var finger = event.touches[0];
+    if (event.touches.length !== 1 || Math.abs(finger.clientX - press.x0) > TOUCH_SLOP_PX || Math.abs(finger.clientY - press.y0) > TOUCH_SLOP_PX) {
+      endPress();
+    }
+  }
+
+  function onTouchEnd(event) {
+    if (!press) return;
+    if (press.dragging || press.fired) {
+      event.stopPropagation(); event.preventDefault();
+      var cc = el('cc'); if (cc) cc.classList.remove('pan');
+      if (press.dragging) onWindowUp();
+    }
+    endPress();
+  }
+
   function onKeyDown(event) {
     if (event.key === 'Escape' && (menu || drag)) {
       event.preventDefault(); event.stopPropagation();
@@ -11070,6 +11165,10 @@ var SeqEyesMarkers = (function () {
     window.addEventListener('mouseup', onWindowUp);
     window.addEventListener('blur', onWindowUp);
     document.addEventListener('keydown', onKeyDown, true);
+    cc.addEventListener('touchstart', onTouchStart, { capture: true, passive: false });
+    cc.addEventListener('touchmove', onTouchMove, { capture: true, passive: false });
+    cc.addEventListener('touchend', onTouchEnd, { capture: true, passive: false });
+    cc.addEventListener('touchcancel', onTouchEnd, { capture: true, passive: false });
     buildTable();
     var p = prefs();
     if (p && p.KEYS.markerSnap) snapEnabled = p.getBool(p.KEYS.markerSnap, true);
@@ -11082,7 +11181,7 @@ var SeqEyesMarkers = (function () {
       };
       dev.addMarker = function (t, snap) { var m = addMarker(clampTime(t), snap); afterChange(); return m.id; };
       dev.snapAt = function (t) { return ctx ? snapFor(ctx.t2x(t), null) : null; };
-      dev.markerTable = function () { return ctx ? toTsv(tableRows(markers, ctx.blocks(), liveDetail(), units()), units()) : ''; };
+      dev.markerTable = function () { return ctx ? toTsv(tableRows(markers, ctx.blocks(), liveDetail(), units(), derivedText()), units()) : ''; };
       dev.markerState = function () {
         return { suggestion: currentSuggestion(), menuOpen: !!menu, dragging: !!drag, snapEnabled: snapEnabled, tableOpen: tableOpen };
       };
@@ -11092,7 +11191,8 @@ var SeqEyesMarkers = (function () {
   /**
    * Hand the module a renderer's state. ctx: blocks(), duration(), margins(),
    * t2x, x2t, visChannels, cH, cy, channelRange, timeConv, timeUnitStr,
-   * gradConv, gradUnitStr, requestOverlay. A later install replaces an
+   * gradConv, gradUnitStr, requestOverlay, and optionally derivedLines(t)
+   * (the hover readout's M1/PNS lines). A later install replaces an
    * earlier one; the DOM is wired once.
    */
   function install(context) {
@@ -11106,6 +11206,7 @@ var SeqEyesMarkers = (function () {
   function reset() {
     clearMarkers();
     drag = null; hover = null; hoverMarkerId = 0; snapCache = null;
+    endPress();
     closeMenu();
     var cc = typeof document !== 'undefined' ? el('cc') : null;
     if (cc) cc.classList.remove('mk-drag', 'mk-hover');
@@ -11549,7 +11650,8 @@ SeqEyesMarkers.install({
   blocks:function(){return BL;},duration:function(){return TD;},margins:function(){return M;},
   t2x:t2x,x2t:x2t,visChannels:visChannels,cH:cH,cy:cy,channelRange:channelRange,
   timeConv:timeConv,timeUnitStr:timeUnitStr,gradConv:gradConv,gradUnitStr:gradUnitStr,
-  requestOverlay:drawCursorOverlay
+  requestOverlay:drawCursorOverlay,
+  derivedLines:function(t){var lines=[];appendDerivedTooltipLines(lines,t);return lines;}
 });
 /* Deferred by one macrotask so web/index.html, whose inline IIFE runs after
    this bundle, has installed its own adapter before the persisted mode is

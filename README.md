@@ -378,7 +378,7 @@ long, the plan takes a coarser tested spacing and says so. **Not yet**:
 | Load an ASC profile | `Load ASC (PNS/Acoustic)`, then choose a scanner ASC. PNS coefficients and acoustic resonances are read independently — a file carrying only one still loads, and the viewer says which it found |
 | Toggle block boundaries | Checkbox `☐ Blocks` in toolbar |
 | Block details & values | Hover waveform |
-| Measure times and values | Right-click the waveform → **Add marker** (see [Measurement markers](#measurement-markers)). Drag a marker to move it; hold `Shift` to place it off the snap points |
+| Measure times and values | Right-click (or long-press) the waveform → **Add marker** (see [Measurement markers](#measurement-markers)). Drag a marker to move it; hold `Shift` to place it off the snap points |
 | Switch theme | Toolbar `Theme` dropdown |
 | Cycle the analysis panel | Toolbar button: closed → **K-Space** → **Spectrogram** → closed. The label always names what the next click does |
 | Rotate 3D view | Left‑drag in k‑space panel |
@@ -400,8 +400,9 @@ long, the plan takes a coarser tested spacing and says so. **Not yet**:
 
 ## Measurement markers
 
-Right-click the waveform viewer and choose **Add marker** to drop a vertical
-marker. Add as many as you need (M1, M2, …):
+Right-click the waveform viewer (or long-press it on a touch screen) and
+choose **Add marker** to drop a vertical marker. Add as many as you need
+(M1, M2, …):
 
 - **Snapping.** Near a gradient corner the menu offers that point instead:
   a trapezoid's ramp and flat-top corners, the breakpoints of an extended
@@ -414,14 +415,15 @@ marker. Add as many as you need (M1, M2, …):
   its value, and Δt is shown between neighbouring markers. The table under
   the plot lists every marker: time, block and time within it, Δt to the
   previous one, Gx/Gy/Gz in the current gradient unit, RF amplitude and
-  phase, the ADC sample and the trigger. **Copy** puts it on the clipboard as
-  tab-separated text.
+  phase, the ADC sample and the trigger, plus M1 and PNS while those rows
+  are shown. **Copy** puts it on the clipboard as tab-separated text.
 - **Exactness.** Trapezoid corners, RF/ADC edges and block boundaries are
   always exact. A long arbitrary waveform is reduced for the whole-sequence
   view; values read from those reduced samples are marked ≈ until you zoom
   in far enough for the exact samples to load, and its interior bends are
   only offered as snap points then.
-- **Editing.** Drag a marker to move it, right-click next to one to remove
+- **Editing.** Drag a marker to move it (with a finger on a touch screen),
+  right-click next to one to remove
   it, or use the table's × and **Clear**. `Esc` closes the menu or cancels a
   drag. Markers belong to the open sequence and are cleared when another one
   loads.

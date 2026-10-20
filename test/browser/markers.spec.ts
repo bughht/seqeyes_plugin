@@ -267,3 +267,73 @@ async function opaquePixelCount(locator: Locator): Promise<number> {
     return count;
   });
 }
+
+test('adds an M1 column once the M1 rows are shown', async ({ page }) => {
+  const corners = firstGxTrapezoid();
+  await loadViewer(page, gre);
+  await setView(page, corners[0] - 2e-4, corners[3] + 2e-4);
+  await rightClickAt(page, corners[1], 'Gx', 3);
+  await page.locator('#markerMenu .mk-item').first().click();
+  await expect(page.locator('#mkTable th', { hasText: 'M1 / PNS' })).toHaveCount(0);
+
+  await page.locator('#legend .li').filter({ hasText: 'M1x' }).click();
+  await expect(page.locator('#mkTable th', { hasText: 'M1 / PNS' })).toHaveCount(1, { timeout: 20_000 });
+  const cells = page.locator('#mkTable tbody tr').first().locator('td');
+  await expect(cells.nth(12)).toHaveText(/^M1: M1x/);
+  expect(await page.evaluate(() => (window as unknown as { SeqEyesDev: { markerTable(): string } }).SeqEyesDev.markerTable()))
+    .toContain('M1 / PNS');
+});
+
+test.describe('on a touch screen', () => {
+  test.use({ hasTouch: true });
+
+  test('a long-press opens the menu, a tap still shows the readout, and a finger drags a marker', async ({ page }) => {
+    const corners = firstGxTrapezoid();
+    await loadViewer(page, gre);
+    await setView(page, corners[0] - 2e-4, corners[3] + 2e-4);
+
+    // A tap is still the renderer's: the tooltip, no menu.
+    const tap = await pointFor(page, (corners[1] + corners[2]) / 2, 'Gx', 0);
+    await touch(page, 'touchstart', tap.x, tap.y);
+    await touch(page, 'touchend', tap.x, tap.y);
+    await expect(page.locator('#tt')).toBeVisible();
+    await expect(page.locator('#markerMenu')).toHaveCount(0);
+
+    // Held still, it opens the menu, which offers the corner within reach.
+    const offset = (await viewState(page)).offset;
+    const press = await pointFor(page, corners[1], 'Gx', 10);
+    await touch(page, 'touchstart', press.x, press.y);
+    await page.waitForTimeout(650);
+    await expect(page.locator('#markerMenu')).toBeVisible();
+    await touch(page, 'touchmove', press.x + 30, press.y);
+    await touch(page, 'touchend', press.x + 30, press.y);
+    expect((await viewState(page)).offset).toBe(offset);
+    await expect(page.locator('#tt')).toBeHidden();
+    await expect(page.locator('#markerMenu .mk-item').first()).toContainText('Add marker at Gx flat-top start');
+    await page.locator('#markerMenu .mk-item').first().click();
+    expect((await markerList(page)).map(m => m.snap.split(' · ')[0])).toEqual(['Gx flat-top start']);
+
+    // A finger on the marker moves it instead of panning.
+    const grab = await pointFor(page, corners[1], 'Gx', 6);
+    const drop = await pointFor(page, corners[2], 'Gx', -10);
+    await touch(page, 'touchstart', grab.x, grab.y);
+    await touch(page, 'touchmove', (grab.x + drop.x) / 2, grab.y);
+    await touch(page, 'touchmove', drop.x, drop.y);
+    await touch(page, 'touchend', drop.x, drop.y);
+    expect((await viewState(page)).offset).toBe(offset);
+    const [marker] = await markerList(page);
+    expect(Math.abs(marker.t - corners[2])).toBeLessThan(1e-12);
+  });
+});
+
+/** Dispatch one touch event on the plot, as a single finger. */
+async function touch(page: Page, type: string, x: number, y: number): Promise<void> {
+  await page.evaluate(({ type, x, y }) => {
+    const mc = document.getElementById('mc')!;
+    const finger = new Touch({ identifier: 1, target: mc, clientX: x, clientY: y });
+    const down = type === 'touchend' ? [] : [finger];
+    mc.dispatchEvent(new TouchEvent(type, {
+      touches: down, targetTouches: down, changedTouches: [finger], bubbles: true, cancelable: true,
+    }));
+  }, { type, x, y });
+}
