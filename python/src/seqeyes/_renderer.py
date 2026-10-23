@@ -76,7 +76,7 @@ def _read_viewer_template() -> str:
 
 def _normalize_grad_disp(unit: str) -> str:
     """Return a viewer-supported gradient unit."""
-    return unit if unit in _VALID_GRAD_UNITS else "Hz/m"
+    return unit if unit in _VALID_GRAD_UNITS else "mT/m"
 
 
 def _build_html(
@@ -88,7 +88,7 @@ def _build_html(
     show_blocks: bool = False,
     time_range: tuple = (0, float("inf")),
     time_disp: str = "s",
-    grad_disp: str = "Hz/m",
+    grad_disp: str = "mT/m",
 ) -> str:
     """Assemble the complete viewer HTML.
 
@@ -109,7 +109,8 @@ def _build_html(
     time_disp : str
         Initial time display unit (``"s"``, ``"ms"``, ``"us"``).
     grad_disp : str
-        Initial gradient display unit (``"Hz/m"``, ``"mT/m"``, ``"G/cm"``).
+        Initial gradient display unit (``"mT/m"``, the default, ``"Hz/m"``
+        or ``"G/cm"``).
     """
     template = _read_viewer_template()
     grad_disp = _normalize_grad_disp(grad_disp)
@@ -189,7 +190,7 @@ class SeqEyesViewer:
     time_disp : str
         Time axis unit — ``"s"``, ``"ms"``, or ``"us"``.
     grad_disp : str
-        Gradient axis unit — ``"Hz/m"``, ``"mT/m"``, or ``"G/cm"``.
+        Gradient axis unit — ``"mT/m"`` (default), ``"Hz/m"``, or ``"G/cm"``.
     theme : str or None
         Colour theme.
     width : str
@@ -206,7 +207,7 @@ class SeqEyesViewer:
         show_blocks: bool = False,
         time_range: tuple = (0, float("inf")),
         time_disp: str = "s",
-        grad_disp: str = "Hz/m",
+        grad_disp: str = "mT/m",
         theme: Optional[str] = None,
         width: str = "100%",
         height: str = "550px",

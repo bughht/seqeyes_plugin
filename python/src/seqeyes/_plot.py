@@ -120,7 +120,7 @@ def _ensure_patched() -> None:
         show_blocks: bool = False,
         time_range: Any = (0, float("inf")),
         time_disp: str = "s",
-        grad_disp: str = "Hz/m",
+        grad_disp: str = "mT/m",
         **kwargs: Any,
     ) -> None:
         # Merge globals — per‑call args take precedence

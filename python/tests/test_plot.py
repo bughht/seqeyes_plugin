@@ -111,15 +111,15 @@ class TestSeqEyesViewer:
         assert '"ms"' in raw
         assert '"mT/m"' in raw
 
-    def test_viewer_default_gradient_unit_is_hz_per_m(self):
+    def test_viewer_default_gradient_unit_is_mt_per_m(self):
         v = SeqEyesViewer(SAMPLE_SEQ_TEXT)
         raw = v.to_html(inject_bundle=False)
-        assert 'window.SEQEYES_GRAD_DISP = "Hz/m";' in raw
+        assert 'window.SEQEYES_GRAD_DISP = "mT/m";' in raw
 
     def test_viewer_normalizes_unsupported_gradient_unit(self):
         v = SeqEyesViewer(SAMPLE_SEQ_TEXT, grad_disp="kHz/m")
         raw = v.to_html(inject_bundle=False)
-        assert 'window.SEQEYES_GRAD_DISP = "Hz/m";' in raw
+        assert 'window.SEQEYES_GRAD_DISP = "mT/m";' in raw
         assert "kHz/m" not in raw
 
 
