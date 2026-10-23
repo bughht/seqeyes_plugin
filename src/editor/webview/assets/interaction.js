@@ -398,6 +398,15 @@ rs();
    this one — install() swaps the host without re-binding the DOM. */
 SeqEyesPanel.install(window.SeqEyesPanelHost);
 SeqEyesPrefsUi.install();
+/* Measurement markers read this renderer's state through these accessors.
+   web/index.html installs its own over them, as it does the panel host. */
+SeqEyesMarkers.install({
+  blocks:function(){return BL;},duration:function(){return TD;},margins:function(){return M;},
+  t2x:t2x,x2t:x2t,visChannels:visChannels,cH:cH,cy:cy,channelRange:channelRange,
+  timeConv:timeConv,timeUnitStr:timeUnitStr,gradConv:gradConv,gradUnitStr:gradUnitStr,
+  requestOverlay:drawCursorOverlay,
+  derivedLines:function(t){var lines=[];appendDerivedTooltipLines(lines,t);return lines;}
+});
 /* Deferred by one macrotask so web/index.html, whose inline IIFE runs after
    this bundle, has installed its own adapter before the persisted mode is
    restored against it. */

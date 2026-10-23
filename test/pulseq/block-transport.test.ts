@@ -236,6 +236,45 @@ describe('packed block transport', () => {
     }
   });
 
+  it('carries each RF centre and flags only the waveforms the overview reduced', () => {
+    // Measurement markers snap to RF centres and treat corners inside a reduced
+    // waveform as unknown, so both have to reach the webview.
+    const sequence = loadSequence('writeSpiral.seq');
+    const decoded = loadBlocks('writeSpiral.seq');
+    const packed = packSequenceBlocks(sequence);
+    type Packed = { r?: number; c?: number };
+    let rfCount = 0;
+    let reducedCount = 0;
+    let wholeCount = 0;
+    decoded.forEach((block, index) => {
+      const entry = packed.blocks[index] as Record<string, Packed | undefined>;
+      if (block.rf) {
+        rfCount++;
+        expect(entry.rf!.c).toBe(block.rf.centerTime);
+      }
+      for (const axis of ['gx', 'gy', 'gz'] as const) {
+        const native = block[axis];
+        if (!native || native.type === 'none') continue;
+        const reduced = native.timePoints.length > MAX_DISPLAY_PTS;
+        expect(entry[axis]!.r === 1, `${axis} of block ${block.index}`).toBe(reduced);
+        if (reduced) reducedCount++;
+        else wholeCount++;
+      }
+    });
+    expect(rfCount).toBeGreaterThan(0);
+    expect(reducedCount).toBeGreaterThan(0);
+    expect(wholeCount).toBeGreaterThan(0);
+
+    // An exact detail window carries every sample it covers, so nothing is flagged.
+    const index = decoded.findIndex(b => b.gx && b.gx.type !== 'none' && b.gx.timePoints.length > 2000);
+    const native = decoded[index].gx!;
+    const detail = packSequenceBlockRange(
+      sequence, index, index + 1, undefined, MAX_DETAIL_PTS, undefined,
+      { startSec: native.timePoints[0], endSec: native.timePoints[native.timePoints.length - 1] },
+    );
+    expect((detail.blocks[0] as Record<string, Packed>).gx.r).toBeUndefined();
+  });
+
   it('falls back to a bounded reduction when a window cannot be sent exactly', () => {
     const sequence = loadSequence('writeSpiral.seq');
     // A one-sample exactness budget forces the reduced path for any real window.

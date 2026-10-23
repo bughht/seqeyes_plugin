@@ -77,7 +77,7 @@
 <span class="ulbl">Theme:</span><select id="theme"><option value="system">System</option><option value="onelight">One Light</option><option value="onedark">One Dark</option><option value="dracula">Dracula</option><option value="nord">Nord</option><option value="githublight">GitHub Light</option><option value="github">GitHub</option></select>
 <div class="sep"></div>
 <span class="ulbl">Time:</span><select id="tu"><option value="s">s</option><option value="ms" selected>ms</option><option value="us">µs</option></select>
-<span class="ulbl">Grad:</span><select id="gu"><option value="Hz/m" selected>Hz/m</option><option value="mT/m">mT/m</option><option value="G/cm">G/cm</option></select>
+<span class="ulbl">Grad:</span><select id="gu"><option value="Hz/m">Hz/m</option><option value="mT/m" selected>mT/m</option><option value="G/cm">G/cm</option></select>
 <div class="sep"></div>
 <label class="li" id="bbt" title="Toggle block boundary lines"><input type="checkbox" id="bbc" style="margin:0;cursor:pointer"><span style="font-size:11px;color:var(--fg)">Blocks</span></label>
 <div class="sep"></div>
@@ -269,7 +269,7 @@ var cursorT=0,cursorActive=false;
    the viewer in a state its own toolbar cannot express. */
 function selectOptionValues(sel){var out=[],i;if(!sel)return out;for(i=0;i<sel.options.length;i++)out.push(sel.options[i].value);return out;}
 var timeUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.timeUnit,selectOptionValues(tuSel),'ms'),
-    gradUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.gradUnit,selectOptionValues(guSel),'Hz/m');
+    gradUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.gradUnit,selectOptionValues(guSel),'mT/m');
 var showBB=SeqEyesPrefs.getBool(SeqEyesPrefs.KEYS.showBlocks,false);
 var GAMMA=42576;
 var ampZoom=[1,1,1,1,1,1,1];
@@ -832,7 +832,7 @@ function loadSequenceSource(sourceBytes,fileName,parseSource){
 
     showProgress('decode',15,'Preparing blocks in bounded batches...');
     var packed=Pulseq.packSequenceBlocks(seq);
-    resetWaveformDetail();
+    resetWaveformDetail();SeqEyesMarkers.reset();
     BL=unpackSequenceBlocks(packed.blocks,packed.sampleTimes,packed.sampleValues,packed.sampleCount);
     decodedBlocks=null;
     decodeContext=Pulseq.createSequenceDecodeContext(seq);
@@ -1573,6 +1573,7 @@ function drawCursorOverlay(){
   var dpr=window.devicePixelRatio||1,w=moc.width/dpr,h=moc.height/dpr;
   moctx.clearRect(0,0,w,h);
   drawPanelMarker(w,h);
+  if(typeof SeqEyesMarkers!=='undefined')SeqEyesMarkers.drawOverlay(moctx,w,h);
   if(!cursorActive)return;var cx=t2x(cursorT);
   if(cx<M.l||cx>w-M.r)return;
   var color=getComputedStyle(document.body).getPropertyValue('--cr').trim();
@@ -3013,6 +3014,15 @@ function selectPanelWindowBlocks(startSec,endSec){
 
 SeqEyesPanel.install(window.SeqEyesPanelHost);
 SeqEyesPrefsUi.install();
+/* Over the bundle's install: markers must read this page's BL and view, not
+   the bundle's empty copies. */
+SeqEyesMarkers.install({
+  blocks:function(){return BL;},duration:function(){return TD;},margins:function(){return M;},
+  t2x:t2x,x2t:x2t,visChannels:visChannels,cH:cH,cy:cy,channelRange:channelRange,
+  timeConv:timeConv,timeUnitStr:timeUnitStr,gradConv:gradConv,gradUnitStr:gradUnitStr,
+  requestOverlay:drawCursorOverlay,
+  derivedLines:function(t){var lines=[];appendDerivedTooltipLines(lines,t);return lines;}
+});
 
 /* Re-apply the ASC profile cached from an earlier session.  Only the display
    side runs here: there is no sequence open yet, so PNS waits for

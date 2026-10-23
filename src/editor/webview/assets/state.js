@@ -24,7 +24,7 @@ var cursorT=0,cursorActive=false;            // mouse time position
    putting the viewer in a state its own toolbar cannot express. */
 function selectOptionValues(sel){var out=[],i;if(!sel)return out;for(i=0;i<sel.options.length;i++)out.push(sel.options[i].value);return out;}
 var timeUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.timeUnit,selectOptionValues(tuSel),'ms'),
-    gradUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.gradUnit,selectOptionValues(guSel),'Hz/m');
+    gradUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.gradUnit,selectOptionValues(guSel),'mT/m');
 var showBB=SeqEyesPrefs.getBool(SeqEyesPrefs.KEYS.showBlocks,false);  // show block boundaries
 var GAMMA=42576;                            // Hz/m per mT/m for 1H
 
@@ -353,7 +353,7 @@ function applySerializedKspace(payload){
    much as the message: the progress overlay reaches "Ready" either way, so
    leaving stale blocks on screen would read as a successful load. */
 function showSequenceLoadFailure(message){
-  BL=[];waveformOverview=null;blockPos=[];mmCache=null;resetWaveformDetail();
+  BL=[];waveformOverview=null;blockPos=[];mmCache=null;resetWaveformDetail();SeqEyesMarkers.reset();
   labelInfo={names:[],kinds:[]};labelTable=null;labelBusy=false;chVis[11]=false;SeqEyesLabels.closeControls(false);buildLegend();
   setViewerNotice('sequence',message);
   setExportButtonEnabled(false);
@@ -382,7 +382,7 @@ window.addEventListener('message',function(e){
     return;
   }
   if(m.type==='sequenceData'){
-    resetWaveformDetail(m.sequenceGeneration);
+    resetWaveformDetail(m.sequenceGeneration);SeqEyesMarkers.reset();
     try{
       BL=unpackSequenceBlocks(m.blocks,m.sampleTimes,m.sampleValues,m.sampleCount||0);
     }catch(err){
@@ -1115,9 +1115,9 @@ window.SeqEyesPanelHost={
     message.endSec=endSec;
     vscApi.postMessage(message);
   },
-  /* Simulation: only inside VS Code, where the extension answers these. The
-     Python viewer runs this bundle too, with no host to ask, so it keeps the
-     Simulation button hidden. */
+  /* Simulation: only inside VS Code, where the extension answers these. Any
+     page that loads this bundle without a VS Code host keeps the Simulation
+     button hidden. (The Python viewer has its own renderer and does not.) */
   createSimulationWorker:vscApi?createSimulationWorkerStandIn:undefined,
   getSequenceSource:vscApi?simulationSequenceSource:undefined,
   getSequenceSourceStatus:vscApi?simulationSequenceStatus:undefined,

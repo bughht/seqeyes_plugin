@@ -45,6 +45,8 @@ const files = [
     'ndview.js',
     'simulation-panel.js',
     'prefs-ui.js',
+    // Before interaction.js, which installs it with the bundle's renderer.
+    'markers.js',
     'interaction.js',
 ];
 
