@@ -1041,7 +1041,7 @@ var cursorT=0,cursorActive=false;            // mouse time position
    putting the viewer in a state its own toolbar cannot express. */
 function selectOptionValues(sel){var out=[],i;if(!sel)return out;for(i=0;i<sel.options.length;i++)out.push(sel.options[i].value);return out;}
 var timeUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.timeUnit,selectOptionValues(tuSel),'ms'),
-    gradUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.gradUnit,selectOptionValues(guSel),'Hz/m');
+    gradUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.gradUnit,selectOptionValues(guSel),'mT/m');
 var showBB=SeqEyesPrefs.getBool(SeqEyesPrefs.KEYS.showBlocks,false);  // show block boundaries
 var GAMMA=42576;                            // Hz/m per mT/m for 1H
 
@@ -10835,6 +10835,15 @@ var SeqEyesMarkers = (function () {
     return b;
   }
 
+  /* Text columns read left to right; numbers line up on the right. */
+  var LEFT_COLUMNS = { name: true, derived: true, snap: true };
+
+  function cell(tag, key, text) {
+    var node = element(tag, LEFT_COLUMNS[key] ? 'mk-left' : null, text);
+    node.setAttribute('data-col', key);
+    return node;
+  }
+
   function buildTable() {
     var cc = el('cc');
     if (!cc || !cc.parentNode) return;
@@ -10876,17 +10885,19 @@ var SeqEyesMarkers = (function () {
     if (tableOpen) {
       var scroll = element('div', 'mk-scroll'), table = element('table'), thead = element('thead'), tr = element('tr');
       var cols = columns(u, hasDerived(rows));
-      cols.forEach(function (c) { tr.appendChild(element('th', null, c[1])); });
-      tr.appendChild(element('th'));
+      // The remove button leads, so it stays in reach however wide the table.
+      var corner = element('th', 'mk-del'); corner.setAttribute('aria-label', 'Remove');
+      tr.appendChild(corner);
+      cols.forEach(function (c) { tr.appendChild(cell('th', c[0], c[1])); });
       thead.appendChild(tr); table.appendChild(thead);
       var body = element('tbody');
       rows.forEach(function (row) {
         var line = element('tr');
         line.setAttribute('data-marker', String(row.id));
-        cols.forEach(function (c) { line.appendChild(element('td', c[0] === 'name' ? 'mk-name' : null, row[c[0]])); });
-        var cell = element('td');
-        cell.appendChild(button('×', 'Remove ' + row.name, function () { removeMarker(row.id); afterChange(); }));
-        line.appendChild(cell);
+        var remove = element('td', 'mk-del');
+        remove.appendChild(button('×', 'Remove ' + row.name, function () { removeMarker(row.id); afterChange(); }));
+        line.appendChild(remove);
+        cols.forEach(function (c) { line.appendChild(cell('td', c[0], row[c[0]])); });
         body.appendChild(line);
       });
       table.appendChild(body); scroll.appendChild(table); tableEl.appendChild(scroll);

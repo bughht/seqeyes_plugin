@@ -79,8 +79,13 @@ test('right-click adds a marker snapped to a gradient corner, and a second gives
   await expect(table).toBeVisible();
   await expect(table.locator('tbody tr')).toHaveCount(2);
   const delta = ((corners[2] - corners[1]) * 1e3).toFixed(4);
-  await expect(table.locator('tbody tr').nth(1).locator('td').nth(2)).toHaveText(delta);
+  await expect(table.locator('tbody tr').nth(1).locator('td[data-col="delta"]')).toHaveText(delta);
   await expect(table.locator('.mk-summary')).toContainText('span ' + delta + ' ms');
+  // Gradients read in mT/m by default, and each row leads with its remove button.
+  await expect(page.locator('#gu')).toHaveValue('mT/m');
+  await expect(table.locator('th[data-col="gx"]')).toHaveText('Gx (mT/m)');
+  await expect(table.locator('tbody tr').first().locator('td').first().locator('button')).toHaveText('×');
+  await expect(table.locator('thead th').nth(1)).toHaveText('Marker');
 
   // Once markers are in use, approaching a corner suggests it.
   await hoverAt(page, corners[3], 'Gx', 2);
@@ -278,8 +283,7 @@ test('adds an M1 column once the M1 rows are shown', async ({ page }) => {
 
   await page.locator('#legend .li').filter({ hasText: 'M1x' }).click();
   await expect(page.locator('#mkTable th', { hasText: 'M1 / PNS' })).toHaveCount(1, { timeout: 20_000 });
-  const cells = page.locator('#mkTable tbody tr').first().locator('td');
-  await expect(cells.nth(12)).toHaveText(/^M1: M1x/);
+  await expect(page.locator('#mkTable tbody tr').first().locator('td[data-col="derived"]')).toHaveText(/^M1: M1x/);
   expect(await page.evaluate(() => (window as unknown as { SeqEyesDev: { markerTable(): string } }).SeqEyesDev.markerTable()))
     .toContain('M1 / PNS');
 });

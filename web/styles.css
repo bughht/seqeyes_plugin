@@ -296,10 +296,18 @@ body.layout-vertical.sg-split-drag{cursor:col-resize}
 .mk-table button{background:var(--gr);border:1px solid var(--ax);color:var(--fg);border-radius:3px;font-size:10px;padding:1px 6px;cursor:pointer}
 .mk-table button:hover{opacity:.75}
 .mk-scroll{overflow:auto;min-height:0}
+/* Scrollbars in the theme's own colours (Chromium, VS Code, Safari)... */
+.mk-scroll::-webkit-scrollbar{width:10px;height:10px}
+.mk-scroll::-webkit-scrollbar-track,.mk-scroll::-webkit-scrollbar-corner{background:var(--trbg)}
+.mk-scroll::-webkit-scrollbar-thumb{background:var(--ax);border:2px solid var(--trbg);border-radius:6px}
+.mk-scroll::-webkit-scrollbar-thumb:hover{background:var(--lb)}
+/* ...and the standard properties where those pseudo-elements do not exist. */
+@supports not selector(::-webkit-scrollbar){.mk-scroll{scrollbar-width:thin;scrollbar-color:var(--ax) var(--trbg)}}
 .mk-table table{border-collapse:collapse;font:10px monospace;white-space:nowrap}
 .mk-table th{position:sticky;top:0;background:var(--trbg);text-align:right;font-weight:600;color:var(--lb);padding:2px 8px;border-bottom:1px solid var(--gr)}
 .mk-table td{text-align:right;padding:1px 8px}
-.mk-table th:first-child,.mk-table td.mk-name,.mk-table td:nth-last-child(2){text-align:left}
+.mk-table .mk-left{text-align:left}
+.mk-table .mk-del{width:1%;text-align:center;padding:1px 2px 1px 6px}
 .mk-table tbody tr:nth-child(even){background:rgba(127,127,127,.06)}
 .mk-table td button{padding:0 5px}
 @media(max-width:768px),(pointer:coarse){

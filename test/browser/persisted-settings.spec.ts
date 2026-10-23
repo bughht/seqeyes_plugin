@@ -70,7 +70,7 @@ test('brings back the units, Blocks toggle and k-space controls after a reload',
   await loadSequence(page);
 
   await page.locator('#tu').selectOption('us');
-  await page.locator('#gu').selectOption('mT/m');
+  await page.locator('#gu').selectOption('G/cm');
   await page.locator('#bbc').check();
   await page.locator('#theme').selectOption('nord');
 
@@ -82,7 +82,7 @@ test('brings back the units, Blocks toggle and k-space controls after a reload',
   await openViewer(page);
 
   await expect(page.locator('#tu')).toHaveValue('us');
-  await expect(page.locator('#gu')).toHaveValue('mT/m');
+  await expect(page.locator('#gu')).toHaveValue('G/cm');
   await expect(page.locator('#bbc')).toBeChecked();
   await expect(page.locator('#theme')).toHaveValue('nord');
   await expect(page.locator('body')).toHaveClass(/theme-nord/);
@@ -133,7 +133,7 @@ test('stores nothing and returns to defaults once the user opts out', async ({ p
 
   await openViewer(page);
   await expect(page.locator('#tu')).toHaveValue('ms');
-  await expect(page.locator('#gu')).toHaveValue('Hz/m');
+  await expect(page.locator('#gu')).toHaveValue('mT/m');
   await expect(page.locator('#prefsBtn')).toBeVisible();
 });
 

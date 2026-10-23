@@ -803,7 +803,7 @@ test('adds a measurement marker from the right-click menu', async ({ page }) => 
   await items.first().click();
 
   await expect(page.locator('#mkTable tbody tr')).toHaveCount(1);
-  await expect(page.locator('#mkTable tbody tr td').first()).toHaveText('M1');
+  await expect(page.locator('#mkTable tbody tr td[data-col="name"]')).toHaveText('M1');
   const markers = await page.evaluate(() =>
     (window as unknown as { SeqEyesDev: { markers(): { t: number }[] } }).SeqEyesDev.markers());
   expect(markers).toHaveLength(1);

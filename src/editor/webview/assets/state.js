@@ -24,7 +24,7 @@ var cursorT=0,cursorActive=false;            // mouse time position
    putting the viewer in a state its own toolbar cannot express. */
 function selectOptionValues(sel){var out=[],i;if(!sel)return out;for(i=0;i<sel.options.length;i++)out.push(sel.options[i].value);return out;}
 var timeUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.timeUnit,selectOptionValues(tuSel),'ms'),
-    gradUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.gradUnit,selectOptionValues(guSel),'Hz/m');
+    gradUnit=SeqEyesPrefs.getEnum(SeqEyesPrefs.KEYS.gradUnit,selectOptionValues(guSel),'mT/m');
 var showBB=SeqEyesPrefs.getBool(SeqEyesPrefs.KEYS.showBlocks,false);  // show block boundaries
 var GAMMA=42576;                            // Hz/m per mT/m for 1H
 
