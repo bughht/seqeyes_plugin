@@ -1,46 +1,180 @@
-# SeqEyes Online — Pulseq MRI Sequence Viewer
-
-**Visualize [Pulseq](https://github.com/pulseq/pulseq) MRI sequences — in your browser, MATLAB, or VS Code.** Open text `.seq` or official binary `.bseq` files, then inspect RF pulses, gradients, ADC readouts, and triggers with interactive zoom & pan. Includes a GPU‑accelerated 3D k‑space viewer with camera presets. Inspired by [SeqEyes](https://github.com/xingwangyong/seqeyes).
-
 <p align="center">
-  <a href="https://bughht.github.io/seqeyes_plugin/"><strong>🌐 Try it Online — No Install Required</strong></a>
+  <img src="images/logo_highres.png" alt="SeqEyes logo" width="150" />
 </p>
 
+<h1 align="center">SeqEyes</h1>
+
 <p align="center">
-  <img src="images/logo_highres.png" alt="SeqEyes" width="180" />
+  <b>A cross-platform interactive viewer for <a href="https://github.com/pulseq/pulseq">Pulseq</a> MRI sequences.</b><br />
+  Inspect waveforms and 3D k-space, check M1, PNS and acoustic resonances, and simulate the signal on a phantom,<br />
+  in your browser, VS Code, MATLAB, Python or Jupyter. Everything runs on your own machine.
 </p>
 
 <p align="center">
   <a href="https://bughht.github.io/seqeyes_plugin/"><img src="https://img.shields.io/badge/🌐-Open%20in%20Browser-blue?logo=googlechrome&logoColor=white" alt="Web App"></a>
   <a href="https://marketplace.visualstudio.com/items?itemName=SeqEyesDeveloper.seqeyes-web"><img src="https://img.shields.io/badge/VS%20Code-Marketplace-blue?logo=visualstudiocode" alt="VS Code Marketplace"></a>
+  <a href="https://github.com/bughht/seqeyes_plugin/releases"><img src="https://img.shields.io/github/v/release/bughht/seqeyes_plugin?label=MATLAB%20toolbox&logo=mathworks" alt="MATLAB toolbox release"></a>
+  <a href="https://pypi.org/project/seqeyes-python/"><img src="https://img.shields.io/pypi/v/seqeyes-python?label=PyPI&logo=python&logoColor=white" alt="PyPI"></a>
   <a href="https://github.com/bughht/seqeyes_plugin/blob/main/LICENSE.txt"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
 </p>
 
-## 🌐 Web Version — Try It Now!
+<p align="center">
+  <a href="https://bughht.github.io/seqeyes_plugin/"><b>🌐 Try it in your browser, no install needed</b></a>
+  &nbsp;·&nbsp; <a href="#-install">Install</a>
+  &nbsp;·&nbsp; <a href="#-sequence-viewer--k-space">Viewer</a>
+  &nbsp;·&nbsp; <a href="#-hardware--acoustic-checks">Hardware checks</a>
+  &nbsp;·&nbsp; <a href="#-bloch--rf-simulation">Simulation</a>
+  &nbsp;·&nbsp; <a href="#-controls">Controls</a>
+</p>
+
+<p align="center">
+  <img src="images/readme/overview.png" alt="SeqEyes overview: Pulseq .seq and .bseq files are read by one shared engine that runs in the web browser, VS Code, MATLAB, Python and Jupyter, with three analysis modules: sequence viewer and k-space, hardware and acoustic checks, and Bloch and RF simulation" width="720" />
+</p>
+
+| **`.seq` · `.bseq`** | **5 hosts** | **5–7 s** | **0 bytes** |
+|:---:|:---:|:---:|:---:|
+| Pulseq v1.2–v1.5 text and v1.5.2 binary | web, VS Code, MATLAB, Python and Jupyter share one engine | to open a 176 MB `.bseq` with 512,768 blocks in the browser | uploaded: parsing, analysis and simulation run locally |
+
+## 💻 Use it where you write sequences
+
+<p align="center">
+  <img src="images/readme/hosts.gif" alt="Screen recordings of the Pulseq spiral demo opening in four hosts: dragged into the web app, double-clicked in VS Code, seqeyes(seq) in MATLAB, and seq.plot() in Jupyter" width="760" />
+</p>
+
+| Host | Get it | Open a sequence |
+|---|---|---|
+| 🌐 **Web** | [bughht.github.io/seqeyes_plugin](https://bughht.github.io/seqeyes_plugin/), nothing to install | Drag & drop a `.seq` / `.bseq`, or **📂 Open** / **🌐 URL** |
+| **VS Code** | `code --install-extension SeqEyesDeveloper.seqeyes-web` | Double-click a `.seq` / `.bseq` in the Explorer |
+| **MATLAB** | `seqeyes-*.mltbx` from [Releases](https://github.com/bughht/seqeyes_plugin/releases) (R2022a+) | `seqeyes(seq)` on an `mr.Sequence`, or double-click a file |
+| **Python** | `pip install seqeyes-python` | `seqeyes.set()` once, then `seq.plot()` as usual |
+| **Jupyter** | the same package | `seq.plot()` renders inline in the cell output |
+
+Every host embeds the same viewer, so the viewer and hardware checks below work in all of them. The Bloch
+simulation is available in the web app and VS Code. Sequence files stay in memory on your machine.
+
+## 🔍 Sequence viewer & k-space
+
+<p align="center">
+  <img src="images/readme/viewer.gif" alt="The SeqEyes web app with six numbered operations: inspect waveforms, read event details, adjust the theme, explore 3D k-space, link time and k-space, and measure times and values" width="760" />
+</p>
+
+1. **Inspect waveforms.** Scroll to zoom around the cursor, drag to pan, and `Ctrl` + scroll to scale a single row.
+   **Fit** brings the whole sequence back.
+2. **Read event details.** Hover a block to see its timing, gradient, RF and ADC values and acquisition labels
+   (SLC, LIN, REP, …).
+3. **Adjust the theme.** Choose one of six themes (or follow the system), time in s / ms / µs and gradients in
+   Hz/m, mT/m or G/cm. Your choices come back next session.
+4. **Explore 3D k-space.** **K-Space / Spectrum** opens a WebGL point cloud of every ADC sample. Drag to rotate;
+   **Prj** steps through the XY, XZ and YZ views.
+5. **Link time and k-space.** The k-space view shows only the samples inside the visible time window, so panning the
+   waveforms walks along the trajectory.
+6. **Measure times and values.** Right-click the waveforms and choose **Add marker**. Markers snap to gradient
+   corners, RF/ADC edges and centres and block boundaries; Δt and each channel's value go into a table you can copy.
+
+**Large files** open as an overview and load waveform detail as you zoom in. Text `.seq` v1.2.0–v1.5.x and binary
+`.bseq` v1.5.2 are read without conversion.
+
+## ⚡ Hardware & acoustic checks
+
+<p align="center">
+  <img src="images/readme/hardware.gif" alt="Hardware and acoustic checks: M1 with and without flow compensation, PNS at two slew rates, a spectrogram with resonance bands, and simulated gradient sound of a violin melody encoded as a ZTE sequence" width="760" />
+</p>
+<p align="center"><sub>EPI test sequences with an example ASC profile (SAFE example coefficients and synthetic resonance bands, not a real scanner).
+Panel 4 plays a violin melody encoded as a ZTE sequence.</sub></p>
+
+1. **First-order moment (M1).** Click **M1x**, **M1y** or **M1z** in the legend to calculate M1 on that axis, for
+   example to check that flow compensation nulls M1 at TE.
+2. **PNS.** **Load ASC (PNS/Acoustic)** reads your scanner's ASC profile. SeqEyes predicts PNS X / Y / Z / Norm with
+   the SAFE model, and values of 100 % or more are flagged.
+3. **Spectrogram with resonance bands.** Click **K-Space / Spectrum** twice to open the gradient spectrogram of the
+   visible window. The profile's forbidden bands are drawn over it, so a readout inside a band stands out.
+4. **Sound simulation.** **▶** in the spectrogram panel plays the simulated gradient sound with a synchronized
+   playhead.
+
+> **Note:** PNS and the band check are advisory predictions, not a safety or compliance test. The sound is simulated
+> from the gradient waveforms and is not calibrated. See [Gradient spectrogram and acoustic bands](#gradient-spectrogram-and-acoustic-bands).
+
+## 🧲 Bloch & RF simulation
+
+In the web app and VS Code, the **Simulation** button simulates the open sequence on a phantom in Web Workers on your
+own machine, with no server involved.
+
+<p align="center">
+  <img src="images/readme/simulation.gif" alt="Bloch simulation: choose a phantom, simulate with the Bloch or EPG engine, inspect raw data, k-space and images, export raw data; RF pulse profiles; off-resonance effects; validation numbers" width="760" />
+</p>
+<p align="center"><sub>Head phantom with B0, B1 and four receive coils. The spiral image under “Explore off-resonance” was reconstructed
+offline (NUFFT); the in-app reconstruction is Cartesian.</sub></p>
+
+1. **Choose a phantom.** The built-in Shepp–Logan (2-D or 3-D), the MRzero brain, BrainWeb subjects at 3 T and 7 T,
+   or your own PD, T1, T2, T2′, ADC, B0 and B1 maps (`.npz`, `.npy`, `.mat` or NIfTI).
+2. **Simulate MR signals.** Press **▶ Run**. *Isochromats* (Bloch) simulate spins in every voxel and are the
+   reference; the *phase graph* (EPG) engine tracks states per tissue class and is 6–14× faster on our benchmarks.
+   An accuracy preset, from Accurate (2 %) to Instant (50 %), trades precision for speed.
+3. **Inspect the results.** The **Raw**, **k-space** and **Image** tabs open in an N-D viewer: magnitude, phase,
+   real, imaginary or dB, an FFT along any axis, and hovering a raw sample marks its time on the sequence timeline.
+4. **Export raw data.** **Export…** writes ISMRMRD (`.h5` or stream), NumPy (`.npz`) or the current view as PNG.
+
+- **Evaluate RF pulses.** The **RF pulses** tab plots each pulse's tip angle, |Mxy| and Mz across z, or against
+  off-resonance, for slice-selective, multiband, adiabatic and fat-saturation pulses alike, as soon as a sequence is
+  open.
+- **Explore off-resonance.** With the phantom's B0 map switched on, the simulation shows spiral blurring, EPI shifts
+  and bSSFP banding.
+
+Not yet supported: non-Cartesian gridding in the app, anisotropic or restricted diffusion, dynamic pTx, and the MATLAB
+and Python hosts. See [Simulation in depth](#simulation-in-depth) for the engines, accuracy tiers and phantom formats.
+
+## 📊 Validation & performance
+
+| **≤ 0.023 %** | **6–14×** | **≤ 10⁻⁵ m⁻¹** | **0.5 s** |
+|:---:|:---:|:---:|:---:|
+| image error against KomaMRI | phase-graph speed-up over Bloch | k-space difference from Pulseq MATLAB | to parse a 176 MB `.bseq` |
+
+**Simulation accuracy.** Image NRMSE of SeqEyes isochromats (Accurate preset) against two independent simulators, on
+the MRzero 2-D brain with ideal B0/B1, one coil and the same reconstruction:
+
+| Sequence | vs KomaMRI 0.13 | vs MRzeroCore 1.0.5 |
+|---|--:|--:|
+| Spoiled GRE 128² | 0.015 % | 1.40 % |
+| HASTE 128² | 0.012 % | 0.86 % |
+| SE-EPI 64² | 0.001 % | 0.39 % |
+| bSSFP 256² | 0.022 % | 2.11 % |
+| TSE 256² | 0.023 % | 1.05 % |
+
+The gap to MRzero matches MRzero's own spread against KomaMRI (0.39–2.05 %), mostly from MRzero's instantaneous RF
+pulses.
+
+**Simulation speed.** On a 128² Shepp–Logan (Accurate preset, 8 Web Workers, Ryzen 9 8945HX), isochromat runs of
+GRE, TSE, EPI and bSSFP take 4–19 s; the phase-graph engine is 6–14× faster, with 0.5–7.7 % image error.
+
+**Viewer accuracy.** ADC k-space checkpoints of 11 Pulseq test sequences agree with Pulseq MATLAB within 10⁻⁵ m⁻¹
+(largest difference 1.2 × 10⁻⁶ m⁻¹).
+
+**Large files.** A 4D-flow 3D radial sequence with 512,768 blocks parses in 0.5 s as `.bseq` (176 MB) and 3.9 s as
+`.seq` (481 MB) in Node.js on an Apple M3 Pro; the `.bseq` opens in the browser in 5–7 s.
+
+Tests and evidence: [yeewantung/seqeyes-plus-experiments](https://github.com/yeewantung/seqeyes-plus-experiments).
+
+## 📦 Install
+
+### 🌐 Web app
 
 **[→ bughht.github.io/seqeyes_plugin](https://bughht.github.io/seqeyes_plugin/)**
 
-No download, no extension, no setup. Just drag & drop a `.seq` or `.bseq` file and explore:
+No download, no extension, no setup. Drag & drop a `.seq` or `.bseq` file onto the page, click **📂 Open**, or click
+**🌐 URL** and paste a link to a raw `.seq` / `.bseq` file. The Pulseq engine runs entirely in the browser: parsing and
+calculation happen in browser memory, and sequence data is never uploaded.
 
-- **Drag & drop** a `.seq` or `.bseq` file onto the page (or click **📂 Open**)
-- **All the same features** as the VS Code extension — sequence channels, optional M1/PNS, k‑space viewer, 6 themes, tooltips
-- **GPU‑accelerated** 3D k‑space rendered in your browser via WebGL
-- **Zero‑dependency parsing** — the Pulseq engine runs entirely in the browser
-- **Local files stay local** — parsing and calculation run in browser memory without uploading sequence data
+### VS Code extension
 
-## VS Code Extension
-
-Deep integration with VS Code — `.seq` and `.bseq` files open automatically in the custom editor.
-
-### Install
-
-From the [Marketplace](https://marketplace.visualstudio.com/items?itemName=SeqEyesDeveloper.seqeyes-web):
+`.seq` and `.bseq` files open automatically in the SeqEyes custom editor. Install from the
+[Marketplace](https://marketplace.visualstudio.com/items?itemName=SeqEyesDeveloper.seqeyes-web), or:
 
 ```
 code --install-extension SeqEyesDeveloper.seqeyes-web
 ```
 
-Or build from source:
+<details>
+<summary>Build from source</summary>
 
 ```bash
 git clone https://github.com/bughht/seqeyes_plugin.git
@@ -50,33 +184,32 @@ npm run package
 code --install-extension seqeyes-web-*.vsix --force
 ```
 
-Or press **F5** to launch Extension Development Host.
+Or press **F5** to launch the Extension Development Host.
 
-## 🧪 MATLAB Toolbox
+</details>
 
-Open in-memory Pulseq sequences, text `.seq` files, or binary `.bseq` files directly inside MATLAB — call `seqeyes(seq)`, double-click a file in the Current Folder browser, or open an empty viewer with `seqeyes()`.
+### 🧪 MATLAB toolbox
 
-### Setup
+Open in-memory Pulseq sequences, text `.seq` files or binary `.bseq` files directly inside MATLAB. Requires R2022a+.
 
-Choose one of these two MATLAB setup paths.
-
-**Option 1: Install the toolbox.** Download `seqeyes-*.mltbx` from [GitHub Releases](https://github.com/bughht/seqeyes_plugin/releases) and double-click to install, or run:
+**Option 1: install the toolbox.** Download `seqeyes-*.mltbx` from
+[GitHub Releases](https://github.com/bughht/seqeyes_plugin/releases) and double-click it, or run:
 
 ```matlab
 matlab.addons.toolbox.installToolbox('seqeyes-<version>.mltbx')
 ```
 
-The installed toolbox is self-contained for MATLAB: it includes `seqeyes.m` and the bundled web viewer assets, so you do not need to keep a GitHub checkout after installing it.
+The installed toolbox is self-contained: it includes `seqeyes.m` and the bundled web viewer assets, so you do not need
+to keep a GitHub checkout after installing it.
 
-**Option 2: Use the source checkout.** Clone or download this repository, then add its `matlab` folder to the MATLAB path:
+**Option 2: use the source checkout.** Clone or download this repository, then add its `matlab` folder to the MATLAB
+path. `seqeyes(seq)` then uses the web assets from the checkout.
 
 ```matlab
 addpath(genpath('/path/to/seqeyes_plugin/matlab'))
 ```
 
-This source setup does not require installing the `.mltbx`; `seqeyes(seq)` uses the web assets from the checkout.
-
-### Usage
+**Usage**
 
 ```matlab
 seqeyes(seq)                  % open an in-memory mr.Sequence object
@@ -84,78 +217,122 @@ seqeyes('spiral_inout.seq')   % open a saved .seq file
 open('spiral_inout.seq')      % or double-click in Current Folder
 seqeyes('gre.bseq')           % open a saved binary .bseq file
 open('gre.bseq')              % or double-click in Current Folder
+seqeyes()                     % open an empty viewer
 ```
 
-No manual `.seq` export is needed for `mr.Sequence` objects; SeqEyes writes a temporary file internally and does not modify Pulseq files or classes. All the same features as the browser & VS Code versions — 7 channels, k-space viewer, themes, tooltips — rendered inside a native MATLAB figure. Requires R2022a+.
+No manual `.seq` export is needed for `mr.Sequence` objects; SeqEyes writes a temporary file internally and does not
+modify Pulseq files or classes. The viewer opens in a native MATLAB figure.
 
-## 🐍 Python Package
+### 🐍 Python package
 
-Interactive Pulseq sequence viewer for Jupyter notebooks and Python scripts — a drop‑in replacement for `pypulseq.Sequence.plot()`. Renders directly in notebook cell output or opens in your default browser.
-
-### Install
+An interactive replacement for `pypulseq.Sequence.plot()` that renders in Jupyter cell output or opens in your default
+browser. Requires Python ≥ 3.9.
 
 ```bash
-pip install seqeyes-python
+pip install seqeyes-python             # viewer only
+pip install seqeyes-python[pypulseq]   # with pypulseq integration
 ```
-
-For pypulseq integration:
-
-```bash
-pip install seqeyes-python[pypulseq]
-```
-
-### Usage
 
 ```python
 import seqeyes
 
-# Enable SeqEyes (once per session) — seq.plot() is now interactive
+# Enable SeqEyes (once per session): seq.plot() is now interactive
 seqeyes.set(theme="dark", time_disp="ms")
 
 # Build your sequence with pypulseq as usual
 seq.plot()                          # interactive viewer in Jupyter
-seq.plot(show_blocks=True)          # per‑call overrides
+seq.plot(show_blocks=True)          # per-call overrides
 seq.plot(time_range=(0, 0.05))      # zoom to first 50 ms
 
 # Restore matplotlib at any time
 seqeyes.reset()
 ```
 
-All the same features as the other versions — interactive waveforms, k‑space viewer, themes, tooltips — rendered directly in Jupyter or your browser. Requires Python ≥ 3.9.
+## 🧭 Controls
 
-## Features
+**Waveforms**
 
-- **Custom editor for `.seq` and `.bseq` files** — opens automatically on double‑click
-- **📂 Open button** — switch between sequences without closing the editor
-- **Browser URL import** — open raw `.seq` or `.bseq` files from web links in the standalone web app; fetched bytes stay in browser memory
-- **7 primary channels**: RF · φ · Gx · Gy · Gz · ADC · Trigger
-- **Optional M1 channels**: calculate M1x, M1y, and M1z on demand
-- **Optional SAFE PNS prediction**: load a user-provided Siemens ASC profile to display PNS X/Y/Z/Norm
-- **Gradient spectrogram**: time × frequency content of the *physical* (rotation-applied) gradient waveforms over exactly the visible time window, with a frequency-spectrum sub-pane, selectable colormaps, and radiology-style window/level
-- **Acoustic resonance bands**: forbidden bands read from the same ASC profile, overlaid on both sub-panes
-- **Simulated gradient sound**: play the visible window with a playhead that tracks the audio clock (simulated, not calibrated — see the caveat below)
-- **ADC phase curve** on φ axis — continuous $\phi(t) = \phi_0 + 2\pi \cdot f_{offset} \cdot (t - t_0)$
-- **Analysis panel**: one panel, three states — closed, WebGL‑accelerated 3D k‑space scatter (millions of points @ 60 fps) with camera presets, or the gradient spectrogram
-- **Bloch simulation (preview, web app and VS Code)**: simulate the sequence on the built-in, MRzero/BrainWeb or your own phantom, locally in Web Workers, browse raw data, k-space and images in an N-D viewer, export ISMRMRD (`.h5`) or NumPy — see [Simulation](#simulation-preview-web-app-and-vs-code)
-- **Camera presets** (xy / xz / yz) rotate the 3D view; any drag reverts to free 3D
-- **Interactive Canvas**: cursor‑anchored time zoom, per‑row y‑axis zoom, drag‑pan, hover tooltips
-- **6 built‑in themes**: One Light · One Dark · Dracula · Nord · GitHub Light · GitHub Dark (+ system auto)
-- **Vertical cursor** with live time readout
-- **Measurement markers**: right-click to drop markers that snap to gradient corners, RF/ADC edges and centres, and block boundaries; read each channel's value at every marker and Δt between them, and copy the table
-- **Unit switchers** for time (s / ms / µs) and gradient (Hz/m / mT/m / G/cm)
-- **K‑space unit toggle** (1/m ↔ rad/m) with auto‑updating axis ticks
-- **Block boundary lines** — toggle in toolbar
-- **Remembered settings** — theme, units, toggles, panel sizes and the loaded ASC profile come back next session; a ⚙ toolbar button turns that off and throws away what is stored
-- **Optimized for large files** — binary k‑space encoding, bounds-checked parsers, and no text conversion for `.bseq`
-- **Pulseq format support** — text `.seq` v1.2.0–v1.5.x and official binary `.bseq` v1.5.2 reading
-- **Current `.bseq` hosts** — standalone web, VS Code, MATLAB `seqeyes('file.bseq')`, Python `SeqEyesViewer.from_file()`, and the k-space export CLI
+| Action | How |
+|--------|-----|
+| Open a `.seq` or `.bseq` file | Double-click it in the VS Code Explorer, drag it onto the web app, or click **📂 Open** |
+| Open a web link | In the web app, click **🌐 URL** and paste a raw `.seq` or `.bseq` link |
+| Zoom time | Scroll wheel, or toolbar `+` / `−` |
+| Zoom one row's y-axis | `Ctrl` + scroll wheel over the row |
+| Fine wheel zoom | Hold `Alt` while scrolling; `Ctrl` + `Alt` + scroll gives finer y-axis zoom where the browser/OS supports it |
+| Pan | Click & drag |
+| Fit to view | Toolbar `Fit` |
+| Show / hide a channel | Click its legend label |
+| Block details & values | Hover the waveform |
+| Block boundaries | `Blocks` checkbox in the toolbar |
+| Calculate M1 | Select `M1x`, `M1y` or `M1z` in the legend; the legend toggles each axis |
+| Load an ASC profile | `Load ASC (PNS/Acoustic)`, then choose a scanner ASC. PNS coefficients and acoustic resonances are read independently: a file carrying only one still loads, and the viewer says which it found |
+| Switch theme and units | Toolbar `Theme`, `Time` and `Grad` dropdowns |
 
-## Gradient spectrogram and acoustic bands
+**Measurement markers**
 
-The analysis panel has three states, cycled by one toolbar button: closed,
-k-space trajectory, and gradient spectrogram.
+| Action | How |
+|--------|-----|
+| Add a marker | Right-click (or long-press) the waveform → **Add marker** |
+| Place it off the snap points | **Add marker at pointer (no snap)**, or hold `Shift` while dragging |
+| Move a marker | Drag it |
+| Remove markers | Right-click next to one, use the table's ×, or **Clear** |
+| Copy the readouts | **Copy** in the marker table (tab-separated) |
 
-### What the spectrogram shows
+**Analysis panel: 3D k-space**
+
+| Action | How |
+|--------|-----|
+| Cycle the analysis panel | Toolbar button: closed → **K-Space** → **Spectrogram** → closed. The label always names what the next click does |
+| Rotate 3D view | Left-drag in the k-space panel |
+| Pan 3D view | Right-drag or middle-drag |
+| Zoom k-space (at cursor) | Scroll wheel in the k-space panel |
+| Cycle camera preset | `Prj` button: xy → xz → yz → 3D |
+| Reset k-space view | `↺` button |
+| Toggle k-space unit | `Unit` button: 1/m ↔ rad/m |
+| ADC marker size | `Size` slider in the k-space panel |
+| Resize the analysis panel | Drag the outer edge handle |
+
+**Analysis panel: spectrogram & sound**
+
+| Action | How |
+|--------|-----|
+| Resize the spectrogram / spectrum split | Drag the divider between the sub-panes (3:1 by default, remembered per orientation) |
+| Window / level the spectrogram | Middle-drag: horizontal = window width, vertical = level. Middle-double-click, or `Auto W/L`, resets. Two-finger drag on touch; the `W±` / `L±` buttons do the same |
+| Place a time marker | Right-click the spectrogram (or long-press on touch). The spectrum sub-pane shows that column; `Esc` or `Clear marker` removes it. With no marker the sub-pane shows the view average |
+| Change the frequency range | `f min` / `f max` boxes, or scroll/drag on the frequency axis; `Fit f` returns to 0–3000 Hz |
+| Change colormap | Colormap dropdown: Viridis (default), Magma, Inferno, Turbo, Greyscale, Theme |
+| Analyse slew rate instead of amplitude | Source dropdown: `G` → `dG/dt` |
+| Play the simulated gradient sound | `▶` at the top-left of the panel. Playback runs from the marker (or the window start) to the end of the visible window |
+
+**Simulation (web app and VS Code)**
+
+| Action | How |
+|--------|-----|
+| Open the simulation panel | Toolbar **Simulation** |
+| Pick a phantom, fields and coils | Phantom, matrix, `B0/B1` and coil dropdowns; **Your file…** loads your own maps |
+| Pick the engine and accuracy | `Engine: isochromats` / `Engine: phase graph`, then the accuracy preset |
+| Run or cancel | **▶ Run** (**▶ Run again** after a result) and the stop button |
+| Browse the data | **Phantom**, **RF pulses**, **Raw**, **k-space** and **Image** tabs; choose the X / Y dimensions, the others get sliders |
+| Find a readout on the timeline | Hover the raw data; **⇱ Timeline** brings the selected readout into view |
+| Export | **Export…**: ISMRMRD `.h5` or stream, NumPy `.npz`, or the current view as PNG |
+
+**Settings**
+
+| Action | How |
+|--------|-----|
+| Stop remembering settings | ⚙ in the toolbar, then untick **Remember my settings**. **Forget stored settings** deletes what is already there |
+
+## 📖 In depth
+
+### Gradient spectrogram and acoustic bands
+
+The analysis panel has three states, cycled by one toolbar button: closed, k-space trajectory, and gradient
+spectrogram.
+
+<details>
+<summary>What the spectrogram shows, acoustic bands, simulated sound, and limits</summary>
+
+#### What the spectrogram shows
 
 The time × frequency content of the three **physical** gradient axes — the
 logical channels with each block’s rotation extension applied, because acoustic
@@ -175,7 +352,7 @@ The readout under the panel always states the resolution actually achieved
 (`dt`, `df`), because a heavily zoomed view genuinely cannot resolve fine
 frequency detail, and the panel says so rather than implying otherwise.
 
-### Acoustic resonance bands
+#### Acoustic resonance bands
 
 `Load ASC (PNS/Acoustic)` reads both the SAFE PNS coefficients and the acoustic
 resonance table from a Siemens ASC profile. The two are parsed independently:
@@ -188,7 +365,7 @@ window, the band edge is highlighted and the viewer says so. **This is
 advisory.** It compares against your current window/level setting, not against
 a scanner limit, and it is not a compliance check.
 
-### Simulated gradient sound
+#### Simulated gradient sound
 
 The play button synthesises audio from the physical gradient waveforms,
 following pulseq’s `Sequence.sound()`: x to the left channel, y to the right,
@@ -200,7 +377,7 @@ about how loud the scanner will actually be — that would need the coil transfe
 function, which the ASC does not contain. Windows shorter than 250 ms loop so
 there is something to hear; windows longer than 120 s are refused.
 
-### Limits
+#### Limits
 
 The spectrogram is scoped to the visible window, so when a request exceeds the
 interactive budget the viewer asks you to zoom in rather than offering a
@@ -208,12 +385,16 @@ interactive budget the viewer asks you to zoom in rather than offering a
 solves it. For the same reason the spectrogram stays available on sequences
 where k-space is refused, and the k-space safety dialog offers it as a way out.
 
-## Simulation (preview, web app and VS Code)
+</details>
 
-The **Simulation** toggle next to the k-space/spectrogram button runs a Bloch
-simulation of the open sequence on a phantom, entirely on your machine (Web
-Workers in the browser or in the VS Code viewer, no server), and shows the raw
+### Simulation in depth
+
+The **Simulation** toggle next to the k-space/spectrogram button runs a Bloch simulation of the open sequence on a
+phantom, entirely on your machine (Web Workers in the browser or in the VS Code viewer, no server), and shows the raw
 data and a reconstruction.
+
+<details>
+<summary>Phantoms, RF pulses and the slab, engines, 3-D, viewing the data, accuracy tiers, export, and what it simulates</summary>
 
 **Phantoms**
 
@@ -357,52 +538,19 @@ long, the plan takes a coarser tested spacing and says so. **Not yet**:
 - anisotropic diffusion (the ADC is a scalar) and Monte Carlo diffusion in
   restricted geometries;
 - dynamic pTx;
-- non-Cartesian gridding (the preview recon snaps samples to the nearest
+- non-Cartesian gridding (the in-app recon snaps samples to the nearest
   Cartesian cell);
 - the MATLAB and Python hosts.
 
-## Usage
+</details>
 
-| Action | How |
-|--------|-----|
-| Open a `.seq` or `.bseq` file | Double‑click in Explorer, or click **📂 Open** in toolbar |
-| Switch to another sequence | **📂 Open** button (top‑left) |
-| Open a browser web link | In the standalone web app, click **🌐 URL** and paste a raw `.seq` or `.bseq` link |
-| Zoom waveform | Scroll wheel or toolbar `+` / `−` |
-| Zoom waveform y‑axis | `Ctrl` + scroll wheel over a waveform row |
-| Fine wheel zoom | Hold `Alt` while scrolling; `Ctrl` + `Alt` + scroll gives finer y‑axis zoom where supported by the browser/OS |
-| Pan waveform | Click & drag |
-| Fit to view | Toolbar `Fit` |
-| Toggle channel | Click legend label |
-| Calculate M1 | Select any `M1x`, `M1y`, or `M1z` legend entry; use the legend to toggle each axis |
-| Load an ASC profile | `Load ASC (PNS/Acoustic)`, then choose a scanner ASC. PNS coefficients and acoustic resonances are read independently — a file carrying only one still loads, and the viewer says which it found |
-| Toggle block boundaries | Checkbox `☐ Blocks` in toolbar |
-| Block details & values | Hover waveform |
-| Measure times and values | Right-click (or long-press) the waveform → **Add marker** (see [Measurement markers](#measurement-markers)). Drag a marker to move it; hold `Shift` to place it off the snap points |
-| Switch theme | Toolbar `Theme` dropdown |
-| Cycle the analysis panel | Toolbar button: closed → **K-Space** → **Spectrogram** → closed. The label always names what the next click does |
-| Rotate 3D view | Left‑drag in k‑space panel |
-| Pan 3D view | Right‑drag or middle‑drag |
-| Zoom k‑space (at cursor) | Scroll wheel in k‑space panel |
-| Cycle camera preset | `Prj` button — xy → xz → yz → 3D |
-| Reset k‑space view | `↺` button |
-| Toggle k‑space unit | `Unit` button — 1/m ↔ rad/m |
-| ADC marker size | `Size` slider in k‑space panel |
-| Resize the analysis panel | Drag the outer edge handle |
-| Resize the spectrogram / spectrum split | Drag the divider between the sub-panes (3:1 by default, remembered per orientation) |
-| Window / level the spectrogram | Middle-drag: horizontal = window width, vertical = level. Middle-double-click, or `Auto W/L`, resets. Two-finger drag on touch; the `W±` / `L±` buttons do the same |
-| Place a time marker | Right-click the spectrogram (or long-press on touch). The spectrum sub-pane shows that column; `Esc` or `Clear marker` removes it. With no marker the sub-pane shows the view average |
-| Change the frequency range | `f min` / `f max` boxes, or scroll/drag on the frequency axis; `Fit f` returns to 0–3000 Hz |
-| Change colormap | Colormap dropdown — Viridis (default), Magma, Inferno, Turbo, Greyscale, Theme |
-| Analyse slew rate instead of amplitude | Source dropdown: `G` → `dG/dt` |
-| Play the simulated gradient sound | `▶` at the top-left of the panel. Playback runs from the marker (or the window start) to the end of the visible window |
-| Stop remembering settings | ⚙ in the toolbar, then untick **Remember my settings**. **Forget stored settings** deletes what is already there |
+### Measurement markers
 
-## Measurement markers
+Right-click the waveform viewer (or long-press it on a touch screen) and choose **Add marker** to drop a vertical
+marker. Add as many as you need (M1, M2, …).
 
-Right-click the waveform viewer (or long-press it on a touch screen) and
-choose **Add marker** to drop a vertical marker. Add as many as you need
-(M1, M2, …):
+<details>
+<summary>Snapping, readouts, exactness and editing</summary>
 
 - **Snapping.** Near a gradient corner the menu offers that point instead:
   a trapezoid's ramp and flat-top corners, the breakpoints of an extended
@@ -428,9 +576,17 @@ choose **Add marker** to drop a vertical marker. Add as many as you need
   drag. Markers belong to the open sequence and are cleared when another one
   loads.
 
-## Remembered settings
+</details>
 
-The viewer comes back the way you left it. Theme, time and gradient units, the
+### Remembered settings
+
+The viewer comes back the way you left it: theme, units, toggles, panel sizes and the loaded ASC profile survive a
+restart. Everything is stored locally under the `seqeyes.` prefix, and nothing is uploaded.
+
+<details>
+<summary>What is stored, how the ASC profile is kept, and how to turn it off</summary>
+
+Theme, time and gradient units, the
 `Blocks` toggle, k-space unit, projection and marker size, spectrogram
 parameters, label marker styles, panel sizes and the loaded ASC profile all
 survive a restart, so a session starts where the last one ended rather than at
@@ -449,8 +605,6 @@ things to work with:
 Everything lives in the browser's (or the webview's) local storage under the
 `seqeyes.` prefix, on your own machine. Nothing is uploaded.
 
-### Turning it off
-
 The ⚙ button in the toolbar opens a settings popover:
 
 - **Remember my settings** — on by default. Unticking it deletes everything
@@ -459,6 +613,46 @@ The ⚙ button in the toolbar opens a settings popover:
   while it was off.
 - **Forget stored settings** — deletes what is stored, including a cached ASC
   profile, without changing the setting itself.
+
+</details>
+
+### Full feature list
+
+<details>
+<summary>Everything SeqEyes does, in one list</summary>
+
+- **Custom editor for `.seq` and `.bseq` files** — opens automatically on double‑click
+- **📂 Open button** — switch between sequences without closing the editor
+- **Browser URL import** — open raw `.seq` or `.bseq` files from web links in the standalone web app; fetched bytes stay in browser memory
+- **7 primary channels**: RF · φ · Gx · Gy · Gz · ADC · Trigger
+- **Optional M1 channels**: calculate M1x, M1y, and M1z on demand
+- **Optional SAFE PNS prediction**: load a user-provided Siemens ASC profile to display PNS X/Y/Z/Norm
+- **Gradient spectrogram**: time × frequency content of the *physical* (rotation-applied) gradient waveforms over exactly the visible time window, with a frequency-spectrum sub-pane, selectable colormaps, and radiology-style window/level
+- **Acoustic resonance bands**: forbidden bands read from the same ASC profile, overlaid on both sub-panes
+- **Simulated gradient sound**: play the visible window with a playhead that tracks the audio clock (simulated, not calibrated — see [Gradient spectrogram and acoustic bands](#gradient-spectrogram-and-acoustic-bands))
+- **ADC phase curve** on φ axis — continuous $\phi(t) = \phi_0 + 2\pi \cdot f_{offset} \cdot (t - t_0)$
+- **Analysis panel**: one panel, three states — closed, WebGL‑accelerated 3D k‑space scatter (millions of points @ 60 fps) with camera presets, or the gradient spectrogram
+- **Bloch simulation (web app and VS Code)**: simulate the sequence on the built-in, MRzero/BrainWeb or your own phantom, locally in Web Workers, browse raw data, k-space and images in an N-D viewer, export ISMRMRD (`.h5`) or NumPy — see [Simulation in depth](#simulation-in-depth)
+- **Camera presets** (xy / xz / yz) rotate the 3D view; any drag reverts to free 3D
+- **Interactive Canvas**: cursor‑anchored time zoom, per‑row y‑axis zoom, drag‑pan, hover tooltips
+- **6 built‑in themes**: One Light · One Dark · Dracula · Nord · GitHub Light · GitHub Dark (+ system auto)
+- **Vertical cursor** with live time readout
+- **Measurement markers**: right-click to drop markers that snap to gradient corners, RF/ADC edges and centres, and block boundaries; read each channel's value at every marker and Δt between them, and copy the table
+- **Unit switchers** for time (s / ms / µs) and gradient (Hz/m / mT/m / G/cm)
+- **K‑space unit toggle** (1/m ↔ rad/m) with auto‑updating axis ticks
+- **Block boundary lines** — toggle in toolbar
+- **Remembered settings** — theme, units, toggles, panel sizes and the loaded ASC profile come back next session; a ⚙ toolbar button turns that off and throws away what is stored
+- **Optimized for large files** — binary k‑space encoding, bounds-checked parsers, and no text conversion for `.bseq`
+- **Pulseq format support** — text `.seq` v1.2.0–v1.5.x and official binary `.bseq` v1.5.2 reading
+- **Current `.bseq` hosts** — standalone web, VS Code, MATLAB `seqeyes('file.bseq')`, Python `SeqEyesViewer.from_file()`, and the k-space export CLI
+
+</details>
+
+## Credits
+
+SeqEyes for the web is inspired by the C++/Qt [SeqEyes](https://github.com/xingwangyong/seqeyes) desktop application
+(Yong X, et al. Magn Reson Med 2026; [doi:10.1002/mrm.70584](https://doi.org/10.1002/mrm.70584)). It reads sequences
+written with [Pulseq](https://github.com/pulseq/pulseq) and [PyPulseq](https://github.com/pulseq/pypulseq).
 
 ## License
 

@@ -21,4 +21,6 @@ python/**
 scripts/**
 web/**
 images/*.svg
+# README figures: vsce points the Marketplace README at their GitHub copies, so the VSIX needn't carry them.
+images/readme/**
 PLAN.md
