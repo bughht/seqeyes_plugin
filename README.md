@@ -43,7 +43,7 @@
 
 | Host | Get it | Open a sequence |
 |---|---|---|
-| 🌐 **Web** | [bughht.github.io/seqeyes_plugin](https://bughht.github.io/seqeyes_plugin/), nothing to install | Drag & drop a `.seq` / `.bseq`, or **📂 Open** / **🌐 URL** |
+| 🌐 **Web** | [bughht.github.io/seqeyes_plugin](https://bughht.github.io/seqeyes_plugin/), nothing to install | Drag & drop a `.seq` / `.bseq`, **📂 Open** / **🌐 URL**, or **Open in SeqEyes** on GitHub with the [userscript](https://github.com/xingwangyong/seqeyes-userscripts) |
 | **VS Code** | `code --install-extension SeqEyesDeveloper.seqeyes-web` | Double-click a `.seq` / `.bseq` in the Explorer |
 | **MATLAB** | `seqeyes-*.mltbx` from [Releases](https://github.com/bughht/seqeyes_plugin/releases) (R2022a+) | `seqeyes(seq)` on an `mr.Sequence`, or double-click a file |
 | **Python** | `pip install seqeyes-python` | `seqeyes.set()` once, then `seq.plot()` as usual |
@@ -163,6 +163,11 @@ Tests and evidence: [yeewantung/seqeyes-plus-experiments](https://github.com/yee
 No download, no extension, no setup. Drag & drop a `.seq` or `.bseq` file onto the page, click **📂 Open**, or click
 **🌐 URL** and paste a link to a raw `.seq` / `.bseq` file. The Pulseq engine runs entirely in the browser: parsing and
 calculation happen in browser memory, and sequence data is never uploaded.
+
+**Open `.seq` files straight from GitHub.** Install [Tampermonkey](https://www.tampermonkey.net/), then the
+[Open in SeqEyes userscript](https://github.com/xingwangyong/seqeyes-userscripts). It adds a **SeqEyes↗** button next to
+every `.seq` file in a repository listing, and an **Open in SeqEyes** button beside **Raw** on a file's page; both open
+the file in the web app.
 
 ### VS Code extension
 
