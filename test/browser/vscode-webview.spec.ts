@@ -29,6 +29,12 @@ import { calculateKspace } from '../../src/pulseq/kspace';
 import { parseSequenceBytes } from '../../src/pulseq/sequenceReader';
 import { detectSequenceTiming } from '../../src/pulseq/trdetect';
 
+import {
+  DEFAULT_ORDER, DEFAULT_ROWS, ctrlWheelOnRow, dragOver, dragRow, legendOrder, lineIndex, menuItem,
+  moveRow, openRowMenu, readoutLines, rowOrder, rowPoint, rowSignatures, rowState, settledRowSignatures,
+  shownRows, viewStart,
+} from './channel-order-helpers';
+
 const FIXTURE = resolve('test/seq/spiral_inout.seq');
 const SIM_FIXTURE = resolve('test/kspace_baselines/v151_gre/seq/writeGradientEcho.seq');
 const OUT = resolve('out/editor/webview/assets');
@@ -818,4 +824,162 @@ test('adds a measurement marker from the right-click menu', async ({ page }) => 
   }, { sampleTimes: b64(packed.sampleTimes), sampleValues: b64(packed.sampleValues) });
   await expect(page.locator('#mkTable')).toBeHidden();
   expect(failures).toEqual([]);
+});
+
+/**
+ * Channel row order through the bundle's renderer, the one VS Code runs. The
+ * page is served from the test origin rather than set as content, so that a
+ * reload is a real one and localStorage survives it, as it does in a webview.
+ */
+test.describe('channel row order', () => {
+  const EPI = resolve('test/seqeyes_demo_seq_files/writeEpi.seq');
+  const epi = () => parseSequenceBytes(new Uint8Array(readFileSync(EPI)), 'writeEpi.seq');
+
+  const failures = new WeakMap<Page, string[]>();
+  test.beforeEach(async ({ page }) => {
+    const seen: string[] = [];
+    failures.set(page, seen);
+    page.on('pageerror', e => seen.push(e.message));
+    page.on('console', m => { if (m.type() === 'error') seen.push(m.text()); });
+  });
+  test.afterEach(async ({ page }) => { expect(failures.get(page) ?? []).toEqual([]); });
+
+  /** Open the webview on the test origin and hand it writeEpi, as the extension would. */
+  async function openWithEpi(page: Page): Promise<void> {
+    const css = readFileSync(resolve(OUT, 'styles.css'), 'utf8');
+    const body = readFileSync(resolve(OUT, 'template.html'), 'utf8');
+    const bundle = readFileSync(resolve(OUT, 'webview-bundle.js'), 'utf8');
+    const host = `window.__posted=[];window.acquireVsCodeApi=function(){return{`
+      + `postMessage:function(m){window.__posted.push(m);},getState:function(){},setState:function(){}};};`;
+    await page.route('**/__webview__', route => route.fulfill({
+      contentType: 'text/html; charset=utf-8',
+      body: `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><script>${host}</script><style>${css}</style></head>`
+        + `<body>${body}<script>(function(){${bundle}})();</script></body></html>`,
+    }));
+    await page.goto('/__webview__');
+    const seq = epi();
+    const packed = packSequenceBlocks(seq);
+    await post(page, {
+      type: 'sequenceData', sequenceGeneration: 1, blocks: packed.blocks, sampleCount: packed.sampleCount,
+      totalDuration: getTotalDuration(seq), gradRaster: seq.rasterTimes.gradientRaster,
+      rfRaster: seq.rasterTimes.rfRaster, adcRaster: seq.rasterTimes.adcRaster,
+      blockRaster: seq.rasterTimes.blockDurationRaster, timing: detectSequenceTiming(seq), notices: [],
+    }, { sampleTimes: b64(packed.sampleTimes), sampleValues: b64(packed.sampleValues) });
+    await expect.poll(async () => (await shownRows(page)).length).toBe(DEFAULT_ROWS.length);
+  }
+
+  test('reorders rows by dragging a channel name: a row\'s middle swaps, its edge inserts', async ({ page }) => {
+    await openWithEpi(page);
+    const start = await viewStart(page);
+
+    await dragOver(page, 'Gz', 'RF', 0.5);
+    expect(await rowState(page)).toMatchObject({ dragging: true, target: { mode: 'swap', index: 0 } });
+    await expect(page.locator('#coGhost')).toHaveText('Swap Gz ↔ RF');
+    await expect(page.locator('#coTarget')).toBeVisible();
+    await page.mouse.up();
+    expect(await shownRows(page)).toEqual(['Gz', 'φ', 'Gx', 'Gy', 'RF', 'ADC', 'Trig']);
+
+    await dragOver(page, 'ADC', 'φ', 0.08);
+    await expect(page.locator('#coGhost')).toHaveText('Insert ADC here');
+    await expect(page.locator('#coLine')).toBeVisible();
+    await page.mouse.up();
+    expect(await shownRows(page)).toEqual(['Gz', 'ADC', 'φ', 'Gx', 'Gy', 'RF', 'Trig']);
+    expect(await legendOrder(page)).toEqual(['Gz', 'ADC', 'φ', 'Gx', 'Gy', 'RF', 'Trig', 'Label', 'PNS', 'M1x', 'M1y', 'M1z']);
+    expect(await viewStart(page)).toBe(start);
+  });
+
+  test('moves a row from its name\'s menu and resets, leaving the plot\'s menu to markers', async ({ page }) => {
+    await openWithEpi(page);
+    let menu = await openRowMenu(page, 'RF');
+    await expect(menuItem(menu, 'Top')).toBeDisabled();
+    await expect(menuItem(menu, 'Up')).toBeDisabled();
+    await expect(menuItem(menu, 'Reset order')).toBeDisabled();
+    await menuItem(menu, 'Down').click();
+    expect(await shownRows(page)).toEqual(['φ', 'RF', 'Gx', 'Gy', 'Gz', 'ADC', 'Trig']);
+    await moveRow(page, 'RF', 'Up');
+    expect(await shownRows(page)).toEqual(DEFAULT_ROWS);
+    await moveRow(page, 'Gx', 'Bottom');
+    expect(await shownRows(page)).toEqual(['RF', 'φ', 'Gy', 'Gz', 'ADC', 'Trig', 'Gx']);
+    menu = await openRowMenu(page, 'Gx');
+    await expect(menuItem(menu, 'Down')).toBeDisabled();
+    await expect(menuItem(menu, 'Bottom')).toBeDisabled();
+    await menuItem(menu, 'Top').click();
+    expect(await shownRows(page)).toEqual(['Gx', 'RF', 'φ', 'Gy', 'Gz', 'ADC', 'Trig']);
+    await moveRow(page, 'Gz', 'Reset order');
+    expect(await rowOrder(page)).toEqual(DEFAULT_ORDER);
+
+    await openRowMenu(page, 'Gx');
+    await expect(page.locator('#markerMenu')).toHaveCount(0);
+    const plot = await rowPoint(page, 'Gx', 0.5, 'plot');
+    await page.mouse.click(plot.x, plot.y, { button: 'right' });
+    await expect(page.locator('#markerMenu')).toBeVisible();
+    await expect(page.locator('#channelOrderMenu')).toHaveCount(0);
+  });
+
+  test('moves only among the rows shown, so a hidden channel keeps its place', async ({ page }) => {
+    await openWithEpi(page);
+    await page.locator('#legend .li', { hasText: /^φ$/ }).click();
+    await moveRow(page, 'Gx', 'Up');
+    expect(await shownRows(page)).toEqual(['Gx', 'RF', 'Gy', 'Gz', 'ADC', 'Trig']);
+    await dragRow(page, 'Trig', 'RF', 0.5);
+    expect(await shownRows(page)).toEqual(['Gx', 'Trig', 'Gy', 'Gz', 'ADC', 'RF']);
+    await page.locator('#legend .li', { hasText: /^φ$/ }).click();
+    expect(await shownRows(page)).toEqual(['Gx', 'Trig', 'φ', 'Gy', 'Gz', 'ADC', 'RF']);
+  });
+
+  test('zooms the amplitude of the row under the cursor after a reorder', async ({ page }) => {
+    await openWithEpi(page);
+    await moveRow(page, 'Gz', 'Top');
+    for (const [channel, row] of [['Gz', 0], ['RF', 1]] as const) {
+      const before = await settledRowSignatures(page);
+      await ctrlWheelOnRow(page, channel, -600);
+      await expect.poll(async () => (await rowSignatures(page))[row]).not.toBe(before[row]);
+      const after = await settledRowSignatures(page);
+      expect(after.filter((_, i) => i !== row)).toEqual(before.filter((_, i) => i !== row));
+    }
+  });
+
+  test('lists the hover readout in row order', async ({ page }) => {
+    await openWithEpi(page);
+    // The excitation plays RF and the slice-select Gz together.
+    const blocks = packSequenceBlocks(epi()).blocks as unknown as { s: number; d: number; rf?: unknown }[];
+    const excitation = blocks.find(b => b.rf)!;
+    const t = excitation.s + excitation.d / 2;
+    const at = async () => {
+      const view = await page.evaluate(() => (window as unknown as { SeqEyesPanelHost: { getView(): { startSec: number; endSec: number } } })
+        .SeqEyesPanelHost.getView());
+      const box = (await page.locator('#mc').boundingBox())!;
+      const p = await rowPoint(page, 'Gy', 0.5, 'plot');
+      // Wide layout: a 92 px gutter on the left, 4 px on the right.
+      return readoutLines(page, box.x + 92 + (t - view.startSec) * (box.width - 96) / (view.endSec - view.startSec), p.y);
+    };
+    let lines = await at();
+    expect(lineIndex(lines, 'RF:')).toBeLessThan(lineIndex(lines, 'Gz:'));
+    await moveRow(page, 'Gz', 'Top');
+    lines = await at();
+    expect(lines[0]).toMatch(/^Block #/);
+    expect(lineIndex(lines, 'Gz:')).toBeLessThan(lineIndex(lines, 'RF:'));
+  });
+
+  test('remembers the row order when the webview reopens, but only while settings are remembered', async ({ page }) => {
+    await openWithEpi(page);
+    await moveRow(page, 'Gz', 'Top');
+    const remembered = ['Gz', 'RF', 'φ', 'Gx', 'Gy', 'ADC', 'Trig', 'Label', 'PNS', 'M1x', 'M1y', 'M1z'];
+    const stored = () => page.evaluate(() => localStorage.getItem('seqeyes.channelOrder'));
+    expect(JSON.parse((await stored())!)).toEqual(remembered);
+
+    await openWithEpi(page);
+    expect(await rowOrder(page)).toEqual(remembered);
+    expect(await legendOrder(page)).toEqual(remembered);
+
+    await page.locator('#prefsBtn').click();
+    await page.locator('#prefsRemember').uncheck();
+    await page.keyboard.press('Escape');
+    expect(await stored()).toBeNull();
+    await moveRow(page, 'RF', 'Top');
+    expect((await shownRows(page))[0]).toBe('RF');
+    expect(await stored()).toBeNull();
+    await openWithEpi(page);
+    expect(await rowOrder(page)).toEqual(DEFAULT_ORDER);
+  });
 });

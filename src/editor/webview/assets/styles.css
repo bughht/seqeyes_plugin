@@ -315,3 +315,15 @@ body.layout-vertical.sg-split-drag{cursor:col-resize}
   .mk-table{max-height:40%}
   .mk-table button{min-height:28px;padding:2px 10px}
 }
+/* ── Channel row order (channel-order.js) ───────────────────────────── */
+#cc.co-grab{cursor:grab}
+#cc.co-drag{cursor:grabbing}
+#cc.co-drag #tt,#cc.co-menu-open #tt{display:none!important}
+.co-box,.co-line,.co-ghost{position:absolute;pointer-events:none;z-index:3;box-sizing:border-box}
+#coSource{border:1.5px dashed var(--lb);background:rgba(127,127,127,.07)}
+#coTarget{border:2.5px solid var(--adc);background:var(--adf)}
+.co-line{height:4px;margin-top:-2px;border-radius:2px;background:var(--adc)}
+.co-ghost{z-index:4;transform:translateY(-50%);padding:3px 6px;border:1px solid var(--adc);border-radius:4px;background:var(--bg);color:var(--fg);font:bold 11px monospace;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.2)}
+.mk-menu.co-menu{min-width:150px}
+.co-menu-title{padding:4px 12px 3px;color:var(--lb);font-size:10px}
+.mk-menu .mk-item:disabled{opacity:.4;cursor:default;background:none}
