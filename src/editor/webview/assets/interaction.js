@@ -145,18 +145,23 @@ function pushPnsDerivedPart(parts,label,series,t){
   }
   pushDerivedPart(parts,label,series,t,'%');
 }
-function appendDerivedTooltipLines(lines,ct){
+/* Readout lines go out as [channel, text] so they can follow the row order. */
+function appendDerivedTooltipRows(rows,ct){
   // The series the plot is showing, not the full-sequence one behind it.
   var activePns=pnsSeriesShown(ox,ox+visibleDuration());
   if(activePns&&chVis[7]){
     var p=[];pushPnsDerivedPart(p,'X',activePns.x,ct);pushPnsDerivedPart(p,'Y',activePns.y,ct);pushPnsDerivedPart(p,'Z',activePns.z,ct);pushPnsDerivedPart(p,'Norm',activePns.n,ct);
-    if(p.length)lines.push('PNS: '+p.join('  '));
+    if(p.length)rows.push([7,'PNS: '+p.join('  ')]);
   }
   var activeM1=m1SeriesForView(ox,ox+visibleDuration());
   if(activeM1&&(chVis[8]||chVis[9]||chVis[10])){
     var m=[];if(chVis[8])pushM1DerivedPart(m,'M1x',activeM1.x,ct);if(chVis[9])pushM1DerivedPart(m,'M1y',activeM1.y,ct);if(chVis[10])pushM1DerivedPart(m,'M1z',activeM1.z,ct);
-    if(m.length)lines.push('M1: '+m.join('  '));
+    if(m.length)rows.push([[8,9,10].filter(function(c){return chVis[c];}),'M1: '+m.join('  ')]);
   }
+}
+function appendDerivedTooltipLines(lines,ct){
+  var rows=[];appendDerivedTooltipRows(rows,ct);
+  Array.prototype.push.apply(lines,SeqEyesChannelOrder.sortRows(rows,CH_ORDER));
 }
 function placeTooltip(cx,cy){
   var pad=8;tt.style.left='0px';tt.style.top='0px';
@@ -226,21 +231,22 @@ function showTooltipAt(cx,cy,ct){
   var ch=cH(),vc=visChannels(),vi2=Math.floor((cy-mc.getBoundingClientRect().top-M.t)/ch);
   if(vi2>=0&&vi2<vc.length){
     var found=findBlockAtTime(ct);
-    var lines=[];
+    var lines=[],rows=[];
     if(found){
       var blockDt=Math.max(0,Math.min(found.d,ct-found.s));
       lines=['Block #'+found.i,'Time: '+fmtT(timeConv(ct))+' '+timeUnitStr()+' (\u0394 '+fmtT(timeConv(blockDt))+' / dur: '+fmtT(timeConv(found.d))+' '+timeUnitStr()+')'];
-      if(found.rf){lines.push('RF: '+(found.rf.a||0).toFixed(1)+' Hz'+rfResponseSummary(found.rf)+'  fo='+(found.rf.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.rf.po||0)%6.283).toFixed(2)+' rad');}
-      if(found.gx&&found.gx.ty!=='none')lines.push('Gx: '+fmtG(found.gx,ct));
-      if(found.gy&&found.gy.ty!=='none')lines.push('Gy: '+fmtG(found.gy,ct));
-      if(found.gz&&found.gz.ty!=='none')lines.push('Gz: '+fmtG(found.gz,ct));
-      if(found.adc){lines.push('ADC: '+found.adc.n+'pts @'+(found.adc.dw*1e6).toFixed(1)+'\u00b5s  fo='+(found.adc.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.adc.po||0)%6.283).toFixed(2)+' rad');}
-      if(found.trg)lines.push('Trig: ch'+found.trg.map(function(x){return x.c}).join(',')+' \u0394'+found.trg.map(function(x){return fmtT(timeConv(x.dr))+' '+timeUnitStr()}).join(','));
-      if(chVis[11]&&labelTable){var labelLine=SeqEyesLabels.tooltipLine(labelTable,found);if(labelLine)lines.push(labelLine);}
+      if(found.rf){rows.push([0,'RF: '+(found.rf.a||0).toFixed(1)+' Hz'+rfResponseSummary(found.rf)+'  fo='+(found.rf.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.rf.po||0)%6.283).toFixed(2)+' rad']);}
+      if(found.gx&&found.gx.ty!=='none')rows.push([2,'Gx: '+fmtG(found.gx,ct)]);
+      if(found.gy&&found.gy.ty!=='none')rows.push([3,'Gy: '+fmtG(found.gy,ct)]);
+      if(found.gz&&found.gz.ty!=='none')rows.push([4,'Gz: '+fmtG(found.gz,ct)]);
+      if(found.adc){rows.push([5,'ADC: '+found.adc.n+'pts @'+(found.adc.dw*1e6).toFixed(1)+'\u00b5s  fo='+(found.adc.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.adc.po||0)%6.283).toFixed(2)+' rad']);}
+      if(found.trg)rows.push([6,'Trig: ch'+found.trg.map(function(x){return x.c}).join(',')+' \u0394'+found.trg.map(function(x){return fmtT(timeConv(x.dr))+' '+timeUnitStr()}).join(',')]);
+      if(chVis[11]&&labelTable){var labelLine=SeqEyesLabels.tooltipLine(labelTable,found);if(labelLine)rows.push([11,labelLine]);}
     }else{
       lines=['Time: '+fmtT(timeConv(ct))+' '+timeUnitStr()];
     }
-    appendDerivedTooltipLines(lines,ct);
+    appendDerivedTooltipRows(rows,ct);
+    Array.prototype.push.apply(lines,SeqEyesChannelOrder.sortRows(rows,CH_ORDER));
     if(lines.length>1||found){
       renderTooltipLines(tt,lines);tt.style.display='block';
       placeTooltip(cx,cy);
@@ -406,6 +412,12 @@ SeqEyesMarkers.install({
   timeConv:timeConv,timeUnitStr:timeUnitStr,gradConv:gradConv,gradUnitStr:gradUnitStr,
   requestOverlay:drawCursorOverlay,
   derivedLines:function(t){var lines=[];appendDerivedTooltipLines(lines,t);return lines;}
+});
+/* Row reordering from the gutter; web/index.html installs its own over it. */
+SeqEyesChannelOrder.install({
+  names:CH,defaults:CH_DEFAULT_ORDER,margins:function(){return M;},visChannels:visChannels,cH:cH,
+  getOrder:function(){return CH_ORDER;},
+  setOrder:function(order){CH_ORDER=order;buildLegend();draw();}
 });
 /* Deferred by one macrotask so web/index.html, whose inline IIFE runs after
    this bundle, has installed its own adapter before the persisted mode is
