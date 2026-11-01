@@ -166,7 +166,10 @@ body.layout-vertical.sg-split-drag{cursor:col-resize}
   body.layout-vertical #spane:not(.mobile-spectrum) #spPane{display:none}
   body.layout-vertical #spane.mobile-spectrum #sgPane,
   body.layout-vertical #spane.mobile-spectrum #sgSplit{display:none}
-  body.layout-vertical #spane.mobile-spectrum #spPane{display:block;flex:1 1 auto}
+  /* The lone pane fills the body: !important beats the inline split ratio,
+     whose grow factor below 1 would leave the rest of the panel blank. */
+  body.layout-vertical #spane:not(.mobile-spectrum) #sgPane{flex:1 1 auto!important}
+  body.layout-vertical #spane.mobile-spectrum #spPane{display:block;flex:1 1 auto!important}
   #viewerNotice .viewer-notice-item{align-items:flex-start;padding:5px 7px}
 }
 /* ── Simulation pane (simulation-panel.js, ndview.js) ──────────────── */

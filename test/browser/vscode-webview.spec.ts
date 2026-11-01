@@ -19,8 +19,9 @@ import { expect, test, type Page } from '@playwright/test';
 import { packSequenceBlocks } from '../../src/editor/blockTransport';
 import { buildWaveformDetailReply, waveformDetailMessage } from '../../src/editor/waveformDetailReply';
 import { serializeKSpace } from '../../src/editor/kspaceTransport';
-import { serializeGradientSound } from '../../src/editor/spectrogramTransport';
+import { serializeGradientSound, serializeSpectrogram } from '../../src/editor/spectrogramTransport';
 import { synthesizeGradientSound } from '../../src/pulseq/gradientSound';
+import { computeGradientSpectrogram } from '../../src/pulseq/gradSpectrum';
 import { resolveDetailBlockRange } from '../../src/editor/blockTransport';
 import { serializeLabelTable, type SerializedLabelTable } from '../../src/editor/labelTransport';
 import { evaluateAdcLabels, listSequenceLabels } from '../../src/pulseq/labels';
@@ -28,6 +29,8 @@ import { createSequenceDecodeContext, decodeAllBlocks, decodeBlockRange, getTota
 import { calculateKspace } from '../../src/pulseq/kspace';
 import { parseSequenceBytes } from '../../src/pulseq/sequenceReader';
 import { detectSequenceTiming } from '../../src/pulseq/trdetect';
+
+import { expectPaneFillsBody, expectSpectrogramDrawn, expectSpectrumDrawn } from './spectrogram-canvas';
 
 const FIXTURE = resolve('test/seq/spiral_inout.seq');
 const SIM_FIXTURE = resolve('test/kspace_baselines/v151_gre/seq/writeGradientEcho.seq');
@@ -628,6 +631,76 @@ test('plays the RF proxy end to end over the extension round trip', async ({ pag
     (window as unknown as { SeqEyesDev: { spectrogramState(): { audioRfIncluded: boolean | null } } })
       .SeqEyesDev.spectrogramState().audioRfIncluded)).toBe(true);
   await expect(page.locator('#sgReadout')).toContainText('audio RF ✓ 100%');
+
+  expect(failures).toEqual([]);
+});
+
+test('draws the spectrum in a narrow editor\'s one-pane view', async ({ page }) => {
+  // Reported from a narrow VS Code editor: the panel docks under the
+  // waveforms and shows one analysis pane at a time, and the Spectrum switch
+  // left that pane empty because its canvas was never sized for it.
+  const failures: string[] = [];
+  page.on('pageerror', e => failures.push(e.message));
+  page.on('console', m => { if (m.type() === 'error') failures.push(m.text()); });
+
+  await page.setViewportSize({ width: 420, height: 820 });
+  const { seq } = loadSequence();
+  const packed = packSequenceBlocks(seq);
+  const blocks = decodeAllBlocks(seq);
+  await openWebview(page);
+  await post(page, {
+    type: 'sequenceData',
+    sequenceGeneration: 1,
+    blocks: packed.blocks,
+    sampleCount: packed.sampleCount,
+    totalDuration: getTotalDuration(seq),
+    gradRaster: seq.rasterTimes.gradientRaster,
+    rfRaster: seq.rasterTimes.rfRaster,
+    adcRaster: seq.rasterTimes.adcRaster,
+    blockRaster: seq.rasterTimes.blockDurationRaster,
+    timing: detectSequenceTiming(seq),
+    notices: [],
+  }, { sampleTimes: b64(packed.sampleTimes), sampleValues: b64(packed.sampleValues) });
+  expect(await page.evaluate(() => document.body.classList.contains('layout-vertical'))).toBe(true);
+
+  await page.evaluate(() => (window as unknown as { SeqEyesDev: { setPanelMode(m: string): string } })
+    .SeqEyesDev.setPanelMode('spectrogram'));
+  await expect(page.locator('#spane')).toHaveClass(/on/);
+
+  // Answer the latest request the way seqEditorProvider does until the panel
+  // holds a matrix; earlier ones are stale and the panel would drop them.
+  const answered = new Set<unknown>();
+  await expect.poll(async () => {
+    const request = (await posted(page)).filter(m => m.command === 'calculateSpectrogram').pop();
+    if (request && !answered.has(request.requestId)) {
+      answered.add(request.requestId);
+      const startSec = Number(request.startSec);
+      const endSec = Number(request.endSec);
+      const spectrogram = computeGradientSpectrogram(blocks, seq.rasterTimes.gradientRaster,
+        { ...(request.params as Record<string, unknown>), startSec, endSec });
+      await post(page, { type: 'spectrogramData', requestId: request.requestId, spectrogram: serializeSpectrogram(spectrogram) });
+    }
+    return page.evaluate(() => {
+      const state = (window as unknown as { SeqEyesDev: { spectrogramState(): { nTime: number; busy: boolean } } })
+        .SeqEyesDev.spectrogramState();
+      return state.nTime > 0 && !state.busy;
+    });
+  }, { timeout: 20_000 }).toBe(true);
+
+  const toggle = page.locator('#sgMobileView');
+  await expect(toggle).toHaveText('Spectrum');
+  await expectPaneFillsBody(page, '#sgPane');
+  await expectSpectrogramDrawn(page);
+
+  await toggle.click();
+  await expect(toggle).toHaveText('Spectrogram');
+  await expect(page.locator('#sgPane')).toBeHidden();
+  await expectPaneFillsBody(page, '#spPane');
+  await expectSpectrumDrawn(page);
+
+  await toggle.click();
+  await expect(page.locator('#spPane')).toBeHidden();
+  await expectSpectrogramDrawn(page);
 
   expect(failures).toEqual([]);
 });
