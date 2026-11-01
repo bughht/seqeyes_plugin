@@ -29,6 +29,11 @@ import { calculateKspace } from '../../src/pulseq/kspace';
 import { parseSequenceBytes } from '../../src/pulseq/sequenceReader';
 import { detectSequenceTiming } from '../../src/pulseq/trdetect';
 
+import {
+  amplitudeZoom, canvasText, dispatchWheels, gradientRanges, recordCanvasText, repeat, settled, stillKspaceCamera,
+  timeZoom, WHEEL, type Wheel,
+} from './wheelZoomProbes';
+
 const FIXTURE = resolve('test/seq/spiral_inout.seq');
 const SIM_FIXTURE = resolve('test/kspace_baselines/v151_gre/seq/writeGradientEcho.seq');
 const OUT = resolve('out/editor/webview/assets');
@@ -818,4 +823,95 @@ test('adds a measurement marker from the right-click menu', async ({ page }) => 
   }, { sampleTimes: b64(packed.sampleTimes), sampleValues: b64(packed.sampleValues) });
   await expect(page.locator('#mkTable')).toBeHidden();
   expect(failures).toEqual([]);
+});
+
+/**
+ * Wheel zoom follows the wheel's delta in the bundle's own handlers, the ones
+ * VS Code runs. A fixed step per event let a trackpad or high-resolution wheel
+ * take the full step on every one of its many small events.
+ */
+test.describe('wheel zoom follows the wheel delta', () => {
+  const { notch, maxStep, kNotch, kMaxStep } = WHEEL;
+  const zoom = (page: Page, wheels: Wheel[]) => timeZoom(page, '#mc', wheels);
+  const EPI = resolve('test/seqeyes_demo_seq_files/writeEpi.seq');
+  let seq: ReturnType<typeof parseSequenceBytes>;
+
+  test.beforeEach(async ({ page }) => {
+    seq = parseSequenceBytes(new Uint8Array(readFileSync(EPI)), 'writeEpi.seq');
+    const packed = packSequenceBlocks(seq);
+    await openWebview(page);
+    await recordCanvasText(page);
+    await post(page, {
+      type: 'sequenceData', sequenceGeneration: 1, blocks: packed.blocks, sampleCount: packed.sampleCount,
+      totalDuration: getTotalDuration(seq), gradRaster: seq.rasterTimes.gradientRaster,
+      rfRaster: seq.rasterTimes.rfRaster, adcRaster: seq.rasterTimes.adcRaster,
+      blockRaster: seq.rasterTimes.blockDurationRaster, timing: detectSequenceTiming(seq), notices: [],
+    }, { sampleTimes: b64(packed.sampleTimes), sampleValues: b64(packed.sampleValues) });
+    await expect.poll(async () => (await gradientRanges(page)).length).toBeGreaterThan(1);
+  });
+
+  test('zooms time by a fraction of a notch for a small delta', async ({ page }) => {
+    expect(await zoom(page, [{ deltaY: -100 }])).toBeCloseTo(notch, 6);
+    expect(await zoom(page, [{ deltaY: -10 }])).toBeCloseTo(notch ** 0.1, 6);
+    expect(await zoom(page, [{ deltaY: 100 }])).toBeCloseTo(1 / notch, 6);
+    expect(await zoom(page, [{ deltaY: 0 }])).toBe(1);
+  });
+
+  test('zooms time as far for ten small events as for one notch', async ({ page }) => {
+    expect(await zoom(page, repeat(10, { deltaY: -10 }))).toBeCloseTo(notch, 6);
+    expect(await zoom(page, repeat(10, { deltaY: 10 }))).toBeCloseTo(1 / notch, 6);
+  });
+
+  test('caps one huge time-zoom event at the maximum step, above a notch', async ({ page }) => {
+    expect(await zoom(page, [{ deltaY: -100 }])).toBeLessThan(maxStep);
+    expect(await zoom(page, [{ deltaY: -1200 }])).toBeCloseTo(maxStep, 6);
+    expect(await zoom(page, [{ deltaY: 1200 }])).toBeCloseTo(1 / maxStep, 6);
+  });
+
+  test('reads line- and page-mode time-zoom deltas in pixels', async ({ page }) => {
+    expect(await zoom(page, [{ deltaY: -3, deltaMode: 1 }])).toBeCloseTo(notch, 6);
+    expect(await zoom(page, [{ deltaY: -1, deltaMode: 1 }])).toBeCloseTo(notch ** (1 / 3), 6);
+    expect(await zoom(page, [{ deltaY: -1, deltaMode: 2 }])).toBeCloseTo(maxStep, 6);
+  });
+
+  test('zooms one row\'s amplitude by the delta on Ctrl+wheel', async ({ page }) => {
+    // The range labels print one decimal, which bounds how closely they agree.
+    const notchZoom = await amplitudeZoom(page, [{ deltaY: -100 }]);
+    expect(Math.abs(notchZoom.factor - notch)).toBeLessThan(0.02);
+    expect(notchZoom.othersHeld).toBe(true);
+    expect(Math.abs((await amplitudeZoom(page, repeat(10, { deltaY: -10 }))).factor - notch)).toBeLessThan(0.02);
+  });
+
+  test('zooms time by the delta on the minimap', async ({ page }) => {
+    expect(await timeZoom(page, '#mmc', [{ deltaY: -100 }])).toBeCloseTo(notch, 6);
+    expect(await timeZoom(page, '#mmc', repeat(10, { deltaY: -10 }))).toBeCloseTo(notch, 6);
+  });
+
+  test('zooms k-space by the delta, compounding events faster than its easing', async ({ page }) => {
+    const ks = calculateKspace(
+      decodeAllBlocks(seq), seq.rasterTimes.gradientRaster, getTotalDuration(seq), 0,
+      { rfRaster: seq.rasterTimes.rfRaster },
+    );
+    await postKspace(page, serializeKSpace(ks!));
+    // No debug hook in this lane: the kx and ky axis labels sit at a fixed
+    // k from the origin, so the distance between them is proportional to the
+    // camera's scale, whatever the pan.
+    const axisSpan = async () => {
+      const text = await canvasText(page, 'kc');
+      const kx = text.find(t => t.text === 'kx'), ky = text.find(t => t.text === 'ky');
+      return kx && ky ? Math.hypot(kx.x - ky.x, kx.y - ky.y) : 0;
+    };
+    await expect.poll(axisSpan, { timeout: 15_000 }).toBeGreaterThan(0);
+    const kZoom = async (wheels: Wheel[], perFrame = false) => {
+      await settled(page, axisSpan);
+      await stillKspaceCamera(page);
+      const before = await settled(page, axisSpan);
+      await dispatchWheels(page, '#kc', wheels, undefined, perFrame);
+      return (await settled(page, axisSpan)) / before;
+    };
+    expect(await kZoom([{ deltaY: -100 }])).toBeCloseTo(kNotch, 6);
+    expect(await kZoom([{ deltaY: -10 }])).toBeCloseTo(kNotch ** 0.1, 6);
+    expect(await kZoom(repeat(10, { deltaY: -10 }), true)).toBeCloseTo(kNotch, 6);
+    expect(await kZoom([{ deltaY: -1200 }])).toBeCloseTo(kMaxStep, 6);
+  });
 });

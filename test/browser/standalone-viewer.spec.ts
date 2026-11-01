@@ -5,6 +5,10 @@ import { basename, join, resolve } from 'node:path';
 import { expect, test, type Download, type Locator, type Page } from '@playwright/test';
 import sharp from 'sharp';
 
+import {
+  amplitudeZoom, dispatchWheels, recordCanvasText, repeat, settled, stillKspaceCamera, timeZoom, WHEEL, type Wheel,
+} from './wheelZoomProbes';
+
 interface DebugState {
   blocks: number;
   totalDuration: number;
@@ -1346,6 +1350,79 @@ test.describe('minimap block cache at high DPI', () => {
     [0, 1 / 3, 2 / 3].forEach((want, index) => {
       expect(found[index].from).toBeCloseTo(want, 2);
     });
+  });
+});
+
+/**
+ * Wheel zoom follows the wheel's delta. A fixed step per event let a trackpad
+ * or high-resolution wheel, which sends many small events per gesture, take
+ * the full step on every one of them.
+ */
+test.describe('wheel zoom follows the wheel delta', () => {
+  const { notch, maxStep, kNotch, kMaxStep } = WHEEL;
+  const zoom = (page: Page, wheels: Wheel[]) => timeZoom(page, '#mc', wheels);
+
+  test.beforeEach(async ({ page }) => { await loadViewer(page, fixtures.epi); });
+
+  test('zooms time by a fraction of a notch for a small delta', async ({ page }) => {
+    expect(await zoom(page, [{ deltaY: -100 }])).toBeCloseTo(notch, 6);
+    expect(await zoom(page, [{ deltaY: -10 }])).toBeCloseTo(notch ** 0.1, 6);
+    expect(await zoom(page, [{ deltaY: 100 }])).toBeCloseTo(1 / notch, 6);
+    expect(await zoom(page, [{ deltaY: 0 }])).toBe(1);
+  });
+
+  test('zooms time as far for ten small events as for one notch', async ({ page }) => {
+    expect(await zoom(page, repeat(10, { deltaY: -10 }))).toBeCloseTo(notch, 6);
+    expect(await zoom(page, repeat(10, { deltaY: 10 }))).toBeCloseTo(1 / notch, 6);
+  });
+
+  test('caps one huge time-zoom event at the maximum step, above a notch', async ({ page }) => {
+    expect(await zoom(page, [{ deltaY: -100 }])).toBeLessThan(maxStep);
+    expect(await zoom(page, [{ deltaY: -1200 }])).toBeCloseTo(maxStep, 6);
+    expect(await zoom(page, [{ deltaY: 1200 }])).toBeCloseTo(1 / maxStep, 6);
+  });
+
+  test('reads line- and page-mode time-zoom deltas in pixels', async ({ page }) => {
+    expect(await zoom(page, [{ deltaY: -3, deltaMode: 1 }])).toBeCloseTo(notch, 6);
+    expect(await zoom(page, [{ deltaY: -1, deltaMode: 1 }])).toBeCloseTo(notch ** (1 / 3), 6);
+    expect(await zoom(page, [{ deltaY: -1, deltaMode: 2 }])).toBeCloseTo(maxStep, 6);
+  });
+
+  test('zooms one row\'s amplitude by the delta on Ctrl+wheel', async ({ page }) => {
+    await recordCanvasText(page);
+    const view = await page.evaluate(() => window.SeqEyesPanelHost.getView());
+    await page.evaluate(v => window.__seqeyesDebug.setView(v.startSec, v.endSec), view);
+    // The range labels print one decimal, which bounds how closely they agree.
+    const notchZoom = await amplitudeZoom(page, [{ deltaY: -100 }]);
+    expect(Math.abs(notchZoom.factor - notch)).toBeLessThan(0.02);
+    expect(notchZoom.othersHeld).toBe(true);
+    expect(Math.abs((await amplitudeZoom(page, repeat(10, { deltaY: -10 }))).factor - notch)).toBeLessThan(0.02);
+  });
+
+  test('zooms time by the delta on the minimap', async ({ page }) => {
+    expect(await timeZoom(page, '#mmc', [{ deltaY: -100 }])).toBeCloseTo(notch, 6);
+    expect(await timeZoom(page, '#mmc', repeat(10, { deltaY: -10 }))).toBeCloseTo(notch, 6);
+  });
+
+  test('zooms k-space by the delta, compounding events faster than its easing', async ({ page }) => {
+    await openKspace(page);
+    const camera = async () => {
+      const s = await debugState(page);
+      return [s.kScale, s.kPanX, s.kPanY, s.kRotX, s.kRotY];
+    };
+    const kZoom = async (wheels: Wheel[], perFrame = false) => {
+      await settled(page, camera);
+      await stillKspaceCamera(page);
+      const before = (await debugState(page)).kScale;
+      await dispatchWheels(page, '#kc', wheels, undefined, perFrame);
+      return (await settled(page, camera))[0] / before;
+    };
+    expect(await kZoom([{ deltaY: -100 }])).toBeCloseTo(kNotch, 6);
+    expect(await kZoom([{ deltaY: -10 }])).toBeCloseTo(kNotch ** 0.1, 6);
+    // One event per frame, as a trackpad sends them: each must build on where
+    // the easing is heading, not on the frame it has reached.
+    expect(await kZoom(repeat(10, { deltaY: -10 }), true)).toBeCloseTo(kNotch, 6);
+    expect(await kZoom([{ deltaY: -1200 }])).toBeCloseTo(kMaxStep, 6);
   });
 });
 

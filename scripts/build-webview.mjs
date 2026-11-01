@@ -1,9 +1,9 @@
 /**
  * build-webview.mjs — Bundle the shared SeqEyes webview rendering assets.
  *
- * Concatenates the webview JS files (prefs, block-transport, labels, state,
- * derived-series, drawing, kspace, colormaps, spectrogram, audio, panel,
- * ndview, simulation-panel, prefs-ui, interaction) into a single
+ * Concatenates the webview JS files (prefs, block-transport, labels,
+ * wheel-zoom, state, derived-series, drawing, kspace, colormaps, spectrogram,
+ * audio, panel, ndview, simulation-panel, prefs-ui, interaction) into a single
  * self-contained script.  The files
  * communicate via shared globals so they are concatenated without IIFE
  * wrapping — they run in the global scope.  The VS Code extension wraps
@@ -33,6 +33,7 @@ const files = [
     'prefs.js',
     'block-transport.js',
     'labels.js',
+    'wheel-zoom.js',
     'state.js',
     'derived-series.js',
     'drawing.js',
