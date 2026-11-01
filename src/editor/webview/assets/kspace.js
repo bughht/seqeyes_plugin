@@ -519,16 +519,21 @@ kCanvas.addEventListener("mousedown",function(e){
 kCanvas.addEventListener("contextmenu",function(e){e.preventDefault();});
 
 kCanvas.addEventListener("wheel",function(e){e.preventDefault();
+  var zf=wheelZoomFactor(e,KSPACE_WHEEL_ZOOM_NOTCH,KSPACE_WHEEL_ZOOM_MAX_STEP);
+  if(zf===1)return;
   var r=kCanvas.getBoundingClientRect(),dpr=window.devicePixelRatio||1;
   var mx=(e.clientX-r.left)/dpr, my=(e.clientY-r.top)/dpr;
-  var zf=e.deltaY<0?1.25:0.8, W=kCanvas.width/dpr, H=kCanvas.height/dpr;
+  var W=kCanvas.width/dpr, H=kCanvas.height/dpr;
+  // Build on a running ease's target, not the frame on screen: events that
+  // arrive faster than the ease then compound like one larger event.
+  var s0=_kAnimId?_tScl:kScl, px0=_kAnimId?_tPanX:kPanX, py0=_kAnimId?_tPanY:kPanY;
   kAutoFit=false;
   // Keep whatever is under the cursor under the cursor.  With pan in screen
   // space this is the same arithmetic at every rotation; the previous form
   // added a screen delta straight to world coordinates and only aimed
   // correctly in the unrotated view.
-  setKSpaceTarget(kRotX, kRotY, kScl*zf,
-    kPanX+(mx-W/2-kPanX)*(1-zf), kPanY+(my-H/2-kPanY)*(1-zf), false);
+  setKSpaceTarget(kRotX, kRotY, s0*zf,
+    px0+(mx-W/2-px0)*(1-zf), py0+(my-H/2-py0)*(1-zf), false);
 },{passive:false});
 
 window.addEventListener("mousemove",function(e){

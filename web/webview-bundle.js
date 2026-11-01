@@ -1014,6 +1014,38 @@ var SeqEyesLabels = (function () {
 })();
 
 
+/* ══ wheel-zoom.js ══ */
+/* ═══════════════════════════════════════════════════════════════════════
+   Wheel zoom step, shared by the waveform, minimap and k-space wheel handlers
+   of both lanes (web/index.html calls these as globals of this bundle).
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* Calibration, to tune by feel.  *_NOTCH is the zoom for one notch of a
+   standard mouse wheel (1.2 = 20 % per notch); *_MAX_STEP caps any single
+   event, and is the fixed step every event took before zoom followed deltaY. */
+var WHEEL_ZOOM_NOTCH=1.2,WHEEL_ZOOM_MAX_STEP=1.3;          // waveform time, amplitude, minimap
+var KSPACE_WHEEL_ZOOM_NOTCH=1.2,KSPACE_WHEEL_ZOOM_MAX_STEP=1.25;
+
+/* Pixels per deltaY unit in each deltaMode.  Chrome and Edge report a notch as
+   100 px, Firefox in line mode as 3 lines, so a line is a third of a notch.
+   A page has no standard size; 800 px is past the clamp at the calibration
+   above, so a page event takes the maximum step. */
+var WHEEL_NOTCH_PX=100,WHEEL_LINE_PX=100/3,WHEEL_PAGE_PX=800;
+
+/**
+ * Zoom factor for one wheel event: above 1 zooms in (deltaY < 0), below 1
+ * out, exactly 1 with no vertical delta.  Exponential in the delta, so a
+ * trackpad's many small events multiply to the zoom of one event carrying
+ * their summed delta, within the per-event clamp [1/maxStep, maxStep].
+ */
+function wheelZoomFactor(e,notch,maxStep){
+  var px=+e.deltaY;
+  if(!isFinite(px)||px===0)return 1;
+  if(e.deltaMode===1)px*=WHEEL_LINE_PX;else if(e.deltaMode===2)px*=WHEEL_PAGE_PX;
+  return Math.max(1/maxStep,Math.min(maxStep,Math.pow(notch,-px/WHEEL_NOTCH_PX)));
+}
+
+
 /* ══ state.js ══ */
 /* ═══════════════════════════════════════════════════════════════════════
    Application state & configuration
@@ -3691,16 +3723,21 @@ kCanvas.addEventListener("mousedown",function(e){
 kCanvas.addEventListener("contextmenu",function(e){e.preventDefault();});
 
 kCanvas.addEventListener("wheel",function(e){e.preventDefault();
+  var zf=wheelZoomFactor(e,KSPACE_WHEEL_ZOOM_NOTCH,KSPACE_WHEEL_ZOOM_MAX_STEP);
+  if(zf===1)return;
   var r=kCanvas.getBoundingClientRect(),dpr=window.devicePixelRatio||1;
   var mx=(e.clientX-r.left)/dpr, my=(e.clientY-r.top)/dpr;
-  var zf=e.deltaY<0?1.25:0.8, W=kCanvas.width/dpr, H=kCanvas.height/dpr;
+  var W=kCanvas.width/dpr, H=kCanvas.height/dpr;
+  // Build on a running ease's target, not the frame on screen: events that
+  // arrive faster than the ease then compound like one larger event.
+  var s0=_kAnimId?_tScl:kScl, px0=_kAnimId?_tPanX:kPanX, py0=_kAnimId?_tPanY:kPanY;
   kAutoFit=false;
   // Keep whatever is under the cursor under the cursor.  With pan in screen
   // space this is the same arithmetic at every rotation; the previous form
   // added a screen delta straight to world coordinates and only aimed
   // correctly in the unrotated view.
-  setKSpaceTarget(kRotX, kRotY, kScl*zf,
-    kPanX+(mx-W/2-kPanX)*(1-zf), kPanY+(my-H/2-kPanY)*(1-zf), false);
+  setKSpaceTarget(kRotX, kRotY, s0*zf,
+    px0+(mx-W/2-px0)*(1-zf), py0+(my-H/2-py0)*(1-zf), false);
 },{passive:false});
 
 window.addEventListener("mousemove",function(e){
@@ -11277,14 +11314,14 @@ var SeqEyesMarkers = (function () {
 var _touchTooltipTimer=null,_pointerFrame=0,_pendingPointer=null,mmDrag=false;
 
 mc.addEventListener('wheel',function(e){e.preventDefault();
-  var changed=false;
+  var changed=false,zf=wheelZoomFactor(e,WHEEL_ZOOM_NOTCH,WHEEL_ZOOM_MAX_STEP);
   if(e.ctrlKey||e.metaKey){
     var ch=cH(),vc=visChannels(),my=e.clientY-mc.getBoundingClientRect().top;
     var vi2=Math.floor((my-M.t)/ch);
-    if(vi2>=0&&vi2<vc.length){var ci=vc[vi2],oldZoom=ampZoom[ci];ampZoom[ci]*=e.deltaY<0?1.3:1/1.3;ampZoom[ci]=Math.max(0.1,Math.min(100,ampZoom[ci]));changed=ampZoom[ci]!==oldZoom;}
+    if(vi2>=0&&vi2<vc.length){var ci=vc[vi2],oldZoom=ampZoom[ci];ampZoom[ci]*=zf;ampZoom[ci]=Math.max(0.1,Math.min(100,ampZoom[ci]));changed=ampZoom[ci]!==oldZoom;}
   }else{
     var r=mc.getBoundingClientRect(),mx2=e.clientX-r.left;
-    var zf=e.deltaY<0?1.3:1/1.3;changed=zoomAt(mx2,zf);
+    changed=zoomAt(mx2,zf);
   }
   if(changed)scheduleViewerDraw(true);},{passive:false});
 mc.addEventListener('mousedown',function(e){if(e.button===0){dr=true;dsx=e.clientX;dso=ox;cc.classList.add('pan')}});
@@ -11628,7 +11665,7 @@ function scrollMinimapToTouch(touch){
 /* ── Old mouse minimap ────────────────────────────────────────────── */
 mmCanvas.addEventListener('wheel',function(e){
   e.preventDefault();
-  var zf=e.deltaY<0?1.3:1/1.3;
+  var zf=wheelZoomFactor(e,WHEEL_ZOOM_NOTCH,WHEEL_ZOOM_MAX_STEP);
   if(zoomAtCenter(zf))scheduleViewerDraw(true);
 },{passive:false});
 

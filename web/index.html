@@ -2112,14 +2112,14 @@ function drawTriggerBlocks(start,end,vi,ch,colors,vs,ve){
    MOUSE INTERACTION  (identical to js_interaction.ts)
    ═══════════════════════════════════════════════════════════════════════ */
 mc.addEventListener('wheel',function(e){e.preventDefault();
-  var changed=false;
+  var changed=false,zf=wheelZoomFactor(e,WHEEL_ZOOM_NOTCH,WHEEL_ZOOM_MAX_STEP);
   if(e.ctrlKey||e.metaKey){
     var ch=cH(),vc=visChannels(),my=e.clientY-mc.getBoundingClientRect().top;
     var vi2=Math.floor((my-M.t)/ch);
-    if(vi2>=0&&vi2<vc.length){var ci=vc[vi2],oldZoom=ampZoom[ci];ampZoom[ci]*=e.deltaY<0?1.3:1/1.3;ampZoom[ci]=Math.max(0.1,Math.min(100,ampZoom[ci]));changed=ampZoom[ci]!==oldZoom;}
+    if(vi2>=0&&vi2<vc.length){var ci=vc[vi2],oldZoom=ampZoom[ci];ampZoom[ci]*=zf;ampZoom[ci]=Math.max(0.1,Math.min(100,ampZoom[ci]));changed=ampZoom[ci]!==oldZoom;}
   }else{
     var r=mc.getBoundingClientRect(),mx2=e.clientX-r.left;
-    var zf=e.deltaY<0?1.3:1/1.3;changed=zoomAt(mx2,zf);
+    changed=zoomAt(mx2,zf);
   }
   if(changed)scheduleViewerDraw(true);},{passive:false});
 mc.addEventListener('mousedown',function(e){if(e.button===0){dr=true;dsx=e.clientX;dso=ox;cc.classList.add('pan')}});
@@ -2388,7 +2388,7 @@ function scrollMinimapToTouch(touch){
 }
 
 mmCanvas.addEventListener('wheel',function(e){e.preventDefault();
-  var zf=e.deltaY<0?1.3:1/1.3;
+  var zf=wheelZoomFactor(e,WHEEL_ZOOM_NOTCH,WHEEL_ZOOM_MAX_STEP);
   if(zoomAtCenter(zf))scheduleViewerDraw(true);
 },{passive:false});
 function scrollMinimapToMouse(e){
@@ -2625,11 +2625,13 @@ function drawKCursorMarker(ctx,proj,cs,W,H){
 kCanvas.addEventListener("mousedown",function(e){kDragging=true;kDragPrev={x:e.clientX,y:e.clientY};kDragBtn=e.button;if(_kAnimId){cancelAnimationFrame(_kAnimId);_kAnimId=null}e.preventDefault();});
 kCanvas.addEventListener("contextmenu",function(e){e.preventDefault();});
 kCanvas.addEventListener("wheel",function(e){e.preventDefault();
+  var zf=wheelZoomFactor(e,KSPACE_WHEEL_ZOOM_NOTCH,KSPACE_WHEEL_ZOOM_MAX_STEP);if(zf===1)return;
   var r=kCanvas.getBoundingClientRect(),dpr=window.devicePixelRatio||1;
   var mx=(e.clientX-r.left)/dpr,my=(e.clientY-r.top)/dpr;
-  var zf=e.deltaY<0?1.25:0.8,W=kCanvas.width/dpr,H=kCanvas.height/dpr;
-  var dz=(1-1/zf)*dpr/kScl;kAutoFit=false;
-  setKSpaceTarget(kRotX,kRotY,kScl*zf,kPanX+(mx-W/2-kPanX)*(1-zf),kPanY+(my-H/2-kPanY)*(1-zf),false);
+  var W=kCanvas.width/dpr,H=kCanvas.height/dpr;
+  // Build on a running ease's target, so events faster than the ease compound.
+  var s0=_kAnimId?_tScl:kScl,px0=_kAnimId?_tPanX:kPanX,py0=_kAnimId?_tPanY:kPanY;kAutoFit=false;
+  setKSpaceTarget(kRotX,kRotY,s0*zf,px0+(mx-W/2-px0)*(1-zf),py0+(my-H/2-py0)*(1-zf),false);
 },{passive:false});
 window.addEventListener("mousemove",function(e){
   if(!kDragging||!kDragPrev||!kOpen)return;

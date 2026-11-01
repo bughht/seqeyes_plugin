@@ -5,14 +5,14 @@
 var _touchTooltipTimer=null,_pointerFrame=0,_pendingPointer=null,mmDrag=false;
 
 mc.addEventListener('wheel',function(e){e.preventDefault();
-  var changed=false;
+  var changed=false,zf=wheelZoomFactor(e,WHEEL_ZOOM_NOTCH,WHEEL_ZOOM_MAX_STEP);
   if(e.ctrlKey||e.metaKey){
     var ch=cH(),vc=visChannels(),my=e.clientY-mc.getBoundingClientRect().top;
     var vi2=Math.floor((my-M.t)/ch);
-    if(vi2>=0&&vi2<vc.length){var ci=vc[vi2],oldZoom=ampZoom[ci];ampZoom[ci]*=e.deltaY<0?1.3:1/1.3;ampZoom[ci]=Math.max(0.1,Math.min(100,ampZoom[ci]));changed=ampZoom[ci]!==oldZoom;}
+    if(vi2>=0&&vi2<vc.length){var ci=vc[vi2],oldZoom=ampZoom[ci];ampZoom[ci]*=zf;ampZoom[ci]=Math.max(0.1,Math.min(100,ampZoom[ci]));changed=ampZoom[ci]!==oldZoom;}
   }else{
     var r=mc.getBoundingClientRect(),mx2=e.clientX-r.left;
-    var zf=e.deltaY<0?1.3:1/1.3;changed=zoomAt(mx2,zf);
+    changed=zoomAt(mx2,zf);
   }
   if(changed)scheduleViewerDraw(true);},{passive:false});
 mc.addEventListener('mousedown',function(e){if(e.button===0){dr=true;dsx=e.clientX;dso=ox;cc.classList.add('pan')}});
@@ -356,7 +356,7 @@ function scrollMinimapToTouch(touch){
 /* ── Old mouse minimap ────────────────────────────────────────────── */
 mmCanvas.addEventListener('wheel',function(e){
   e.preventDefault();
-  var zf=e.deltaY<0?1.3:1/1.3;
+  var zf=wheelZoomFactor(e,WHEEL_ZOOM_NOTCH,WHEEL_ZOOM_MAX_STEP);
   if(zoomAtCenter(zf))scheduleViewerDraw(true);
 },{passive:false});
 
