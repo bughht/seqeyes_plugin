@@ -6,7 +6,8 @@ import { expect, test, type Download, type Locator, type Page } from '@playwrigh
 import sharp from 'sharp';
 
 import {
-  amplitudeZoom, dispatchWheels, recordCanvasText, repeat, settled, stillKspaceCamera, timeZoom, WHEEL, type Wheel,
+  amplitudeZoom, dispatchWheels, kspaceZoomAnchorError, recordCanvasText, repeat, settled, stillKspaceCamera, timeZoom,
+  WHEEL, type Wheel,
 } from './wheelZoomProbes';
 import {
   DEFAULT_ORDER, DEFAULT_ROWS, ctrlWheelOnRow, dragOver, dragRow, legendOrder, lineIndex, menuItem,
@@ -1633,6 +1634,16 @@ test.describe('wheel zoom follows the wheel delta', () => {
     // the easing is heading, not on the frame it has reached.
     expect(await kZoom(repeat(10, { deltaY: -10 }), true)).toBeCloseTo(kNotch, 6);
     expect(await kZoom([{ deltaY: -1200 }])).toBeCloseTo(kMaxStep, 6);
+  });
+
+  test.describe('on a high-DPI display', () => {
+    test.use({ deviceScaleFactor: 2 });
+
+    test('anchors k-space zoom at the cursor', async ({ page }) => {
+      await recordCanvasText(page);
+      await openKspace(page);
+      expect(await kspaceZoomAnchorError(page, { x: 0.8, y: 0.3 })).toBeLessThan(0.5);
+    });
   });
 });
 

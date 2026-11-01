@@ -4211,7 +4211,8 @@ kCanvas.addEventListener("wheel",function(e){e.preventDefault();
   var zf=wheelZoomFactor(e,KSPACE_WHEEL_ZOOM_NOTCH,KSPACE_WHEEL_ZOOM_MAX_STEP);
   if(zf===1)return;
   var r=kCanvas.getBoundingClientRect(),dpr=window.devicePixelRatio||1;
-  var mx=(e.clientX-r.left)/dpr, my=(e.clientY-r.top)/dpr;
+  // Client coordinates are already CSS px, the unit of the pan and projection.
+  var mx=e.clientX-r.left, my=e.clientY-r.top;
   var W=kCanvas.width/dpr, H=kCanvas.height/dpr;
   // Build on a running ease's target, not the frame on screen: events that
   // arrive faster than the ease then compound like one larger event.

@@ -134,3 +134,31 @@ export async function stillKspaceCamera(page: Page): Promise<void> {
   await page.mouse.move(cx, cy);
   await page.mouse.up({ button: 'right' });
 }
+
+/**
+ * Wheel-zoom k-space by one notch at `at` (fractions of the canvas box) and
+ * return, in CSS px, how far the kx and ky axis labels landed from where a
+ * zoom anchored there puts them. Each label marks a fixed k, so anchored at
+ * the cursor c it moves to c + (p - c) * factor, p being its anchor point; the
+ * label itself is drawn 5 px right of and 5 px above p (kspace.js drawAxis3D).
+ * Needs recordCanvasText installed before k-space first draws.
+ */
+export async function kspaceZoomAnchorError(page: Page, at: { x: number; y: number }): Promise<number> {
+  const box = (await page.locator('#kc').boundingBox())!;
+  const c = { x: box.width * at.x, y: box.height * at.y };
+  const axes = async () => {
+    const text = await canvasText(page, 'kc');
+    return ['kx', 'ky'].map(name => text.find(t => t.text === name)).filter(t => t) as { x: number; y: number }[];
+  };
+  await expect.poll(async () => (await axes()).length, { timeout: 15_000 }).toBe(2);
+  await settled(page, axes);
+  await stillKspaceCamera(page);
+  const before = await settled(page, axes);
+  await dispatchWheels(page, '#kc', [{ deltaY: -100 }], c);
+  const after = await settled(page, axes);
+  const f = WHEEL.kNotch;
+  return Math.max(...before.map((b, i) => {
+    const px = b.x - 5, py = b.y + 5;
+    return Math.hypot(after[i].x - 5 - (c.x + (px - c.x) * f), after[i].y + 5 - (c.y + (py - c.y) * f));
+  }));
+}

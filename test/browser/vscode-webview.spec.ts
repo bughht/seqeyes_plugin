@@ -32,8 +32,8 @@ import { detectSequenceTiming } from '../../src/pulseq/trdetect';
 
 import { expectPaneFillsBody, expectSpectrogramDrawn, expectSpectrumDrawn } from './spectrogram-canvas';
 import {
-  amplitudeZoom, canvasText, dispatchWheels, gradientRanges, recordCanvasText, repeat, settled, stillKspaceCamera,
-  timeZoom, WHEEL, type Wheel,
+  amplitudeZoom, canvasText, dispatchWheels, gradientRanges, kspaceZoomAnchorError, recordCanvasText, repeat, settled,
+  stillKspaceCamera, timeZoom, WHEEL, type Wheel,
 } from './wheelZoomProbes';
 import {
   DEFAULT_ORDER, DEFAULT_ROWS, ctrlWheelOnRow, dragOver, dragRow, legendOrder, lineIndex, menuItem,
@@ -990,6 +990,19 @@ test.describe('wheel zoom follows the wheel delta', () => {
     expect(await kZoom([{ deltaY: -10 }])).toBeCloseTo(kNotch ** 0.1, 6);
     expect(await kZoom(repeat(10, { deltaY: -10 }), true)).toBeCloseTo(kNotch, 6);
     expect(await kZoom([{ deltaY: -1200 }])).toBeCloseTo(kMaxStep, 6);
+  });
+
+  test.describe('on a high-DPI display', () => {
+    test.use({ deviceScaleFactor: 2 });
+
+    test('anchors k-space zoom at the cursor', async ({ page }) => {
+      const ks = calculateKspace(
+        decodeAllBlocks(seq), seq.rasterTimes.gradientRaster, getTotalDuration(seq), 0,
+        { rfRaster: seq.rasterTimes.rfRaster },
+      );
+      await postKspace(page, serializeKSpace(ks!));
+      expect(await kspaceZoomAnchorError(page, { x: 0.8, y: 0.3 })).toBeLessThan(0.5);
+    });
   });
 });
 
