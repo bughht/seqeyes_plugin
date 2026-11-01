@@ -5551,18 +5551,28 @@ var SeqEyesPanel = (function () {
     if (!sgPane || !spPane) return;
     var sgRect = sgPane.getBoundingClientRect();
     var spRect = spPane.getBoundingClientRect();
-    if (sgRect.width <= 0 || sgRect.height <= 0) return;
+    // The narrow portrait layout shows one pane at a time. A hidden pane keeps
+    // its last canvas size; shrinking it to nothing would leave it blank when
+    // it is switched back in.
+    var sgShown = sgRect.width > 0 && sgRect.height > 0;
+    var spShown = spRect.width > 0 && spRect.height > 0;
+    if (!sgShown && !spShown) return;
 
     var changed = false;
-    changed = sizeCanvas(el('sgImg'), sgRect, dpr) || changed;
-    changed = sizeCanvas(el('sgOvl'), sgRect, dpr) || changed;
-    changed = sizeCanvas(el('spCanvas'), spRect, dpr) || changed;
+    if (sgShown) {
+      changed = sizeCanvas(el('sgImg'), sgRect, dpr) || changed;
+      changed = sizeCanvas(el('sgOvl'), sgRect, dpr) || changed;
+    }
+    if (spShown) changed = sizeCanvas(el('spCanvas'), spRect, dpr) || changed;
     if (changed) imageDirty = true;
 
     // Column budget follows the pane width in device pixels (§5.4), quantised
     // to 32: it is part of the cache key, so tracking every pixel of the
-    // open/resize animation would invalidate a perfectly good matrix.
-    var target = Math.max(64, Math.min(512, Math.round(sgRect.width * dpr / 64) * 32));
+    // open/resize animation would invalidate a perfectly good matrix. Both
+    // one-pane views span the panel, so the spectrum's width stands in for the
+    // hidden spectrogram's and the toggle keeps the cached matrix.
+    var basis = sgShown ? sgRect : spRect;
+    var target = Math.max(64, Math.min(512, Math.round(basis.width * dpr / 64) * 32));
     if (target !== params.targetColumns) {
       params.targetColumns = target;
     }
@@ -6524,8 +6534,13 @@ var SeqEyesPanel = (function () {
     window.addEventListener('resize', function () { if (panelMode === 'spectrogram') resize(); });
 
     var pane = el('sgPane');
+    var spectrumPane = el('spPane');
     if (pane && typeof ResizeObserver !== 'undefined') {
-      new ResizeObserver(function () { if (panelMode === 'spectrogram') resize(); }).observe(pane);
+      var observer = new ResizeObserver(function () { if (panelMode === 'spectrogram') resize(); });
+      observer.observe(pane);
+      // The spectrogram pane is hidden while the narrow layout shows the
+      // spectrum, so it cannot report the panel's open animation or resizes.
+      if (spectrumPane) observer.observe(spectrumPane);
     }
 
     syncControls();

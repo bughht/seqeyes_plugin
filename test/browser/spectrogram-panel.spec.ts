@@ -2,6 +2,8 @@ import { resolve } from 'node:path';
 
 import { expect, test, type Locator, type Page } from '@playwright/test';
 
+import { expectPaneFillsBody, expectSpectrogramDrawn, expectSpectrumDrawn } from './spectrogram-canvas';
+
 interface PanelState {
   mode: 'off' | 'kspace' | 'spectrogram';
   open: boolean;
@@ -953,6 +955,79 @@ test('keeps the portrait mobile viewer compact and switches full-width analysis 
   }));
   expect(viewport.bodyBottom).toBeLessThanOrEqual(viewport.innerHeight + 1);
   expect(viewport.scrollHeight).toBeLessThanOrEqual(viewport.innerHeight + 1);
+});
+
+test('draws the spectrum in the narrow portrait view and keeps both views live', async ({ page }) => {
+  // The Spectrum switch used to leave an empty pane: resize() bailed out when
+  // the hidden spectrogram pane measured zero, so the spectrum canvas kept the
+  // 0 px size it was given while it was the hidden one. The lone pane also
+  // filled only its split share of the panel.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await loadViewer(page, fixtures.gre);
+  await openSpectrogram(page);
+  await page.evaluate(() => window.SeqEyesDev.setAcousticBands([
+    { freqHz: 550, bwHz: 100 }, { freqHz: 1150, bwHz: 220 },
+  ]));
+  const toggle = page.locator('#sgMobileView');
+
+  await expect(page.locator('#spPane')).toBeHidden();
+  await expectPaneFillsBody(page, '#sgPane');
+  await expectSpectrogramDrawn(page);
+
+  await toggle.click();
+  await expect(toggle).toHaveText('Spectrogram');
+  await expect(page.locator('#sgPane')).toBeHidden();
+  await expectPaneFillsBody(page, '#spPane');
+  await expectSpectrumDrawn(page, { bands: true });
+
+  // Pan while the spectrum is showing: it must follow the new view.
+  const before = await samplePixels(page.locator('#spCanvas'));
+  const total = (await page.evaluate(() => window.__seqeyesDebug.state())).totalDuration;
+  await page.evaluate((duration) => window.__seqeyesDebug.setView(duration * 0.1, duration * 0.3), total);
+  await settlePanel(page);
+  expect((await panelState(page)).viewStartSec).toBeCloseTo(total * 0.1, 6);
+  await expectSpectrumDrawn(page);
+  expect(await samplePixels(page.locator('#spCanvas'))).not.toEqual(before);
+
+  // A viewport resize, and a close and reopen whose open animation only the
+  // spectrum pane can report.
+  await page.setViewportSize({ width: 390, height: 700 });
+  await expectSpectrumDrawn(page);
+  await page.evaluate(() => window.SeqEyesDev.setPanelMode('off'));
+  await openSpectrogram(page);
+  await expect(toggle).toHaveText('Spectrogram');
+  await expectPaneFillsBody(page, '#spPane');
+  await expectSpectrumDrawn(page);
+
+  await toggle.click();
+  await expect(toggle).toHaveText('Spectrum');
+  await expect(page.locator('#spPane')).toBeHidden();
+  await expectPaneFillsBody(page, '#sgPane');
+  await expectSpectrogramDrawn(page);
+
+  // Wide layout shows both panes again; returning to portrait starts on the
+  // spectrogram and the switch still works.
+  await toggle.click();
+  await expectSpectrumDrawn(page);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect.poll(async () => await page.evaluate(() => document.body.classList.contains('layout-vertical')),
+    { timeout: 10_000 }).toBe(false);
+  await expect(toggle).toBeHidden();
+  await expect(page.locator('#sgPane')).toBeVisible();
+  await expect(page.locator('#spPane')).toBeVisible();
+  await expectSpectrogramDrawn(page);
+  await expectSpectrumDrawn(page);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(async () => await page.evaluate(() => document.body.classList.contains('layout-vertical')),
+    { timeout: 10_000 }).toBe(true);
+  await expect(toggle).toHaveText('Spectrum');
+  await expect(page.locator('#spPane')).toBeHidden();
+  await expectPaneFillsBody(page, '#sgPane');
+  await expectSpectrogramDrawn(page);
+  await toggle.click();
+  await expectPaneFillsBody(page, '#spPane');
+  await expectSpectrumDrawn(page, { bands: true });
 });
 
 test('mirrors the panel marker onto the waveform panel', async ({ page }) => {
