@@ -1302,7 +1302,8 @@ var SeqEyesChannelOrder = (function () {
 
   function onHoverMove(event) {
     if (!ctx || press) return;
-    var over = event.target === el('mc') && gutterRow(canvasPoint(event)) >= 0;
+    // Not while a button is held: a pan or marker drag keeps its own cursor.
+    var over = !event.buttons && event.target === el('mc') && gutterRow(canvasPoint(event)) >= 0;
     el('cc').classList.toggle('co-grab', over);
   }
 

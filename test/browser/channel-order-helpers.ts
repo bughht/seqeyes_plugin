@@ -49,14 +49,18 @@ export async function rowPoint(page: Page, channel: string, frac = 0.5, where: '
   return { x: box.x + x, y: box.y + MARGIN.top + (row + frac) * height };
 }
 
-/** Press on a channel's name and carry it over `onto`, `frac` of the way down that row; the button stays down. */
+/**
+ * Press on a channel's name and carry it over `onto`, `frac` of the way down
+ * that row; the button stays down. The pointer also drifts 24 px left, still
+ * in the gutter, so a pan started by the press would move the view.
+ */
 export async function dragOver(page: Page, channel: string, onto: string, frac = 0.5): Promise<void> {
   const from = await rowPoint(page, channel);
   const to = await rowPoint(page, onto, frac);
   await page.mouse.move(from.x, from.y);
   await page.mouse.down();
-  await page.mouse.move(from.x, (from.y + to.y) / 2, { steps: 4 });
-  await page.mouse.move(to.x, to.y, { steps: 4 });
+  await page.mouse.move(from.x - 12, (from.y + to.y) / 2, { steps: 4 });
+  await page.mouse.move(to.x - 24, to.y, { steps: 4 });
 }
 
 export async function dragRow(page: Page, channel: string, onto: string, frac = 0.5): Promise<void> {
