@@ -41,6 +41,7 @@ var SeqEyesPrefs = (function () {
     kspaceProjection: 'seqeyes.kspace.projection',
     markerSnap: 'seqeyes.markers.snap',
     markerTable: 'seqeyes.markers.table',
+    channelOrder: 'seqeyes.channelOrder',
     ascName: 'seqeyes.asc.name',
     ascText: 'seqeyes.asc.text'
   };
@@ -567,11 +568,10 @@ function failWaveformDetail(payload){
 /* ═══════════════════════════════════════════════════════════════════════
    MDH label row — markers at each ADC centre, and their style controls
    ═══════════════════════════════════════════════════════════════════════
-   Shared by all three renderers: the VS Code webview, web/index.html (which
-   the MATLAB toolbox also loads) and the Python viewer.html.  Each declares
-   its own canvas state, so nothing here reads renderer globals — callers pass
-   the 2-D context, the time→x mapping and the row geometry.  The Python
-   viewer loads this file on its own, without the rest of the bundle.
+   Shared by both renderers: the VS Code webview and web/index.html (which
+   the MATLAB toolbox and the Python package also load).  Each declares its
+   own canvas state, so nothing here reads renderer globals — callers pass
+   the 2-D context, the time→x mapping and the row geometry.
 
    The DOM and storage are only touched inside functions, so the tests can
    run the shipped file in a bare VM context.
@@ -581,10 +581,10 @@ function failWaveformDetail(payload){
 var SeqEyesLabels = (function () {
   var STORAGE_KEY = 'seqeyes.labelStyles.v1';
 
-  /* The Python viewer inlines this file on its own, so the bundle's
-     preferences gateway may not be there.  Go through it when it is, so the
-     settings popover's master switch and Forget button cover marker styles
-     too, and fall back to raw storage when it is not. */
+  /* The unit tests load this file without the bundle's preferences gateway.
+     Go through it when it is there, so the settings popover's master switch
+     and Forget button cover marker styles too, and fall back to raw storage
+     when it is not. */
   function prefsApi() { return (typeof SeqEyesPrefs !== 'undefined') ? SeqEyesPrefs : null; }
   function readStored(key) {
     var api = prefsApi();
@@ -610,7 +610,7 @@ var SeqEyesLabels = (function () {
   /* ── Table ─────────────────────────────────────────────────────────── */
 
   /* Same contract as asTypedView in block-transport.js, repeated because the
-     Python viewer loads this file without the bundle. */
+     unit tests load this file without the bundle. */
   function typedView(buffer, Ctor) {
     if (buffer instanceof Ctor) return buffer;
     if (buffer instanceof ArrayBuffer) return new Ctor(buffer);
@@ -1014,6 +1014,520 @@ var SeqEyesLabels = (function () {
 })();
 
 
+/* ══ wheel-zoom.js ══ */
+/* ═══════════════════════════════════════════════════════════════════════
+   Wheel zoom step, shared by the waveform, minimap and k-space wheel handlers
+   of both lanes (web/index.html calls these as globals of this bundle).
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* Calibration, to tune by feel.  *_NOTCH is the zoom for one notch of a
+   standard mouse wheel (1.2 = 20 % per notch); *_MAX_STEP caps any single
+   event, and is the fixed step every event took before zoom followed deltaY. */
+var WHEEL_ZOOM_NOTCH=1.2,WHEEL_ZOOM_MAX_STEP=1.3;          // waveform time, amplitude, minimap
+var KSPACE_WHEEL_ZOOM_NOTCH=1.2,KSPACE_WHEEL_ZOOM_MAX_STEP=1.25;
+
+/* Pixels per deltaY unit in each deltaMode.  Chrome and Edge report a notch as
+   100 px, Firefox in line mode as 3 lines, so a line is a third of a notch.
+   A page has no standard size; 800 px is past the clamp at the calibration
+   above, so a page event takes the maximum step. */
+var WHEEL_NOTCH_PX=100,WHEEL_LINE_PX=100/3,WHEEL_PAGE_PX=800;
+
+/**
+ * Zoom factor for one wheel event: above 1 zooms in (deltaY < 0), below 1
+ * out, exactly 1 with no vertical delta.  Exponential in the delta, so a
+ * trackpad's many small events multiply to the zoom of one event carrying
+ * their summed delta, within the per-event clamp [1/maxStep, maxStep].
+ */
+function wheelZoomFactor(e,notch,maxStep){
+  var px=+e.deltaY;
+  if(!isFinite(px)||px===0)return 1;
+  if(e.deltaMode===1)px*=WHEEL_LINE_PX;else if(e.deltaMode===2)px*=WHEEL_PAGE_PX;
+  return Math.max(1/maxStep,Math.min(maxStep,Math.pow(notch,-px/WHEEL_NOTCH_PX)));
+}
+
+
+/* ══ channel-order.js ══ */
+/* ═══════════════════════════════════════════════════════════════════════
+   Channel row order
+   ═══════════════════════════════════════════════════════════════════════
+
+   The waveform rows can be reordered, as SeqEyes Qt's subplots can: drag a
+   channel's name in the left gutter, or right-click it for Top / Up / Down /
+   Bottom and Reset order. A drop on the middle of a row swaps with it; near
+   its top or bottom edge it inserts above or below. Moves count only the
+   rows on screen, so a hidden channel keeps its slot for when it returns.
+
+   A channel index stays the channel's identity everywhere (chColors[ci],
+   ampZoom[ci], the derived series); only the renderer's CH_ORDER, the
+   display order, changes. Both renderers install this module with accessors
+   to their own state, the last install winning, as they do markers.js. The
+   order is kept by name under seqeyes.channelOrder, behind the settings
+   consent switch.
+
+   The core takes everything it reads as arguments, so it runs in node:vm
+   for the unit tests; only install() touches the DOM. */
+
+var SeqEyesChannelOrder = (function () {
+  /* Movement in CSS pixels before a press on a name becomes a drag (Qt's
+     Manhattan threshold), and the long-press that opens the menu by touch. */
+  var DRAG_START_PX = 4;
+  var LONG_PRESS_MS = 500;
+  var TOUCH_SLOP_PX = 8;
+  var MOVES = [['top', 'Top'], ['up', 'Up'], ['down', 'Down'], ['bottom', 'Bottom']];
+
+  /* ── Core ──────────────────────────────────────────────────────────── */
+
+  function sameOrder(a, b) {
+    if (!a || !b || a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+
+  /**
+   * Channel indices for a stored list of channel names. Unknown names and
+   * repeats are dropped, and a channel the list lacks (one added in a later
+   * version) goes back in at its default position, so an old order can never
+   * lose a row.
+   */
+  function normalize(stored, names, defaults) {
+    var out = [], seen = {}, i;
+    for (i = 0; stored && i < stored.length; i++) {
+      var ci = names.indexOf(stored[i]);
+      if (ci >= 0 && defaults.indexOf(ci) >= 0 && !seen[ci]) { seen[ci] = true; out.push(ci); }
+    }
+    for (i = 0; i < defaults.length; i++) {
+      if (seen[defaults[i]]) continue;
+      seen[defaults[i]] = true;
+      out.splice(Math.min(i, out.length), 0, defaults[i]);
+    }
+    return out;
+  }
+
+  /** Which moves would change what is on screen, for the menu. */
+  function movesFor(visible, ci) {
+    var vi = visible.indexOf(ci), up = vi > 0, down = vi >= 0 && vi < visible.length - 1;
+    return { top: up, up: up, down: down, bottom: down };
+  }
+
+  /**
+   * Qt's moveVisibleAxis. Top and Bottom go to the ends of the whole order;
+   * Up and Down step over the neighbouring row on screen rather than the next
+   * entry, which may be hidden. Null when nothing would change.
+   */
+  function move(order, visible, ci, where) {
+    var vi = visible.indexOf(ci);
+    if (vi < 0) return null;
+    var next = order.filter(function (c) { return c !== ci; });
+    if (where === 'top') next.unshift(ci);
+    else if (where === 'bottom') next.push(ci);
+    else if (where === 'up' && vi > 0) next.splice(next.indexOf(visible[vi - 1]), 0, ci);
+    else if (where === 'down' && vi < visible.length - 1) next.splice(next.indexOf(visible[vi + 1]) + 1, 0, ci);
+    else return null;
+    return sameOrder(next, order) ? null : next;
+  }
+
+  /**
+   * Where the shown row `source` lands with the pointer at `y`, given `count`
+   * rows of height `rowH` from `top`: {mode: 'swap' | 'insert', index}, the
+   * index counted in rows shown (an insert index of `count` means after the
+   * last). Each row's top and bottom bands insert above and below it and its
+   * middle swaps, the bands a quarter of the row clamped to 8–40 px as in Qt.
+   * Null for a drop that would change nothing.
+   */
+  function dropTarget(count, source, y, top, rowH) {
+    if (!(count > 0) || !(rowH > 0) || source < 0 || source >= count || !isFinite(y)) return null;
+    var target;
+    if (y < top) target = { mode: 'insert', index: 0 };
+    else if (y >= top + count * rowH) target = { mode: 'insert', index: count };
+    else {
+      var i = Math.min(count - 1, Math.floor((y - top) / rowH));
+      var within = y - top - i * rowH, edge = Math.max(8, Math.min(40, rowH / 4));
+      if (within < edge) target = { mode: 'insert', index: i };
+      else if (within > rowH - edge) target = { mode: 'insert', index: i + 1 };
+      else target = { mode: 'swap', index: i };
+    }
+    if (target.mode === 'swap' ? target.index === source : (target.index === source || target.index === source + 1)) return null;
+    return target;
+  }
+
+  /** The order after dropping channel `ci` on a dropTarget() result. */
+  function applyDrop(order, visible, ci, target) {
+    if (!target || visible.indexOf(ci) < 0) return null;
+    var next = order.slice();
+    if (target.mode === 'swap') {
+      var other = visible[target.index], a = next.indexOf(ci), b = next.indexOf(other);
+      if (other === undefined || a < 0 || b < 0) return null;
+      next[a] = other; next[b] = ci;
+    } else {
+      next.splice(next.indexOf(ci), 1);
+      if (target.index < visible.length) next.splice(next.indexOf(visible[target.index]), 0, ci);
+      else next.splice(next.indexOf(visible[visible.length - 1]) + 1, 0, ci);
+    }
+    return sameOrder(next, order) ? null : next;
+  }
+
+  /**
+   * Hover-readout lines, given as [channel, text], in row order. A line that
+   * speaks for several rows (M1) passes their indices and sits with the
+   * highest of them; a line for no row in the order goes last. Stable.
+   */
+  function sortRows(rows, order) {
+    function rank(ci) {
+      var list = Array.isArray(ci) ? ci : [ci], best = Infinity;
+      for (var i = 0; i < list.length; i++) {
+        var at = order.indexOf(list[i]);
+        if (at >= 0 && at < best) best = at;
+      }
+      return best;
+    }
+    return rows
+      .map(function (row, i) { return { rank: rank(row[0]), i: i, text: row[1] }; })
+      .sort(function (a, b) { return (a.rank === b.rank ? 0 : a.rank - b.rank) || a.i - b.i; })
+      .map(function (row) { return row.text; });
+  }
+
+  /* ── Persistence ───────────────────────────────────────────────────── */
+
+  function prefs() {
+    var p = typeof SeqEyesPrefs !== 'undefined' ? SeqEyesPrefs : null;
+    return p && p.KEYS.channelOrder ? p : null;
+  }
+
+  /** The remembered order, validated against this version's channels. */
+  function restore(names, defaults) {
+    var p = prefs(), raw = p ? p.get(p.KEYS.channelOrder) : null, stored = null;
+    try { stored = raw ? JSON.parse(raw) : null; } catch (e) { stored = null; }
+    return normalize(Array.isArray(stored) ? stored : [], names, defaults);
+  }
+
+  /* The default order is kept as no key at all, so Reset leaves nothing
+     behind and a future default still reaches anyone who never reordered. */
+  function save(order, names, defaults) {
+    var p = prefs();
+    if (!p) return;
+    if (sameOrder(order, defaults)) p.remove(p.KEYS.channelOrder);
+    else p.set(p.KEYS.channelOrder, JSON.stringify(order.map(function (ci) { return names[ci]; })));
+  }
+
+  /* ── Interaction (DOM) ─────────────────────────────────────────────── */
+
+  var ctx = null;
+  var wired = false;
+  /** {ci, vi, x0, y0, dragging, target} for a mouse press on a row's name. */
+  var press = null;
+  /** {x0, y0, timer, fired} for a finger that may become a long-press. */
+  var touchPress = null;
+  var menu = null;
+  var feedback = null;
+
+  function el(id) { return document.getElementById(id); }
+
+  function canvasPoint(event) {
+    var rect = el('mc').getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top, width: rect.width };
+  }
+
+  /** The shown row whose name is under `p` in the left gutter, or -1. */
+  function gutterRow(p) {
+    var M = ctx.margins(), rows = ctx.visChannels(), vi = Math.floor((p.y - M.t) / ctx.cH());
+    return p.x >= 0 && p.x < M.l && p.y >= M.t && vi >= 0 && vi < rows.length ? vi : -1;
+  }
+
+  function apply(next) {
+    if (!next || !ctx) return;
+    ctx.setOrder(next);
+    save(next, ctx.names, ctx.defaults);
+  }
+
+  /* Drag feedback is DOM laid over the canvas rather than paint on it, so it
+     needs no hook in either renderer's draw. */
+  function buildFeedback(cc) {
+    function layer(id, className) {
+      var node = document.createElement('div');
+      node.id = id; node.className = className; node.hidden = true;
+      node.setAttribute('aria-hidden', 'true');
+      cc.appendChild(node);
+      return node;
+    }
+    feedback = {
+      source: layer('coSource', 'co-box'), target: layer('coTarget', 'co-box'),
+      line: layer('coLine', 'co-line'), ghost: layer('coGhost', 'co-ghost')
+    };
+  }
+
+  function placeRow(node, vi, inset, width) {
+    var M = ctx.margins(), ch = ctx.cH();
+    node.style.left = inset + 'px';
+    node.style.width = Math.max(0, width - M.r - 2 * inset) + 'px';
+    node.style.top = (M.t + vi * ch + inset) + 'px';
+    node.style.height = Math.max(0, ch - 2 * inset) + 'px';
+    node.hidden = false;
+  }
+
+  function hideFeedback() {
+    if (!feedback) return;
+    for (var key in feedback) feedback[key].hidden = true;
+  }
+
+  function updateDrag(p) {
+    var M = ctx.margins(), rows = ctx.visChannels(), ch = ctx.cH(), f = feedback;
+    var target = dropTarget(rows.length, press.vi, p.y, M.t, ch), name = ctx.names[press.ci], hint = name;
+    press.target = target;
+    f.target.hidden = true; f.line.hidden = true;
+    if (target && target.mode === 'swap') {
+      placeRow(f.target, target.index, 3, p.width);
+      hint = 'Swap ' + name + ' ↔ ' + ctx.names[rows[target.index]];
+    } else if (target) {
+      var y = M.t + target.index * ch;
+      if (target.index === 0) y += 2; else if (target.index === rows.length) y -= 2;
+      f.line.style.left = '4px';
+      f.line.style.width = Math.max(0, p.width - M.r - 8) + 'px';
+      f.line.style.top = y + 'px';
+      f.line.hidden = false;
+      hint = 'Insert ' + name + ' here';
+    }
+    f.ghost.textContent = hint;
+    f.ghost.hidden = false;
+    f.ghost.style.left = Math.max(0, Math.min(p.x + 16, p.width - f.ghost.offsetWidth - 4)) + 'px';
+    f.ghost.style.top = p.y + 'px';
+  }
+
+  function endDrag(commit) {
+    if (!press) return;
+    var ended = press;
+    press = null;
+    hideFeedback();
+    var cc = el('cc'); if (cc) cc.classList.remove('co-drag');
+    if (commit && ended.dragging) apply(applyDrop(ctx.getOrder(), ctx.visChannels(), ended.ci, ended.target));
+  }
+
+  /* Capture phase on #cc runs before both renderers' mousedown on #mc, so a
+     press on a name never starts a pan. Presses elsewhere pass through. */
+  function onMouseDown(event) {
+    if (!ctx || event.button !== 0 || event.ctrlKey || event.target !== el('mc')) return;
+    var vi = gutterRow(canvasPoint(event));
+    if (vi < 0) return;
+    event.stopPropagation(); event.preventDefault();
+    closeMenu();
+    press = { ci: ctx.visChannels()[vi], vi: vi, x0: event.clientX, y0: event.clientY, dragging: false, target: null };
+  }
+
+  function onWindowMove(event) {
+    if (!press || !ctx) return;
+    if (!press.dragging) {
+      if (Math.abs(event.clientX - press.x0) + Math.abs(event.clientY - press.y0) < DRAG_START_PX) return;
+      press.dragging = true;
+      var cc = el('cc');
+      cc.classList.add('co-drag'); cc.classList.remove('co-grab');
+      placeRow(feedback.source, press.vi, 1, canvasPoint(event).width);
+    }
+    event.preventDefault();
+    updateDrag(canvasPoint(event));
+  }
+
+  function onWindowUp(event) {
+    if (!press) return;
+    if (press.dragging && event && isFinite(event.clientY)) updateDrag(canvasPoint(event));
+    endDrag(true);
+  }
+
+  function onHoverMove(event) {
+    if (!ctx || press) return;
+    // Not while a button is held: a pan or marker drag keeps its own cursor.
+    var over = !event.buttons && event.target === el('mc') && gutterRow(canvasPoint(event)) >= 0;
+    el('cc').classList.toggle('co-grab', over);
+  }
+
+  function onHoverLeave() {
+    var cc = el('cc'); if (cc && !press) cc.classList.remove('co-grab');
+  }
+
+  /* ── Menu ──────────────────────────────────────────────────────────── */
+
+  /* Built from the marker menu's classes so the two read as one control. */
+  function menuItem(label, enabled, onSelect) {
+    var item = document.createElement('button'), text = document.createElement('span');
+    item.type = 'button'; item.className = 'mk-item'; item.setAttribute('role', 'menuitem');
+    text.className = 'mk-item-label'; text.textContent = label;
+    item.appendChild(text);
+    item.disabled = !enabled;
+    item.addEventListener('click', function () { closeMenu(); onSelect(); });
+    return item;
+  }
+
+  function openMenu(clientX, clientY, ci) {
+    closeMenu();
+    var name = ctx.names[ci], can = movesFor(ctx.visChannels(), ci);
+    menu = document.createElement('div');
+    menu.className = 'lblc mk-menu co-menu'; menu.id = 'channelOrderMenu';
+    menu.setAttribute('role', 'menu'); menu.setAttribute('aria-label', 'Move the ' + name + ' row');
+    var title = document.createElement('div');
+    title.className = 'co-menu-title'; title.textContent = 'Move ' + name;
+    menu.appendChild(title);
+    MOVES.forEach(function (m) {
+      menu.appendChild(menuItem(m[1], can[m[0]], function () { apply(move(ctx.getOrder(), ctx.visChannels(), ci, m[0])); }));
+    });
+    var sep = document.createElement('div'); sep.className = 'mk-sep';
+    menu.appendChild(sep);
+    menu.appendChild(menuItem('Reset order', !sameOrder(ctx.getOrder(), ctx.defaults), function () { apply(ctx.defaults.slice()); }));
+    document.body.appendChild(menu);
+    positionMenu(clientX, clientY);
+    el('cc').classList.add('co-menu-open');
+    document.addEventListener('pointerdown', onOutsidePointer, true);
+    window.addEventListener('resize', closeMenu);
+    var first = menu.querySelector('.mk-item:not(:disabled)');
+    if (first) first.focus();
+  }
+
+  function positionMenu(clientX, clientY) {
+    var compact = !!(window.matchMedia && window.matchMedia('(max-width: 768px), (pointer: coarse)').matches);
+    menu.classList.toggle('sheet', compact);
+    if (compact) { menu.style.left = ''; menu.style.top = ''; return; }
+    var width = menu.offsetWidth, height = menu.offsetHeight, vw = window.innerWidth, vh = window.innerHeight;
+    menu.style.left = Math.max(8, Math.min(clientX + 2, vw - width - 8)) + 'px';
+    menu.style.top = Math.max(8, clientY + 2 + height > vh - 8 ? clientY - height - 2 : clientY + 2) + 'px';
+  }
+
+  function closeMenu() {
+    if (!menu) return;
+    document.removeEventListener('pointerdown', onOutsidePointer, true);
+    window.removeEventListener('resize', closeMenu);
+    if (menu.parentNode) menu.parentNode.removeChild(menu);
+    menu = null;
+    var cc = el('cc'); if (cc) cc.classList.remove('co-menu-open');
+  }
+
+  function onOutsidePointer(event) {
+    if (menu && !menu.contains(event.target)) closeMenu();
+  }
+
+  function onContextMenu(event) {
+    if (!ctx || event.target !== el('mc')) return;
+    var vi = gutterRow(canvasPoint(event));
+    if (vi < 0) return;
+    event.preventDefault();
+    openMenu(event.clientX, event.clientY, ctx.visChannels()[vi]);
+  }
+
+  function onKeyDown(event) {
+    if (event.key === 'Escape' && (menu || press)) {
+      event.preventDefault(); event.stopPropagation();
+      if (menu) closeMenu(); else endDrag(false);
+      return;
+    }
+    if (menu && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+      event.preventDefault();
+      var items = Array.prototype.slice.call(menu.querySelectorAll('.mk-item:not(:disabled)'));
+      var at = items.indexOf(document.activeElement), step = event.key === 'ArrowDown' ? 1 : -1;
+      var next = items[(at + step + items.length) % items.length];
+      if (next) next.focus();
+    }
+  }
+
+  /* ── Touch ──────────────────────────────────────────────────────────
+
+     A finger held still on a name opens the menu, as a long-press in the plot
+     opens the marker menu; its later moves and lift are swallowed so the view
+     does not pan. A finger that moves first is the renderer's pan, as before.
+     Touch has no drag reorder. */
+
+  function endTouch() {
+    if (touchPress && touchPress.timer) clearTimeout(touchPress.timer);
+    touchPress = null;
+  }
+
+  function onTouchStart(event) {
+    endTouch();
+    if (!ctx || event.target !== el('mc') || event.touches.length !== 1) return;
+    var finger = event.touches[0], vi = gutterRow(canvasPoint(finger));
+    if (vi < 0) return;
+    var x0 = finger.clientX, y0 = finger.clientY, ci = ctx.visChannels()[vi];
+    touchPress = { x0: x0, y0: y0, fired: false, timer: setTimeout(function () {
+      if (!touchPress) return;
+      touchPress.fired = true; touchPress.timer = 0;
+      var cc = el('cc'); if (cc) cc.classList.remove('pan');
+      openMenu(x0, y0, ci);
+    }, LONG_PRESS_MS) };
+  }
+
+  function onTouchMove(event) {
+    if (!touchPress) return;
+    if (touchPress.fired) { event.stopPropagation(); event.preventDefault(); return; }
+    var finger = event.touches[0];
+    if (event.touches.length !== 1 || Math.abs(finger.clientX - touchPress.x0) > TOUCH_SLOP_PX || Math.abs(finger.clientY - touchPress.y0) > TOUCH_SLOP_PX) endTouch();
+  }
+
+  function onTouchEnd(event) {
+    if (!touchPress) return;
+    if (touchPress.fired) {
+      event.stopPropagation(); event.preventDefault();
+      var cc = el('cc'); if (cc) cc.classList.remove('pan');
+    }
+    endTouch();
+  }
+
+  function names(list) { return list.map(function (ci) { return ctx.names[ci]; }); }
+
+  function wire() {
+    var cc = el('cc');
+    if (!cc || !el('mc')) return;
+    wired = true;
+    buildFeedback(cc);
+    cc.addEventListener('mousedown', onMouseDown, true);
+    cc.addEventListener('contextmenu', onContextMenu);
+    cc.addEventListener('mousemove', onHoverMove);
+    cc.addEventListener('mouseleave', onHoverLeave);
+    window.addEventListener('mousemove', onWindowMove);
+    window.addEventListener('mouseup', onWindowUp);
+    window.addEventListener('blur', function () { endDrag(false); });
+    document.addEventListener('keydown', onKeyDown, true);
+    cc.addEventListener('touchstart', onTouchStart, { capture: true, passive: false });
+    cc.addEventListener('touchmove', onTouchMove, { capture: true, passive: false });
+    cc.addEventListener('touchend', onTouchEnd, { capture: true, passive: false });
+    cc.addEventListener('touchcancel', onTouchEnd, { capture: true, passive: false });
+    var dev = window.SeqEyesDev = window.SeqEyesDev || {};
+    dev.channelOrder = function () { return ctx ? names(ctx.getOrder()) : []; };
+    dev.channelOrderState = function () {
+      var target = press && press.target;
+      return {
+        visible: ctx ? names(ctx.visChannels()) : [],
+        dragging: !!(press && press.dragging),
+        menuOpen: !!menu,
+        target: target ? { mode: target.mode, index: target.index } : null
+      };
+    };
+  }
+
+  /**
+   * Hand the module a renderer's state. ctx: names (CH), defaults (the
+   * default order), margins(), visChannels(), cH(), getOrder(), and
+   * setOrder(order), which adopts the order and redraws. A later install
+   * replaces an earlier one; the DOM is wired once.
+   */
+  function install(context) {
+    ctx = context;
+    if (!wired && typeof document !== 'undefined') wire();
+  }
+
+  return {
+    install: install,
+    restore: restore,
+    sortRows: sortRows,
+    // Pure core, exported for the unit tests.
+    core: {
+      normalize: normalize,
+      movesFor: movesFor,
+      move: move,
+      dropTarget: dropTarget,
+      applyDrop: applyDrop,
+      sortRows: sortRows,
+      sameOrder: sameOrder,
+      save: save
+    }
+  };
+})();
+
+
 /* ══ state.js ══ */
 /* ═══════════════════════════════════════════════════════════════════════
    Application state & configuration
@@ -1031,8 +1545,10 @@ var chColors=['var(--rf)','var(--rf)','var(--gx)','var(--gy)','var(--gz)','var(-
 var chVis=[true,true,true,true,true,true,true,false,false,false,false,false];                   // visibility toggles
 var gMax=[1,6.28318,1,1,1,0,0,1,0.001,0.001,0.001,0];          // global max per channel
 // Row and legend order.  Label is channel 11 so every existing index keeps its
-// meaning, but it is shown directly after Trig.
-var CH_ORDER=[0,1,2,3,4,5,6,11,7,8,9,10];
+// meaning, but it is shown directly after Trig.  The user can reorder the rows
+// (channel-order.js); indices keep naming channels, only CH_ORDER changes.
+var CH_DEFAULT_ORDER=[0,1,2,3,4,5,6,11,7,8,9,10];
+var CH_ORDER=SeqEyesChannelOrder.restore(CH,CH_DEFAULT_ORDER);
 var ox=0,sc=1;                             // view offset [s] & scale [px/s]
 var dr=false,dsx=0,dso=0;                  // drag state
 var cursorT=0,cursorActive=false;            // mouse time position
@@ -2134,7 +2650,8 @@ window.SeqEyesPanelHost={
   },
   /* Simulation: only inside VS Code, where the extension answers these. Any
      page that loads this bundle without a VS Code host keeps the Simulation
-     button hidden. (The Python viewer has its own renderer and does not.) */
+     button hidden, unless it installs a host of its own as web/index.html
+     does. */
   createSimulationWorker:vscApi?createSimulationWorkerStandIn:undefined,
   getSequenceSource:vscApi?simulationSequenceSource:undefined,
   getSequenceSourceStatus:vscApi?simulationSequenceStatus:undefined,
@@ -3691,16 +4208,22 @@ kCanvas.addEventListener("mousedown",function(e){
 kCanvas.addEventListener("contextmenu",function(e){e.preventDefault();});
 
 kCanvas.addEventListener("wheel",function(e){e.preventDefault();
+  var zf=wheelZoomFactor(e,KSPACE_WHEEL_ZOOM_NOTCH,KSPACE_WHEEL_ZOOM_MAX_STEP);
+  if(zf===1)return;
   var r=kCanvas.getBoundingClientRect(),dpr=window.devicePixelRatio||1;
-  var mx=(e.clientX-r.left)/dpr, my=(e.clientY-r.top)/dpr;
-  var zf=e.deltaY<0?1.25:0.8, W=kCanvas.width/dpr, H=kCanvas.height/dpr;
+  // Client coordinates are already CSS px, the unit of the pan and projection.
+  var mx=e.clientX-r.left, my=e.clientY-r.top;
+  var W=kCanvas.width/dpr, H=kCanvas.height/dpr;
+  // Build on a running ease's target, not the frame on screen: events that
+  // arrive faster than the ease then compound like one larger event.
+  var s0=_kAnimId?_tScl:kScl, px0=_kAnimId?_tPanX:kPanX, py0=_kAnimId?_tPanY:kPanY;
   kAutoFit=false;
   // Keep whatever is under the cursor under the cursor.  With pan in screen
   // space this is the same arithmetic at every rotation; the previous form
   // added a screen delta straight to world coordinates and only aimed
   // correctly in the unrotated view.
-  setKSpaceTarget(kRotX, kRotY, kScl*zf,
-    kPanX+(mx-W/2-kPanX)*(1-zf), kPanY+(my-H/2-kPanY)*(1-zf), false);
+  setKSpaceTarget(kRotX, kRotY, s0*zf,
+    px0+(mx-W/2-px0)*(1-zf), py0+(my-H/2-py0)*(1-zf), false);
 },{passive:false});
 
 window.addEventListener("mousemove",function(e){
@@ -5551,18 +6074,28 @@ var SeqEyesPanel = (function () {
     if (!sgPane || !spPane) return;
     var sgRect = sgPane.getBoundingClientRect();
     var spRect = spPane.getBoundingClientRect();
-    if (sgRect.width <= 0 || sgRect.height <= 0) return;
+    // The narrow portrait layout shows one pane at a time. A hidden pane keeps
+    // its last canvas size; shrinking it to nothing would leave it blank when
+    // it is switched back in.
+    var sgShown = sgRect.width > 0 && sgRect.height > 0;
+    var spShown = spRect.width > 0 && spRect.height > 0;
+    if (!sgShown && !spShown) return;
 
     var changed = false;
-    changed = sizeCanvas(el('sgImg'), sgRect, dpr) || changed;
-    changed = sizeCanvas(el('sgOvl'), sgRect, dpr) || changed;
-    changed = sizeCanvas(el('spCanvas'), spRect, dpr) || changed;
+    if (sgShown) {
+      changed = sizeCanvas(el('sgImg'), sgRect, dpr) || changed;
+      changed = sizeCanvas(el('sgOvl'), sgRect, dpr) || changed;
+    }
+    if (spShown) changed = sizeCanvas(el('spCanvas'), spRect, dpr) || changed;
     if (changed) imageDirty = true;
 
     // Column budget follows the pane width in device pixels (§5.4), quantised
     // to 32: it is part of the cache key, so tracking every pixel of the
-    // open/resize animation would invalidate a perfectly good matrix.
-    var target = Math.max(64, Math.min(512, Math.round(sgRect.width * dpr / 64) * 32));
+    // open/resize animation would invalidate a perfectly good matrix. Both
+    // one-pane views span the panel, so the spectrum's width stands in for the
+    // hidden spectrogram's and the toggle keeps the cached matrix.
+    var basis = sgShown ? sgRect : spRect;
+    var target = Math.max(64, Math.min(512, Math.round(basis.width * dpr / 64) * 32));
     if (target !== params.targetColumns) {
       params.targetColumns = target;
     }
@@ -6524,8 +7057,13 @@ var SeqEyesPanel = (function () {
     window.addEventListener('resize', function () { if (panelMode === 'spectrogram') resize(); });
 
     var pane = el('sgPane');
+    var spectrumPane = el('spPane');
     if (pane && typeof ResizeObserver !== 'undefined') {
-      new ResizeObserver(function () { if (panelMode === 'spectrogram') resize(); }).observe(pane);
+      var observer = new ResizeObserver(function () { if (panelMode === 'spectrogram') resize(); });
+      observer.observe(pane);
+      // The spectrogram pane is hidden while the narrow layout shows the
+      // spectrum, so it cannot report the panel's open animation or resizes.
+      if (spectrumPane) observer.observe(spectrumPane);
     }
 
     syncControls();
@@ -9982,9 +10520,9 @@ var SeqEyesPrefsUi = (function () {
 
     var note = element('div', 'prefs-note');
     note.appendChild(element('div', null,
-      'Theme, time and gradient units, the Blocks toggle, k-space and '
-      + 'spectrogram options, marker snapping, and panel sizes are kept '
-      + 'between sessions.'));
+      'Theme, time and gradient units, the Blocks toggle, the channel row '
+      + 'order, k-space and spectrogram options, marker snapping, and panel '
+      + 'sizes are kept between sessions.'));
     note.appendChild(element('div', null, inVsCode()
       /* Different sentences because the two hosts really do keep different
          things: a path the extension re-reads, versus the file's text. */
@@ -11262,14 +11800,14 @@ var SeqEyesMarkers = (function () {
 var _touchTooltipTimer=null,_pointerFrame=0,_pendingPointer=null,mmDrag=false;
 
 mc.addEventListener('wheel',function(e){e.preventDefault();
-  var changed=false;
+  var changed=false,zf=wheelZoomFactor(e,WHEEL_ZOOM_NOTCH,WHEEL_ZOOM_MAX_STEP);
   if(e.ctrlKey||e.metaKey){
     var ch=cH(),vc=visChannels(),my=e.clientY-mc.getBoundingClientRect().top;
     var vi2=Math.floor((my-M.t)/ch);
-    if(vi2>=0&&vi2<vc.length){var ci=vc[vi2],oldZoom=ampZoom[ci];ampZoom[ci]*=e.deltaY<0?1.3:1/1.3;ampZoom[ci]=Math.max(0.1,Math.min(100,ampZoom[ci]));changed=ampZoom[ci]!==oldZoom;}
+    if(vi2>=0&&vi2<vc.length){var ci=vc[vi2],oldZoom=ampZoom[ci];ampZoom[ci]*=zf;ampZoom[ci]=Math.max(0.1,Math.min(100,ampZoom[ci]));changed=ampZoom[ci]!==oldZoom;}
   }else{
     var r=mc.getBoundingClientRect(),mx2=e.clientX-r.left;
-    var zf=e.deltaY<0?1.3:1/1.3;changed=zoomAt(mx2,zf);
+    changed=zoomAt(mx2,zf);
   }
   if(changed)scheduleViewerDraw(true);},{passive:false});
 mc.addEventListener('mousedown',function(e){if(e.button===0){dr=true;dsx=e.clientX;dso=ox;cc.classList.add('pan')}});
@@ -11402,18 +11940,23 @@ function pushPnsDerivedPart(parts,label,series,t){
   }
   pushDerivedPart(parts,label,series,t,'%');
 }
-function appendDerivedTooltipLines(lines,ct){
+/* Readout lines go out as [channel, text] so they can follow the row order. */
+function appendDerivedTooltipRows(rows,ct){
   // The series the plot is showing, not the full-sequence one behind it.
   var activePns=pnsSeriesShown(ox,ox+visibleDuration());
   if(activePns&&chVis[7]){
     var p=[];pushPnsDerivedPart(p,'X',activePns.x,ct);pushPnsDerivedPart(p,'Y',activePns.y,ct);pushPnsDerivedPart(p,'Z',activePns.z,ct);pushPnsDerivedPart(p,'Norm',activePns.n,ct);
-    if(p.length)lines.push('PNS: '+p.join('  '));
+    if(p.length)rows.push([7,'PNS: '+p.join('  ')]);
   }
   var activeM1=m1SeriesForView(ox,ox+visibleDuration());
   if(activeM1&&(chVis[8]||chVis[9]||chVis[10])){
     var m=[];if(chVis[8])pushM1DerivedPart(m,'M1x',activeM1.x,ct);if(chVis[9])pushM1DerivedPart(m,'M1y',activeM1.y,ct);if(chVis[10])pushM1DerivedPart(m,'M1z',activeM1.z,ct);
-    if(m.length)lines.push('M1: '+m.join('  '));
+    if(m.length)rows.push([[8,9,10].filter(function(c){return chVis[c];}),'M1: '+m.join('  ')]);
   }
+}
+function appendDerivedTooltipLines(lines,ct){
+  var rows=[];appendDerivedTooltipRows(rows,ct);
+  Array.prototype.push.apply(lines,SeqEyesChannelOrder.sortRows(rows,CH_ORDER));
 }
 function placeTooltip(cx,cy){
   var pad=8;tt.style.left='0px';tt.style.top='0px';
@@ -11483,21 +12026,22 @@ function showTooltipAt(cx,cy,ct){
   var ch=cH(),vc=visChannels(),vi2=Math.floor((cy-mc.getBoundingClientRect().top-M.t)/ch);
   if(vi2>=0&&vi2<vc.length){
     var found=findBlockAtTime(ct);
-    var lines=[];
+    var lines=[],rows=[];
     if(found){
       var blockDt=Math.max(0,Math.min(found.d,ct-found.s));
       lines=['Block #'+found.i,'Time: '+fmtT(timeConv(ct))+' '+timeUnitStr()+' (\u0394 '+fmtT(timeConv(blockDt))+' / dur: '+fmtT(timeConv(found.d))+' '+timeUnitStr()+')'];
-      if(found.rf){lines.push('RF: '+(found.rf.a||0).toFixed(1)+' Hz'+rfResponseSummary(found.rf)+'  fo='+(found.rf.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.rf.po||0)%6.283).toFixed(2)+' rad');}
-      if(found.gx&&found.gx.ty!=='none')lines.push('Gx: '+fmtG(found.gx,ct));
-      if(found.gy&&found.gy.ty!=='none')lines.push('Gy: '+fmtG(found.gy,ct));
-      if(found.gz&&found.gz.ty!=='none')lines.push('Gz: '+fmtG(found.gz,ct));
-      if(found.adc){lines.push('ADC: '+found.adc.n+'pts @'+(found.adc.dw*1e6).toFixed(1)+'\u00b5s  fo='+(found.adc.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.adc.po||0)%6.283).toFixed(2)+' rad');}
-      if(found.trg)lines.push('Trig: ch'+found.trg.map(function(x){return x.c}).join(',')+' \u0394'+found.trg.map(function(x){return fmtT(timeConv(x.dr))+' '+timeUnitStr()}).join(','));
-      if(chVis[11]&&labelTable){var labelLine=SeqEyesLabels.tooltipLine(labelTable,found);if(labelLine)lines.push(labelLine);}
+      if(found.rf){rows.push([0,'RF: '+(found.rf.a||0).toFixed(1)+' Hz'+rfResponseSummary(found.rf)+'  fo='+(found.rf.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.rf.po||0)%6.283).toFixed(2)+' rad']);}
+      if(found.gx&&found.gx.ty!=='none')rows.push([2,'Gx: '+fmtG(found.gx,ct)]);
+      if(found.gy&&found.gy.ty!=='none')rows.push([3,'Gy: '+fmtG(found.gy,ct)]);
+      if(found.gz&&found.gz.ty!=='none')rows.push([4,'Gz: '+fmtG(found.gz,ct)]);
+      if(found.adc){rows.push([5,'ADC: '+found.adc.n+'pts @'+(found.adc.dw*1e6).toFixed(1)+'\u00b5s  fo='+(found.adc.fo||0).toFixed(0)+' Hz  \u03c6\u2080='+((found.adc.po||0)%6.283).toFixed(2)+' rad']);}
+      if(found.trg)rows.push([6,'Trig: ch'+found.trg.map(function(x){return x.c}).join(',')+' \u0394'+found.trg.map(function(x){return fmtT(timeConv(x.dr))+' '+timeUnitStr()}).join(',')]);
+      if(chVis[11]&&labelTable){var labelLine=SeqEyesLabels.tooltipLine(labelTable,found);if(labelLine)rows.push([11,labelLine]);}
     }else{
       lines=['Time: '+fmtT(timeConv(ct))+' '+timeUnitStr()];
     }
-    appendDerivedTooltipLines(lines,ct);
+    appendDerivedTooltipRows(rows,ct);
+    Array.prototype.push.apply(lines,SeqEyesChannelOrder.sortRows(rows,CH_ORDER));
     if(lines.length>1||found){
       renderTooltipLines(tt,lines);tt.style.display='block';
       placeTooltip(cx,cy);
@@ -11613,7 +12157,7 @@ function scrollMinimapToTouch(touch){
 /* ── Old mouse minimap ────────────────────────────────────────────── */
 mmCanvas.addEventListener('wheel',function(e){
   e.preventDefault();
-  var zf=e.deltaY<0?1.3:1/1.3;
+  var zf=wheelZoomFactor(e,WHEEL_ZOOM_NOTCH,WHEEL_ZOOM_MAX_STEP);
   if(zoomAtCenter(zf))scheduleViewerDraw(true);
 },{passive:false});
 
@@ -11663,6 +12207,12 @@ SeqEyesMarkers.install({
   timeConv:timeConv,timeUnitStr:timeUnitStr,gradConv:gradConv,gradUnitStr:gradUnitStr,
   requestOverlay:drawCursorOverlay,
   derivedLines:function(t){var lines=[];appendDerivedTooltipLines(lines,t);return lines;}
+});
+/* Row reordering from the gutter; web/index.html installs its own over it. */
+SeqEyesChannelOrder.install({
+  names:CH,defaults:CH_DEFAULT_ORDER,margins:function(){return M;},visChannels:visChannels,cH:cH,
+  getOrder:function(){return CH_ORDER;},
+  setOrder:function(order){CH_ORDER=order;buildLegend();draw();}
 });
 /* Deferred by one macrotask so web/index.html, whose inline IIFE runs after
    this bundle, has installed its own adapter before the persisted mode is

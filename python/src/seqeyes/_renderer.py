@@ -1,82 +1,112 @@
 """
 _renderer.py — Jupyter HTML renderer for the SeqEyes interactive viewer.
 
-Generates a self‑contained HTML string that Jupyter displays inline via
-``_repr_html_()``, exactly the same mechanism Plotly uses.  The viewer is
-an iframe embedding the SeqEyes web UI with sequence data injected.
+The viewer is the standalone SeqEyes page (``web/index.html``) run as the
+``python`` host: the sequence and the display options are injected ahead of
+the page's own script, the way the MATLAB toolbox does it.  Jupyter displays
+it inline via ``_repr_html_()`` in a ``data:`` iframe, the same mechanism
+Plotly uses; such a frame can fetch nothing, so the stylesheet and both
+scripts are inlined.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import math
 import os
+import re
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, List, Optional, Union
 
 
 # ── Paths ─────────────────────────────────────────────────────────────────
 _RESOURCES_DIR = Path(__file__).resolve().parent / "resources"
-_VIEWER_TEMPLATE_PATH = _RESOURCES_DIR / "viewer.html"
+# ``npm run build:web`` copies the page and its assets into resources/; a
+# source checkout (python/src/seqeyes/) can read them from web/ instead.
+_WEB_DIR = Path(__file__).resolve().parent.parent.parent.parent / "web"
 
-# pulseq-bundle.js lives in the repo root; during dev we read it directly.
-# When installed as a package, a copy should be placed in resources/.
-_BUNDLE_CANDIDATES = [
-    _RESOURCES_DIR / "pulseq-bundle.js",
-    Path(__file__).resolve().parent.parent.parent.parent / "web" / "pulseq-bundle.js",
-    Path.cwd() / "web" / "pulseq-bundle.js",
-]
-# The label-row module shared with the web renderers.  build:web copies it into
-# resources/; a source checkout can read it from the webview assets instead.
-_LABELS_SCRIPT_CANDIDATES = [
-    _RESOURCES_DIR / "seqeyes-labels.js",
-    Path(__file__).resolve().parent.parent.parent.parent / "src" / "editor" / "webview" / "assets" / "labels.js",
-    Path.cwd() / "src" / "editor" / "webview" / "assets" / "labels.js",
-]
+# The page's references to its assets, each present exactly once.
+_STYLESHEET_TAG = '<link rel="stylesheet" href="styles.css">'
+_PULSEQ_TAG = '<script src="pulseq-bundle.js"></script>'
+_WEBVIEW_TAG = '<script src="webview-bundle.js"></script>'
+_BODY_TAG = "<body>"
+
 _VALID_GRAD_UNITS = {"Hz/m", "mT/m", "G/cm"}
+# The two plain names Python has always accepted, resolved the way the page's
+# own "system" theme resolves light and dark.
+_THEME_ALIASES = {"light": "githublight", "dark": "github"}
 SequenceSource = Union[str, bytes, bytearray, memoryview]
 
 
-def _find_bundle() -> str:
-    """Locate and read the pulseq-bundle.js file."""
-    for p in _BUNDLE_CANDIDATES:
-        if p.is_file():
-            return p.read_text(encoding="utf-8")
+def _read_resource(name: str) -> str:
+    """Read one of the page's files from resources/, or from web/ in a checkout."""
+    for directory in (_RESOURCES_DIR, _WEB_DIR):
+        path = directory / name
+        if path.is_file():
+            return path.read_text(encoding="utf-8")
     raise FileNotFoundError(
-        "pulseq-bundle.js not found.  "
-        "Build it with: npm run build:web  (from the repo root), "
-        "or copy it to python/src/seqeyes/resources/"
-    )
-
-
-def _find_labels_script() -> str:
-    """Locate and read the label-row script (SeqEyesLabels)."""
-    for p in _LABELS_SCRIPT_CANDIDATES:
-        if p.is_file():
-            return p.read_text(encoding="utf-8")
-    raise FileNotFoundError(
-        "seqeyes-labels.js not found.  "
-        "Build it with: npm run build:web  (from the repo root), "
-        "or copy src/editor/webview/assets/labels.js to python/src/seqeyes/resources/seqeyes-labels.js"
-    )
-
-
-def _read_viewer_template() -> str:
-    """Read the standalone viewer HTML template."""
-    if _VIEWER_TEMPLATE_PATH.is_file():
-        return _VIEWER_TEMPLATE_PATH.read_text(encoding="utf-8")
-    alt = Path.cwd() / "python" / "src" / "seqeyes" / "resources" / "viewer.html"
-    if alt.is_file():
-        return alt.read_text(encoding="utf-8")
-    raise FileNotFoundError(
-        f"Viewer template not found at {_VIEWER_TEMPLATE_PATH}. "
-        "Ensure the package is installed correctly."
+        f"{name} not found in {_RESOURCES_DIR}.  "
+        "Build it with: npm run build:web  (from the repo root)."
     )
 
 
 def _normalize_grad_disp(unit: str) -> str:
     """Return a viewer-supported gradient unit."""
     return unit if unit in _VALID_GRAD_UNITS else "mT/m"
+
+
+def _page_theme(theme: Optional[str]) -> Optional[str]:
+    """Map a Python theme name to one of the page's theme names."""
+    if not theme:
+        return None
+    return _THEME_ALIASES.get(str(theme), str(theme))
+
+
+def _finite_or_none(value: Any) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _time_range_option(time_range: Any) -> List[Optional[float]]:
+    """Seconds, with None for an open end; ``[0, None]`` keeps the page's first view."""
+    try:
+        start, end = time_range
+    except (TypeError, ValueError):
+        return [0.0, None]
+    return [_finite_or_none(start), _finite_or_none(end)]
+
+
+def _script_json(value: Any) -> str:
+    """JSON for an inline script, with no character the HTML parser acts on."""
+    return (
+        json.dumps(value, allow_nan=False, separators=(",", ":"))
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
+def _inline_script(source: str) -> str:
+    # A literal "</script" would end the element early; "<\/" means the same in JS.
+    return "<script>\n" + re.sub(r"</(?=script)", r"<\\/", source, flags=re.IGNORECASE) + "\n</script>"
+
+
+def _inline_style(source: str) -> str:
+    # Likewise for "</style"; "\/" is an escaped "/" in CSS.
+    return "<style>\n" + re.sub(r"</(?=style)", r"<\\/", source, flags=re.IGNORECASE) + "\n</style>"
+
+
+def _replace_tags(page: str, replacements: dict) -> str:
+    """Replace each tag, which must occur exactly once, in a single pass."""
+    for tag in replacements:
+        if page.count(tag) != 1:
+            raise ValueError(f"index.html no longer has exactly one {tag!r}")
+    pattern = "|".join(re.escape(tag) for tag in replacements)
+    return re.sub(pattern, lambda match: replacements[match.group(0)], page)
 
 
 def _build_html(
@@ -97,77 +127,65 @@ def _build_html(
     sequence_source : str or bytes-like
         Raw text ``.seq`` content or binary ``.bseq`` bytes.
     theme : str or None
-        CSS theme class to apply to ``<body>``.
+        Viewer theme: ``"system"``, ``"light"``, ``"dark"``, or one of the
+        page's themes (``"onelight"``, ``"onedark"``, ``"dracula"``,
+        ``"nord"``, ``"githublight"``, ``"github"``).  None uses the page's
+        remembered or system theme.
     inject_bundle : bool
-        If True, inline the pulseq-bundle.js parser into the HTML.
+        If True, inline the stylesheet and both scripts so the page is
+        self-contained.  If False, keep the page's relative references to
+        ``styles.css``, ``pulseq-bundle.js`` and ``webview-bundle.js``, for a
+        page served next to copies of those files.
     label : str
-        Display label (injected as JS variable, not yet rendered).
+        Sequence file name: names exported files, and titles the page when
+        the sequence defines no ``Name``.
     show_blocks : bool
         Initial block‑boundary visibility.
     time_range : tuple[float, float]
-        Initial viewport range in seconds.
+        Initial viewport range in seconds.  ``(0, inf)`` keeps the viewer's
+        own first view; an infinite end means the end of the sequence.
     time_disp : str
         Initial time display unit (``"s"``, ``"ms"``, ``"us"``).
     grad_disp : str
         Initial gradient display unit (``"mT/m"``, the default, ``"Hz/m"``
         or ``"G/cm"``).
     """
-    template = _read_viewer_template()
-    grad_disp = _normalize_grad_disp(grad_disp)
+    page = _read_resource("index.html")
     source_is_text = isinstance(sequence_source, str)
-    source_bytes = sequence_source.encode("utf-8") if source_is_text else bytes(sequence_source)
-    source_b64 = base64.b64encode(source_bytes).decode("ascii")
-
-    # 1. Inject the pulseq-bundle.js
-    bundle_placeholder = "<!-- PULSEQ_BUNDLE_PLACEHOLDER -->"
-    if inject_bundle and bundle_placeholder in template:
-        bundle_js = _find_bundle()
-        template = template.replace(
-            bundle_placeholder,
-            f"<script>\n{bundle_js}\n</script>",
-        )
-    elif bundle_placeholder in template:
-        template = template.replace(bundle_placeholder, "")
-
-    labels_placeholder = "<!-- LABELS_SCRIPT_PLACEHOLDER -->"
-    if inject_bundle and labels_placeholder in template:
-        template = template.replace(
-            labels_placeholder,
-            f"<script>\n{_find_labels_script()}\n</script>",
-        )
-    elif labels_placeholder in template:
-        template = template.replace(labels_placeholder, "")
-
-    # 2. Build options injection block (sequence data + display opts)
-    opts = [
-        f"window.SEQEYES_RAW_B64 = {json.dumps(source_b64)};",
-        f"window.SEQEYES_SOURCE_KIND = {json.dumps('text' if source_is_text else 'bytes')};",
-        f"window.SEQEYES_SOURCE_NAME = {json.dumps(label)};",
-        f"window.SEQEYES_LABEL = {json.dumps(label)};",
-        f"window.SEQEYES_SHOW_BLOCKS = {json.dumps(show_blocks)};",
-        f"window.SEQEYES_TIME_RANGE = {json.dumps(list(time_range))};",
-        f"window.SEQEYES_TIME_DISP = {json.dumps(time_disp)};",
-        f"window.SEQEYES_GRAD_DISP = {json.dumps(grad_disp)};",
-    ]
-    opts_block = "\n".join(opts)
-
-    data_placeholder = "/* SEQEYES_DATA_PLACEHOLDER */"
-    if data_placeholder in template:
-        template = template.replace(data_placeholder, opts_block)
+    file_name = label or ("sequence.seq" if source_is_text else "sequence.bseq")
+    if source_is_text:
+        preload = {"text": sequence_source, "fileName": file_name}
     else:
-        template = template.replace(
-            "</body>",
-            f"<script>{opts_block}</script>\n</body>",
-        )
+        source_b64 = base64.b64encode(bytes(sequence_source)).decode("ascii")
+        preload = {"base64": source_b64, "fileName": file_name}
+    page_theme = _page_theme(theme)
+    options = {
+        "theme": page_theme,
+        "timeUnit": time_disp,
+        "gradUnit": _normalize_grad_disp(grad_disp),
+        "showBlocks": bool(show_blocks),
+        "timeRange": _time_range_option(time_range),
+    }
+    # Runs before both bundles and the page's own script, which read these.
+    host_script = (
+        "<script>"
+        'window._SEQEYES_HOST="python";'
+        f"window._SEQEYES_PRELOAD={_script_json(preload)};"
+        f"window._SEQEYES_OPTIONS={_script_json(options)};"
+        "</script>\n"
+    )
 
-    # 3. Apply theme if specified
-    if theme:
-        template = template.replace(
-            "<body>",
-            f'<body class="theme-{theme}">',
-        )
-
-    return template
+    replacements = {_PULSEQ_TAG: host_script + _PULSEQ_TAG}
+    if inject_bundle:
+        replacements = {
+            _STYLESHEET_TAG: _inline_style(_read_resource("styles.css")),
+            _PULSEQ_TAG: host_script + _inline_script(_read_resource("pulseq-bundle.js")),
+            _WEBVIEW_TAG: _inline_script(_read_resource("webview-bundle.js")),
+        }
+    # Themed from the first paint; the page's script then applies the same choice.
+    if page_theme and page_theme != "system" and re.fullmatch(r"[\w-]+", page_theme):
+        replacements[_BODY_TAG] = f'<body class="theme-{page_theme}">'
+    return _replace_tags(page, replacements)
 
 
 class SeqEyesViewer:
@@ -181,18 +199,21 @@ class SeqEyesViewer:
     sequence_source : str or bytes-like
         Raw text ``.seq`` content or binary ``.bseq`` bytes.
     label : str
-        Display label (not yet rendered on the viewer).
+        Sequence file name: names exported files, and titles the viewer when
+        the sequence defines no ``Name``.
     show_blocks : bool
         Whether to show block‑boundary lines initially.
     time_range : tuple[float, float]
         Initial time viewport ``(start_sec, end_sec)``.  ``(0, inf)``
-        shows the whole sequence.
+        keeps the viewer's own first view (the first TR when one is found).
     time_disp : str
         Time axis unit — ``"s"``, ``"ms"``, or ``"us"``.
     grad_disp : str
         Gradient axis unit — ``"mT/m"`` (default), ``"Hz/m"``, or ``"G/cm"``.
     theme : str or None
-        Colour theme.
+        Colour theme: ``"system"``, ``"light"``, ``"dark"``, ``"onelight"``,
+        ``"onedark"``, ``"dracula"``, ``"nord"``, ``"githublight"`` or
+        ``"github"``.
     width : str
         CSS width of the iframe (e.g. ``"100%"``).
     height : str
@@ -281,7 +302,12 @@ class SeqEyesViewer:
     # ── Direct HTML access (for debugging / custom embedding) ──────────
 
     def to_html(self, *, inject_bundle: bool = True) -> str:
-        """Return the full standalone HTML string (for saving to a file)."""
+        """Return the full standalone HTML string (for saving to a file).
+
+        With ``inject_bundle=False`` the page references ``styles.css``,
+        ``pulseq-bundle.js`` and ``webview-bundle.js`` by relative URL
+        instead of inlining them, so it works only next to copies of them.
+        """
         return _build_html(
             self._sequence_source,
             theme=self._theme,

@@ -44,25 +44,25 @@ class TestSeqEyesViewer:
         v = SeqEyesViewer(SAMPLE_SEQ_TEXT)
         assert v is not None
 
-    def test_viewer_loads_binary_file(self, tmp_path):
+    def test_viewer_loads_binary_file(self, tmp_path, injected):
         source = b"\x01pulseq\x02\x00\xff"
         path = tmp_path / "demo.bseq"
         path.write_bytes(source)
 
         raw = SeqEyesViewer.from_file(path).to_html(inject_bundle=False)
 
-        assert 'window.SEQEYES_SOURCE_KIND = "bytes";' in raw
-        assert 'window.SEQEYES_SOURCE_NAME = "demo.bseq";' in raw
-        assert __import__("base64").b64encode(source).decode() in raw
+        assert injected(raw)["_SEQEYES_PRELOAD"] == {
+            "base64": __import__("base64").b64encode(source).decode(),
+            "fileName": "demo.bseq",
+        }
 
-    def test_viewer_loads_text_file(self, tmp_path):
+    def test_viewer_loads_text_file(self, tmp_path, injected):
         path = tmp_path / "demo.seq"
         path.write_text(SAMPLE_SEQ_TEXT, encoding="utf-8")
 
         raw = SeqEyesViewer.from_file(path).to_html(inject_bundle=False)
 
-        assert 'window.SEQEYES_SOURCE_KIND = "text";' in raw
-        assert 'window.SEQEYES_SOURCE_NAME = "demo.seq";' in raw
+        assert injected(raw)["_SEQEYES_PRELOAD"] == {"text": SAMPLE_SEQ_TEXT, "fileName": "demo.seq"}
 
     def test_viewer_rejects_unsupported_file_extension(self, tmp_path):
         path = tmp_path / "demo.txt"
@@ -70,67 +70,82 @@ class TestSeqEyesViewer:
         with pytest.raises(ValueError, match=r"\.seq or \.bseq"):
             SeqEyesViewer.from_file(path)
 
-    def test_repr_html_is_iframe(self):
-        v = SeqEyesViewer(SAMPLE_SEQ_TEXT)
+    def test_repr_html_is_iframe(self, injected):
+        v = SeqEyesViewer(SAMPLE_SEQ_TEXT, width="80%", height="400px")
         html = v._repr_html_()
         assert html.startswith("<iframe")
-        assert "data:text/html;base64," in html
+        assert html.endswith("</iframe>")
+        assert 'width="80%" height="400px"' in html
+        prefix = 'src="data:text/html;base64,'
+        start = html.index(prefix) + len(prefix)
+        page = __import__("base64").b64decode(html[start:html.index('"', start)]).decode("utf-8")
+        assert page == v.to_html()
+        assert injected(page)["_SEQEYES_PRELOAD"]["text"] == SAMPLE_SEQ_TEXT
 
     def test_to_html_standalone(self):
         v = SeqEyesViewer(SAMPLE_SEQ_TEXT)
-        html = v.to_html(inject_bundle=False)
+        html = v.to_html()
         assert "<!DOCTYPE html>" in html
         assert "SeqEyes" in html
-        assert "SEQEYES_RAW_B64" in html
+        assert "_SEQEYES_PRELOAD" in html
+        assert "<script src=" not in html
 
     def test_viewer_with_theme(self):
         v = SeqEyesViewer(SAMPLE_SEQ_TEXT, theme="dracula")
         raw = v.to_html(inject_bundle=False)
         assert 'class="theme-dracula"' in raw
 
-    def test_viewer_with_label(self):
+    def test_viewer_with_label(self, injected):
         v = SeqEyesViewer(SAMPLE_SEQ_TEXT, label="My GRE")
         raw = v.to_html(inject_bundle=False)
-        assert '"My GRE"' in raw
+        assert injected(raw)["_SEQEYES_PRELOAD"]["fileName"] == "My GRE"
 
-    def test_viewer_with_show_blocks(self):
+    def test_viewer_with_show_blocks(self, injected):
         v = SeqEyesViewer(SAMPLE_SEQ_TEXT, show_blocks=True)
         raw = v.to_html(inject_bundle=False)
-        assert "SEQEYES_SHOW_BLOCKS" in raw
+        assert injected(raw)["_SEQEYES_OPTIONS"]["showBlocks"] is True
 
-    def test_viewer_with_time_range(self):
+    def test_viewer_with_time_range(self, injected):
         v = SeqEyesViewer(SAMPLE_SEQ_TEXT, time_range=(0.01, 0.05))
         raw = v.to_html(inject_bundle=False)
-        assert "SEQEYES_TIME_RANGE" in raw
-        assert "0.01" in raw
-        assert "0.05" in raw
+        assert injected(raw)["_SEQEYES_OPTIONS"]["timeRange"] == [0.01, 0.05]
 
-    def test_viewer_with_units(self):
-        v = SeqEyesViewer(SAMPLE_SEQ_TEXT, time_disp="ms", grad_disp="mT/m")
-        raw = v.to_html(inject_bundle=False)
-        assert '"ms"' in raw
-        assert '"mT/m"' in raw
+    def test_viewer_with_units(self, injected):
+        v = SeqEyesViewer(SAMPLE_SEQ_TEXT, time_disp="ms", grad_disp="G/cm")
+        options = injected(v.to_html(inject_bundle=False))["_SEQEYES_OPTIONS"]
+        assert options["timeUnit"] == "ms"
+        assert options["gradUnit"] == "G/cm"
 
-    def test_viewer_default_gradient_unit_is_mt_per_m(self):
+    def test_viewer_defaults(self, injected):
         v = SeqEyesViewer(SAMPLE_SEQ_TEXT)
         raw = v.to_html(inject_bundle=False)
-        assert 'window.SEQEYES_GRAD_DISP = "mT/m";' in raw
+        assert injected(raw)["_SEQEYES_OPTIONS"] == {
+            "theme": None,
+            "timeUnit": "s",
+            "gradUnit": "mT/m",
+            "showBlocks": False,
+            "timeRange": [0.0, None],
+        }
 
-    def test_viewer_normalizes_unsupported_gradient_unit(self):
+    def test_viewer_normalizes_unsupported_gradient_unit(self, injected):
         v = SeqEyesViewer(SAMPLE_SEQ_TEXT, grad_disp="kHz/m")
         raw = v.to_html(inject_bundle=False)
-        assert 'window.SEQEYES_GRAD_DISP = "mT/m";' in raw
+        assert injected(raw)["_SEQEYES_OPTIONS"]["gradUnit"] == "mT/m"
         assert "kHz/m" not in raw
 
 
 class TestSetAndReset:
     """Tests for set() and reset()."""
 
-    def test_set_patches_plot(self):
+    def test_set_patches_plot(self, monkeypatch, injected):
         try:
             import seqeyes
+            import seqeyes._plot as plot_module
             from pypulseq import Sequence
 
+            # Outside Jupyter plot() opens a browser window; capture the viewer instead.
+            shown = []
+            monkeypatch.setattr(plot_module, "_open_in_browser", shown.append)
             seqeyes.set()
             assert hasattr(Sequence, "plot")
             assert callable(Sequence.plot)
@@ -145,6 +160,11 @@ class TestSetAndReset:
             seq.add_block(rf)
             seq.add_block(adc)
             seq.plot(show_blocks=True, time_disp="ms")
+            assert len(shown) == 1
+            options = injected(shown[0].to_html(inject_bundle=False))["_SEQEYES_OPTIONS"]
+            assert options["showBlocks"] is True
+            assert options["timeUnit"] == "ms"
+            seqeyes.reset()
         except ImportError:
             pytest.skip("pypulseq not installed")
 

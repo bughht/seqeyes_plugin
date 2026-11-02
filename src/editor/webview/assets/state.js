@@ -14,8 +14,10 @@ var chColors=['var(--rf)','var(--rf)','var(--gx)','var(--gy)','var(--gz)','var(-
 var chVis=[true,true,true,true,true,true,true,false,false,false,false,false];                   // visibility toggles
 var gMax=[1,6.28318,1,1,1,0,0,1,0.001,0.001,0.001,0];          // global max per channel
 // Row and legend order.  Label is channel 11 so every existing index keeps its
-// meaning, but it is shown directly after Trig.
-var CH_ORDER=[0,1,2,3,4,5,6,11,7,8,9,10];
+// meaning, but it is shown directly after Trig.  The user can reorder the rows
+// (channel-order.js); indices keep naming channels, only CH_ORDER changes.
+var CH_DEFAULT_ORDER=[0,1,2,3,4,5,6,11,7,8,9,10];
+var CH_ORDER=SeqEyesChannelOrder.restore(CH,CH_DEFAULT_ORDER);
 var ox=0,sc=1;                             // view offset [s] & scale [px/s]
 var dr=false,dsx=0,dso=0;                  // drag state
 var cursorT=0,cursorActive=false;            // mouse time position
@@ -1117,7 +1119,8 @@ window.SeqEyesPanelHost={
   },
   /* Simulation: only inside VS Code, where the extension answers these. Any
      page that loads this bundle without a VS Code host keeps the Simulation
-     button hidden. (The Python viewer has its own renderer and does not.) */
+     button hidden, unless it installs a host of its own as web/index.html
+     does. */
   createSimulationWorker:vscApi?createSimulationWorkerStandIn:undefined,
   getSequenceSource:vscApi?simulationSequenceSource:undefined,
   getSequenceSourceStatus:vscApi?simulationSequenceStatus:undefined,

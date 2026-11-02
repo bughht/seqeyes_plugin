@@ -5,6 +5,16 @@ import { basename, join, resolve } from 'node:path';
 import { expect, test, type Download, type Locator, type Page } from '@playwright/test';
 import sharp from 'sharp';
 
+import {
+  amplitudeZoom, dispatchWheels, kspaceZoomAnchorError, recordCanvasText, repeat, settled, stillKspaceCamera, timeZoom,
+  WHEEL, type Wheel,
+} from './wheelZoomProbes';
+import {
+  DEFAULT_ORDER, DEFAULT_ROWS, ctrlWheelOnRow, dragOver, dragRow, legendOrder, lineIndex, menuItem,
+  moveRow, openRowMenu, readoutLines, rowOrder, rowPoint, rowSignatures, rowState, settledRowSignatures,
+  shownRows, touch, viewStart,
+} from './channel-order-helpers';
+
 interface DebugState {
   blocks: number;
   totalDuration: number;
@@ -953,6 +963,211 @@ test('shows the marker popup as a sheet inside a phone viewport', async ({ page 
   expect(box.y + box.height).toBeLessThanOrEqual(844 + 0.5);
 });
 
+/* ── Channel row order ─────────────────────────────────────────────────
+   Gestures in the left gutter, shared with the VS Code webview spec through
+   channel-order-helpers.ts. writeEpi shows the seven default rows. */
+
+test('reorders rows by dragging a channel name: a row\'s middle swaps, its edge inserts', async ({ page }) => {
+  await loadViewer(page, fixtures.epi);
+  const start = await viewStart(page);
+  expect(await shownRows(page)).toEqual(DEFAULT_ROWS);
+
+  await dragOver(page, 'Gz', 'RF', 0.5);
+  expect(await rowState(page)).toMatchObject({ dragging: true, target: { mode: 'swap', index: 0 } });
+  await expect(page.locator('#coGhost')).toHaveText('Swap Gz ↔ RF');
+  await expect(page.locator('#coSource')).toBeVisible();
+  await expect(page.locator('#coTarget')).toBeVisible();
+  await expect(page.locator('#tt')).toBeHidden();
+  await page.mouse.up();
+  await expect(page.locator('#coGhost')).toBeHidden();
+  expect(await shownRows(page)).toEqual(['Gz', 'φ', 'Gx', 'Gy', 'RF', 'ADC', 'Trig']);
+  expect((await debugState(page)).visibleChannels).toEqual(['Gz', 'φ', 'Gx', 'Gy', 'RF', 'ADC', 'Trig']);
+
+  // Near the top edge of φ, ADC goes in above it.
+  await dragOver(page, 'ADC', 'φ', 0.08);
+  expect((await rowState(page)).target).toEqual({ mode: 'insert', index: 1 });
+  await expect(page.locator('#coGhost')).toHaveText('Insert ADC here');
+  await expect(page.locator('#coLine')).toBeVisible();
+  await expect(page.locator('#coTarget')).toBeHidden();
+  await page.mouse.up();
+  expect(await shownRows(page)).toEqual(['Gz', 'ADC', 'φ', 'Gx', 'Gy', 'RF', 'Trig']);
+  // The legend follows the order, and no drag panned the view.
+  expect(await legendOrder(page)).toEqual(['Gz', 'ADC', 'φ', 'Gx', 'Gy', 'RF', 'Trig', 'Label', 'PNS', 'M1x', 'M1y', 'M1z']);
+  expect(await viewStart(page)).toBe(start);
+
+  // Escape abandons a drag.
+  await dragOver(page, 'Trig', 'Gz', 0.5);
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  expect(await shownRows(page)).toEqual(['Gz', 'ADC', 'φ', 'Gx', 'Gy', 'RF', 'Trig']);
+  expect((await rowState(page)).dragging).toBe(false);
+});
+
+test('moves a row from its name\'s menu, disables what cannot apply, and resets the order', async ({ page }) => {
+  await loadViewer(page, fixtures.epi);
+  let menu = await openRowMenu(page, 'RF');
+  await expect(menu.locator('.co-menu-title')).toHaveText('Move RF');
+  await expect(menuItem(menu, 'Top')).toBeDisabled();
+  await expect(menuItem(menu, 'Up')).toBeDisabled();
+  await expect(menuItem(menu, 'Down')).toBeEnabled();
+  await expect(menuItem(menu, 'Bottom')).toBeEnabled();
+  await expect(menuItem(menu, 'Reset order')).toBeDisabled();
+  await menuItem(menu, 'Down').click();
+  await expect(menu).toBeHidden();
+  expect(await shownRows(page)).toEqual(['φ', 'RF', 'Gx', 'Gy', 'Gz', 'ADC', 'Trig']);
+
+  await moveRow(page, 'RF', 'Up');
+  expect(await shownRows(page)).toEqual(DEFAULT_ROWS);
+  await moveRow(page, 'Gx', 'Bottom');
+  expect(await shownRows(page)).toEqual(['RF', 'φ', 'Gy', 'Gz', 'ADC', 'Trig', 'Gx']);
+  expect((await rowOrder(page)).at(-1)).toBe('Gx');
+
+  menu = await openRowMenu(page, 'Gx');
+  await expect(menuItem(menu, 'Down')).toBeDisabled();
+  await expect(menuItem(menu, 'Bottom')).toBeDisabled();
+  await menuItem(menu, 'Top').click();
+  expect(await shownRows(page)).toEqual(['Gx', 'RF', 'φ', 'Gy', 'Gz', 'ADC', 'Trig']);
+
+  menu = await openRowMenu(page, 'Gy');
+  await expect(menuItem(menu, 'Reset order')).toBeEnabled();
+  await menuItem(menu, 'Reset order').click();
+  expect(await rowOrder(page)).toEqual(DEFAULT_ORDER);
+
+  // Escape and an outside click both close it.
+  await openRowMenu(page, 'Gz');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#channelOrderMenu')).toHaveCount(0);
+  await openRowMenu(page, 'Gz');
+  await page.mouse.click(5, 5);
+  await expect(page.locator('#channelOrderMenu')).toHaveCount(0);
+
+  // A right-click on a name offers no marker, and one in the plot is still the marker menu.
+  await openRowMenu(page, 'Gx');
+  await expect(page.locator('#markerMenu')).toHaveCount(0);
+  const plot = await rowPoint(page, 'Gx', 0.5, 'plot');
+  await page.mouse.click(plot.x, plot.y, { button: 'right' });
+  await expect(page.locator('#markerMenu')).toBeVisible();
+  await expect(page.locator('#channelOrderMenu')).toHaveCount(0);
+});
+
+test('moves only among the rows shown, so a hidden channel keeps its place', async ({ page }) => {
+  await loadViewer(page, fixtures.epi);
+  await page.locator('#legend .li', { hasText: /^φ$/ }).click();
+  expect(await shownRows(page)).toEqual(['RF', 'Gx', 'Gy', 'Gz', 'ADC', 'Trig']);
+
+  // Up steps over the hidden φ rather than swapping with it.
+  await moveRow(page, 'Gx', 'Up');
+  expect(await shownRows(page)).toEqual(['Gx', 'RF', 'Gy', 'Gz', 'ADC', 'Trig']);
+  // A drag counts rows shown too: Trig onto the middle of RF swaps the two.
+  await dragRow(page, 'Trig', 'RF', 0.5);
+  expect(await shownRows(page)).toEqual(['Gx', 'Trig', 'Gy', 'Gz', 'ADC', 'RF']);
+
+  await page.locator('#legend .li', { hasText: /^φ$/ }).click();
+  expect(await shownRows(page)).toEqual(['Gx', 'Trig', 'φ', 'Gy', 'Gz', 'ADC', 'RF']);
+});
+
+test('zooms the amplitude of the row under the cursor after a reorder', async ({ page }) => {
+  await loadViewer(page, fixtures.epi);
+  await moveRow(page, 'Gz', 'Top');
+  expect(await shownRows(page)).toEqual(['Gz', 'RF', 'φ', 'Gx', 'Gy', 'ADC', 'Trig']);
+
+  for (const [channel, row] of [['Gz', 0], ['RF', 1]] as const) {
+    const before = await settledRowSignatures(page);
+    await ctrlWheelOnRow(page, channel, -600);
+    await expect.poll(async () => (await rowSignatures(page))[row]).not.toBe(before[row]);
+    const after = await settledRowSignatures(page);
+    // Only that row redrew differently: the zoom went to the channel shown there.
+    expect(after.filter((_, i) => i !== row)).toEqual(before.filter((_, i) => i !== row));
+  }
+});
+
+test('lists the hover readout in row order', async ({ page }) => {
+  await loadViewer(page, fixtures.epi);
+  const [excitation] = await page.evaluate(() => window.__seqeyesDebug.rfEvents()) as Array<{ start: number; end: number }>;
+  const t = 0.5 * (excitation.start + excitation.end);
+  await page.evaluate(({ s, e }) => window.__seqeyesDebug.setView(s, e), { s: excitation.start - 1e-3, e: excitation.end + 1e-3 });
+  const at = async () => {
+    const state = await debugState(page);
+    const p = await rowPoint(page, 'Gy', 0.5, 'plot');
+    const box = await requireBox(page.locator('#mc'));
+    return readoutLines(page, box.x + 92 + (t - state.offset) * state.scale, p.y);
+  };
+
+  let lines = await at();
+  expect(lines[0]).toMatch(/^Block #/);
+  expect(lineIndex(lines, 'RF:')).toBeLessThan(lineIndex(lines, 'Gz:'));
+
+  await moveRow(page, 'Gz', 'Top');
+  lines = await at();
+  expect(lines[0]).toMatch(/^Block #/);
+  expect(lineIndex(lines, 'Gz:')).toBeLessThan(lineIndex(lines, 'RF:'));
+});
+
+test('remembers the row order across a reload, but only while settings are remembered', async ({ page }) => {
+  await loadViewer(page, fixtures.epi);
+  await moveRow(page, 'Gz', 'Top');
+  const remembered = ['Gz', 'RF', 'φ', 'Gx', 'Gy', 'ADC', 'Trig', 'Label', 'PNS', 'M1x', 'M1y', 'M1z'];
+  expect(JSON.parse((await storedOrder(page))!)).toEqual(remembered);
+
+  await loadViewer(page, fixtures.epi);
+  expect(await rowOrder(page)).toEqual(remembered);
+  expect(await shownRows(page)).toEqual(['Gz', 'RF', 'φ', 'Gx', 'Gy', 'ADC', 'Trig']);
+  expect(await legendOrder(page)).toEqual(remembered);
+
+  // Back at the default order, nothing is kept.
+  await moveRow(page, 'RF', 'Reset order');
+  expect(await storedOrder(page)).toBeNull();
+
+  // Opted out, a reorder lasts the session and a reload starts from the default.
+  await page.locator('#prefsBtn').click();
+  await page.locator('#prefsRemember').uncheck();
+  await page.keyboard.press('Escape');
+  await moveRow(page, 'Gz', 'Top');
+  expect((await shownRows(page))[0]).toBe('Gz');
+  expect(await storedOrder(page)).toBeNull();
+  await loadViewer(page, fixtures.epi);
+  expect(await rowOrder(page)).toEqual(DEFAULT_ORDER);
+});
+
+test('checks a remembered order against the channels it knows', async ({ page }) => {
+  await page.goto('/?debug=1');
+  await page.evaluate(() => localStorage.setItem('seqeyes.channelOrder', JSON.stringify(['Gz', 'Bogus', 'RF', 'Gz'])));
+  await loadViewer(page, fixtures.epi);
+  // The unknown name and the repeat are dropped; every missing channel is back at its default place.
+  expect(await rowOrder(page))
+    .toEqual(['Gz', 'φ', 'Gx', 'Gy', 'RF', 'ADC', 'Trig', 'Label', 'PNS', 'M1x', 'M1y', 'M1z']);
+});
+
+test.describe('channel rows on a touch screen', () => {
+  test.use({ hasTouch: true });
+
+  test('a long-press on a channel name opens its row menu without panning', async ({ page }) => {
+    await loadViewer(page, fixtures.epi);
+    const start = await viewStart(page);
+    const p = await rowPoint(page, 'Gy');
+
+    // A short touch on a name is still nothing but the renderer's.
+    await touch(page, 'touchstart', p.x, p.y);
+    await touch(page, 'touchend', p.x, p.y);
+    await page.waitForTimeout(650);
+    await expect(page.locator('#channelOrderMenu')).toHaveCount(0);
+
+    await touch(page, 'touchstart', p.x, p.y);
+    await page.waitForTimeout(650);
+    const menu = page.locator('#channelOrderMenu');
+    await expect(menu).toBeVisible();
+    await touch(page, 'touchmove', p.x + 60, p.y);
+    await touch(page, 'touchend', p.x + 60, p.y);
+    expect(await viewStart(page)).toBe(start);
+    await menuItem(menu, 'Top').click();
+    expect(await shownRows(page)).toEqual(['Gy', 'RF', 'φ', 'Gx', 'Gz', 'ADC', 'Trig']);
+  });
+});
+
+async function storedOrder(page: Page): Promise<string | null> {
+  return page.evaluate(() => localStorage.getItem('seqeyes.channelOrder'));
+}
+
 test('downloads ktraj_adc text and matching metadata from the web export button', async ({ page }) => {
   await loadViewer(page, fixtures.gre);
 
@@ -1345,6 +1560,89 @@ test.describe('minimap block cache at high DPI', () => {
     expect(found.length, `RF marks at ${JSON.stringify(found)}`).toBe(3);
     [0, 1 / 3, 2 / 3].forEach((want, index) => {
       expect(found[index].from).toBeCloseTo(want, 2);
+    });
+  });
+});
+
+/**
+ * Wheel zoom follows the wheel's delta. A fixed step per event let a trackpad
+ * or high-resolution wheel, which sends many small events per gesture, take
+ * the full step on every one of them.
+ */
+test.describe('wheel zoom follows the wheel delta', () => {
+  const { notch, maxStep, kNotch, kMaxStep } = WHEEL;
+  const zoom = (page: Page, wheels: Wheel[]) => timeZoom(page, '#mc', wheels);
+
+  test.beforeEach(async ({ page }) => { await loadViewer(page, fixtures.epi); });
+
+  test('zooms time by a fraction of a notch for a small delta', async ({ page }) => {
+    expect(await zoom(page, [{ deltaY: -100 }])).toBeCloseTo(notch, 6);
+    expect(await zoom(page, [{ deltaY: -10 }])).toBeCloseTo(notch ** 0.1, 6);
+    expect(await zoom(page, [{ deltaY: 100 }])).toBeCloseTo(1 / notch, 6);
+    expect(await zoom(page, [{ deltaY: 0 }])).toBe(1);
+  });
+
+  test('zooms time as far for ten small events as for one notch', async ({ page }) => {
+    expect(await zoom(page, repeat(10, { deltaY: -10 }))).toBeCloseTo(notch, 6);
+    expect(await zoom(page, repeat(10, { deltaY: 10 }))).toBeCloseTo(1 / notch, 6);
+  });
+
+  test('caps one huge time-zoom event at the maximum step, above a notch', async ({ page }) => {
+    expect(await zoom(page, [{ deltaY: -100 }])).toBeLessThan(maxStep);
+    expect(await zoom(page, [{ deltaY: -1200 }])).toBeCloseTo(maxStep, 6);
+    expect(await zoom(page, [{ deltaY: 1200 }])).toBeCloseTo(1 / maxStep, 6);
+  });
+
+  test('reads line- and page-mode time-zoom deltas in pixels', async ({ page }) => {
+    expect(await zoom(page, [{ deltaY: -3, deltaMode: 1 }])).toBeCloseTo(notch, 6);
+    expect(await zoom(page, [{ deltaY: -1, deltaMode: 1 }])).toBeCloseTo(notch ** (1 / 3), 6);
+    expect(await zoom(page, [{ deltaY: -1, deltaMode: 2 }])).toBeCloseTo(maxStep, 6);
+  });
+
+  test('zooms one row\'s amplitude by the delta on Ctrl+wheel', async ({ page }) => {
+    await recordCanvasText(page);
+    const view = await page.evaluate(() => window.SeqEyesPanelHost.getView());
+    await page.evaluate(v => window.__seqeyesDebug.setView(v.startSec, v.endSec), view);
+    // The range labels print one decimal, which bounds how closely they agree.
+    const notchZoom = await amplitudeZoom(page, [{ deltaY: -100 }]);
+    expect(Math.abs(notchZoom.factor - notch)).toBeLessThan(0.02);
+    expect(notchZoom.othersHeld).toBe(true);
+    expect(Math.abs((await amplitudeZoom(page, repeat(10, { deltaY: -10 }))).factor - notch)).toBeLessThan(0.02);
+  });
+
+  test('zooms time by the delta on the minimap', async ({ page }) => {
+    expect(await timeZoom(page, '#mmc', [{ deltaY: -100 }])).toBeCloseTo(notch, 6);
+    expect(await timeZoom(page, '#mmc', repeat(10, { deltaY: -10 }))).toBeCloseTo(notch, 6);
+  });
+
+  test('zooms k-space by the delta, compounding events faster than its easing', async ({ page }) => {
+    await openKspace(page);
+    const camera = async () => {
+      const s = await debugState(page);
+      return [s.kScale, s.kPanX, s.kPanY, s.kRotX, s.kRotY];
+    };
+    const kZoom = async (wheels: Wheel[], perFrame = false) => {
+      await settled(page, camera);
+      await stillKspaceCamera(page);
+      const before = (await debugState(page)).kScale;
+      await dispatchWheels(page, '#kc', wheels, undefined, perFrame);
+      return (await settled(page, camera))[0] / before;
+    };
+    expect(await kZoom([{ deltaY: -100 }])).toBeCloseTo(kNotch, 6);
+    expect(await kZoom([{ deltaY: -10 }])).toBeCloseTo(kNotch ** 0.1, 6);
+    // One event per frame, as a trackpad sends them: each must build on where
+    // the easing is heading, not on the frame it has reached.
+    expect(await kZoom(repeat(10, { deltaY: -10 }), true)).toBeCloseTo(kNotch, 6);
+    expect(await kZoom([{ deltaY: -1200 }])).toBeCloseTo(kMaxStep, 6);
+  });
+
+  test.describe('on a high-DPI display', () => {
+    test.use({ deviceScaleFactor: 2 });
+
+    test('anchors k-space zoom at the cursor', async ({ page }) => {
+      await recordCanvasText(page);
+      await openKspace(page);
+      expect(await kspaceZoomAnchorError(page, { x: 0.8, y: 0.3 })).toBeLessThan(0.5);
     });
   });
 });

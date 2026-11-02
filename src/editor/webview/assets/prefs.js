@@ -38,6 +38,7 @@ var SeqEyesPrefs = (function () {
     kspaceProjection: 'seqeyes.kspace.projection',
     markerSnap: 'seqeyes.markers.snap',
     markerTable: 'seqeyes.markers.table',
+    channelOrder: 'seqeyes.channelOrder',
     ascName: 'seqeyes.asc.name',
     ascText: 'seqeyes.asc.text'
   };

@@ -43,7 +43,7 @@
 
 | Host | Get it | Open a sequence |
 |---|---|---|
-| 🌐 **Web** | [bughht.github.io/seqeyes_plugin](https://bughht.github.io/seqeyes_plugin/), nothing to install | Drag & drop a `.seq` / `.bseq`, or **📂 Open** / **🌐 URL** |
+| 🌐 **Web** | [bughht.github.io/seqeyes_plugin](https://bughht.github.io/seqeyes_plugin/), nothing to install | Drag & drop a `.seq` / `.bseq`, **📂 Open** / **🌐 URL**, or **Open in SeqEyes** on GitHub with the [userscript](https://github.com/xingwangyong/seqeyes-userscripts) |
 | **VS Code** | `code --install-extension SeqEyesDeveloper.seqeyes-web` | Double-click a `.seq` / `.bseq` in the Explorer |
 | **MATLAB** | `seqeyes-*.mltbx` from [Releases](https://github.com/bughht/seqeyes_plugin/releases) (R2022a+) | `seqeyes(seq)` on an `mr.Sequence`, or double-click a file |
 | **Python** | `pip install seqeyes-python` | `seqeyes.set()` once, then `seq.plot()` as usual |
@@ -164,6 +164,11 @@ No download, no extension, no setup. Drag & drop a `.seq` or `.bseq` file onto t
 **🌐 URL** and paste a link to a raw `.seq` / `.bseq` file. The Pulseq engine runs entirely in the browser: parsing and
 calculation happen in browser memory, and sequence data is never uploaded.
 
+**Open `.seq` files straight from GitHub.** Install [Tampermonkey](https://www.tampermonkey.net/), then the
+[Open in SeqEyes userscript](https://github.com/xingwangyong/seqeyes-userscripts). It adds a **SeqEyes↗** button next to
+every `.seq` file in a repository listing, and an **Open in SeqEyes** button beside **Raw** on a file's page; both open
+the file in the web app.
+
 ### VS Code extension
 
 `.seq` and `.bseq` files open automatically in the SeqEyes custom editor. Install from the
@@ -226,7 +231,7 @@ modify Pulseq files or classes. The viewer opens in a native MATLAB figure.
 ### 🐍 Python package
 
 An interactive replacement for `pypulseq.Sequence.plot()` that renders in Jupyter cell output or opens in your default
-browser. Requires Python ≥ 3.9.
+browser. Requires Python ≥ 3.9. The output is the web app's viewer, without file opening or the Bloch simulation.
 
 ```bash
 pip install seqeyes-python             # viewer only
@@ -601,6 +606,9 @@ things to work with:
 - **Standalone web and MATLAB** get a file through a picker with no re-openable
   path, so the profile's *text* is stored in the browser, up to 2 MB. Larger
   files are not kept.
+- **Jupyter** output runs in a frame that cannot store anything, so nothing
+  is remembered there and the ⚙ button is hidden; `seq.plot()`'s options set
+  the theme, units and view instead.
 
 Everything lives in the browser's (or the webview's) local storage under the
 `seqeyes.` prefix, on your own machine. Nothing is uploaded.
