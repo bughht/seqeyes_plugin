@@ -18,8 +18,8 @@ const fixtures = {
   binaryGre: resolve('test/pulseq/binary/gre.bseq'),
 };
 
-/** The output SeqEyesViewer.from_file(path, **options)._repr_html_() produces. */
-function notebookOutput(sequencePath: string, options: Record<string, unknown> = {}): string {
+/** What SeqEyesViewer.from_file(path, **options).<method>() returns. */
+function pythonOutput(sequencePath: string, options: Record<string, unknown> = {}, method = '_repr_html_'): string {
   const script = [
     'import json, os, sys',
     'import seqeyes',
@@ -27,9 +27,9 @@ function notebookOutput(sequencePath: string, options: Record<string, unknown> =
     // Never fall back silently to an installed copy of the package.
     'assert os.path.realpath(seqeyes.__file__).startswith(os.path.realpath(sys.argv[3])), seqeyes.__file__',
     'viewer = SeqEyesViewer.from_file(sys.argv[1], **json.loads(sys.argv[2]))',
-    'sys.stdout.write(viewer._repr_html_())',
+    'sys.stdout.write(getattr(viewer, sys.argv[4])())',
   ].join('\n');
-  return execFileSync(PYTHON, ['-c', script, sequencePath, JSON.stringify(options), PYTHON_SRC], {
+  return execFileSync(PYTHON, ['-c', script, sequencePath, JSON.stringify(options), PYTHON_SRC, method], {
     env: { ...process.env, PYTHONPATH: PYTHON_SRC },
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
@@ -50,7 +50,7 @@ async function openNotebook(page: Page, output: string): Promise<Frame> {
 }
 
 async function openViewer(page: Page, sequencePath: string, options: Record<string, unknown> = {}): Promise<Frame> {
-  const frame = await openNotebook(page, notebookOutput(sequencePath, options));
+  const frame = await openNotebook(page, pythonOutput(sequencePath, options));
   await expect(frame.locator('#exportKspaceBtn')).toBeEnabled({ timeout: 30_000 });
   await expect(frame.locator('#poverlay')).toBeHidden({ timeout: 10_000 });
   return frame;
@@ -140,6 +140,18 @@ test('hides what a data: iframe cannot use', async ({ page }) => {
   })).toBe('storage throws');
 });
 
+test('keeps the settings button where storage works, as in a to_html() page', async ({ page }) => {
+  const html = pythonOutput(fixtures.epi, {}, 'to_html');
+  await page.route('**/plot.html', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: html }));
+  await page.goto('/plot.html');
+  await expect(page.locator('#exportKspaceBtn')).toBeEnabled({ timeout: 30_000 });
+
+  await expect(page.locator('#prefsBtn')).toBeVisible();
+  for (const id of ['openBtn', 'dropZone', 'openUrlBtn', 'simBtn', 'tbLogo']) {
+    await expect(page.locator(`#${id}`), id).toBeHidden();
+  }
+});
+
 test('applies the plot options once the sequence loads', async ({ page }) => {
   const frame = await openViewer(page, fixtures.epi, {
     time_range: [0.01, 0.02], time_disp: 'us', grad_disp: 'G/cm', show_blocks: true, theme: 'dracula',
@@ -211,7 +223,7 @@ test.describe('minimap at high DPI', () => {
   test.use({ deviceScaleFactor: 2 });
 
   test('places RF blocks at their true times', async ({ page }) => {
-    const frame = await openNotebook(page, notebookOutput(fixtures.epi));
+    const frame = await openNotebook(page, pythonOutput(fixtures.epi));
 
     const rfRuns = () => frame.evaluate(() => {
       const canvas = document.getElementById('mmc') as HTMLCanvasElement | null;

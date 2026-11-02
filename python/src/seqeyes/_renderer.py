@@ -23,8 +23,8 @@ from typing import Any, List, Optional, Union
 # ── Paths ─────────────────────────────────────────────────────────────────
 _RESOURCES_DIR = Path(__file__).resolve().parent / "resources"
 # ``npm run build:web`` copies the page and its assets into resources/; a
-# source checkout can read them from web/ instead.
-_WEB_DIR = Path(__file__).resolve().parents[3] / "web"
+# source checkout (python/src/seqeyes/) can read them from web/ instead.
+_WEB_DIR = Path(__file__).resolve().parent.parent.parent.parent / "web"
 
 # The page's references to its assets, each present exactly once.
 _STYLESHEET_TAG = '<link rel="stylesheet" href="styles.css">'
