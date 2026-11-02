@@ -62,7 +62,7 @@
      ═══════════════════════════════════════════════════════════════ -->
 <div id="tb">
 <button id="menuBtn" class="mobile-only" title="Menu" aria-controls="tbMore" aria-expanded="false">☰</button>
-<img src="logo.png" alt="SeqEyes" style="width:18px;height:18px;border-radius:3px;vertical-align:middle" title="SeqEyes">
+<img id="tbLogo" src="logo.png" alt="SeqEyes" style="width:18px;height:18px;border-radius:3px;vertical-align:middle" title="SeqEyes">
 <button id="openBtn" title="Open another local .seq or .bseq file">📂 Open</button>
 <button id="openSeqBtn" class="matlab-only" title="Open another local .seq file">📂 Open .seq</button>
 <button id="openBseqBtn" class="matlab-only" title="Open another local .bseq file">📂 Open .bseq</button>
@@ -252,6 +252,9 @@ var cc=document.getElementById('cc'),mc=document.getElementById('mc'),ctx=mc.get
  tt=document.getElementById('tt'),curEl=document.getElementById('cur'),legend=document.getElementById('legend'),
  tuSel=document.getElementById('tu'),guSel=document.getElementById('gu');
 var splash=document.getElementById('splash');
+/* Display options a host passes with its preloaded sequence (Python's plot()
+   arguments). They win over remembered settings and are never stored. */
+var hostOptions=window._SEQEYES_OPTIONS||null;
 var exportBtn=document.getElementById('exportKspaceBtn');
 var pnsBtn=document.getElementById('pnsBtn');
 var BL=[],TD=0,GR=1e-5,RR=1e-6,AR=1e-7,BR=1e-5;
@@ -1288,8 +1291,10 @@ function configureUrlOpenUi(){
 function configureHostFileOpenUi(){
   var isMatlab=window._SEQEYES_HOST==='matlab';
   var isMatlabMac=isMatlab&&window._SEQEYES_PLATFORM==='macos';
-  document.getElementById('splashOpen').style.display=isMatlab?'none':'inline-flex';
-  document.getElementById('openBtn').style.display=isMatlab?'none':'inline-flex';
+  /* Python output shows the one sequence its notebook cell passed in. */
+  var isPython=window._SEQEYES_HOST==='python';
+  document.getElementById('splashOpen').style.display=(isMatlab||isPython)?'none':'inline-flex';
+  document.getElementById('openBtn').style.display=(isMatlab||isPython)?'none':'inline-flex';
   var buttons=document.querySelectorAll('.matlab-only');
   for(var i=0;i<buttons.length;i++)buttons[i].style.display=isMatlab?'inline-flex':'none';
   var hostDropZone=document.getElementById('dropZone');
@@ -1298,7 +1303,29 @@ function configureHostFileOpenUi(){
       ?'Drag & drop is unavailable in MATLAB Desktop on macOS. Use Open .seq or Open .bseq above.'
       :'Or drag & drop a .seq or .bseq file here';
     hostDropZone.classList.toggle('matlab-drop-unavailable',isMatlabMac);
+    if(isPython)hostDropZone.style.display='none';
   }
+}
+
+/* Python's page is inlined into a data: iframe, which can fetch nothing and
+   whose opaque origin has no storage. */
+function configurePythonHostUi(){
+  if(window._SEQEYES_HOST!=='python')return;
+  var logo=document.getElementById('tbLogo');
+  if(logo)logo.style.display='none';
+  if(!storagePersists()){
+    var prefsBtn=document.getElementById('prefsBtn'),sep=prefsBtn&&prefsBtn.previousElementSibling;
+    if(prefsBtn)prefsBtn.style.display='none';
+    if(sep&&sep.classList.contains('sep'))sep.style.display='none';
+  }
+}
+
+function storagePersists(){
+  try{
+    var store=window.localStorage,key='seqeyes-storage-probe';
+    store.setItem(key,'1');store.removeItem(key);
+    return true;
+  }catch(_){return false;}
 }
 
 function openUrlDialog(){
@@ -1457,6 +1484,7 @@ document.getElementById('urlOverlay').addEventListener('click',function(e){
 });
 configureUrlOpenUi();
 configureHostFileOpenUi();
+configurePythonHostUi();
 
 /* ── File input ──────────────────────────────────────────────────────── */
 document.getElementById('fileInput').onchange=function(){
@@ -1516,7 +1544,11 @@ document.getElementById('ascInput').addEventListener('cancel',function(){
 /* ── Drag & drop ──────────────────────────────────────────────────────── */
 var dropZone=document.getElementById('dropZone');
 var disableExternalDrop=window._SEQEYES_HOST==='matlab'&&window._SEQEYES_PLATFORM==='macos';
-if(dropZone&&!disableExternalDrop){
+if(window._SEQEYES_HOST==='python'){
+  // Refuse drops, so a stray file cannot navigate the output frame away.
+  document.addEventListener('dragover',function(e){e.preventDefault();if(e.dataTransfer)e.dataTransfer.dropEffect='none';});
+  document.addEventListener('drop',function(e){e.preventDefault();});
+}else if(dropZone&&!disableExternalDrop){
   dropZone.addEventListener('dragover',function(e){e.preventDefault();this.classList.add('dragover');});
   dropZone.addEventListener('dragleave',function(){this.classList.remove('dragover');});
   dropZone.addEventListener('drop',function(e){e.preventDefault();this.classList.remove('dragover');
@@ -2471,7 +2503,7 @@ function applyThemeChoice(value,persist){
   SeqEyesPanel.onThemeChanged();
 }
 if(themeSelect){
-  var savedTheme=SeqEyesPrefs.get(SeqEyesPrefs.KEYS.theme)||"system";
+  var savedTheme=(hostOptions&&hostOptions.theme)||SeqEyesPrefs.get(SeqEyesPrefs.KEYS.theme)||"system";
   if(!themeSelect.querySelector('option[value="'+savedTheme+'"]'))savedTheme="system";
   themeSelect.onchange=function(){applyThemeChoice(this.value,true);};
   applyThemeChoice(savedTheme,false);
@@ -2926,8 +2958,9 @@ window.SeqEyesPanelHost={
   getView:function(){var d=visibleDuration();return{startSec:ox,endSec:ox+d,totalDuration:TD};},
   /* Simulation (simulation-panel.js): the worker script sits next to this
      page. MATLAB's uihtml copies only the files seqeyes.m lists and has not
-     been checked for workers yet, so it keeps the panel hidden for now. */
-  createSimulationWorker:window._SEQEYES_HOST==='matlab'?undefined:function(){return new Worker('sim-worker.js');},
+     been checked for workers yet, so it keeps the panel hidden for now.
+     Python's data: iframe cannot load a worker script at all. */
+  createSimulationWorker:(window._SEQEYES_HOST==='matlab'||window._SEQEYES_HOST==='python')?undefined:function(){return new Worker('sim-worker.js');},
   getSequenceSource:function(){return currentSequenceBytes?{bytes:currentSequenceBytes,name:currentSequenceName}:null;},
   revealTimeRange:function(startSec,endSec){
     if(!isFinite(startSec)||!isFinite(endSec)||endSec<=startSec)return false;
@@ -3113,14 +3146,30 @@ if (window._SEQEYES_PRELOAD && (window._SEQEYES_PRELOAD.base64 || window._SEQEYE
   // Hide splash immediately to avoid flash
   if (splash) splash.style.display = 'none';
   setTimeout(function() {
+    var loaded;
     if(p.base64){
       var binary=atob(p.base64),bytes=new Uint8Array(binary.length);
       for(var i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
-      loadSequenceBytes(bytes,p.fileName);
+      loaded=loadSequenceBytes(bytes,p.fileName);
     }else{
-      loadSequenceText(p.text,p.fileName);
+      loaded=loadSequenceText(p.text,p.fileName);
     }
+    if(loaded&&hostOptions)applyHostViewOptions(hostOptions);
   }, 50);
+}
+
+/* After the load, which picks its own first view: an explicit time range
+   needs the sequence's duration. timeRange holds seconds, null for an open
+   end, and [0, null] means the default view. */
+function applyHostViewOptions(o){
+  if(selectOptionValues(tuSel).indexOf(o.timeUnit)>=0)tuSel.value=timeUnit=o.timeUnit;
+  if(selectOptionValues(guSel).indexOf(o.gradUnit)>=0)guSel.value=gradUnit=o.gradUnit;
+  if(typeof o.showBlocks==='boolean')bbCheck.checked=showBB=o.showBlocks;
+  var r=Array.isArray(o.timeRange)?o.timeRange:[];
+  var hasStart=typeof r[0]==='number'&&r[0]>0,hasEnd=typeof r[1]==='number';
+  var start=hasStart?r[0]:0,end=hasEnd?Math.min(TD,r[1]):TD;
+  if((hasStart||hasEnd)&&end>start){ox=start;sc=plotWidth()/(end-start);clampView();}
+  draw();drawMinimap();
 }
 })();
 </script>
