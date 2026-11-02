@@ -1,10 +1,10 @@
 """
-Tests for seqeyes._renderer — HTML assembly and viewer template.
+Tests for seqeyes._renderer — assembling the standalone page as the Python host.
 """
 from __future__ import annotations
 
 import base64
-import json
+from pathlib import Path
 
 import pytest
 
@@ -33,88 +33,192 @@ num_samples 2
 0 1
 """
 
+HOST_SCRIPT = '<script>window._SEQEYES_HOST="python";'
+PAGE_REFERENCES = (
+    '<link rel="stylesheet" href="styles.css">',
+    '<script src="pulseq-bundle.js"></script>',
+    '<script src="webview-bundle.js"></script>',
+)
+WEB_DIR = Path(__file__).resolve().parents[2] / "web"
+RESOURCES_DIR = Path(__file__).resolve().parents[1] / "src" / "seqeyes" / "resources"
+
 
 class TestBuildHtml:
     """Tests for _build_html()."""
 
-    def test_build_html_contains_sequence_data(self):
-        """The generated HTML should contain the base64-encoded sequence."""
+    def test_preloads_text_sequence(self, injected):
         from seqeyes._renderer import _build_html
 
         html = _build_html(SAMPLE_SEQ_TEXT, inject_bundle=False)
-        expected_b64 = base64.b64encode(SAMPLE_SEQ_TEXT.encode()).decode()
-        assert expected_b64 in html
-        assert 'window.SEQEYES_SOURCE_KIND = "text";' in html
+        assert injected(html)["_SEQEYES_PRELOAD"] == {"text": SAMPLE_SEQ_TEXT, "fileName": "sequence.seq"}
 
-    def test_build_html_contains_binary_sequence_data(self):
-        """Binary sources should stay byte-exact and use byte dispatch."""
+    def test_preloads_binary_sequence_byte_exact(self, injected):
         from seqeyes._renderer import _build_html
 
         source = b"\x01pulseq\x02\x00\xff"
         html = _build_html(source, label="demo.bseq", inject_bundle=False)
-        expected_b64 = base64.b64encode(source).decode()
-        assert expected_b64 in html
-        assert 'window.SEQEYES_SOURCE_KIND = "bytes";' in html
-        assert 'window.SEQEYES_SOURCE_NAME = "demo.bseq";' in html
+        preload = injected(html)["_SEQEYES_PRELOAD"]
+        assert preload == {"base64": base64.b64encode(source).decode(), "fileName": "demo.bseq"}
+        assert _build_html(bytearray(source), inject_bundle=False).count(preload["base64"]) == 1
 
-    def test_build_html_with_theme(self):
-        """Theme should be applied as a body class."""
+    def test_default_binary_name_is_bseq(self, injected):
         from seqeyes._renderer import _build_html
 
-        html = _build_html(SAMPLE_SEQ_TEXT, theme="dracula", inject_bundle=False)
-        assert 'class="theme-dracula"' in html
+        html = _build_html(memoryview(b"\x01pulseq"), inject_bundle=False)
+        assert injected(html)["_SEQEYES_PRELOAD"]["fileName"] == "sequence.bseq"
 
-    def test_build_html_without_theme(self):
-        """Without theme, no theme class should appear."""
+    def test_runs_as_python_host_before_the_page_scripts(self):
+        from seqeyes._renderer import _build_html
+
+        html = _build_html(SAMPLE_SEQ_TEXT)
+        host = html.index(HOST_SCRIPT)
+        assert html.count(HOST_SCRIPT) == 1
+        assert host < html.index("var Pulseq")
+        assert host < html.index("SeqEyes WebView Bundle")
+        assert host < html.index("SeqEyes — Standalone Web Application")
+
+    def test_inlines_stylesheet_and_both_scripts(self):
+        from seqeyes._renderer import _build_html
+
+        html = _build_html(SAMPLE_SEQ_TEXT)
+        for reference in PAGE_REFERENCES:
+            assert reference not in html
+        assert "body.theme-dracula{" in html
+        assert "var Pulseq" in html
+        assert "var SeqEyesLabels" in html
+
+    def test_without_bundle_keeps_relative_references(self, injected):
+        """inject_bundle=False is for a page served next to the web/ assets."""
         from seqeyes._renderer import _build_html
 
         html = _build_html(SAMPLE_SEQ_TEXT, inject_bundle=False)
+        for reference in PAGE_REFERENCES:
+            assert html.count(reference) == 1
+        assert "var Pulseq" not in html
+        assert html.index(HOST_SCRIPT) < html.index(PAGE_REFERENCES[1])
+        assert injected(html)["_SEQEYES_PRELOAD"]["text"] == SAMPLE_SEQ_TEXT
+
+    def test_sequence_text_cannot_close_the_script(self, injected):
+        from seqeyes._renderer import _build_html
+
+        hostile = SAMPLE_SEQ_TEXT + "# </script><script>alert(1)</script> <!-- & -->\n"
+        html = _build_html(hostile, inject_bundle=False)
+        assert "alert(1)</script>" not in html
+        assert "<!-- & -->" not in html
+        assert injected(html)["_SEQEYES_PRELOAD"]["text"] == hostile
+
+    def test_inliners_escape_closing_tags(self):
+        from seqeyes._renderer import _inline_script, _inline_style
+
+        assert _inline_script('s="</SCRIPT>";') == '<script>\ns="<\\/SCRIPT>";\n</script>'
+        assert _inline_style("/* </style> */") == "<style>\n/* <\\/style> */\n</style>"
+
+    def test_page_change_that_drops_a_reference_fails_loudly(self, monkeypatch):
+        import seqeyes._renderer as renderer
+
+        real = renderer._read_resource
+        monkeypatch.setattr(
+            renderer,
+            "_read_resource",
+            lambda name: real(name).replace(PAGE_REFERENCES[2], "") if name == "index.html" else real(name),
+        )
+        with pytest.raises(ValueError, match="webview-bundle.js"):
+            renderer._build_html(SAMPLE_SEQ_TEXT)
+
+    def test_display_options(self, injected):
+        from seqeyes._renderer import _build_html
+
+        html = _build_html(
+            SAMPLE_SEQ_TEXT,
+            inject_bundle=False,
+            show_blocks=True,
+            time_range=(0.01, 0.05),
+            time_disp="ms",
+            grad_disp="G/cm",
+        )
+        assert injected(html)["_SEQEYES_OPTIONS"] == {
+            "theme": None,
+            "timeUnit": "ms",
+            "gradUnit": "G/cm",
+            "showBlocks": True,
+            "timeRange": [0.01, 0.05],
+        }
+
+    @pytest.mark.parametrize(
+        ("time_range", "expected"),
+        [
+            ((0, float("inf")), [0.0, None]),
+            ((0.02, float("inf")), [0.02, None]),
+            ([0.01, 0.03], [0.01, 0.03]),
+            ((float("nan"), 0.03), [None, 0.03]),
+            ("not a range", [0.0, None]),
+            (None, [0.0, None]),
+        ],
+    )
+    def test_time_range_has_no_infinities(self, injected, time_range, expected):
+        from seqeyes._renderer import _build_html
+
+        html = _build_html(SAMPLE_SEQ_TEXT, inject_bundle=False, time_range=time_range)
+        assert injected(html)["_SEQEYES_OPTIONS"]["timeRange"] == expected
+
+    def test_unsupported_gradient_unit_falls_back_to_mt_per_m(self, injected):
+        from seqeyes._renderer import _build_html
+
+        html = _build_html(SAMPLE_SEQ_TEXT, inject_bundle=False, grad_disp="kHz/m")
+        assert injected(html)["_SEQEYES_OPTIONS"]["gradUnit"] == "mT/m"
+
+    @pytest.mark.parametrize(
+        ("theme", "page_theme"),
+        [("dracula", "dracula"), ("dark", "github"), ("light", "githublight"), ("nord", "nord")],
+    )
+    def test_theme_is_a_body_class_and_an_option(self, injected, theme, page_theme):
+        from seqeyes._renderer import _build_html
+
+        html = _build_html(SAMPLE_SEQ_TEXT, theme=theme, inject_bundle=False)
+        assert f'<body class="theme-{page_theme}">' in html
+        assert injected(html)["_SEQEYES_OPTIONS"]["theme"] == page_theme
+
+    @pytest.mark.parametrize("theme", [None, "", "system"])
+    def test_no_theme_class_without_a_fixed_theme(self, theme):
+        from seqeyes._renderer import _build_html
+
+        html = _build_html(SAMPLE_SEQ_TEXT, theme=theme, inject_bundle=False)
+        assert "<body>" in html
         assert 'class="theme-' not in html
 
+    def test_theme_name_cannot_break_out_of_the_class(self, injected):
+        from seqeyes._renderer import _build_html
+
+        html = _build_html(SAMPLE_SEQ_TEXT, theme='x" onload="alert(1)', inject_bundle=False)
+        assert "<body>" in html
+        assert 'onload="alert(1)' not in html.split(HOST_SCRIPT)[0]
+        assert injected(html)["_SEQEYES_OPTIONS"]["theme"] == 'x" onload="alert(1)'
+
     def test_build_html_is_valid_html(self):
-        """The output should be a valid HTML document."""
         from seqeyes._renderer import _build_html
 
-        html = _build_html(SAMPLE_SEQ_TEXT, inject_bundle=False)
-        assert "<!DOCTYPE html>" in html
-        assert "<html" in html
-        assert "</html>" in html
-        assert "<body" in html
-        assert "</body>" in html
-
-    def test_build_html_injects_label_script(self):
-        """The label row's shared module should be inlined with the bundles."""
-        from seqeyes._renderer import _build_html
-
-        html = _build_html(SAMPLE_SEQ_TEXT, inject_bundle=True)
-        assert "var SeqEyesLabels" in html
-        assert "LABELS_SCRIPT_PLACEHOLDER" not in html
-
-    def test_build_html_without_bundle_drops_label_placeholder(self):
-        """Without bundles, no placeholder comment should leak into the page."""
-        from seqeyes._renderer import _build_html
-
-        html = _build_html(SAMPLE_SEQ_TEXT, inject_bundle=False)
-        assert "LABELS_SCRIPT_PLACEHOLDER" not in html
-        assert "var SeqEyesLabels" not in html
+        html = _build_html(SAMPLE_SEQ_TEXT)
+        assert html.lstrip().startswith("<!DOCTYPE html>")
+        assert html.count("<body") == 1
+        assert html.rstrip().endswith("</html>")
+        assert html.count("<script") == html.count("</script>")
 
 
-class TestViewerTemplate:
-    """Tests that the viewer template exists and is well-formed."""
+class TestResources:
+    """The page the package ships."""
 
-    def test_template_exists(self):
-        """The viewer.html template file should exist."""
-        from seqeyes._renderer import _read_viewer_template
+    def test_page_and_assets_are_available(self):
+        from seqeyes._renderer import _read_resource
 
-        html = _read_viewer_template()
-        assert len(html) > 1000
-        assert "<!DOCTYPE html>" in html
+        page = _read_resource("index.html")
+        for reference in PAGE_REFERENCES:
+            assert page.count(reference) == 1
+        assert "<body>" in page
+        for name in ("styles.css", "pulseq-bundle.js", "webview-bundle.js"):
+            assert len(_read_resource(name)) > 1000
 
-    def test_template_has_placeholders(self):
-        """Template should have the expected placeholders."""
-        from seqeyes._renderer import _read_viewer_template
-
-        html = _read_viewer_template()
-        assert "<!-- PULSEQ_BUNDLE_PLACEHOLDER -->" in html
-        assert "<!-- LABELS_SCRIPT_PLACEHOLDER -->" in html
-        assert "/* SEQEYES_DATA_PLACEHOLDER */" in html
+    @pytest.mark.skipif(not WEB_DIR.is_dir(), reason="needs a source checkout")
+    @pytest.mark.parametrize("name", ["index.html", "styles.css", "pulseq-bundle.js", "webview-bundle.js"])
+    def test_resources_match_web_after_build(self, name):
+        """resources/ is a copy of web/ made by `npm run build:web`; rebuild if this fails."""
+        assert (RESOURCES_DIR / name).read_bytes() == (WEB_DIR / name).read_bytes()

@@ -6,16 +6,29 @@ It works as a drop‑in replacement for `pypulseq.Sequence.plot()`,
 rendering an interactive viewer directly in Jupyter notebook cell
 output — just like Plotly.
 
+The output is the [SeqEyes web app](https://bughht.github.io/seqeyes_plugin/)'s
+own viewer, so it has the same features and fixes as the web app, VS Code and
+MATLAB.
+
 ## Features
 
-- 🎛️ **Interactive waveform viewer** — zoom, pan, per‑channel amplitude zoom
+- 🎛️ **Interactive waveform viewer** — zoom, pan, per‑channel amplitude zoom, reorderable rows
 - 📍 **Tooltip** with block details (RF amplitude, gradient strength, ADC params)
-- 🗺️ **3D k‑space trajectory viewer** — rotate, zoom, depth‑sorted rendering
-- 🎨 **8 colour themes** — system, light, dark, dracula, nord, and more
+- 📏 **Measurement markers** — snap to waveform events, read values and Δt
+- 🗺️ **3D k‑space trajectory viewer** — rotate, pan, zoom at the cursor
+- 🔊 **Gradient spectrogram and sound** for the visible window
+- 🧲 **PNS and acoustic resonances** from a Siemens ASC profile
+- 🎨 **Themes** — system, One Light, One Dark, Dracula, Nord, GitHub Light, GitHub Dark
 - 📏 **Unit conversion** — time (s / ms / µs), gradient (Hz/m / mT/m / G/cm)
 - 📐 **Minimap** with TR/TE overlay and viewport indicator
 - 💾 **Export to standalone HTML** — shareable, no Python needed
 - 🔌 **Drop‑in pypulseq integration** — `seq.plot()` just works
+
+In notebook output the viewer shows the sequence its cell passed in, so it has
+no Open button or drag & drop, and the Bloch simulation is not available there.
+The output frame cannot store anything, so settings changed in it are not
+remembered; pass them to `seq.plot()` or `seqeyes.set()` instead. Each output
+carries the whole viewer, about 1.3 MB plus the sequence.
 
 ## Installation
 
@@ -77,6 +90,16 @@ SeqEyesViewer.from_file("my_sequence.bseq", theme="dark")
 | `seqeyes.reset()` | Restore matplotlib `seq.plot()` and clear all defaults |
 | `SeqEyesViewer(source, ...)` | Low-level viewer for raw `.seq` text or `.bseq` bytes |
 | `SeqEyesViewer.from_file(path, ...)` | Open a local `.seq` or `.bseq` file without pypulseq |
+| `viewer.to_html()` | The viewer as one self-contained HTML page |
+| `viewer.to_html(inject_bundle=False)` | The same page referencing `styles.css`, `pulseq-bundle.js` and `webview-bundle.js` by relative URL, to serve next to copies of those files |
+
+| Option | Values |
+|---|---|
+| `theme` | `"system"`, `"light"` (GitHub Light), `"dark"` (GitHub Dark), `"onelight"`, `"onedark"`, `"dracula"`, `"nord"`, `"githublight"`, `"github"` |
+| `time_disp` | `"s"` (default), `"ms"`, `"us"` |
+| `grad_disp` | `"mT/m"` (default), `"Hz/m"`, `"G/cm"` |
+| `show_blocks` | show block boundaries |
+| `time_range` | initial view `(start, end)` in seconds; the default `(0, inf)` keeps the viewer's first view (the first TR, when one is detected); an infinite end runs to the end of the sequence |
 
 ## Viewer Controls
 
@@ -87,10 +110,12 @@ SeqEyesViewer.from_file("my_sequence.bseq", theme="dark")
 | Amplitude zoom (per channel) | Ctrl + scroll wheel |
 | Tooltip | Hover over waveform |
 | Toggle channels | Click legend labels |
-| K‑Space viewer | Click "K‑Space" button |
+| Reorder rows | Drag a channel's name, or right-click it |
+| Measurement markers | Right-click the waveform → **Add marker** |
+| K‑space, then spectrogram | The **K‑Space / Spectrum** toolbar button cycles the analysis panel |
 | Rotate k‑space | Click + drag in panel |
 | Minimap navigation | Click on minimap strip |
-| Open another file | 📂 Open button |
+| PNS and acoustic bands | **Load ASC (PNS/Acoustic)** |
 
 ## Requirements
 

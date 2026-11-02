@@ -293,7 +293,9 @@ function viewerNoticeMessages(value){
   for(var i=0;i<values.length;i++)if(values[i])messages.push(String(values[i]));
   return messages;
 }
-function readViewerNoticesCollapsed(){var saved=SeqEyesPrefs.get(SeqEyesPrefs.KEYS.noticesCollapsed);return saved===null?isMobileSafetyLayout():saved==='1';}
+/* Collapsed by default where room is short: phones, and Python's notebook
+   output (550 px tall by default). */
+function readViewerNoticesCollapsed(){var saved=SeqEyesPrefs.get(SeqEyesPrefs.KEYS.noticesCollapsed);return saved===null?(isMobileSafetyLayout()||window._SEQEYES_HOST==='python'):saved==='1';}
 function setViewerNoticesCollapsed(collapsed){
   viewerNoticesCollapsed=!!collapsed;
   SeqEyesPrefs.setBool(SeqEyesPrefs.KEYS.noticesCollapsed,viewerNoticesCollapsed);

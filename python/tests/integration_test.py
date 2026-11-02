@@ -47,10 +47,11 @@ v2 = SeqEyesViewer(SAMPLE, show_blocks=True, time_range=(0, 0.01), time_disp="ms
 raw = v2.to_html(inject_bundle=True)
 print(f"OK options: {len(raw):,} chars")
 assert "parseSequenceText" in raw
-assert "SEQEYES_SHOW_BLOCKS" in raw
-assert "SEQEYES_TIME_RANGE" in raw
-assert '"ms"' in raw
-assert '"mT/m"' in raw
+assert 'window._SEQEYES_HOST="python"' in raw
+assert '"showBlocks":true' in raw
+assert '"timeRange":[0.0,0.01]' in raw
+assert '"timeUnit":"ms"' in raw
+assert '"gradUnit":"mT/m"' in raw
 
 # Test 4: set, reset
 try:

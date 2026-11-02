@@ -231,7 +231,7 @@ modify Pulseq files or classes. The viewer opens in a native MATLAB figure.
 ### 🐍 Python package
 
 An interactive replacement for `pypulseq.Sequence.plot()` that renders in Jupyter cell output or opens in your default
-browser. Requires Python ≥ 3.9.
+browser. Requires Python ≥ 3.9. The output is the web app's viewer, without file opening or the Bloch simulation.
 
 ```bash
 pip install seqeyes-python             # viewer only
@@ -606,6 +606,9 @@ things to work with:
 - **Standalone web and MATLAB** get a file through a picker with no re-openable
   path, so the profile's *text* is stored in the browser, up to 2 MB. Larger
   files are not kept.
+- **Jupyter** output runs in a frame that cannot store anything, so nothing
+  is remembered there and the ⚙ button is hidden; `seq.plot()`'s options set
+  the theme, units and view instead.
 
 Everything lives in the browser's (or the webview's) local storage under the
 `seqeyes.` prefix, on your own machine. Nothing is uploaded.
