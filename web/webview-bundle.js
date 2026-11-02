@@ -568,11 +568,10 @@ function failWaveformDetail(payload){
 /* ═══════════════════════════════════════════════════════════════════════
    MDH label row — markers at each ADC centre, and their style controls
    ═══════════════════════════════════════════════════════════════════════
-   Shared by all three renderers: the VS Code webview, web/index.html (which
-   the MATLAB toolbox also loads) and the Python viewer.html.  Each declares
-   its own canvas state, so nothing here reads renderer globals — callers pass
-   the 2-D context, the time→x mapping and the row geometry.  The Python
-   viewer loads this file on its own, without the rest of the bundle.
+   Shared by both renderers: the VS Code webview and web/index.html (which
+   the MATLAB toolbox and the Python package also load).  Each declares its
+   own canvas state, so nothing here reads renderer globals — callers pass
+   the 2-D context, the time→x mapping and the row geometry.
 
    The DOM and storage are only touched inside functions, so the tests can
    run the shipped file in a bare VM context.
@@ -582,10 +581,10 @@ function failWaveformDetail(payload){
 var SeqEyesLabels = (function () {
   var STORAGE_KEY = 'seqeyes.labelStyles.v1';
 
-  /* The Python viewer inlines this file on its own, so the bundle's
-     preferences gateway may not be there.  Go through it when it is, so the
-     settings popover's master switch and Forget button cover marker styles
-     too, and fall back to raw storage when it is not. */
+  /* The unit tests load this file without the bundle's preferences gateway.
+     Go through it when it is there, so the settings popover's master switch
+     and Forget button cover marker styles too, and fall back to raw storage
+     when it is not. */
   function prefsApi() { return (typeof SeqEyesPrefs !== 'undefined') ? SeqEyesPrefs : null; }
   function readStored(key) {
     var api = prefsApi();
@@ -611,7 +610,7 @@ var SeqEyesLabels = (function () {
   /* ── Table ─────────────────────────────────────────────────────────── */
 
   /* Same contract as asTypedView in block-transport.js, repeated because the
-     Python viewer loads this file without the bundle. */
+     unit tests load this file without the bundle. */
   function typedView(buffer, Ctor) {
     if (buffer instanceof Ctor) return buffer;
     if (buffer instanceof ArrayBuffer) return new Ctor(buffer);
@@ -2651,7 +2650,8 @@ window.SeqEyesPanelHost={
   },
   /* Simulation: only inside VS Code, where the extension answers these. Any
      page that loads this bundle without a VS Code host keeps the Simulation
-     button hidden. (The Python viewer has its own renderer and does not.) */
+     button hidden, unless it installs a host of its own as web/index.html
+     does. */
   createSimulationWorker:vscApi?createSimulationWorkerStandIn:undefined,
   getSequenceSource:vscApi?simulationSequenceSource:undefined,
   getSequenceSourceStatus:vscApi?simulationSequenceStatus:undefined,

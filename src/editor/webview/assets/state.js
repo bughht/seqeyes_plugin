@@ -1119,7 +1119,8 @@ window.SeqEyesPanelHost={
   },
   /* Simulation: only inside VS Code, where the extension answers these. Any
      page that loads this bundle without a VS Code host keeps the Simulation
-     button hidden. (The Python viewer has its own renderer and does not.) */
+     button hidden, unless it installs a host of its own as web/index.html
+     does. */
   createSimulationWorker:vscApi?createSimulationWorkerStandIn:undefined,
   getSequenceSource:vscApi?simulationSequenceSource:undefined,
   getSequenceSourceStatus:vscApi?simulationSequenceStatus:undefined,
