@@ -23,7 +23,7 @@ import type { PulseqSequence } from '../../pulseq/types';
 import { demodulationPhase } from '../conventions';
 import type { SimProgram } from '../program/compile';
 import { adcSampleTimes } from '../program/compile';
-import { addPiecesIntegral, piecesKAt, relativePieces } from '../program/pwl';
+import { cellMeanGradients, piecesKAt, relativePieces } from '../program/pwl';
 import type { AdcSegment, RfSegment } from '../program/types';
 import { MainPathway } from './pathway';
 import type { SpinMembers, SpinSet, SpinState } from './spins';
@@ -393,18 +393,13 @@ export function rfCells(segment: RfSegment, phaseOffset = segment.phaseOffset): 
     const count = starts.length;
     const b1Re = new Float64Array(count);
     const b1Im = new Float64Array(count);
-    const grad = new Float64Array(3 * count);
-    const area = new Float64Array(3);
     for (let j = 0; j < count; j++) {
         const angle = 2 * Math.PI * phase[j] + phaseOffset;
         const amplitude = op.amplitude * magnitude[j];
         b1Re[j] = amplitude * Math.cos(angle);
         b1Im[j] = amplitude * Math.sin(angle);
-        area.fill(0);
-        const a = starts[j] - starts[0], b = a + widths[j];
-        addPiecesIntegral(gradient, a, b, area);
-        for (let axis = 0; axis < 3; axis++) grad[3 * j + axis] = area[axis] / widths[j];
     }
+    const grad = cellMeanGradients(gradient, starts, widths, starts[0]);
     const freq = op.freqOffset;
     const firstStart = starts[0];
     const lastEnd = starts[count - 1] + widths[count - 1];

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { addPiecesIntegral, mergeAxes, pieceCount, piecesKAt, piecesMoments } from '../../src/sim/program/pwl';
+import { addPiecesIntegral, cellMeanGradients, mergeAxes, pieceCount, piecesKAt, piecesMoments } from '../../src/sim/program/pwl';
 
 const zero = { times: [0, 10], values: [0, 0] };
 
@@ -58,6 +58,22 @@ describe('piecewise-linear gradient windows', () => {
         const out = new Float64Array(3);
         addPiecesIntegral(pieces, 0.5, 1.5, out);
         expect(out[0]).toBeCloseTo(1, 14);                  // ∫ t dt over [0.5, 1.5]
+    });
+
+    it('averages the gradient over consecutive cells exactly as cell-by-cell integrals do', () => {
+        // Breakpoints that fall inside cells, a jump, and cells finer than the pieces.
+        const x = { times: [0, 0.35, 1.2, 1.2, 2.05, 3], values: [0, 3, 3, -1, 2, 0] };
+        const z = { times: [0, 1.5, 3], values: [1, -2, 0.5] };
+        const pieces = mergeAxes([x, zero, z], 0, 3);
+        const starts = Array.from({ length: 30 }, (_, j) => 0.25 + j * 0.09);
+        const widths = starts.map(() => 0.09);
+        const grad = cellMeanGradients(pieces, starts, widths, 0.25);
+        for (let j = 0; j < starts.length; j++) {
+            const area = new Float64Array(3);
+            const a = starts[j] - 0.25;
+            addPiecesIntegral(pieces, a, a + widths[j], area);
+            for (let axis = 0; axis < 3; axis++) expect(grad[3 * j + axis]).toBe(area[axis] / widths[j]);
+        }
     });
 
     it('produces a degenerate single piece for an empty window', () => {

@@ -25,6 +25,17 @@ export interface TrapRow {
     delayUs?: number;
 }
 
+/** An arbitrary gradient; its ID follows the traps' (traps.length + index + 1). */
+export interface ArbRow {
+    amplitude: number;      // Hz/m
+    first: number;          // Hz/m
+    last: number;           // Hz/m
+    shape: number;
+    /** Time shape in gradient-raster units; omitted for a uniform raster. */
+    timeShape?: number;
+    delayUs?: number;
+}
+
 export interface AdcRow {
     samples: number;
     dwellNs: number;
@@ -50,6 +61,7 @@ export interface SeqSpec {
     blocks: BlockRow[];
     rf?: RfRow[];
     traps?: TrapRow[];
+    arbs?: ArbRow[];
     adc?: AdcRow[];
     shapes?: number[][];
     extraDefinitions?: string;
@@ -77,6 +89,13 @@ export function seqText(spec: SeqSpec): string {
             i + 1, f(r.amplitude), r.magShape, r.phaseShape ?? 0, r.timeShape ?? 0,
             f(r.centerUs), f(r.delayUs ?? 0), f(r.freqPPM ?? 0), f(r.phasePPM ?? 0),
             f(r.freq ?? 0), f(r.phase ?? 0), r.use ?? 'e',
+        ].join(' ')));
+    }
+    if (spec.arbs?.length) {
+        const offset = spec.traps?.length ?? 0;
+        lines.push('', '[GRADIENTS]');
+        spec.arbs.forEach((g, i) => lines.push([
+            offset + i + 1, f(g.amplitude), f(g.first), f(g.last), g.shape, g.timeShape ?? 0, f(g.delayUs ?? 0),
         ].join(' ')));
     }
     if (spec.traps?.length) {

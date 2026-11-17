@@ -18,7 +18,7 @@ import type {
 } from './types';
 import { ExtType, VER_PRE_14 } from './types';
 import { classifyRfUses } from './rfClassification';
-import { analyzeRfResponse } from './rfResponse';
+import { analyzeRfResponse, type RfGradientContext } from './rfResponse';
 import { detectPtxTimeShapeChannels } from './rfWaveform';
 
 export { detectPtxTimeShapeChannels };
@@ -67,7 +67,9 @@ export interface SequenceDecodeContext {
     readonly sequence: PulseqSequence;
     readonly blockStartTimes: Float64Array;
     readonly classifiedRfUses: string[];
-    readonly rfResponseCache: Map<number, ReturnType<typeof analyzeRfResponse>>;
+    /** Keyed by the RF library entry and the block's three gradient IDs, which
+     *  decide its response once a gradient plays under it. */
+    readonly rfResponseCache: Map<string, ReturnType<typeof analyzeRfResponse>>;
     readonly triggerCache: Map<number, DecodedTriggerEvent>;
     readonly ncoCache: Map<number, DecodedNCOEvent>;
     /**
@@ -94,7 +96,7 @@ export function createSequenceDecodeContext(seq: PulseqSequence): SequenceDecode
         sequence: seq,
         blockStartTimes,
         classifiedRfUses: classifyRfUses(seq),
-        rfResponseCache: new Map<number, ReturnType<typeof analyzeRfResponse>>(),
+        rfResponseCache: new Map<string, ReturnType<typeof analyzeRfResponse>>(),
         triggerCache: new Map<number, DecodedTriggerEvent>(),
         ncoCache: new Map<number, DecodedNCOEvent>(),
     };
@@ -141,10 +143,13 @@ export function decodeBlockRange(
             const rf = seq.rfs.get(block.rfId);
             if (rf) {
                 const use = context.classifiedRfUses[i];
-                let response = context.rfResponseCache.get(rf.id);
+                const key = `${rf.id}:${block.gxId}:${block.gyId}:${block.gzId}`;
+                let response = context.rfResponseCache.get(key);
                 if (!response) {
-                    response = context.skipRfResponse ? UNANALYZED_RF_RESPONSE : analyzeRfResponse(rf, seq, use);
-                    context.rfResponseCache.set(rf.id, response);
+                    response = context.skipRfResponse
+                        ? UNANALYZED_RF_RESPONSE
+                        : analyzeRfResponse(rf, seq, use, rfGradientContext(seq, block, rf, dur));
+                    context.rfResponseCache.set(key, response);
                 }
                 db.rf = decodeRF(seq, rf, cumulative, dur, use, response);
             }
@@ -199,6 +204,29 @@ export function blockDurationSeconds(seq: PulseqSequence, block: BlockEntry): nu
 }
 
 // ─── RF decoding ──────────────────────────────────────────────────────────
+
+/**
+ * The block's logical gradients on the RF event's clock, for the response
+ * analysis, or null when the block plays none.
+ */
+function rfGradientContext(
+    seq: PulseqSequence,
+    block: BlockEntry,
+    rf: RFEntry,
+    blockDur: number,
+): RfGradientContext | null {
+    if (block.gxId <= 0 && block.gyId <= 0 && block.gzId <= 0) return null;
+    // Decoding with the block starting at −delay puts t = 0 at the RF event start.
+    const origin = -rf.delay * 1e-6;
+    const axis = (gradId: number, channel: 'gx' | 'gy' | 'gz') => {
+        const decoded = decodeGradient(seq, gradId, origin, blockDur, channel);
+        return { times: decoded.timePoints, values: decoded.waveform };
+    };
+    return {
+        axes: [axis(block.gxId, 'gx'), axis(block.gyId, 'gy'), axis(block.gzId, 'gz')],
+        freqOffsetHz: effFreqOff(rf.freqOffset, rf.freqPPM, getB0(seq)),
+    };
+}
 
 function decodeRF(
     seq: PulseqSequence,

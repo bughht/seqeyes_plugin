@@ -119,6 +119,44 @@ describe('RF waveform semantics', () => {
         expect(Array.from(cells.phaseCycles)).toEqual([0.0625, 0.1875, 0.3125, 0.4375, 0.5, 0.5]);
     });
 
+    it('interpolates phase across the [0, 1) wrap along the shorter arc', () => {
+        // A steep ramp, f·t, on 5-raster breakpoints stored wrapped as Pulseq writes it:
+        // 0.3 cycles per breakpoint, so most intervals cross the wrap.
+        const dwell = 5;
+        const intervals = 41;   // 12.3 cycles: a whole number would integrate to zero
+        const frequency = 0.3 / (dwell * RASTER);
+        const timeShape = Array.from({ length: intervals + 1 }, (_, i) => i * dwell);
+        const phaseCycles = timeShape.map(t => (frequency * t * RASTER) % 1);
+        const cells = rasterCellsFromShapes({
+            raster: RASTER, magnitude: timeShape.map(() => 1), phaseCycles, timeShape,
+        });
+        expect(cells.count).toBe(intervals * dwell);
+
+        let real = 0;
+        let imaginary = 0;
+        for (let i = 0; i < cells.count; i++) {
+            const mid = cells.start[i] + 0.5 * cells.width[i];
+            const unwrapped = frequency * mid;
+            // Each cell's phase is the ramp's own value, modulo whole cycles.
+            const error = cells.phaseCycles[i] - unwrapped;
+            expect(error - Math.round(error)).toBeCloseTo(0, 9);
+            real += Math.cos(2 * Math.PI * cells.phaseCycles[i]) * cells.width[i];
+            imaginary += Math.sin(2 * Math.PI * cells.phaseCycles[i]) * cells.width[i];
+        }
+        // |∫ exp(i2πft) dt| over T, with the midpoint rule's sin(πfΔ) in place of πfΔ.
+        const duration = intervals * dwell * RASTER;
+        const analytic = Math.abs(Math.sin(Math.PI * frequency * duration) / Math.sin(Math.PI * frequency * RASTER)) * RASTER;
+        expect(analytic).toBeGreaterThan(0.1 * RASTER);
+        expect(Math.hypot(real, imaginary)).toBeCloseTo(analytic, 15);
+    });
+
+    it('takes phase from the other end of an interval whose breakpoint has zero magnitude', () => {
+        const cells = rasterCellsFromShapes({
+            raster: RASTER, magnitude: [0, 1, 0], phaseCycles: [0.9, 0.2, 0.7], timeShape: [0, 2, 4],
+        });
+        expect(Array.from(cells.phaseCycles)).toEqual([0.2, 0.2, 0.2, 0.2]);
+    });
+
     it('keeps uniform samples held one raster each', () => {
         const shapes = { raster: RASTER, magnitude: [0.2, 0.4, 0.6], phaseCycles: [0, 0.1, 0.2], timeShape: null };
         const cells = rasterCellsFromShapes(shapes);

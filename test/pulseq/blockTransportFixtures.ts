@@ -153,13 +153,21 @@ export function serializeInlineBlocks(blocks: DecodedBlock[]): Array<Record<stri
                 p: uniform(b.rf.phase, MAX_DISPLAY_PTS).map(wrap),
                 a: b.rf.amplitude,
                 a0: b.rf.response.carrierAreaDeg,
-                rb: b.rf.response.bands.map(v => [
-                    v.frequencyOffsetHz, v.spectralAreaDeg, v.polarFlipDeg, v.mz,
-                ]),
+                rb: b.rf.response.bands.map(v => {
+                    const band = [v.frequencyOffsetHz, v.spectralAreaDeg, v.polarFlipDeg, v.mz];
+                    if (b.rf!.response.domain === 'position') band.push(v.positionM!);
+                    return band;
+                }),
                 rs: b.rf.response.spectrumAnalyzed ? 1 : 0,
                 rl: b.rf.response.limited ? 1 : 0,
                 fo: b.rf.freqOffset, po: b.rf.phaseOffset, u: b.rf.use || 'u',
             };
+            if (b.rf.response.domain === 'position') {
+                o.rf.rd = 'p';
+                o.rf.rx = b.rf.response.axis;
+            } else if (b.rf.response.domain === 'unmodelled') {
+                o.rf.rd = 'u';
+            }
         }
         for (const key of ['gx', 'gy', 'gz'] as const) {
             const grad = b[key];

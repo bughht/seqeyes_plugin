@@ -227,17 +227,35 @@ export interface DecodedRFWaveform {
 }
 
 export interface RFResponseBand {
-    frequencyOffsetHz: number;  // relative to the RF carrier [Hz]
+    /** Relative to the RF carrier [Hz]. In the position domain, the off-resonance
+     *  there under the B1-weighted mean gradient, which is the frequency-domain
+     *  band when the gradient is constant. */
+    frequencyOffsetHz: number;
+    /** Position domain only: along the response axis [m]. */
+    positionM?: number;
     spectralAreaDeg: number;    // demodulated complex-area equivalent [deg]
     polarFlipDeg: number;       // final polar angle from +Mz [deg]
     mz: number;                 // final normalized longitudinal magnetization
 }
+
+/** Where a gradient-selected response lies: one logical axis, or `s` along an oblique one. */
+export type RFResponseAxis = 'x' | 'y' | 'z' | 's';
 
 export interface RFResponseAnalysis {
     carrierAreaDeg: number;
     bands: RFResponseBand[];
     spectrumAnalyzed: boolean;
     limited: boolean;
+    /**
+     * How bands are resolved. Absent: against a static frequency offset, when no
+     * gradient plays under the pulse (or it is an inversion pulse). 'position':
+     * along the gradient played with the pulse. 'unmodelled': a gradient plays
+     * that the analysis cannot represent, so the bands are static-offset areas
+     * and must not be presented as flip angles.
+     */
+    domain?: 'position' | 'unmodelled';
+    /** Position domain: the axis `positionM` is measured along. */
+    axis?: RFResponseAxis;
 }
 
 export interface DecodedGradWaveform {

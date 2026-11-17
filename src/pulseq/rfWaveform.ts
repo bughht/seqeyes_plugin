@@ -13,7 +13,8 @@
  * Both forms are reduced here to raster cells, each holding the waveform's
  * mean over the cell: exact for uniform pulses, and exact for breakpoints that
  * sit on the raster (cells then never straddle a breakpoint). Magnitude and
- * phase are interpolated separately, as Pulseq stores them.
+ * phase are interpolated separately, as Pulseq stores them; phase, stored
+ * wrapped to [0, 1) cycles, along the shorter arc.
  */
 
 import type { PulseqSequence, RFEntry } from './types';
@@ -79,10 +80,26 @@ export function forEachRasterCell(
         const t0 = timeShape[k] * raster;
         const t1 = timeShape[k + 1] * raster;
         const u = t1 > t0 ? (mid - t0) / (t1 - t0) : 0;
-        const p0 = phaseCycles ? phaseCycles[k] : 0;
-        const p1 = phaseCycles ? phaseCycles[k + 1] : 0;
-        visit(start, width, magnitude[k] + u * (magnitude[k + 1] - magnitude[k]), p0 + u * (p1 - p0));
+        const m0 = magnitude[k];
+        const m1 = magnitude[k + 1];
+        const phase = phaseCycles ? interpolatePhaseCycles(phaseCycles[k], phaseCycles[k + 1], m0, m1, u) : 0;
+        visit(start, width, m0 + u * (m1 - m0), phase);
     }
+}
+
+/**
+ * Phase between two breakpoints along the shorter arc, so an interval that
+ * crosses the [0, 1) wrap does not sweep the long way round. A half cycle has
+ * no shorter way and keeps its stored direction. A zero-magnitude breakpoint's
+ * phase is arbitrary, so the other end's phase holds across the interval.
+ */
+function interpolatePhaseCycles(p0: number, p1: number, m0: number, m1: number, u: number): number {
+    if (m0 === 0) return p1;
+    if (m1 === 0) return p0;
+    const delta = p1 - p0;
+    let arc = delta - Math.round(delta);
+    if (Math.abs(arc) === 0.5) arc = Math.sign(delta) * 0.5;
+    return p0 + u * arc;
 }
 
 export function rasterCellsFromShapes(shapes: RfShapeArrays): RfRasterCells {
