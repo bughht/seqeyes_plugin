@@ -14,6 +14,7 @@ import {
   moveRow, openRowMenu, readoutLines, rowOrder, rowPoint, rowSignatures, rowState, settledRowSignatures,
   shownRows, touch, viewStart,
 } from './channel-order-helpers';
+import { sliceOffsetSequence } from './rf-slice';
 
 interface DebugState {
   blocks: number;
@@ -305,6 +306,19 @@ test('labels multiband and inversion RF responses without treating carrier area 
         u: 'i', a0: 287.145,
         rb: [[0, 287.145, 175.95, -0.9975]],
       }),
+      // A VERSE excitation whose slice is written as phase: almost no carrier area.
+      slice: summarize({
+        u: 'e', a0: 0.09, rd: 'p', rx: 'z',
+        rb: [[14622, 88.74, 88.72, 0.02, -0.07050]],
+      }),
+      refocusing: summarize({
+        u: 'r', a0: 148.9, rd: 'p', rx: 'z',
+        rb: [[0, 148.96, 148.96, -0.86, 0]],
+      }),
+      unmodelled: summarize({
+        u: 'e', a0: 8.35, rd: 'u',
+        rb: [[12257, 73.7, 73.6, 0.28]],
+      }),
     };
   });
 
@@ -315,6 +329,22 @@ test('labels multiband and inversion RF responses without treating carrier area 
   expect(summaries.inversion).toContain('θz≈176°');
   expect(summaries.inversion).toContain('area₀=287°');
   expect(summaries.inversion).not.toContain('FA≈287°');
+  expect(summaries.slice).toContain('FA≈88.7° @ z=−70.5 mm');
+  expect(summaries.slice).toContain('area₀=0.09°');
+  expect(summaries.slice).not.toContain('Δf');
+  // The carrier area adds nothing when it matches the band.
+  expect(summaries.refocusing).toBe('  θz≈149° @ z=0.0 mm');
+  expect(summaries.unmodelled).toContain('area≈73.7°');
+  expect(summaries.unmodelled).toContain('gradient not modelled');
+  expect(summaries.unmodelled).not.toContain('FA≈');
+});
+
+test('reports a slice-selective pulse by its slice position', async ({ page }) => {
+  await page.goto('/?debug=1');
+  await openSequenceText(page, 'slice-offset.seq', sliceOffsetSequence(0.02));
+  const waveform = await requireBox(page.locator('#mc'));
+  await page.mouse.move(waveform.x + waveform.width / 2, waveform.y + 18);
+  await expect(page.locator('#tt')).toContainText('FA≈90.0° @ z=+20.0 mm');
 });
 
 test('keeps homogeneous RF pulses discrete and renders mixed dense RF as bounded pulse glyphs', async ({ page }) => {

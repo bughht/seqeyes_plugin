@@ -28,8 +28,10 @@ import { evaluateAdcLabels, listSequenceLabels } from '../../src/pulseq/labels';
 import { createSequenceDecodeContext, decodeAllBlocks, decodeBlockRange, getTotalDuration } from '../../src/pulseq/decoder';
 import { calculateKspace } from '../../src/pulseq/kspace';
 import { parseSequenceBytes } from '../../src/pulseq/sequenceReader';
+import { parseSequenceText } from '../../src/pulseq/reader';
 import { detectSequenceTiming } from '../../src/pulseq/trdetect';
 
+import { sliceOffsetSequence } from './rf-slice';
 import { expectPaneFillsBody, expectSpectrogramDrawn, expectSpectrumDrawn } from './spectrogram-canvas';
 import {
   amplitudeZoom, canvasText, dispatchWheels, gradientRanges, kspaceZoomAnchorError, recordCanvasText, repeat, settled,
@@ -754,6 +756,23 @@ test('anchors the hover tooltip to the cursor', async ({ page }) => {
   await expect(tip).toBeVisible();
   const low = (await tip.boundingBox())!;
   expect(low.y + low.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+});
+
+/** The response travels in the packed transport (rd, rx, band positions), which the standalone page never uses. */
+test('reports a slice-selective pulse by its slice position', async ({ page }) => {
+  const seq = parseSequenceText(sliceOffsetSequence(0.02));
+  const packed = packSequenceBlocks(seq);
+  await openWebview(page);
+  await post(page, {
+    type: 'sequenceData', sequenceGeneration: 1, blocks: packed.blocks, sampleCount: packed.sampleCount,
+    totalDuration: getTotalDuration(seq), gradRaster: seq.rasterTimes.gradientRaster,
+    rfRaster: seq.rasterTimes.rfRaster, adcRaster: seq.rasterTimes.adcRaster,
+    blockRaster: seq.rasterTimes.blockDurationRaster, timing: detectSequenceTiming(seq), notices: [],
+  }, { sampleTimes: b64(packed.sampleTimes), sampleValues: b64(packed.sampleValues) });
+
+  const cc = (await page.locator('#cc').boundingBox())!;
+  await page.mouse.move(cc.x + cc.width / 2, cc.y + cc.height / 2);
+  await expect(page.locator('#tt')).toContainText('FA≈90.0° @ z=+20.0 mm');
 });
 
 /**

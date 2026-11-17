@@ -12001,8 +12001,26 @@ function rfBandOffsets(bands){
   if(bands.length<=3)return bands.map(function(v){return fmtRfFrequency(v[0]);}).join(',');
   return fmtRfFrequency(bands[0][0])+'\u2026'+fmtRfFrequency(bands[bands.length-1][0]);
 }
+// One decimal: the band centroid is good to a few hundredths of a millimetre.
+function fmtRfPosition(value){
+  var mm=value*1e3,text=Math.abs(mm).toFixed(1);
+  return text==='0.0'?text:(mm<0?'\u2212':'+')+text;
+}
+/** Band positions [m] (each band's fifth entry) along `axis`, in mm. */
+function rfBandPositions(bands,axis){
+  var positions=bands.length<=3
+    ?bands.map(function(v){return fmtRfPosition(v[4]);}).join(',')
+    :fmtRfPosition(bands[0][4])+'\u2026'+fmtRfPosition(bands[bands.length-1][4]);
+  return (axis||'s')+'='+positions+' mm';
+}
+/**
+ * `rd` says how the bands were resolved: absent against a static frequency
+ * offset, 'p' along the gradient played with the pulse (positions in `rx`),
+ * 'u' under a gradient the analysis cannot represent, so areas only.
+ */
 function rfResponseSummary(rf){
-  var bands=(rf.rb||[]).filter(function(v){return v&&v.length>=4&&isFinite(v[0])&&isFinite(v[1])&&isFinite(v[2])&&isFinite(v[3]);});
+  var position=rf.rd==='p';
+  var bands=(rf.rb||[]).filter(function(v){return v&&v.length>=4&&isFinite(v[0])&&isFinite(v[1])&&isFinite(v[2])&&isFinite(v[3])&&(!position||isFinite(v[4]));});
   var area0=fmtFlipAngle(rf.a0),use=(rf.u||'u').toLowerCase();
   if(!bands.length)return area0?'  area\u2080='+area0:'';
   var polar=rfBandMetric(bands,2),spectral=rfBandMetric(bands,1);
@@ -12011,16 +12029,21 @@ function rfResponseSummary(rf){
     var efficiency=Math.max(0,Math.min(1,-center[3]))*100;
     return '  Inv\u2248'+efficiency.toFixed(1)+'%  \u03b8z\u2248'+fmtFlipAngle(center[2])+(area0?'  area\u2080='+area0:'');
   }
-  if(bands.length>1){
-    var prefix=(use==='e'||use==='excitation')?'FA\u2248':'\u03b8z\u2248';
-    var summary='  MB'+bands.length+' '+prefix+polar;
-    var meanPolar=0,meanArea=0;for(var j=0;j<bands.length;j++){meanPolar+=bands[j][2];meanArea+=bands[j][1];}
-    if(Math.abs(meanArea-meanPolar)/bands.length>.5)summary+=' (area\u2248'+spectral+')';
-    return summary+'  \u0394f='+rfBandOffsets(bands);
+  if(rf.rd==='u'){
+    var area='  area\u2248'+spectral;
+    if(bands.length>1||Math.abs(bands[0][0])>1)area+=' @ \u0394f='+rfBandOffsets(bands);
+    return area+' (gradient not modelled)';
   }
-  var single='  '+((use==='e'||use==='excitation')?'FA\u2248':'\u03b8z\u2248')+polar;
-  if(Math.abs(bands[0][0])>1)single+='  \u0394f='+fmtRfFrequency(bands[0][0]);
-  return single;
+  var summary='  '+(bands.length>1?'MB'+bands.length+' ':'')+((use==='e'||use==='excitation')?'FA\u2248':'\u03b8z\u2248')+polar;
+  var meanPolar=0,meanArea=0;for(var j=0;j<bands.length;j++){meanPolar+=bands[j][2];meanArea+=bands[j][1];}
+  meanPolar/=bands.length;meanArea/=bands.length;
+  if(bands.length>1&&Math.abs(meanArea-meanPolar)>.5)summary+=' (area\u2248'+spectral+')';
+  // The carrier-frame area only where it says something the band does not:
+  // a slice written as phase leaves almost nothing at the carrier.
+  if(position)return summary+' @ '+rfBandPositions(bands,rf.rx)+(area0&&Math.abs(rf.a0-meanArea)>.5?'  area\u2080='+area0:'');
+  if(bands.length>1)return summary+'  \u0394f='+rfBandOffsets(bands);
+  if(Math.abs(bands[0][0])>1)summary+='  \u0394f='+fmtRfFrequency(bands[0][0]);
+  return summary;
 }
 function showTooltipAt(cx,cy,ct){
   var ch=cH(),vc=visChannels(),vi2=Math.floor((cy-mc.getBoundingClientRect().top-M.t)/ch);

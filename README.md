@@ -643,6 +643,7 @@ The ⚙ button in the toolbar opens a settings popover:
 - **Bloch simulation (web app and VS Code)**: simulate the sequence on the built-in, MRzero/BrainWeb or your own phantom, locally in Web Workers, browse raw data, k-space and images in an N-D viewer, export ISMRMRD (`.h5`) or NumPy — see [Simulation in depth](#simulation-in-depth)
 - **Camera presets** (xy / xz / yz) rotate the 3D view; any drag reverts to free 3D
 - **Interactive Canvas**: cursor‑anchored time zoom, per‑row y‑axis zoom, drag‑pan, hover tooltips
+- **RF response in the hover**: a slice-selective pulse reports its flip angle at the slice it selects (`FA≈90.0° @ z=+20.0 mm`), worked out along the gradient played with it, so a VERSE pulse whose slice is written as phase reads the same in every slice; multiband pulses per band, inversion pulses by inversion efficiency
 - **6 built‑in themes**: One Light · One Dark · Dracula · Nord · GitHub Light · GitHub Dark (+ system auto)
 - **Vertical cursor** with live time readout
 - **Measurement markers**: right-click to drop markers that snap to gradient corners, RF/ADC edges and centres, and block boundaries; read each channel's value at every marker and Δt between them, and copy the table

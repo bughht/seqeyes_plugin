@@ -487,12 +487,12 @@ function packRf(
     phase: PairRef,
 ): Record<string, unknown> {
     const metrics = waveformMagnitudeMetrics(rf.timePoints, rf.magnitude);
-    const responseBands = rf.response.bands.map(band => [
-        band.frequencyOffsetHz,
-        band.spectralAreaDeg,
-        band.polarFlipDeg,
-        band.mz,
-    ]);
+    const position = rf.response.domain === 'position';
+    const responseBands = rf.response.bands.map(band => {
+        const packed = [band.frequencyOffsetHz, band.spectralAreaDeg, band.polarFlipDeg, band.mz];
+        if (position) packed.push(band.positionM ?? NaN);
+        return packed;
+    });
     const packed: Record<string, unknown> = {
         s: rf.startTime, d: rf.duration,
         // Absolute effective centre, the point TE and TR are measured from.
@@ -511,6 +511,14 @@ function packRf(
         fo: rf.freqOffset, po: rf.phaseOffset,
         u: rf.use || 'u',   // 'e'=excitation, 'r'=refocusing, 'i'=inversion, 's'=saturation, 'u'=undefined
     };
+    // Bands resolved along the gradient ('p', positions along `rx`) or under a
+    // gradient the analysis cannot represent ('u'); absent for a static offset.
+    if (position) {
+        packed.rd = 'p';
+        packed.rx = rf.response.axis ?? 's';
+    } else if (rf.response.domain === 'unmodelled') {
+        packed.rd = 'u';
+    }
     if (magnitude.r) packed.r = 1;
     return packed;
 }

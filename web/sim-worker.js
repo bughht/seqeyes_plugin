@@ -1556,9 +1556,9 @@
     let best = Math.floor(n / 2), bestNorm = Infinity;
     for (let s = 0; s < n; s++) {
       const i2 = 3 * (offset + s);
-      const norm3 = layout2.k[i2] ** 2 + layout2.k[i2 + 1] ** 2 + layout2.k[i2 + 2] ** 2;
-      if (norm3 < bestNorm - 1e-12) {
-        bestNorm = norm3;
+      const norm4 = layout2.k[i2] ** 2 + layout2.k[i2 + 1] ** 2 + layout2.k[i2 + 2] ** 2;
+      if (norm4 < bestNorm - 1e-12) {
+        bestNorm = norm4;
         best = s;
       }
     }
@@ -3468,6 +3468,183 @@
     };
   }
 
+  // src/sim/program/pwl.ts
+  function pieceCount(pieces) {
+    return pieces.t.length - 1;
+  }
+  function mergeAxes(axes, ta, tb) {
+    if (!(tb > ta)) {
+      return { t: Float64Array.of(ta, ta), ga: new Float64Array(3), gb: new Float64Array(3) };
+    }
+    const cuts = [ta];
+    for (const axis of axes) {
+      for (let i2 = 0; i2 < axis.times.length; i2++) {
+        const time = axis.times[i2];
+        if (time > ta && time < tb) cuts.push(time);
+      }
+    }
+    cuts.push(tb);
+    cuts.sort((a, b) => a - b);
+    const boundaries = [];
+    for (const time of cuts) {
+      if (!boundaries.length || time > boundaries[boundaries.length - 1]) boundaries.push(time);
+    }
+    const n = boundaries.length - 1;
+    const t = Float64Array.from(boundaries);
+    const ga = new Float64Array(3 * n);
+    const gb = new Float64Array(3 * n);
+    for (let axis = 0; axis < 3; axis++) {
+      const { times, values } = axes[axis];
+      let segment = 0;
+      for (let piece = 0; piece < n; piece++) {
+        const u = t[piece], v = t[piece + 1];
+        while (segment + 1 < times.length - 1 && times[segment + 1] <= u) segment++;
+        ga[3 * piece + axis] = interpolateWithin(times, values, segment, u);
+        gb[3 * piece + axis] = interpolateWithin(times, values, segment, v);
+      }
+    }
+    return { t, ga, gb };
+  }
+  function interpolateWithin(times, values, segment, time) {
+    if (times.length === 0) return 0;
+    if (times.length === 1) return values[0];
+    const t0 = times[segment], t1 = times[segment + 1];
+    const v0 = values[segment], v1 = values[segment + 1];
+    if (!(t1 > t0)) return v1;
+    return v0 + (v1 - v0) * (time - t0) / (t1 - t0);
+  }
+  function piecesMoments(pieces) {
+    const dk = new Float64Array(3);
+    const kIntegral = new Float64Array(3);
+    const kSecond = new Float64Array(6);
+    const n = pieceCount(pieces);
+    for (let piece = 0; piece < n; piece++) {
+      const h = pieces.t[piece + 1] - pieces.t[piece];
+      if (!(h > 0)) continue;
+      const o = 3 * piece;
+      const ax = dk[0], ay = dk[1], az = dk[2];
+      const bx = pieces.ga[o], by = pieces.ga[o + 1], bz = pieces.ga[o + 2];
+      const cx = 0.5 * (pieces.gb[o] - bx) / h;
+      const cy = 0.5 * (pieces.gb[o + 1] - by) / h;
+      const cz = 0.5 * (pieces.gb[o + 2] - bz) / h;
+      kIntegral[0] += quadInt(ax, bx, cx, h);
+      kIntegral[1] += quadInt(ay, by, cy, h);
+      kIntegral[2] += quadInt(az, bz, cz, h);
+      kSecond[0] += quadProd(ax, bx, cx, ax, bx, cx, h);
+      kSecond[1] += quadProd(ay, by, cy, ay, by, cy, h);
+      kSecond[2] += quadProd(az, bz, cz, az, bz, cz, h);
+      kSecond[3] += quadProd(ax, bx, cx, ay, by, cy, h);
+      kSecond[4] += quadProd(ax, bx, cx, az, bz, cz, h);
+      kSecond[5] += quadProd(ay, by, cy, az, bz, cz, h);
+      dk[0] += h * (bx + cx * h);
+      dk[1] += h * (by + cy * h);
+      dk[2] += h * (bz + cz * h);
+    }
+    return { dk, kIntegral, kSecond };
+  }
+  function windowMoments(pieces, a, b) {
+    const t = [], ga = [], gb = [];
+    const n = pieceCount(pieces);
+    for (let piece = 0; piece < n; piece++) {
+      const t0 = pieces.t[piece], t1 = pieces.t[piece + 1];
+      const u = Math.max(a, t0), v = Math.min(b, t1);
+      if (!(v > u)) continue;
+      const o = 3 * piece;
+      if (!t.length) t.push(u);
+      t.push(v);
+      for (let axis = 0; axis < 3; axis++) {
+        const g0 = pieces.ga[o + axis], g1 = pieces.gb[o + axis];
+        ga.push(t1 > t0 ? g0 + (g1 - g0) * (u - t0) / (t1 - t0) : g0);
+        gb.push(t1 > t0 ? g0 + (g1 - g0) * (v - t0) / (t1 - t0) : g1);
+      }
+    }
+    if (!t.length) return { dk: new Float64Array(3), kIntegral: new Float64Array(3), kSecond: new Float64Array(6) };
+    return piecesMoments({ t: Float64Array.from(t), ga: Float64Array.from(ga), gb: Float64Array.from(gb) });
+  }
+  function piecesKAt(pieces, times, out) {
+    const n = pieceCount(pieces);
+    let piece = 0;
+    let kx = 0, ky = 0, kz = 0;
+    for (let s = 0; s < times.length; s++) {
+      const time = times[s];
+      while (piece < n - 1 && pieces.t[piece + 1] <= time) {
+        const h2 = pieces.t[piece + 1] - pieces.t[piece];
+        const o2 = 3 * piece;
+        kx += 0.5 * h2 * (pieces.ga[o2] + pieces.gb[o2]);
+        ky += 0.5 * h2 * (pieces.ga[o2 + 1] + pieces.gb[o2 + 1]);
+        kz += 0.5 * h2 * (pieces.ga[o2 + 2] + pieces.gb[o2 + 2]);
+        piece++;
+      }
+      const h = pieces.t[piece + 1] - pieces.t[piece];
+      const tau = Math.min(Math.max(time - pieces.t[piece], 0), h);
+      const o = 3 * piece;
+      if (h > 0) {
+        const fx = (pieces.gb[o] - pieces.ga[o]) / h;
+        const fy = (pieces.gb[o + 1] - pieces.ga[o + 1]) / h;
+        const fz = (pieces.gb[o + 2] - pieces.ga[o + 2]) / h;
+        out[3 * s] = kx + tau * (pieces.ga[o] + 0.5 * fx * tau);
+        out[3 * s + 1] = ky + tau * (pieces.ga[o + 1] + 0.5 * fy * tau);
+        out[3 * s + 2] = kz + tau * (pieces.ga[o + 2] + 0.5 * fz * tau);
+      } else {
+        out[3 * s] = kx;
+        out[3 * s + 1] = ky;
+        out[3 * s + 2] = kz;
+      }
+    }
+  }
+  function addPiecesIntegral(pieces, a, b, out, fromPiece = 0) {
+    const n = pieceCount(pieces);
+    let first = fromPiece;
+    while (first < n - 1 && pieces.t[first + 1] <= a) first++;
+    for (let piece = first; piece < n && pieces.t[piece] < b; piece++) {
+      const u = Math.max(a, pieces.t[piece]);
+      const v = Math.min(b, pieces.t[piece + 1]);
+      if (!(v > u)) continue;
+      const h = pieces.t[piece + 1] - pieces.t[piece];
+      const o = 3 * piece;
+      for (let axis = 0; axis < 3; axis++) {
+        const g0 = pieces.ga[o + axis];
+        const slope = (pieces.gb[o + axis] - g0) / h;
+        const gu = g0 + slope * (u - pieces.t[piece]);
+        const gv = g0 + slope * (v - pieces.t[piece]);
+        out[axis] += 0.5 * (gu + gv) * (v - u);
+      }
+    }
+    return first;
+  }
+  function cellMeanGradients(pieces, starts, widths, origin) {
+    const count = starts.length;
+    const grad = new Float64Array(3 * count);
+    const area = new Float64Array(3);
+    let piece = 0;
+    for (let j = 0; j < count; j++) {
+      area.fill(0);
+      const a = starts[j] - origin, b = a + widths[j];
+      piece = addPiecesIntegral(pieces, a, b, area, piece);
+      for (let axis = 0; axis < 3; axis++) grad[3 * j + axis] = area[axis] / widths[j];
+    }
+    return grad;
+  }
+  function quadInt(a, b, c, h) {
+    return h * (a + h * (b / 2 + h * c / 3));
+  }
+  function quadProd(a1, b1, c1, a2, b2, c2, h) {
+    const p0 = a1 * a2;
+    const p1 = a1 * b2 + b1 * a2;
+    const p2 = a1 * c2 + c1 * a2 + b1 * b2;
+    const p3 = b1 * c2 + c1 * b2;
+    const p4 = c1 * c2;
+    return h * (p0 + h * (p1 / 2 + h * (p2 / 3 + h * (p3 / 4 + h * p4 / 5))));
+  }
+  var RELATIVE_TIME_QUANTUM_SEC = 1e-12;
+  function relativePieces(pieces, t0) {
+    const t = new Float64Array(pieces.t.length);
+    for (let i2 = 0; i2 < t.length; i2++) {
+      t[i2] = Math.round((pieces.t[i2] - t0) / RELATIVE_TIME_QUANTUM_SEC) * RELATIVE_TIME_QUANTUM_SEC;
+    }
+    return { t, ga: pieces.ga.slice(), gb: pieces.gb.slice() };
+  }
+
   // src/pulseq/rfResponse.ts
   var MAX_RF_RESPONSE_FFT_POINTS = 131072;
   var MAX_RF_RESPONSE_SAMPLES = 131072;
@@ -3478,7 +3655,10 @@
   var MIN_DOMINANT_AREA_DEG = 0.01;
   var DEG_PER_CYCLE = 360;
   var TAU = 2 * Math.PI;
-  function analyzeRfResponse(rf, seq, classifiedUse = rf.use) {
+  var SIGNIFICANT_B1_FRACTION = 0.05;
+  var NEGLIGIBLE_K_SPAN = 1;
+  var DIRECTION_TOLERANCE = 0.01;
+  function analyzeRfResponse(rf, seq, classifiedUse = rf.use, gradient = null) {
     if (rfSampleCount(rf, seq) > MAX_RF_RESPONSE_SAMPLES) {
       return {
         carrierAreaDeg: estimateRfCarrierAreaDeg(rf, seq),
@@ -3491,6 +3671,15 @@
     const carrierAreaDeg = frequencyResolvedAreaDeg(samples, 0);
     const normalizedUse = classifiedUse.toLowerCase();
     const inversion = normalizedUse === "i" || normalizedUse === "inversion";
+    let unmodelled = false;
+    if (gradient && !inversion) {
+      const trajectory = gradientTrajectory(samples, gradient);
+      if (trajectory) {
+        const response = trajectory.modelled ? positionResponse(samples, trajectory, gradient.freqOffsetHz, carrierAreaDeg) : null;
+        if (response) return response;
+        unmodelled = true;
+      }
+    }
     let offsets;
     let spectrumAnalyzed = false;
     let limited = false;
@@ -3513,7 +3702,13 @@
         mz: spinor.mz
       };
     });
-    return { carrierAreaDeg, bands, spectrumAnalyzed, limited };
+    return {
+      carrierAreaDeg,
+      bands,
+      spectrumAnalyzed,
+      limited,
+      ...unmodelled ? { domain: "unmodelled" } : {}
+    };
   }
   function estimateRfCarrierAreaDeg(rf, seq) {
     const shapes = rfShapeArrays(rf, seq);
@@ -3555,12 +3750,13 @@
       imaginary[index] = finite ? amplitude * Math.sin(phaseRad) : 0;
       if (Math.abs(widths[index] - raster) > Math.max(1e-12, raster * 1e-6)) uniform = false;
     }
-    return { real, imaginary, times, widths, uniform, dwell: uniform ? raster : widths[0] };
+    return { real, imaginary, starts: cells.start, times, widths, uniform, dwell: uniform ? raster : widths[0] };
   }
   function emptySamples(raster) {
     return {
       real: new Float64Array(0),
       imaginary: new Float64Array(0),
+      starts: new Float64Array(0),
       times: new Float64Array(0),
       widths: new Float64Array(0),
       uniform: true,
@@ -3568,10 +3764,13 @@
     };
   }
   function frequencyResolvedAreaDeg(samples, frequencyOffsetHz) {
+    return resolvedAreaDeg(samples, samples.times, frequencyOffsetHz);
+  }
+  function resolvedAreaDeg(samples, coordinates, conjugate) {
     let realArea = 0;
     let imaginaryArea = 0;
     for (let index = 0; index < samples.real.length; index++) {
-      const angle = -TAU * frequencyOffsetHz * samples.times[index];
+      const angle = -TAU * conjugate * coordinates[index];
       const cosine = Math.cos(angle);
       const sine = Math.sin(angle);
       const width = samples.widths[index];
@@ -3583,34 +3782,36 @@
   function dominantBandOffsets(samples) {
     const sampleCount = samples.real.length;
     if (sampleCount === 0 || !Number.isFinite(samples.dwell) || samples.dwell <= 0) return [0];
-    const paddedTarget = sampleCount <= Math.floor(MAX_RF_RESPONSE_FFT_POINTS / ZERO_PAD_FACTOR) ? sampleCount * ZERO_PAD_FACTOR : sampleCount;
-    const fftPoints = nextPowerOfTwo(Math.max(MIN_FFT_POINTS, paddedTarget));
+    const fftPoints = paddedFftPoints(sampleCount);
     if (fftPoints > MAX_RF_RESPONSE_FFT_POINTS) return [0];
     const real = new Float64Array(fftPoints);
     const imaginary = new Float64Array(fftPoints);
     real.set(samples.real);
     imaginary.set(samples.imaginary);
     fftInPlace(real, imaginary, fftPoints);
+    const offsets = dominantCentres(real, imaginary, samples.dwell, 1 / (fftPoints * samples.dwell));
+    return offsets.length > 0 ? offsets : [0];
+  }
+  function paddedFftPoints(count) {
+    const paddedTarget = count <= Math.floor(MAX_RF_RESPONSE_FFT_POINTS / ZERO_PAD_FACTOR) ? count * ZERO_PAD_FACTOR : count;
+    return nextPowerOfTwo(Math.max(MIN_FFT_POINTS, paddedTarget));
+  }
+  function dominantCentres(real, imaginary, areaScale, step) {
+    const fftPoints = real.length;
+    const half = fftPoints / 2;
+    const areaAt = (bin) => DEG_PER_CYCLE * areaScale * Math.sqrt(real[bin] * real[bin] + imaginary[bin] * imaginary[bin]);
     let peakAreaDeg = 0;
-    for (let bin = 0; bin < fftPoints; bin++) {
-      peakAreaDeg = Math.max(
-        peakAreaDeg,
-        DEG_PER_CYCLE * samples.dwell * Math.hypot(real[bin], imaginary[bin])
-      );
-    }
-    if (!Number.isFinite(peakAreaDeg) || peakAreaDeg < MIN_DOMINANT_AREA_DEG) return [0];
+    for (let bin = 0; bin < fftPoints; bin++) peakAreaDeg = Math.max(peakAreaDeg, areaAt(bin));
+    if (!Number.isFinite(peakAreaDeg) || peakAreaDeg < MIN_DOMINANT_AREA_DEG) return [];
     const threshold = Math.max(MIN_DOMINANT_AREA_DEG, peakAreaDeg * DOMINANT_BAND_FRACTION);
     const clusters = [];
     let active = null;
-    const half = fftPoints / 2;
-    const frequencyStep = 1 / (fftPoints * samples.dwell);
     for (let signedBin = -half; signedBin < half; signedBin++) {
-      const bin = signedBin < 0 ? signedBin + fftPoints : signedBin;
-      const areaDeg = DEG_PER_CYCLE * samples.dwell * Math.hypot(real[bin], imaginary[bin]);
+      const areaDeg = areaAt(signedBin < 0 ? signedBin + fftPoints : signedBin);
       if (areaDeg >= threshold) {
-        const weight = areaDeg * areaDeg;
+        const weight = areaDeg * areaDeg - threshold * threshold;
         if (!active) active = { frequencySum: 0, weightSum: 0, peakAreaDeg: 0 };
-        active.frequencySum += signedBin * frequencyStep * weight;
+        active.frequencySum += signedBin * step * weight;
         active.weightSum += weight;
         active.peakAreaDeg = Math.max(active.peakAreaDeg, areaDeg);
       } else if (active) {
@@ -3619,10 +3820,180 @@
       }
     }
     if (active) clusters.push(active);
-    const offsets = clusters.filter((cluster) => cluster.weightSum > 0).sort((left, right) => right.peakAreaDeg - left.peakAreaDeg).slice(0, MAX_RF_RESPONSE_BANDS).map((cluster) => cluster.frequencySum / cluster.weightSum).sort((left, right) => left - right);
-    return offsets.length > 0 ? offsets : [0];
+    return clusters.filter((cluster) => cluster.weightSum > 0).sort((left, right) => right.peakAreaDeg - left.peakAreaDeg).slice(0, MAX_RF_RESPONSE_BANDS).map((cluster) => cluster.frequencySum / cluster.weightSum).sort((left, right) => left - right);
   }
-  function propagateSpinor(samples, frequencyOffsetHz) {
+  function gradientTrajectory(samples, context) {
+    const count = samples.real.length;
+    if (count === 0) return null;
+    const ta = samples.starts[0];
+    const tb = samples.starts[count - 1] + samples.widths[count - 1];
+    const pieces = mergeAxes(
+      [covering(context.axes[0], ta, tb), covering(context.axes[1], ta, tb), covering(context.axes[2], ta, tb)],
+      ta,
+      tb
+    );
+    const cellGradient = cellMeanGradients(pieces, samples.starts, samples.widths, 0);
+    const cellK = new Float64Array(3 * count);
+    piecesKAt(pieces, samples.times, cellK);
+    const magnitude = b1Magnitudes(samples);
+    let peak = 0;
+    for (let n = 0; n < count; n++) peak = Math.max(peak, magnitude[n]);
+    if (!(peak > 0)) return null;
+    let first = -1;
+    let last = -1;
+    for (let n = 0; n < count; n++) {
+      if (magnitude[n] < SIGNIFICANT_B1_FRACTION * peak) continue;
+      if (first < 0) first = n;
+      last = n;
+    }
+    let span = 0;
+    let peakGradient = 0;
+    for (let n = first; n <= last; n++) {
+      span = Math.max(span, norm3(
+        cellK[3 * n] - cellK[3 * first],
+        cellK[3 * n + 1] - cellK[3 * first + 1],
+        cellK[3 * n + 2] - cellK[3 * first + 2]
+      ));
+      peakGradient = Math.max(peakGradient, norm3(cellGradient[3 * n], cellGradient[3 * n + 1], cellGradient[3 * n + 2]));
+    }
+    if (span < NEGLIGIBLE_K_SPAN) return null;
+    const direction = [0, 1, 2].map((axis2) => cellK[3 * last + axis2] - cellK[3 * first + axis2]);
+    const length = norm3(direction[0], direction[1], direction[2]);
+    let axis = "s";
+    let modelled = length > 0;
+    if (modelled) {
+      let major = 0;
+      for (let a = 1; a < 3; a++) if (Math.abs(direction[a]) > Math.abs(direction[major])) major = a;
+      const sign = Math.sign(direction[major]);
+      for (let a = 0; a < 3; a++) direction[a] *= sign / length;
+      if (Math.abs(direction[major]) > 1 - 1e-9) {
+        axis = ["x", "y", "z"][major];
+        direction.fill(0);
+        direction[major] = 1;
+      }
+    }
+    const k = new Float64Array(count);
+    const gradient = new Float64Array(count);
+    for (let n = 0; n < count; n++) {
+      k[n] = cellK[3 * n] * direction[0] + cellK[3 * n + 1] * direction[1] + cellK[3 * n + 2] * direction[2];
+      gradient[n] = cellGradient[3 * n] * direction[0] + cellGradient[3 * n + 1] * direction[1] + cellGradient[3 * n + 2] * direction[2];
+    }
+    if (modelled) {
+      const travel = Math.sign(k[last] - k[first]);
+      const tolerance = DIRECTION_TOLERANCE * peakGradient;
+      for (let n = first; n <= last && modelled; n++) {
+        const along = gradient[n];
+        const off = norm3(
+          cellGradient[3 * n] - along * direction[0],
+          cellGradient[3 * n + 1] - along * direction[1],
+          cellGradient[3 * n + 2] - along * direction[2]
+        );
+        if (off > tolerance || travel * along < -tolerance) modelled = false;
+      }
+    }
+    return { k, gradient, axis, first, last, modelled };
+  }
+  function covering(points, ta, tb) {
+    const count = Math.min(points.times.length, points.values.length);
+    if (count === 0) return { times: [ta, tb], values: [0, 0] };
+    const firstTime = points.times[0];
+    const lastTime = points.times[count - 1];
+    if (firstTime <= ta && lastTime >= tb) return points;
+    const times = [];
+    const values = [];
+    if (firstTime > ta) times.push(ta, firstTime), values.push(0, 0);
+    for (let i2 = 0; i2 < count; i2++) {
+      times.push(points.times[i2]);
+      values.push(points.values[i2]);
+    }
+    if (lastTime < tb) times.push(lastTime, tb), values.push(0, 0);
+    return { times, values };
+  }
+  function positionResponse(samples, trajectory, freqOffsetHz, carrierAreaDeg) {
+    const b1 = freqOffsetHz !== 0 ? withFrequencyRamp(samples, freqOffsetHz) : samples;
+    const positions = dominantPositions(b1, trajectory);
+    if (!positions) return null;
+    const magnitude = b1Magnitudes(b1);
+    let weightedGradient = 0;
+    let weight = 0;
+    for (let n = 0; n < b1.real.length; n++) {
+      const w = magnitude[n] * b1.widths[n];
+      weightedGradient += w * trajectory.gradient[n];
+      weight += w;
+    }
+    const meanGradient = weight > 0 ? weightedGradient / weight : 0;
+    const bands = positions.map((positionM) => {
+      const spinor = propagateSpinor(samples, -freqOffsetHz, trajectory.gradient, positionM);
+      return {
+        frequencyOffsetHz: meanGradient * positionM - freqOffsetHz,
+        positionM,
+        spectralAreaDeg: resolvedAreaDeg(b1, trajectory.k, positionM),
+        polarFlipDeg: spinor.polarFlipDeg,
+        mz: spinor.mz
+      };
+    });
+    return {
+      carrierAreaDeg,
+      bands,
+      spectrumAnalyzed: true,
+      limited: false,
+      domain: "position",
+      axis: trajectory.axis
+    };
+  }
+  function withFrequencyRamp(samples, frequencyHz) {
+    const real = new Float64Array(samples.real.length);
+    const imaginary = new Float64Array(samples.real.length);
+    for (let n = 0; n < real.length; n++) {
+      const angle = TAU * frequencyHz * samples.times[n];
+      const cosine = Math.cos(angle);
+      const sine = Math.sin(angle);
+      real[n] = samples.real[n] * cosine - samples.imaginary[n] * sine;
+      imaginary[n] = samples.real[n] * sine + samples.imaginary[n] * cosine;
+    }
+    return { ...samples, real, imaginary };
+  }
+  function dominantPositions(samples, trajectory) {
+    const { k, gradient, first, last } = trajectory;
+    let maxStep = 0;
+    for (let n = first; n <= last; n++) maxStep = Math.max(maxStep, Math.abs(gradient[n]) * samples.widths[n]);
+    if (!(maxStep > 0)) return null;
+    const spacing = maxStep;
+    let range = kRange(k, 0, k.length - 1);
+    let bins = Math.floor((range.high - range.low) / spacing) + 2;
+    if (bins > MAX_RF_RESPONSE_FFT_POINTS) {
+      range = kRange(k, first, last);
+      bins = Math.floor((range.high - range.low) / spacing) + 2;
+    }
+    const fftPoints = paddedFftPoints(bins);
+    if (fftPoints > MAX_RF_RESPONSE_FFT_POINTS) return null;
+    const real = new Float64Array(fftPoints);
+    const imaginary = new Float64Array(fftPoints);
+    for (let n = 0; n < k.length; n++) {
+      if (k[n] < range.low || k[n] > range.high) continue;
+      const position = (k[n] - range.low) / spacing;
+      const bin = Math.min(Math.floor(position), bins - 2);
+      const upper = position - bin;
+      const width = samples.widths[n];
+      real[bin] += (1 - upper) * samples.real[n] * width;
+      imaginary[bin] += (1 - upper) * samples.imaginary[n] * width;
+      real[bin + 1] += upper * samples.real[n] * width;
+      imaginary[bin + 1] += upper * samples.imaginary[n] * width;
+    }
+    fftInPlace(real, imaginary, fftPoints);
+    const positions = dominantCentres(real, imaginary, 1, 1 / (fftPoints * spacing));
+    return positions.length > 0 ? positions : null;
+  }
+  function kRange(k, from, to) {
+    let low = Infinity;
+    let high = -Infinity;
+    for (let n = from; n <= to; n++) {
+      low = Math.min(low, k[n]);
+      high = Math.max(high, k[n]);
+    }
+    return { low, high };
+  }
+  function propagateSpinor(samples, frequencyOffsetHz, gradientHz = null, positionM = 0) {
     let stateAReal = 1;
     let stateAImaginary = 0;
     let stateBReal = 0;
@@ -3630,14 +4001,15 @@
     for (let index = 0; index < samples.real.length; index++) {
       const bx = samples.real[index];
       const by = samples.imaginary[index];
-      const norm3 = Math.hypot(bx, by, frequencyOffsetHz);
+      const offset = gradientHz ? frequencyOffsetHz + gradientHz[index] * positionM : frequencyOffsetHz;
+      const norm4 = Math.sqrt(bx * bx + by * by + offset * offset);
       const width = samples.widths[index];
-      if (!(norm3 > 0) || !(width > 0)) continue;
-      const sine = Math.sin(Math.PI * norm3 * width);
-      const localAReal = Math.cos(Math.PI * norm3 * width);
-      const localAImaginary = -frequencyOffsetHz / norm3 * sine;
-      const localBReal = by / norm3 * sine;
-      const localBImaginary = -bx / norm3 * sine;
+      if (!(norm4 > 0) || !(width > 0)) continue;
+      const sine = Math.sin(Math.PI * norm4 * width);
+      const localAReal = Math.cos(Math.PI * norm4 * width);
+      const localAImaginary = -offset / norm4 * sine;
+      const localBReal = by / norm4 * sine;
+      const localBImaginary = -bx / norm4 * sine;
       const nextAReal = localAReal * stateAReal - localAImaginary * stateAImaginary - localBReal * stateBReal - localBImaginary * stateBImaginary;
       const nextAImaginary = localAReal * stateAImaginary + localAImaginary * stateAReal - localBReal * stateBImaginary + localBImaginary * stateBReal;
       const nextBReal = localBReal * stateAReal - localBImaginary * stateAImaginary + localAReal * stateBReal + localAImaginary * stateBImaginary;
@@ -3652,6 +4024,16 @@
     const normalization = aMagnitudeSquared + bMagnitudeSquared;
     const mz = normalization > 0 ? clamp((aMagnitudeSquared - bMagnitudeSquared) / normalization, -1, 1) : 1;
     return { mz, polarFlipDeg: Math.acos(mz) * 180 / Math.PI };
+  }
+  function b1Magnitudes(samples) {
+    const magnitude = new Float64Array(samples.real.length);
+    for (let n = 0; n < magnitude.length; n++) {
+      magnitude[n] = Math.sqrt(samples.real[n] * samples.real[n] + samples.imaginary[n] * samples.imaginary[n]);
+    }
+    return magnitude;
+  }
+  function norm3(x2, y, z) {
+    return Math.sqrt(x2 * x2 + y * y + z * z);
   }
   function clamp(value, minimum, maximum) {
     return Math.max(minimum, Math.min(maximum, value));
@@ -3709,10 +4091,11 @@
         const rf = seq.rfs.get(block.rfId);
         if (rf) {
           const use = context.classifiedRfUses[i2];
-          let response = context.rfResponseCache.get(rf.id);
+          const key = `${rf.id}:${block.gxId}:${block.gyId}:${block.gzId}`;
+          let response = context.rfResponseCache.get(key);
           if (!response) {
-            response = context.skipRfResponse ? UNANALYZED_RF_RESPONSE : analyzeRfResponse(rf, seq, use);
-            context.rfResponseCache.set(rf.id, response);
+            response = context.skipRfResponse ? UNANALYZED_RF_RESPONSE : analyzeRfResponse(rf, seq, use, rfGradientContext(seq, block, rf, dur));
+            context.rfResponseCache.set(key, response);
           }
           db.rf = decodeRF(seq, rf, cumulative, dur, use, response);
         }
@@ -3736,6 +4119,18 @@
   function blockDurationSeconds2(seq, block) {
     if (seq.versionCombined < VER_PRE_14) return block.dur * 1e-6;
     return block.dur * seq.rasterTimes.blockDurationRaster;
+  }
+  function rfGradientContext(seq, block, rf, blockDur) {
+    if (block.gxId <= 0 && block.gyId <= 0 && block.gzId <= 0) return null;
+    const origin = -rf.delay * 1e-6;
+    const axis = (gradId, channel) => {
+      const decoded = decodeGradient(seq, gradId, origin, blockDur, channel);
+      return { times: decoded.timePoints, values: decoded.waveform };
+    };
+    return {
+      axes: [axis(block.gxId, "gx"), axis(block.gyId, "gy"), axis(block.gzId, "gz")],
+      freqOffsetHz: effFreqOff(rf.freqOffset, rf.freqPPM, getB02(seq))
+    };
   }
   function decodeRF(seq, rf, blockStart, _blockDur, classifiedUse, response) {
     const raster = seq.rasterTimes.rfRaster;
@@ -4764,9 +5159,9 @@
         reader.float64("ROTATIONS qy"),
         reader.float64("ROTATIONS qz")
       ];
-      const norm3 = Math.hypot(...values);
-      if (!Number.isFinite(norm3) || norm3 <= 0) reader.fail("invalid zero or non-finite rotation quaternion");
-      seq.rotations.push({ id, values: values.map((value) => value / norm3) });
+      const norm4 = Math.hypot(...values);
+      if (!Number.isFinite(norm4) || norm4 <= 0) reader.fail("invalid zero or non-finite rotation quaternion");
+      seq.rotations.push({ id, values: values.map((value) => value / norm4) });
     }
   }
   function readSignature(reader, seq, sectionOffset) {
@@ -5334,13 +5729,13 @@
           toNumber(p[3], "ROTATIONS", line),
           toNumber(p[4], "ROTATIONS", line)
         ];
-        const norm3 = Math.sqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
-        if (Math.abs(norm3 - 1) > 1e-3 || norm3 === 0) {
+        const norm4 = Math.sqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
+        if (Math.abs(norm4 - 1) > 1e-3 || norm4 === 0) {
           parseError(`ROTATIONS row has a non-normalized quaternion: ${line}`);
         }
         seq.rotations.push({
           id: toInt(p[0], "ROTATIONS", line),
-          values: [q0 / norm3, q1 / norm3, q2 / norm3, q3 / norm3]
+          values: [q0 / norm4, q1 / norm4, q2 / norm4, q3 / norm4]
         });
       } else {
         requireFieldCount("ROTATIONS", line, p.length, 10);
@@ -5865,167 +6260,6 @@
     h2 ^= Math.imul(h1 ^ h1 >>> 13, 3266489909);
     const value = 4294967296 * (2097151 & h2) + (h1 >>> 0);
     return value.toString(16).padStart(14, "0");
-  }
-
-  // src/sim/program/pwl.ts
-  function pieceCount(pieces) {
-    return pieces.t.length - 1;
-  }
-  function mergeAxes(axes, ta, tb) {
-    if (!(tb > ta)) {
-      return { t: Float64Array.of(ta, ta), ga: new Float64Array(3), gb: new Float64Array(3) };
-    }
-    const cuts = [ta];
-    for (const axis of axes) {
-      for (let i2 = 0; i2 < axis.times.length; i2++) {
-        const time = axis.times[i2];
-        if (time > ta && time < tb) cuts.push(time);
-      }
-    }
-    cuts.push(tb);
-    cuts.sort((a, b) => a - b);
-    const boundaries = [];
-    for (const time of cuts) {
-      if (!boundaries.length || time > boundaries[boundaries.length - 1]) boundaries.push(time);
-    }
-    const n = boundaries.length - 1;
-    const t = Float64Array.from(boundaries);
-    const ga = new Float64Array(3 * n);
-    const gb = new Float64Array(3 * n);
-    for (let axis = 0; axis < 3; axis++) {
-      const { times, values } = axes[axis];
-      let segment = 0;
-      for (let piece = 0; piece < n; piece++) {
-        const u = t[piece], v = t[piece + 1];
-        while (segment + 1 < times.length - 1 && times[segment + 1] <= u) segment++;
-        ga[3 * piece + axis] = interpolateWithin(times, values, segment, u);
-        gb[3 * piece + axis] = interpolateWithin(times, values, segment, v);
-      }
-    }
-    return { t, ga, gb };
-  }
-  function interpolateWithin(times, values, segment, time) {
-    if (times.length === 0) return 0;
-    if (times.length === 1) return values[0];
-    const t0 = times[segment], t1 = times[segment + 1];
-    const v0 = values[segment], v1 = values[segment + 1];
-    if (!(t1 > t0)) return v1;
-    return v0 + (v1 - v0) * (time - t0) / (t1 - t0);
-  }
-  function piecesMoments(pieces) {
-    const dk = new Float64Array(3);
-    const kIntegral = new Float64Array(3);
-    const kSecond = new Float64Array(6);
-    const n = pieceCount(pieces);
-    for (let piece = 0; piece < n; piece++) {
-      const h = pieces.t[piece + 1] - pieces.t[piece];
-      if (!(h > 0)) continue;
-      const o = 3 * piece;
-      const ax = dk[0], ay = dk[1], az = dk[2];
-      const bx = pieces.ga[o], by = pieces.ga[o + 1], bz = pieces.ga[o + 2];
-      const cx = 0.5 * (pieces.gb[o] - bx) / h;
-      const cy = 0.5 * (pieces.gb[o + 1] - by) / h;
-      const cz = 0.5 * (pieces.gb[o + 2] - bz) / h;
-      kIntegral[0] += quadInt(ax, bx, cx, h);
-      kIntegral[1] += quadInt(ay, by, cy, h);
-      kIntegral[2] += quadInt(az, bz, cz, h);
-      kSecond[0] += quadProd(ax, bx, cx, ax, bx, cx, h);
-      kSecond[1] += quadProd(ay, by, cy, ay, by, cy, h);
-      kSecond[2] += quadProd(az, bz, cz, az, bz, cz, h);
-      kSecond[3] += quadProd(ax, bx, cx, ay, by, cy, h);
-      kSecond[4] += quadProd(ax, bx, cx, az, bz, cz, h);
-      kSecond[5] += quadProd(ay, by, cy, az, bz, cz, h);
-      dk[0] += h * (bx + cx * h);
-      dk[1] += h * (by + cy * h);
-      dk[2] += h * (bz + cz * h);
-    }
-    return { dk, kIntegral, kSecond };
-  }
-  function windowMoments(pieces, a, b) {
-    const t = [], ga = [], gb = [];
-    const n = pieceCount(pieces);
-    for (let piece = 0; piece < n; piece++) {
-      const t0 = pieces.t[piece], t1 = pieces.t[piece + 1];
-      const u = Math.max(a, t0), v = Math.min(b, t1);
-      if (!(v > u)) continue;
-      const o = 3 * piece;
-      if (!t.length) t.push(u);
-      t.push(v);
-      for (let axis = 0; axis < 3; axis++) {
-        const g0 = pieces.ga[o + axis], g1 = pieces.gb[o + axis];
-        ga.push(t1 > t0 ? g0 + (g1 - g0) * (u - t0) / (t1 - t0) : g0);
-        gb.push(t1 > t0 ? g0 + (g1 - g0) * (v - t0) / (t1 - t0) : g1);
-      }
-    }
-    if (!t.length) return { dk: new Float64Array(3), kIntegral: new Float64Array(3), kSecond: new Float64Array(6) };
-    return piecesMoments({ t: Float64Array.from(t), ga: Float64Array.from(ga), gb: Float64Array.from(gb) });
-  }
-  function piecesKAt(pieces, times, out) {
-    const n = pieceCount(pieces);
-    let piece = 0;
-    let kx = 0, ky = 0, kz = 0;
-    for (let s = 0; s < times.length; s++) {
-      const time = times[s];
-      while (piece < n - 1 && pieces.t[piece + 1] <= time) {
-        const h2 = pieces.t[piece + 1] - pieces.t[piece];
-        const o2 = 3 * piece;
-        kx += 0.5 * h2 * (pieces.ga[o2] + pieces.gb[o2]);
-        ky += 0.5 * h2 * (pieces.ga[o2 + 1] + pieces.gb[o2 + 1]);
-        kz += 0.5 * h2 * (pieces.ga[o2 + 2] + pieces.gb[o2 + 2]);
-        piece++;
-      }
-      const h = pieces.t[piece + 1] - pieces.t[piece];
-      const tau = Math.min(Math.max(time - pieces.t[piece], 0), h);
-      const o = 3 * piece;
-      if (h > 0) {
-        const fx = (pieces.gb[o] - pieces.ga[o]) / h;
-        const fy = (pieces.gb[o + 1] - pieces.ga[o + 1]) / h;
-        const fz = (pieces.gb[o + 2] - pieces.ga[o + 2]) / h;
-        out[3 * s] = kx + tau * (pieces.ga[o] + 0.5 * fx * tau);
-        out[3 * s + 1] = ky + tau * (pieces.ga[o + 1] + 0.5 * fy * tau);
-        out[3 * s + 2] = kz + tau * (pieces.ga[o + 2] + 0.5 * fz * tau);
-      } else {
-        out[3 * s] = kx;
-        out[3 * s + 1] = ky;
-        out[3 * s + 2] = kz;
-      }
-    }
-  }
-  function addPiecesIntegral(pieces, a, b, out) {
-    const n = pieceCount(pieces);
-    for (let piece = 0; piece < n; piece++) {
-      const u = Math.max(a, pieces.t[piece]);
-      const v = Math.min(b, pieces.t[piece + 1]);
-      if (!(v > u)) continue;
-      const h = pieces.t[piece + 1] - pieces.t[piece];
-      const o = 3 * piece;
-      for (let axis = 0; axis < 3; axis++) {
-        const g0 = pieces.ga[o + axis];
-        const slope = (pieces.gb[o + axis] - g0) / h;
-        const gu = g0 + slope * (u - pieces.t[piece]);
-        const gv = g0 + slope * (v - pieces.t[piece]);
-        out[axis] += 0.5 * (gu + gv) * (v - u);
-      }
-    }
-  }
-  function quadInt(a, b, c, h) {
-    return h * (a + h * (b / 2 + h * c / 3));
-  }
-  function quadProd(a1, b1, c1, a2, b2, c2, h) {
-    const p0 = a1 * a2;
-    const p1 = a1 * b2 + b1 * a2;
-    const p2 = a1 * c2 + c1 * a2 + b1 * b2;
-    const p3 = b1 * c2 + c1 * b2;
-    const p4 = c1 * c2;
-    return h * (p0 + h * (p1 / 2 + h * (p2 / 3 + h * (p3 / 4 + h * p4 / 5))));
-  }
-  var RELATIVE_TIME_QUANTUM_SEC = 1e-12;
-  function relativePieces(pieces, t0) {
-    const t = new Float64Array(pieces.t.length);
-    for (let i2 = 0; i2 < t.length; i2++) {
-      t[i2] = Math.round((pieces.t[i2] - t0) / RELATIVE_TIME_QUANTUM_SEC) * RELATIVE_TIME_QUANTUM_SEC;
-    }
-    return { t, ga: pieces.ga.slice(), gb: pieces.gb.slice() };
   }
 
   // src/sim/program/compile.ts
@@ -6751,18 +6985,13 @@
     const count = starts.length;
     const b1Re = new Float64Array(count);
     const b1Im = new Float64Array(count);
-    const grad = new Float64Array(3 * count);
-    const area = new Float64Array(3);
     for (let j = 0; j < count; j++) {
       const angle = 2 * Math.PI * phase[j] + phaseOffset;
       const amplitude = op.amplitude * magnitude[j];
       b1Re[j] = amplitude * Math.cos(angle);
       b1Im[j] = amplitude * Math.sin(angle);
-      area.fill(0);
-      const a = starts[j] - starts[0], b = a + widths[j];
-      addPiecesIntegral(gradient, a, b, area);
-      for (let axis = 0; axis < 3; axis++) grad[3 * j + axis] = area[axis] / widths[j];
     }
+    const grad = cellMeanGradients(gradient, starts, widths, starts[0]);
     const freq = op.freqOffset;
     const firstStart = starts[0];
     const lastEnd = starts[count - 1] + widths[count - 1];
@@ -8468,7 +8697,7 @@
       const [cx, cy] = centre(c);
       centrePower += Math.exp(-(cx * cx + cy * cy) / (width * width));
     }
-    const norm3 = count === 1 ? 1 : 1 / Math.sqrt(centrePower);
+    const norm4 = count === 1 ? 1 : 1 / Math.sqrt(centrePower);
     for (let c = 0; c < count; c++) {
       const [cx, cy] = centre(c);
       for (let row = 0; row < ny; row++) {
@@ -8481,7 +8710,7 @@
             continue;
           }
           const dx = x2 - cx, dy = y - cy;
-          const magnitude = norm3 * Math.exp(-(dx * dx + dy * dy) / (2 * width * width));
+          const magnitude = norm4 * Math.exp(-(dx * dx + dy * dy) / (2 * width * width));
           const phase = Math.atan2(dy, dx);
           re[i2] = magnitude * Math.cos(phase);
           im[i2] = magnitude * Math.sin(phase);
@@ -11306,10 +11535,10 @@
     let [b, c, d] = header.quatern;
     let a = 1 - (b * b + c * c + d * d);
     if (a < 1e-7) {
-      const norm3 = 1 / Math.sqrt(b * b + c * c + d * d);
-      b *= norm3;
-      c *= norm3;
-      d *= norm3;
+      const norm4 = 1 / Math.sqrt(b * b + c * c + d * d);
+      b *= norm4;
+      c *= norm4;
+      d *= norm4;
       a = 0;
     } else {
       a = Math.sqrt(a);

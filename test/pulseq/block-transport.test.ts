@@ -10,7 +10,10 @@ import {
 } from '../../src/editor/blockTransport';
 import { estimateKspaceCost, estimateSequenceKspaceCost, INTERACTIVE_COMPUTE_LIMITS } from '../../src/pulseq/computeBudget';
 import { downsampleM4 } from '../../src/pulseq/displayDownsampling';
+import { decodeAllBlocks } from '../../src/pulseq/decoder';
+import { parseSequenceText } from '../../src/pulseq/reader';
 import type { DecodedBlock } from '../../src/pulseq/types';
+import { seqText, sincShape } from '../sim/helpers/seqBuilder';
 import {
     inlineJsonBytes,
     loadBlocks,
@@ -34,6 +37,8 @@ describe('packed block transport', () => {
     expect(packed.pointsPerWaveform).toBe(MAX_DISPLAY_PTS);
 
     let checkedRf = 0;
+    let positionRf = 0;
+    let staticRf = 0;
     let checkedGrad = 0;
     for (let index = 0; index < blocks.length; index++) {
       const source = blocks[index];
@@ -62,6 +67,19 @@ describe('packed block transport', () => {
           expect(block.rf.rb[band][2]).toBeCloseTo(source.rf.response.bands[band].polarFlipDeg, 8);
           expect(block.rf.rb[band][3]).toBeCloseTo(source.rf.response.bands[band].mz, 8);
         }
+        // How the bands were resolved: along the slice gradient, or against a static offset.
+        if (source.rf.response.domain === 'position') {
+          expect(block.rf.rd).toBe('p');
+          expect(block.rf.rx).toBe(source.rf.response.axis);
+          for (let band = 0; band < block.rf.rb.length; band++) {
+            expect(block.rf.rb[band][4]).toBeCloseTo(source.rf.response.bands[band].positionM!, 12);
+          }
+          positionRf++;
+        } else {
+          expect(block.rf.rd).toBeUndefined();
+          expect(block.rf.rb.every((band: number[]) => band.length === 4)).toBe(true);
+          staticRf++;
+        }
         checkedRf++;
       }
 
@@ -84,7 +102,31 @@ describe('packed block transport', () => {
       }
     }
     expect(checkedRf).toBeGreaterThan(0);
+    // writeEpiRS: a slice-selective excitation and a fat-saturation pulse without gradient.
+    expect(positionRf).toBeGreaterThan(0);
+    expect(staticRf).toBeGreaterThan(0);
     expect(checkedGrad).toBeGreaterThan(0);
+  });
+
+  it('marks RF analysed under a gradient it cannot represent', () => {
+    const api = loadUnpackApi();
+    // Gz for the first half of the pulse, Gy for the second.
+    const shape = sincShape(2000, 4);
+    const blocks = decodeAllBlocks(parseSequenceText(seqText({
+      blocks: [{ ticks: 220, rf: 1, gy: 2, gz: 1 }],
+      rf: [{ amplitude: 0.25 / (shape.reduce((a, b) => a + b, 0) * 1e-6), magShape: 1, centerUs: 1000, delayUs: 100 }],
+      traps: [
+        { amplitude: 425760, riseUs: 100, flatUs: 900, fallUs: 100 },
+        { amplitude: 425760, riseUs: 100, flatUs: 900, fallUs: 100, delayUs: 1100 },
+      ],
+      shapes: [shape],
+    })));
+    expect(blocks[0].rf!.response.domain).toBe('unmodelled');
+    const packed = packBlocks(blocks);
+    const wire = transfer(packed);
+    const [block] = api.unpackSequenceBlocks(wire.envelope, wire.times, wire.values, packed.sampleCount);
+    expect(block.rf.rd).toBe('u');
+    expect(block.rf.rx).toBeUndefined();
   });
 
   it('chunk-packs a parsed sequence without changing its display payload', () => {

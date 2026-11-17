@@ -180,10 +180,23 @@ export function piecesKAt(pieces: GradientPieces, times: ArrayLike<number>, out:
     }
 }
 
-/** Exact ∫ g dt over [a, b] ⊆ window, per axis, added into `out` (length 3). */
-export function addPiecesIntegral(pieces: GradientPieces, a: number, b: number, out: Float64Array): void {
+/**
+ * Exact ∫ g dt over [a, b] ⊆ window, per axis, added into `out` (length 3).
+ * The search starts at `fromPiece`; the return value, the first piece not
+ * wholly before `a`, is a valid start for any later interval.
+ */
+export function addPiecesIntegral(
+    pieces: GradientPieces,
+    a: number,
+    b: number,
+    out: Float64Array,
+    fromPiece = 0,
+): number {
     const n = pieceCount(pieces);
-    for (let piece = 0; piece < n; piece++) {
+    let first = fromPiece;
+    while (first < n - 1 && pieces.t[first + 1] <= a) first++;
+    // Pieces outside [a, b] add nothing, so skipping them leaves the sum bit-identical.
+    for (let piece = first; piece < n && pieces.t[piece] < b; piece++) {
         const u = Math.max(a, pieces.t[piece]);
         const v = Math.min(b, pieces.t[piece + 1]);
         if (!(v > u)) continue;
@@ -197,6 +210,32 @@ export function addPiecesIntegral(pieces: GradientPieces, a: number, b: number, 
             out[axis] += 0.5 * (gu + gv) * (v - u);
         }
     }
+    return first;
+}
+
+/**
+ * Mean gradient over each of a run of ascending cells, xyz interleaved [Hz/m]:
+ * cell j spans [starts[j] − origin, + widths[j]] on the pieces' clock. This is
+ * the gradient an RF raster cell sees, shared by the simulator and the RF
+ * response analysis.
+ */
+export function cellMeanGradients(
+    pieces: GradientPieces,
+    starts: ArrayLike<number>,
+    widths: ArrayLike<number>,
+    origin: number,
+): Float64Array {
+    const count = starts.length;
+    const grad = new Float64Array(3 * count);
+    const area = new Float64Array(3);
+    let piece = 0;
+    for (let j = 0; j < count; j++) {
+        area.fill(0);
+        const a = starts[j] - origin, b = a + widths[j];
+        piece = addPiecesIntegral(pieces, a, b, area, piece);
+        for (let axis = 0; axis < 3; axis++) grad[3 * j + axis] = area[axis] / widths[j];
+    }
+    return grad;
 }
 
 /** ∫₀ʰ (a + b·τ + c·τ²) dτ. */
