@@ -1683,10 +1683,19 @@ var Pulseq = (() => {
       const t0 = timeShape[k] * raster;
       const t1 = timeShape[k + 1] * raster;
       const u = t1 > t0 ? (mid - t0) / (t1 - t0) : 0;
-      const p0 = phaseCycles ? phaseCycles[k] : 0;
-      const p1 = phaseCycles ? phaseCycles[k + 1] : 0;
-      visit(start, width, magnitude[k] + u * (magnitude[k + 1] - magnitude[k]), p0 + u * (p1 - p0));
+      const m0 = magnitude[k];
+      const m1 = magnitude[k + 1];
+      const phase = phaseCycles ? interpolatePhaseCycles(phaseCycles[k], phaseCycles[k + 1], m0, m1, u) : 0;
+      visit(start, width, m0 + u * (m1 - m0), phase);
     }
+  }
+  function interpolatePhaseCycles(p0, p1, m0, m1, u) {
+    if (m0 === 0) return p1;
+    if (m1 === 0) return p0;
+    const delta = p1 - p0;
+    let arc = delta - Math.round(delta);
+    if (Math.abs(arc) === 0.5) arc = Math.sign(delta) * 0.5;
+    return p0 + u * arc;
   }
   function rasterCellsFromShapes(shapes) {
     const cells = allocate(rasterCellCount(shapes), !shapes.timeShape);
